@@ -308,6 +308,24 @@ static void LogFaceW(const char* tag, const wchar_t* face)
     }
     tmp[i] = 0;
     LogFace(tag, " use=", tmp);
+    /* 非 ASCII 名在 use= 里全是 '?', 另记前 8 个字的 U+ 值备查 */
+    {
+        char hx[64];
+        unsigned q = 0;
+        int k = 0;
+        while (face[k] && k < 8 && q + 6 < sizeof(hx))
+        {
+            unsigned w = (unsigned)face[k] & 0xFFFFu;
+            int sh;
+            hx[q++] = 'U'; hx[q++] = '+';
+            for (sh = 12; sh >= 0; sh -= 4)
+                hx[q++] = "0123456789ABCDEF"[(w >> sh) & 15u];
+            hx[q++] = ' ';
+            k++;
+        }
+        hx[q] = 0;
+        LogFace(tag, " useHex=", hx);
+    }
 }
 
 void ResolveFontFace(const char* cfg, const char* tag, wchar_t* out,
@@ -320,6 +338,16 @@ void ResolveFontFace(const char* cfg, const char* tag, wchar_t* out,
     while (cfg[i] && j < (int)sizeof(tmp) - 1) tmp[j++] = cfg[i++];
     while (j > 0 && (tmp[j - 1] == ' ' || tmp[j - 1] == '\t')) j--;
     tmp[j] = 0;
+    /* 行内注释截断: GetPrivateProfileString 不吃行内 ";" (如
+     * FontFace=msyh.ttc ; 字体文件名 会把注释也当值返回),
+     * 不截的话文件名永远找不到, 静默回落默认字体 (vtext/hint 都中过招,
+     * 日志 file= 值里带 "; ..." 即此病)。整数值不受影响 (API 只取前导数字)。 */
+    {
+        int k = 0;
+        while (tmp[k] && tmp[k] != ';') k++;
+        while (k > 0 && (tmp[k - 1] == ' ' || tmp[k - 1] == '\t')) k--;
+        tmp[k] = 0;
+    }
     if (!tmp[0]) { CopyFace(out, fallback); return; }
     if (!FindFontFile(tmp, path, sizeof(path), &where))
     {
