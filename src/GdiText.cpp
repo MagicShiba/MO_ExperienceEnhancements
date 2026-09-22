@@ -476,9 +476,10 @@ void GtUnpack16(unsigned short px, unsigned char* r, unsigned char* g,
     *b = (unsigned char)((bv * 255u + ((1u << g_BBits) - 1) / 2) / ((1u << g_BBits) - 1));
 }
 
-/* ---------------- GDI 光栅化 (双槽: 战役/提示各缓存一套, 避免两框交替时每帧拆建) ---------------- */
+/* ---------------- GDI 光栅化 (四槽: 战役/提示/全局文本/超武面板各缓存一套) ---------------- */
 
-static GdiSlot g_Slots[3] = {
+static GdiSlot g_Slots[4] = {
+    { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
     { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
     { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
     { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } }
@@ -510,7 +511,7 @@ int GdiEnsure(int fontPx, int bold, int slot, const wchar_t* face)
     char b1[16], b2[16], buf[256];
     unsigned p;
 
-    if (slot < 0 || slot > 2) slot = 0;
+    if (slot < 0 || slot > 3) slot = 0;
     s = &g_Slots[slot];
 
     if (s->dc && fontPx == s->px && wantBold == s->bold && FaceSame(face, s->face)) { g_G = s; return 1; }

@@ -31,6 +31,8 @@
 #define ADDR_DRAWTEXT_BACK 0x00434CD6u
 #define ADDR_PRINT       0x00434B90u
 #define ADDR_PRINT_BACK  0x00434B9Au
+#define ADDR_SIMPLE      0x004A5EB0u
+#define ADDR_SIMPLE_BACK 0x004A5EB7u
 
 /* Blit 头 7 字节 (sub esp,0x30 + push ebx/ebp/esi/edi), 下钩前校验 */
 static const unsigned char kWantBlit[7] = { 0x83, 0xEC, 0x30, 0x53, 0x55, 0x56, 0x57 };
@@ -39,6 +41,9 @@ static const unsigned char kWantDrawText[6] = { 0x83, 0xEC, 0x30, 0x53, 0x55, 0x
 /* Print 头 10 字节 (push esi + mov esi,[esp+8] + push edi + mov edi,[esp+0x18]) */
 static const unsigned char kWantPrint[10] = { 0x56, 0x8B, 0x74, 0x24, 0x08,
                                               0x57, 0x8B, 0x7C, 0x24, 0x18 };
+/* Simple_ 头 7 字节 (sub esp,0x28 + mov eax,[esp+0x34]) */
+static const unsigned char kWantSimple[7] = { 0x83, 0xEC, 0x28,
+                                              0x8B, 0x44, 0x24, 0x34 };
 
 /* 场景区分只认位置条带 (Blit 层 y<32 的数字, 见 BlitHook), 不认函数。
  * 函数白名单已删除: 顶栏那几个函数也会画别的文本 (如按 House 遍历的
@@ -52,7 +57,7 @@ typedef struct {
     int FontPx;     /* 全局字号: 0=自动校准; >0 固定像素, 墨水与字宽等比缩放 */
     int CreditPx;   /* 顶栏条带数字单独字号 (0=跟随全局; >0 覆盖, 仅换墨水字宽不动) */
     int CreditDY;   /* 顶栏数字垂直偏移 (像素, 负=上移) */
-    int SuperPx;    /* 超武列表接管字号 (0=关闭, 原样; >0 抑制原字形后重画) */
+    int SuperPx;    /* Blit 层漏网重绘字号 (0=关闭; 列表整体接管另由 [SWPanel] 开关) */
     int BriefBox;   /* 1=简报正文盒加高 (界面适配字体), 0=保持原版盒子 */
     int BriefClip;  /* 1=简报裁剪底边跟盒子走 (面板子面切，需配合 BriefBox) */
     int Bold;
@@ -91,6 +96,13 @@ static DrawTextFn g_OrigDrawText = NULL;
 typedef int (__fastcall *PrintFn)(void* t, void* e,
     int a1, int a2, int a3, int a4, int a5, int a6, int a7);
 static PrintFn g_OrigPrint = NULL;
+
+/* Simple_Text_Print_Wide (0x4A5EB0): 全文本必经之路 (Print 唯一调用者)。
+ * fastcall 形 (ECX=pRetVal, EDX=输入) + 7 个栈参 (ret 0x1c, 尾部反汇编实证)。
+ * 诊断钩只观察不跳过: 转发必须原样 (ECX/EDX 原值进跳板)。 */
+typedef int (__fastcall *SimpleFn)(int ecxIn, int edxIn,
+    int a1, int a2, int a3, int a4, int a5, int a6, int a7);
+static SimpleFn g_OrigSimple = NULL;
 
 /* 文本管线内部地址段 (互调不刷新上下文) */
 static int InPipeline(unsigned caller)
@@ -420,6 +432,173 @@ static void VecSWBandLog(wchar_t wc, int x, int y, int pitchW)
     LogLine(buf);
 }
 
+/* ---------------- 超武列表整体接管 ----------------
+ * 收集点在 Simple_Text_Print_Wide 入口 (Print 唯一调用者, 反汇编实证):
+ * 背景黑条是 Simple_ 内部按标志 (ah&4, 名行 flags=0x4618) 铺的不透明底,
+ * 与字形同一调用, 入口跳过即连底+字一起消失, 不管内容细节不逐条绘制。
+ * 命中 (主画布 + 落列表带 + 名/计时器形状) 即收表 (串,坐标,原前景色)
+ * 并跳过; 空串只收表不跳过 (引擎底色行为与原版一致, 闪烁靠 150ms 过期)。
+ * 门不全走原版; Print 入口保留同带收集做后备 (fore 不见时用名青/计时器白)。
+ * DrawText 计时器 (侧栏图标叠字, 非列表) 与 Blit 层漏网 backstop 不动。 */
+
+/* 冒号嗅探 ("00:00" 经任何 Print 路径; 顶栏纯数字天然区分) */
+static int VecSWColon(const wchar_t* s)
+{
+    int k;
+    if (!s || !IsPlausiblePtr(s)) return 0;
+    for (k = 0; k < 16; k++)
+    {
+        unsigned c = (unsigned)s[k] & 0xFFFFu;
+        if (!c) break;
+        if (c == 0x3Au) return 1;
+    }
+    return 0;
+}
+
+SWCapRow g_SWCap[SWCAP_MAX];
+int g_SWCapN = 0;
+int g_SWCompW = 0, g_SWCompH = 0;
+int g_SWPanelOn = 0;
+
+/* 新坐标只记一次 (vswcap), 上限 48, 重画不刷屏 */
+static int g_SWCapLogs = 0;
+
+static void VecSWCapLog(int kind, int x, int y, int n)
+{
+    char b1[16], buf[128];
+    unsigned p;
+    if (g_SWCapLogs >= 48) return;
+    g_SWCapLogs++;
+    p = 0;
+    p = AppendCStr(buf, p, "vswcap: ", sizeof(buf));
+    p = AppendCh(buf, p, kind == 0 ? 'N' : 'T', sizeof(buf));
+    p = AppendCStr(buf, p, " xy=", sizeof(buf));
+    UtoA((unsigned)x, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCh(buf, p, ',', sizeof(buf));
+    UtoA((unsigned)y, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCStr(buf, p, " n=", sizeof(buf));
+    UtoA((unsigned)n, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    LogLine(buf);
+}
+
+/* 收表 (同坐标覆盖, 空串也收: 杀过期旧文, 面板画空=闪烁灭态)。
+ * src: 0=Simple_ (带原色), 1=Print 后备 (无色)。
+ * 后备不许覆盖新鲜的 Simple_ 行 (防碎片冲掉正文)。 */
+static void VecSWStore(int kind, const wchar_t* s, int n, int fore, int x,
+                       int y, int src)
+{
+    int i;
+    SWCapRow* r;
+    unsigned now = GetTickCount();
+    /* 同行归并 (x 容差 ±6): 引擎同行落笔 x 逐帧抖动 (1722~1725 实证),
+     * 精确匹配会涨满 32 项导致丢弃+过期闪烁。名/计时器同 y 不同 x
+     * (差 27) 天然分开, 不会误并。 */
+    for (i = 0; i < g_SWCapN; i++)
+    {
+        int dx = g_SWCap[i].x - x;
+        if (g_SWCap[i].y == y && dx >= -6 && dx <= 6) break;
+    }
+    if (i >= g_SWCapN)
+    {
+        if (g_SWCapN >= SWCAP_MAX) return;
+        r = &g_SWCap[g_SWCapN++];
+        r->x = x; r->y = y;
+        r->fore = -1;
+        VecSWCapLog(kind, x, y, n);
+    }
+    else
+    {
+        r = &g_SWCap[i];
+        r->x = x;   /* 跟随漂移 */
+        if (src == 1 && fore < 0 && r->fore >= 0 &&
+            now - r->tick <= SW_FRESH_MS) return;   /* 新鲜正文, 后备碎片靠边 */
+    }
+    if (n > 63) n = 63;
+    for (i = 0; i <= n; i++) r->s[i] = s[i];
+    r->s[63] = 0;
+    r->kind = kind;
+    if (fore >= 0) r->fore = fore;
+    else if (r->fore < 0) r->fore = (kind == 0) ? 0x07FF : 0xFFFF;
+    r->tick = now;
+}
+
+/* Print 层后备收集 (Simple_ 钩漏网时才跑到这): 同带同面即收并跳过。
+ * fore 在 Print 层不可见 (a6=a7=0 实证), 记 -1 用名青/计时器白。 */
+static int VecSWCapture(void* surf, int kind, const wchar_t* s, int x, int y)
+{
+    int sw = 0, sh = 0, n = 0;
+    if (!g_SWPanelOn) return 0;
+    if (!s || !IsPlausiblePtr(s)) return 0;
+    if (x < 1300 || x > 1752 || y < 32 || y > 1080) return 0;
+    if (surf && IsPlausiblePtr(surf))
+    {
+        int* b = (int*)surf;
+        sw = b[1]; sh = b[2];
+    }
+    if (sw <= 0 || sh <= 0 || sw != g_SWCompW || sh != g_SWCompH) return 0;
+    while (s[n] && n < 63) n++;
+    if (g_SWCapN >= SWCAP_MAX && n > 0)
+    {
+        int i, found = 0;
+        for (i = 0; i < g_SWCapN; i++)
+        {
+            int dx = g_SWCap[i].x - x;
+            if (g_SWCap[i].y == y && dx >= -6 && dx <= 6) { found = 1; break; }
+        }
+        if (!found) return 1;   /* 满了: 照跳, 不收 */
+    }
+    VecSWStore(kind, s, n, -1, x, y, 1);
+    return n > 0 ? 1 : 0;   /* 空串不跳过 (底色行为与原版一致) */
+}
+
+/* 一次性探针 (黑条+原色定案): 主画布区域调用记形状与全参。
+ * kind>=0 (名/计时器): 记 a1/a6/a7 找颜色槽 (原青 0x7FF/白 0xFFFF/-1 默认);
+ * kind<0 (黑条嫌疑): 记首字+长度 (空格填充串即黑条)。同坐标只记一次, 上限 40。 */
+static int g_SWProbeN = 0;
+static int g_SWPX[40], g_SWPY[40];
+
+static void VecSWProbe(void* surf, int kind, const wchar_t* s,
+                       int x, int y, int a1, int a6, int a7)
+{
+    int sw = 0, sh = 0, n = 0, i;
+    unsigned c0 = 0;
+    char buf[224];
+    unsigned p;
+    if (!g_SWPanelOn || g_SWProbeN >= 40) return;
+    if (surf && IsPlausiblePtr(surf))
+    {
+        int* b = (int*)surf;
+        sw = b[1]; sh = b[2];
+    }
+    if (sw <= 0 || sw != g_SWCompW || sh != g_SWCompH) return;
+    for (i = 0; i < g_SWProbeN; i++)
+        if (g_SWPX[i] == x && g_SWPY[i] == y) return;
+    g_SWPX[g_SWProbeN] = x; g_SWPY[g_SWProbeN] = y; g_SWProbeN++;
+    if (s && IsPlausiblePtr(s))
+    {
+        c0 = (unsigned)s[0] & 0xFFFFu;
+        while (s[n] && n < 64) n++;
+    }
+    p = 0;
+    p = AppendCStr(buf, p, "vswp: ", sizeof(buf));
+    p = AppendCh(buf, p, kind == 0 ? 'N' : kind == 1 ? 'T' : '?', sizeof(buf));
+    p = AppendCStr(buf, p, " xy=", sizeof(buf));
+    p += UtoA((unsigned)x, buf + p);
+    p = AppendCh(buf, p, ',', sizeof(buf));
+    p += UtoA((unsigned)y, buf + p);
+    p = AppendCStr(buf, p, " c0=", sizeof(buf));
+    p += HtoA(c0, buf + p);
+    p = AppendCStr(buf, p, " n=", sizeof(buf));
+    p += UtoA((unsigned)n, buf + p);
+    p = AppendCStr(buf, p, " a1=", sizeof(buf));
+    p += HtoA((unsigned)a1, buf + p);
+    p = AppendCStr(buf, p, " a6=", sizeof(buf));
+    p += HtoA((unsigned)a6, buf + p);
+    p = AppendCStr(buf, p, " a7=", sizeof(buf));
+    p += HtoA((unsigned)a7, buf + p);
+    LogLine(buf);
+}
+
 /* (捕获/重画/入口发现已删除: 改当场渲染+Blit 层判决, 见上) */
 
 int __fastcall VecDrawTextEntry(void* t, void* e,
@@ -434,6 +613,8 @@ int __fastcall VecDrawTextEntry(void* t, void* e,
     av[0] = a1; av[1] = a2; av[2] = a3; av[3] = a4; av[4] = a5;
     av[5] = a6; av[6] = a7; av[7] = a8; av[8] = a9; av[9] = a10;
     if (brief) VecBriefLog(caller, av, t);
+    /* DrawText 不碰 (计时器侧栏叠字非列表 + 简报正文, 全部走原版;
+     * 列表的隐藏/收集只在 Print 入口做, 高层级一次干掉, 不逐条) */
     if (!g_OrigDrawText) return 0;
     if (brief)
     {
@@ -506,10 +687,172 @@ int __fastcall VecPrintEntry(void* t, void* e,
     unsigned caller = (unsigned)__builtin_return_address(0);
     int r;
     if (g_VT.LogAdv) VecCallerLog('P', caller, a3);
-    /* 超武名走这条路, 但 Blit 层按区域整体接管, 入口不做任何事。 */
+    /* 超武列表整体隐藏+收集: 右侧面板区 CJK/冒号串, 命中即收表并跳过
+     * 原调用 (字+黑底一起消失); 门不全 (面板关/异面/形状不符) 走原版。 */
+    if (a4 >= 1300 && a5 >= 32)
+    {
+        const wchar_t* s = (const wchar_t*)a3;
+        unsigned c0 = 0;
+        int kind = -1;
+        if (s && IsPlausiblePtr(s)) c0 = (unsigned)s[0] & 0xFFFFu;
+        if ((c0 >= 0x2E80u && c0 < 0xA000u) ||
+            (c0 >= 0xFF00u && c0 < 0xFFF0u))
+            kind = 0;
+        else if (VecSWColon(s))
+            kind = 1;
+        VecSWProbe((void*)a2, kind, s, a4, a5, a1, a6, a7);
+        if (kind >= 0 && VecSWCapture((void*)a2, kind, s, a4, a5))
+            return 1;
+    }
     if (!g_OrigPrint) return 0;
     r = g_OrigPrint(t, NULL, a1, a2, a3, a4, a5, a6, a7);
     return r;
+}
+
+/* 文本槽判定: CJK 首字=0 (名), 前 8 字含冒号=1 (计时器), 否则 -1。
+ * 调用方只传 EDX (文本槽实证; ECX 是调用方暂存, 首字偶落 CJK 区,
+ * 碰它即误收; 栈槽整数如 flags=0x4618 也恰落 CJK 区, 碰不得)。 */
+static int VecSWTextKind(int slot, const wchar_t** out)
+{
+    const wchar_t* s;
+    unsigned c;
+    int k;
+    if (!IsPlausiblePtr((void*)slot)) return -1;
+    s = (const wchar_t*)slot;
+    c = (unsigned)s[0] & 0xFFFFu;
+    if ((c >= 0x2E80u && c < 0xA000u) ||
+        (c >= 0xFF00u && c < 0xFFF0u)) { *out = s; return 0; }
+    for (k = 0; k < 8; k++)
+    {
+        c = (unsigned)s[k] & 0xFFFFu;
+        if (!c) break;
+        if (c == 0x3Au) { *out = s; return 1; }
+    }
+    return -1;
+}
+
+/* Simple_ 双槽取证 (vswx): 文本只认 EDX (ECX 是调用方暂存, 内容不定,
+ * 新存档实证其首字恰落 CJK 区造成误收)。e=/c= 各记前 4 字, 命中脱靶都记。
+ * 内容键去重, 上限 60。 */
+static int g_SWsN = 0;
+static unsigned g_SWsK[60], g_SWsC0[60], g_SWsNN[60];
+
+static void VecSWxLog(int kind, int inband, unsigned c0, int n, int sx, int sy,
+                      int fore, int ecxIn, int edxIn, int* v9)
+{
+    char buf[384];
+    unsigned p, key, eh[4] = { 0, 0, 0, 0 }, ch[4] = { 0, 0, 0, 0 };
+    int i, j;
+    if (g_SWsN >= 60) return;
+    key = ((unsigned)(kind + 2) << 24) ^ ((unsigned)inband << 23);
+    for (i = 0; i < g_SWsN; i++)
+        if (g_SWsK[i] == key && g_SWsC0[i] == c0 && g_SWsNN[i] == (unsigned)n)
+            return;
+    g_SWsK[g_SWsN] = key; g_SWsC0[g_SWsN] = c0; g_SWsNN[g_SWsN] = (unsigned)n;
+    g_SWsN++;
+    if (IsPlausiblePtr((void*)edxIn))
+    {
+        const wchar_t* s = (const wchar_t*)edxIn;
+        for (j = 0; j < 4; j++) eh[j] = (unsigned)s[j] & 0xFFFFu;
+    }
+    if (IsPlausiblePtr((void*)ecxIn))
+    {
+        const wchar_t* s = (const wchar_t*)ecxIn;
+        for (j = 0; j < 4; j++) ch[j] = (unsigned)s[j] & 0xFFFFu;
+    }
+    p = 0;
+    p = AppendCStr(buf, p, "vswx: ", sizeof(buf));
+    p = AppendCh(buf, p, kind == 0 ? 'N' : kind == 1 ? 'T' : kind == 2 ? 'E' : '?',
+                 sizeof(buf));
+    p = AppendCStr(buf, p, inband ? " in" : " out", sizeof(buf));
+    p = AppendCStr(buf, p, " xy=", sizeof(buf));
+    {
+        int v = sx < 0 ? -sx : sx;
+        if (sx < 0) p = AppendCh(buf, p, '-', sizeof(buf));
+        p += UtoA((unsigned)v, buf + p);
+    }
+    p = AppendCh(buf, p, ',', sizeof(buf));
+    {
+        int v = sy < 0 ? -sy : sy;
+        if (sy < 0) p = AppendCh(buf, p, '-', sizeof(buf));
+        p += UtoA((unsigned)v, buf + p);
+    }
+    p = AppendCStr(buf, p, " fore=", sizeof(buf));
+    p += HtoA((unsigned)fore, buf + p);
+    p = AppendCStr(buf, p, " e=", sizeof(buf));
+    for (j = 0; j < 4; j++)
+    {
+        char h[16];
+        HtoA(eh[j], h);
+        p = AppendCStr(buf, p, h + 2, sizeof(buf));
+        p = AppendCh(buf, p, (j == 3) ? ' ' : ',', sizeof(buf));
+    }
+    p = AppendCStr(buf, p, "c=", sizeof(buf));
+    for (j = 0; j < 4; j++)
+    {
+        char h[16];
+        HtoA(ch[j], h);
+        p = AppendCStr(buf, p, h + 2, sizeof(buf));
+        p = AppendCh(buf, p, (j == 3) ? ' ' : ',', sizeof(buf));
+    }
+    p = AppendCStr(buf, p, "n=", sizeof(buf));
+    p += UtoA((unsigned)n, buf + p);
+    p = AppendCStr(buf, p, " v=", sizeof(buf));
+    for (i = 0; i < 9; i++)
+    {
+        p += HtoA((unsigned)v9[i], buf + p);
+        p = AppendCh(buf, p, (i == 8) ? ' ' : ',', sizeof(buf));
+    }
+    LogLine(buf);
+}
+
+/* Simple_ 入口: 命中 (主画布 + 落列表带 + 名/计时器) 即收表并跳过
+ * (底+字同死); 空串只收表不跳过; 其余原样转发 (ECX/EDX 原值进跳板)。 */
+int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
+    int a1, int a2, int a3, int a4, int a5, int a6, int a7)
+{
+    if (!g_OrigSimple) return 0;
+    if (g_SWPanelOn && g_SWCompW && IsPlausiblePtr((void*)a1))
+    {
+        int* b = (int*)a1;
+        if (b[1] == g_SWCompW && b[2] == g_SWCompH &&
+            IsPlausiblePtr((void*)a2) && IsPlausiblePtr((void*)a3))
+        {
+            int* p2 = (int*)a2;
+            int* p3 = (int*)a3;
+            const wchar_t* text = NULL;
+            int kind = VecSWTextKind(edxIn, &text);   /* 文本只认 EDX */
+            int n = 0, sx, sy, v9[9];
+            unsigned c0 = 0;
+            int inband;
+            sx = p2[0] + p3[0]; sy = p2[1] + p3[1];
+            inband = (sx >= 1300 && sx <= 1752 && sy >= 32 && sy <= 1080);
+            if (text)
+            {
+                c0 = (unsigned)text[0] & 0xFFFFu;
+                while (text[n] && n < 64) n++;
+            }
+            v9[0] = ecxIn; v9[1] = edxIn;
+            v9[2] = a1; v9[3] = a2; v9[4] = a3; v9[5] = a4;
+            v9[6] = a5; v9[7] = a6; v9[8] = a7;
+            VecSWxLog(text ? (n > 0 ? kind : 2) : -1, inband, c0, n, sx, sy,
+                      a4, ecxIn, edxIn, v9);
+            if (text && inband)
+            {
+                VecSWStore(kind, text, n, a4, sx, sy, 0);
+                if (n > 0)
+                {
+                    if (IsPlausiblePtr((void*)ecxIn))
+                    {
+                        ((int*)ecxIn)[0] = sx;
+                        ((int*)ecxIn)[1] = sy;
+                    }
+                    return ecxIn;   /* 与原版同口径 (pRetVal 非空) */
+                }
+            }
+        }
+    }
+    return g_OrigSimple(ecxIn, edxIn, a1, a2, a3, a4, a5, a6, a7);
 }
 
 /* ---------------- 探针记录 ---------------- */
@@ -1005,6 +1348,10 @@ static int VecRender(void* t, wchar_t wch, int adv, int h, int x, int y,
     return x + adv;
 }
 
+/* ---------------- 超武逐行绘制已删除 ----------------
+ * 整体接管改为: Print 入口隐藏+收集, 消息帧统一整块重绘 (见 MsgFont 超武面板)。
+ * 逐行背景/自锁/虚表 (旧 VecSWRowDraw/VecSWBandFill/VecSWVt/VecSWDoLog) 不再需要。 */
+
 /* 数字字形渲染实况 (顶栏用): 每个数字 Blit 的 px/credits/yoff、
  * 表面坐标 x,y、成败。上限 12 行。
  * 结论: 同一条顶栏被多条路径在同一坐标反复画, 位置是定案关键。 */
@@ -1340,7 +1687,9 @@ void VecText_Install(void)
         if (dy < 0) { p = AppendCh(buf, p, '-', sizeof(buf)); dy = -dy; }
         UtoA((unsigned)dy, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     }
-    p = AppendCStr(buf, p, " v=5", sizeof(buf));   /* 发版自增, 日志对版本 */
+    p = AppendCStr(buf, p, " swpx=", sizeof(buf));
+    UtoA((unsigned)g_VT.SuperPx, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCStr(buf, p, " v=9", sizeof(buf));   /* 发版自增, 日志对版本 */
     LogLine(buf);
     if (!g_VT.Enable) { LogLine("vtext: disabled"); return; }
     if (!BytesSame((unsigned char*)ADDR_BLIT, kWantBlit, 7))
@@ -1371,4 +1720,13 @@ void VecText_Install(void)
         else { LogLine("vtext: print ctx hook OFF"); g_OrigPrint = NULL; }
     }
     else { LogLine("vtext: print bytes mismatch"); LogBytes((unsigned char*)ADDR_PRINT); }
+    /* Simple_ 收集钩 (全文本必经, 命中跳过): 字节对不上就不装 */
+    if (BytesSame((unsigned char*)ADDR_SIMPLE, kWantSimple, 7))
+    {
+        g_OrigSimple = (SimpleFn)BuildTrampAt(ADDR_SIMPLE, 7, ADDR_SIMPLE_BACK);
+        if (g_OrigSimple && PatchAt(ADDR_SIMPLE, (void*)(size_t)VecSimpleEntry, 7))
+            LogLine("vtext: simple hook ON");
+        else { LogLine("vtext: simple hook OFF"); g_OrigSimple = NULL; }
+    }
+    else { LogLine("vtext: simple bytes mismatch"); LogBytes((unsigned char*)ADDR_SIMPLE); }
 }
