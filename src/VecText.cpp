@@ -65,7 +65,6 @@ typedef struct {
     int MenuTake;   /* 1=菜单按钮整体替换 (禁用原字形, 全墨水自定义绘制) */
     int DigitTrack; /* 数字字距微调像素 (负=收紧, 正=放松, 只影响 0-9 步进) */
     int ToolBox;    /* 0=关, 1=悬浮提示背景盒跟字走 (取样实色底才拓盒), 2=探测 */
-    int BoxProbe;   /* 出界实验: 0=关, 1=a3[2]收窄200, 2=a3[2]放宽600 (调完恢复) */
     int TipBox;     /* 1=电力提示定制盒 (按列调映射补齐, 与引擎同 tone) */
     int BriefBox;   /* 1=简报正文盒加高 (界面适配字体), 0=保持原版盒子 */
     int BriefClip;  /* 1=简报裁剪底边跟盒子走 (面板子面切，需配合 BriefBox) */
@@ -623,7 +622,6 @@ static int g_ToolPenX = 0;
 static int g_ToolBuilt = 0;   /* 0=未建, 1=已建, -1=失败走引擎笔位 */
 static int g_ToolLastX1 = -9999, g_ToolLastY = -9999;
 static unsigned g_ToolLastTick = 0;
-static int g_BoxLogs = 0;   /* 临时计数 (定案即删) */
 static int g_ToolStepA[TOOL_MAXCH];
 static int g_ToolInk0 = 0, g_ToolInkEnd = 0;   /* 首/尾墨水相对 x 偏移 */
 static unsigned g_ToolGateTick = 0;   /* 取样门上次判决时刻 */
@@ -646,14 +644,6 @@ static int VecToolMatch(unsigned caller, const wchar_t* s, int x, int y)
     return 1;
 }
 
-/* 探测读像素 (越界/非法面返回 -1, 只读不写; 日志已退役静默, 保留消警告) */
-static int VecProbePx(unsigned short* bb, int pp, int x, int y)
-{
-    if (!bb || !IsPlausiblePtr((void*)bb)) return -1;
-    if (pp < 64 || pp > 4096 || y < 0 || y > 4096) return -1;
-    if (x < 0 || x >= pp) return -1;
-    return (int)bb[y * pp + x];
-}
 
 /* 面内实色填充 (调用方保证 y1<=B; x 钳到行宽内) */
 static void VecFillBox(unsigned short* buf, int pitchW,
@@ -828,10 +818,19 @@ static int g_TipOw = 0;
 /* 边缘位移 (Print 入口算, Blit 逐字消耗, 非提示串清零, 无泄漏) */
 static int g_TipShift = 0;
 static int g_TipShiftN = 0;
+/* 深边缘推进 (v62 实验): tipx<4 时转交引擎的 a4 右推至 4,
+ * 引擎锚点回屏内即解 cull (整串跳过), Blit/盒全活。
+ * 只影响转发值与记录值, 中间 (a4>=4) 恒零零回归。 */
+static int g_TipPush = 0;
 /* 当帧提示落笔 (Print 入口记, 首字位置门用, 与颜色无关) */
 static int g_TipY = -9999;
 /* 当帧提示首字是否已扫描 (Print 入口清零, Blit 首字置位) */
 static int g_BlitTipSeen = 0;
+/* 提示 Print 序号 (精确+子串分支都加): vbox2 凭 ps= 对齐盒与 Print,
+ * 数 Simple_/Print/盒三者个数, 找盖盒子的额外绘制 */
+static unsigned g_TipSeq = 0;
+/* 当 Print 已收几个落点内 Blit (vhead 取证用, 入口清零) */
+static int g_HeadN = 0;
 /* 边缘诊断 (定案即删): 当帧提示色 Blit 最小 x, Print 入口转存上一帧。
  * 若引擎在边缘滚字 (minx 远小于 tipx 甚至为负), 盒 (跟 tipx) 与字
  * (跟 Blit x) 必然错位。 */
@@ -839,11 +838,10 @@ static int g_BlitMinX = 9999;
 static int g_PrevMinX = 9999;
 static int g_BlitMaxX = -9999;
 static int g_PrevMaxX = -9999;
-/* 出界实验状态 (BoxProbe): 改前快照, 转发后恢复, 误伤自愈。 */
-static int* g_MutP3 = NULL;
-static int g_MutSaved = 0;
-static int g_MutVal = 0;
-static int g_MutFrame = 0;
+static int g_BlitMinY = 9999;
+static int g_PrevMinY = 9999;
+static int g_BlitMaxY = -9999;
+static int g_PrevMaxY = -9999;
 static int g_MutModeLog = 0;
 /* 多槽宽度表 (单槽会被同帧其它串冲掉, 见 vfixq ow=30 教训):
  * ring 32 项, 按指针/首字+长度命中, 跨帧也有效。 */
@@ -955,6 +953,7 @@ int __fastcall VecPrintEntry(void* t, void* e,
 {
     unsigned caller = (unsigned)__builtin_return_address(0);
     int r, toolTake = 0;
+    int pushK = 0;
     if (g_VT.LogAdv) VecCallerLog('P', caller, a3);
     /* 电力提示落笔 x 记录 (Simple 盒 R 自校验用, 只读 First 字) */
     {
@@ -966,10 +965,16 @@ int __fastcall VecPrintEntry(void* t, void* e,
             g_LastTipX = a4;
             g_TipY = a5;
             g_BlitTipSeen = 0;
+            g_TipSeq++;
+            g_HeadN = 0;
             g_PrevMinX = g_BlitMinX;
             g_BlitMinX = 9999;
             g_PrevMaxX = g_BlitMaxX;
             g_BlitMaxX = -9999;
+            g_PrevMinY = g_BlitMinY;
+            g_BlitMinY = 9999;
+            g_PrevMaxY = g_BlitMaxY;
+            g_BlitMaxY = -9999;
             /* 取本串宽度 (表对齐缓存): Blit 首字画盒用, 查不到=0跳过 */
             g_TipTot = 0;
             g_TipOw = 0;
@@ -1049,14 +1054,21 @@ int __fastcall VecPrintEntry(void* t, void* e,
             {
                 static int nV = 0;
                 static int vX = -99999, vT = -1, vM = -99999, vA = -99999;
-                if ((a4 != vX || g_TipTot != vT ||
-                     g_PrevMinX != vM || g_PrevMaxX != vA) && nV < 40)
+                static int vNY = -99999, vAY = -99999;
                 {
-                    char vb1[16], vf[160];
+                    /* Deep-zone line: first 8 always, then tipx<120 only.
+                     * Cap 400. */
+                    if ((a4 != vX || g_TipTot != vT ||
+                         g_PrevMinX != vM || g_PrevMaxX != vA ||
+                         g_PrevMinY != vNY || g_PrevMaxY != vAY) &&
+                        nV < 400 && (nV < 8 || a4 < 2120))
+                {
+                    char vb1[16], vf[192];
                     unsigned vz = 0;
                     nV++;
                     vX = a4; vT = g_TipTot;
                     vM = g_PrevMinX; vA = g_PrevMaxX;
+                    vNY = g_PrevMinY; vAY = g_PrevMaxY;
                     vz = AppendCStr(vf, vz, "vtip: n=", sizeof(vf));
                     UtoA((unsigned)tl, vb1);
                     vz = AppendCStr(vf, vz, vb1, sizeof(vf));
@@ -1072,25 +1084,115 @@ int __fastcall VecPrintEntry(void* t, void* e,
                     vz = AppendCStr(vf, vz, " maxx=", sizeof(vf));
                     UtoA((unsigned)(g_PrevMaxX + 2000), vb1);
                     vz = AppendCStr(vf, vz, vb1, sizeof(vf));
+                    vz = AppendCStr(vf, vz, " miny=", sizeof(vf));
+                    UtoA((unsigned)(g_PrevMinY + 2000), vb1);
+                    vz = AppendCStr(vf, vz, vb1, sizeof(vf));
+                    vz = AppendCStr(vf, vz, " maxy=", sizeof(vf));
+                    UtoA((unsigned)(g_PrevMaxY + 2000), vb1);
+                    vz = AppendCStr(vf, vz, vb1, sizeof(vf));
                     LogLine(vf);
+                    }
                 }
             }
-            /* 边缘位移已退役 (出界按原版裁剪消失, 不强制对齐):
-             * 位移恒零, 盒仍钳制贴合可见字。 */
+            /* 边缘位移已退役: 位移恒零, 出界即真裁剪 (盒字同宽同锚,
+             * 整体出屏, 无模式切换)。 */
             g_TipShift = 0;
             g_TipShiftN = 0;
-            if (0 && g_TipTot >= 50 && g_TipTot <= 400)
-            {
-                if (a4 < 4) g_TipShift = 4 - a4;
-                else if (a4 + g_TipTot + 4 >= 1752)
-                    g_TipShift = 1751 - (a4 + g_TipTot + 4);
-                if (g_TipShift != 0) g_TipShiftN = tl;
-            }
+            /* 推进已删除: 锚点出屏也不右推, 原样转交,
+             * Blit 层盒字同几何真裁剪。 */
+            pushK = 0;
+            g_TipPush = 0;
         }
         else
         {
             g_TipShift = 0;
             g_TipShiftN = 0;
+        }
+    }
+    /* Substring fallback (deep edge): engine passes only the visible
+     * substring (first char != tip leader) -> exact branch ignores it,
+     * seen never resets, box stalls while wide text keeps drawing.
+     * Match qs against sticky full texts; on hit at offset k:
+     * tipx = substring pen a4 (== visible start), tot = nw - k*avg
+     * (avg = nw/n, few-px error), ow scaled the same.
+     * Gates (anti-misfire): tl in [8,64), y within +-24 of last tip,
+     * a4 within [tipx-320, tipx+64]. tot < 40 -> miss. */
+    {
+        const wchar_t* qs = (const wchar_t*)a3;
+        int ql = 0;
+        if (g_TipTot == 0 && qs && IsPlausiblePtr((void*)qs) &&
+            g_TipY > -9000 && a5 >= g_TipY - 24 && a5 <= g_TipY + 24 &&
+            a4 >= g_LastTipX - 320 && a4 <= g_LastTipX + 64)
+        {
+            int si;
+            while (ql < 64 && qs[ql]) ql++;
+            if (ql >= 8 && ql < 64)
+            {
+                for (si = 0; si < STICKY_N; si++)
+                {
+                    StkCE* s = &g_StkC[si];
+                    int kk;
+                    if (!s->used || s->n < ql) continue;
+                    for (kk = 0; kk + ql <= s->n; kk++)
+                    {
+                        int m2, ok = 1;
+                        for (m2 = 0; m2 < ql; m2++)
+                        {
+                            if (s->tx[kk + m2] != qs[m2])
+                            {
+                                ok = 0;
+                                break;
+                            }
+                        }
+                        if (!ok) continue;
+                        {
+                            int t2 = s->nw - kk * s->nw / s->n;
+                            int o2 = s->ow - kk * s->ow / s->n;
+                            if (t2 >= 40)
+                            {
+                                static int nS = 0;
+                                 g_TipTot = t2; g_TipOw = o2;
+                                 g_LastTipX = a4; g_TipY = a5;
+                                 g_BlitTipSeen = 0;
+                                 g_TipSeq++;
+                                 g_HeadN = 0;
+                                 /* 推进已删除 (同上, 出界整串走原版, 不左对齐) */
+                                 pushK = 0;
+                                 g_TipPush = 0;
+                                if (nS < 20)
+                                {
+                                    char sb1[16], sf[128];
+                                    unsigned sz = 0;
+                                    nS++;
+                                    sz = AppendCStr(sf, sz, "vsub: k=",
+                                                    sizeof(sf));
+                                    UtoA((unsigned)kk, sb1);
+                                    sz = AppendCStr(sf, sz, sb1,
+                                                    sizeof(sf));
+                                    sz = AppendCStr(sf, sz, " tipx=",
+                                                    sizeof(sf));
+                                    UtoA((unsigned)(a4 + 2000), sb1);
+                                    sz = AppendCStr(sf, sz, sb1,
+                                                    sizeof(sf));
+                                    sz = AppendCStr(sf, sz, " tot=",
+                                                    sizeof(sf));
+                                    UtoA((unsigned)t2, sb1);
+                                    sz = AppendCStr(sf, sz, sb1,
+                                                    sizeof(sf));
+                                    sz = AppendCStr(sf, sz, " n=",
+                                                    sizeof(sf));
+                                    UtoA((unsigned)ql, sb1);
+                                    sz = AppendCStr(sf, sz, sb1,
+                                                    sizeof(sf));
+                                    LogLine(sf);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    if (g_TipTot != 0) break;
+                }
+            }
         }
     }
     /* 出界: Print 收到的串 (m=6 若传子串, 即盒交集, 边界反推盒宽)。
@@ -1132,7 +1234,7 @@ int __fastcall VecPrintEntry(void* t, void* e,
             (((unsigned)ps[0] & 0xFFFFu) == 0x7535u))
         {
             /* ph=0 (画布) 已证无效 (cbb=NULL), 退役省行数, 只扫 surface */
-            if (n < 4 && IsPlausiblePtr((void*)a2))
+            if (n < 300 && IsPlausiblePtr((void*)a2))
             {
                 int* sd = (int*)a2;
                 char b1[16], fbuf[128];
@@ -1157,134 +1259,6 @@ int __fastcall VecPrintEntry(void* t, void* e,
                 LogLine(fbuf);
                 VecScanBoxBuf((unsigned short*)sd[0], sd[1], a4, a5, 3);
             }
-        }
-    }
-    /* 盒几何实测 (定案即删): Print 入口时盒已画好字未画, 沿 y-2..y+24
-     * 找长红边 (>=40px 连续, 字墨形不成这么长的连笔), 定盒上下左右。
-     * 与帧轮转实验联动, 一次跑出基线 + 各候选的 ΔR。上限 12 行。 */
-    {
-        static int n = 0;
-        const wchar_t* ps = (const wchar_t*)a3;
-        if (0 && n < 12 && ps && IsPlausiblePtr((void*)ps) &&
-            (((unsigned)ps[0] & 0xFFFFu) == 0x7535u) &&
-            IsPlausiblePtr((void*)a1))
-        {
-            unsigned short* bb = *(unsigned short**)((char*)a1 + 0x0C);
-            int pp = *(int*)((char*)a1 + 0x10);
-            char b1[16], fbuf[128];
-            unsigned z = 0;
-            int yy, xx, top = 0, bot = 0, bL = 0, bR = 0;
-            n++;
-            if (bb && IsPlausiblePtr((void*)bb) &&
-                pp >= 64 && pp <= 4096)
-            {
-                for (yy = a5 - 2; yy <= a5 + 24; yy++)
-                {
-                    int runL = -1, runR = -1;
-                    if (yy < 0 || yy > 4096) continue;
-                    for (xx = a4 - 200; xx <= a4 + 400; xx++)
-                    {
-                        unsigned c;
-                        int isRed;
-                        if (xx < 0 || xx >= pp) continue;
-                        c = bb[yy * pp + xx];
-                        isRed = (((c >> 11) & 31) >= 24 &&
-                                 ((c >> 5) & 63) <= 12 &&
-                                 (c & 31) <= 12);
-                        if (isRed)
-                        {
-                            if (runL < 0) runL = xx;
-                            runR = xx;
-                        }
-                        else if (runL >= 0)
-                        {
-                            if (runR - runL + 1 >= 40 && !top)
-                            {
-                                top = yy; bot = yy;
-                                bL = runL; bR = runR;
-                            }
-                            else if (runR - runL + 1 >= 40)
-                                bot = yy;
-                            runL = -1;
-                        }
-                    }
-                    if (runL >= 0 && runR - runL + 1 >= 40)
-                    {
-                        if (!top) { top = yy; bL = runL; bR = runR; }
-                        else bot = yy;
-                    }
-                }
-            }
-            z = AppendCStr(fbuf, z, "vscan: m=", sizeof(fbuf));
-            UtoA((unsigned)g_MutModeLog, b1);
-            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-            z = AppendCStr(fbuf, z, " top=", sizeof(fbuf));
-            UtoA((unsigned)top, b1);
-            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-            z = AppendCStr(fbuf, z, " bot=", sizeof(fbuf));
-            UtoA((unsigned)bot, b1);
-            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-            z = AppendCStr(fbuf, z, " L=", sizeof(fbuf));
-            UtoA((unsigned)bL, b1);
-            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-            z = AppendCStr(fbuf, z, " R=", sizeof(fbuf));
-            UtoA((unsigned)bR, b1);
-            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-            LogLine(fbuf);
-        }
-    }
-    /* 提示盒宽度来源探测 (只读日志, 上限 6 行): outer=0x4BAF63 电力提示行
-     * 的 Print 全参数 + 画布裁剪 LTRB + a2 解引用, 看盒宽是否经参数传递。 */
-    {
-        static int n = 0;
-        if (0 && caller == 0x004A5FF2u && n < 6 && InPipeline(caller) &&
-            VecFindOuter() == 0x004BAF63u)
-        {
-            char b1[16], fbuf[256];
-            unsigned z = 0;
-            int ci;
-            n++;
-            z = AppendCStr(fbuf, z, "vparg: a1=", sizeof(fbuf));
-            z += HtoA((unsigned)a1, fbuf + z);
-            z = AppendCStr(fbuf, z, " a2=", sizeof(fbuf));
-            z += HtoA((unsigned)a2, fbuf + z);
-            z = AppendCStr(fbuf, z, " x=", sizeof(fbuf));
-            UtoA((unsigned)a4, b1);
-            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-            z = AppendCStr(fbuf, z, " y=", sizeof(fbuf));
-            UtoA((unsigned)a5, b1);
-            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-            z = AppendCStr(fbuf, z, " a6=", sizeof(fbuf));
-            UtoA((unsigned)a6, b1);
-            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-            z = AppendCStr(fbuf, z, " a7=", sizeof(fbuf));
-            UtoA((unsigned)a7, b1);
-            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-            z = AppendCStr(fbuf, z, " clip=", sizeof(fbuf));
-            if (IsPlausiblePtr((void*)a1))
-            {
-                int* cp = (int*)((char*)a1 + 0x30);
-                for (ci = 0; ci < 4; ci++)
-                {
-                    if (ci) z = AppendCh(fbuf, z, ',', sizeof(fbuf));
-                    UtoA((unsigned)cp[ci], b1);
-                    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                }
-            }
-            else z = AppendCh(fbuf, z, 'X', sizeof(fbuf));
-            z = AppendCStr(fbuf, z, " a2d=", sizeof(fbuf));
-            if (IsPlausiblePtr((void*)a2))
-            {
-                int* dp = (int*)a2;
-                for (ci = 0; ci < 4; ci++)
-                {
-                    if (ci) z = AppendCh(fbuf, z, ',', sizeof(fbuf));
-                    UtoA((unsigned)dp[ci], b1);
-                    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                }
-            }
-            else z = AppendCh(fbuf, z, 'X', sizeof(fbuf));
-            LogLine(fbuf);
         }
     }
     /* 悬浮提示收串: CJK Print (超武带除外), 首层才收; 不认 outer */
@@ -1319,7 +1293,7 @@ int __fastcall VecPrintEntry(void* t, void* e,
             return 1;
     }
     if (!g_OrigPrint) { if (toolTake) g_ToolDepth--; return 0; }
-    r = g_OrigPrint(t, NULL, a1, a2, a3, a4, a5, a6, a7);
+    r = g_OrigPrint(t, NULL, a1, a2, a3, a4 + pushK, a5, a6, a7);
     if (toolTake) g_ToolDepth--;
     return r;
 }
@@ -1358,19 +1332,25 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
      * 三重门: 电力串 + 调用签名 (a4/a5/a7) + x 自校验 (a6≈x+ow-2)。
      * 首帧无缓存静默跳过 (视觉无差)。 */
     {
-        static int n = 0;
         static int nq = 0;
         const wchar_t* ts = (const wchar_t*)edxIn;
-        /* 结构探测 (定案即删): a2/a3 解引用, 盒几何定位。
-         * SW 已证 p2[0]+p3[0]=落笔x; 看 R/B 藏在哪个槽。上限 6 行。 */
-        if (nq < 6 && ts && IsPlausiblePtr((void*)ts) &&
+        /* 结构探测: a2/a3 解引用, 盒几何定位。
+         * SW 已证 p2[0]+p3[0]=落笔x; 看 R/B 藏在哪个槽。
+         * 上限 300 行: 数每 Print 对几个 Simple_, 找盖盒子的额外绘制。 */
+        if (nq < 300 && ts && IsPlausiblePtr((void*)ts) &&
             (((unsigned)ts[0] & 0xFFFFu) == 0x7535u))
         {
             char b1[16], fbuf[288];
             unsigned z = 0;
             int ci;
             nq++;
-            z = AppendCStr(fbuf, z, "vss: p2=", sizeof(fbuf));
+            z = AppendCStr(fbuf, z, "vss: q=", sizeof(fbuf));
+            UtoA((unsigned)nq, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " ps=", sizeof(fbuf));
+            UtoA(g_TipSeq, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " p2=", sizeof(fbuf));
             if (IsPlausiblePtr((void*)a2))
             {
                 int* p2 = (int*)a2;
@@ -1429,49 +1409,6 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
                 else z = AppendCh(fbuf, z, 'X', sizeof(fbuf));
             }
             LogLine(fbuf);
-        }
-        if (ts && IsPlausiblePtr((void*)ts) &&
-            (((unsigned)ts[0] & 0xFFFFu) == 0x7535u) &&
-            a4 == 0xA92Au && a5 == 0 && a7 == 1 &&
-            g_LastTipX >= 0)
-        {
-            /* 出界实验 (BoxProbe ini): 帧轮转, 只改本调用栈值。
-             * eff: 0=基线, 5=a4 去 0x8000 位, 6=a7 置 0。
-             * BoxProbe=3 时按 {0,5,6} 轮转, vscan 实测每帧盒矩形。 */
-            int mode = g_VT.BoxProbe;
-            int eff = mode;
-            int seqs[3] = {0, 5, 6};
-            if (mode == 3) eff = seqs[(g_MutFrame++) % 3];
-            g_MutModeLog = eff;
-            /* eff: 0=基线, 5=a4 去 0x8000 位 (若 a4 兼标志, 盒位即落),
-             * 6=a7 置 0 (若 a7 是盒开关, 边框即灭)。
-             * a4/a7 皆小整数值, 非指针, 只改本调用, 无崩溃风险。 */
-            if (eff == 5)
-            {
-                a4 &= ~0x8000;
-                if (n < 6)
-                {
-                    char fbuf[64];
-                    unsigned z = 0;
-                    n++;
-                    z = AppendCStr(fbuf, z, "vmut: a4&~80",
-                                   sizeof(fbuf));
-                    LogLine(fbuf);
-                }
-            }
-            else if (eff == 6)
-            {
-                a7 = 0;
-                if (n < 6)
-                {
-                    char fbuf[64];
-                    unsigned z = 0;
-                    n++;
-                    z = AppendCStr(fbuf, z, "vmut: a7=0",
-                                   sizeof(fbuf));
-                    LogLine(fbuf);
-                }
-            }
         }
     }
     /* 入口盒预检 (定案即删): Simple 运行前画布上已有盒 => 上游预画。
@@ -1537,9 +1474,7 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
     }
     {
         int r;
-        if (g_MutP3) g_MutP3[2] = g_MutVal;   /* 出界实验值 */
         r = g_OrigSimple(ecxIn, edxIn, a1, a2, a3, a4, a5, a6, a7);
-        if (g_MutP3) { g_MutP3[2] = g_MutSaved; g_MutP3 = NULL; }   /* 恢复 */
         {
             /* ph=1: Simple 全画完后实测 (与 ph=0 对照定边框绘制时机) */
             const wchar_t* ts2 = (const wchar_t*)edxIn;
@@ -1597,7 +1532,7 @@ static void VecDim2Log(const wchar_t* s, int maxW, int ow, int rep)
 {
     char b1[16], fbuf[128];
     unsigned z = 0;
-    if (g_Dim2N >= 8) return;
+    if (g_Dim2N >= 64) return;
     if (!s || !IsPlausiblePtr((void*)s)) return;
     g_Dim2N++;
     z = AppendCStr(fbuf, z, "vdim2: maxW=", sizeof(fbuf));
@@ -1707,11 +1642,18 @@ int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
     }
     if (((unsigned)s[0] & 0xFFFFu) == 0x7535u)
         VecDim2Log(s, maxW, ow, 1);
-    if (g_DimLogs < 60 && i >= 10)
+    /* Change-triggered: 每帧同值烧 cap (120 行只够约 2 秒),
+     * 只记 (px,ow,nw,n) 变化。 */
+    if (i >= 10)
     {
+        static int dPx = -1, dOw = -1, dNw = -1, dN = -1;
+        int moved = (px != dPx || ow != dOw || tot != dNw || i != dN);
+        if (moved && g_DimLogs < 120)
+        {
         char b1[16], dbuf[160];
         unsigned q = 0;
         g_DimLogs++;
+        dPx = px; dOw = ow; dNw = tot; dN = i;
         q = AppendCStr(dbuf, q, "vdim: px=", sizeof(dbuf));
         UtoA((unsigned)px, b1); q = AppendCStr(dbuf, q, b1, sizeof(dbuf));
         q = AppendCStr(dbuf, q, " ow=", sizeof(dbuf));
@@ -1725,6 +1667,7 @@ int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
         q = AppendCh(dbuf, q, ',', sizeof(dbuf));
         q += HtoA((unsigned)s[1] & 0xFFFFu, dbuf + q);
         LogLine(dbuf);
+        }
     }
     g_GDDepth--;
     return r;
@@ -2449,28 +2392,74 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
     adv = VecMeasure(t, wc, &h);
     if (adv < 0)
         return g_OrigBlit(t, NULL, wch, x, y, color);
+    /* 落笔即引擎坐标 (推进已删除, tx==x)。 */
+    int tx = x - g_TipPush;
+    int inTip = (g_LastTipX >= 0 && g_TipTot > 0 &&
+                 tx >= g_LastTipX - g_TipTot - 16 &&
+                 tx <= g_LastTipX + g_TipTot + 8 &&
+                 y >= g_TipY - 8 && y <= g_TipY + 8);
     /* 出界: 提示首字 Blit 时扫有效画布 (盒若上游预画, 此时无字污染
      * 最干净; bb 与渲染同源, 必有效)。上限 4 帧, 定案即删。 */
     {
         static int n = 0;
-        /* 帧最小 x (边缘诊断, 定案即删): 提示色 Blit 全收录 (不限跨度门),
-         * 看引擎在边缘到底从哪起笔。 */
-        if (g_LastTipX >= 0 && y >= g_TipY - 8 && y <= g_TipY + 8 &&
-            t && IsPlausiblePtr(t) &&
-            (eff == 0xA92Au || eff == 0x292Au || eff == 0x07FFu ||
-             eff == 0xAEFCu))
+        /* 帧跨度 (边缘诊断, 定案即删): 位置门 (颜色盲, y +-64),
+         * 看引擎在边缘到底把字画在哪 (颜色门在深边缘已证盲)。
+         * 邻串可能混入, 看随 tipx 联动的趋势, 不看单行。 */
+        if (g_LastTipX >= 0 && g_TipTot > 0 &&
+            y >= g_TipY - 64 && y <= g_TipY + 64 &&
+            tx >= g_LastTipX - 350 &&
+            tx <= g_LastTipX + g_TipTot + 64 &&
+            t && IsPlausiblePtr(t))
         {
-            if (x < g_BlitMinX) g_BlitMinX = x;
-            if (x > g_BlitMaxX) g_BlitMaxX = x;
+            if (tx < g_BlitMinX) g_BlitMinX = tx;
+            if (tx > g_BlitMaxX) g_BlitMaxX = tx;
+            if (y < g_BlitMinY) g_BlitMinY = y;
+            if (y > g_BlitMaxY) g_BlitMaxY = y;
         }
-        /* 位置门 (颜色盲): 首个 Blit 落在当帧提示跨度内。
+    /* 首字取证 (vhead): 只抓近边缘批次 (tipx<40), 每批全部 Blit
+     * (15 字上限) 的字/坐标/颜色, 定深边缘哪些字没发出来。
+     * 上限 900 行 (屏内批次不占额度)。
+     * (不用 inTip: 它含 tipx>=0, 深边缘恒假, 会漏掉正要抓的批次。) */
+    if (g_HeadN < 15 && g_TipTot > 0 && g_LastTipX < 40 &&
+        tx >= g_LastTipX - g_TipTot - 16 &&
+        tx <= g_LastTipX + g_TipTot + 8 &&
+        y >= g_TipY - 8 && y <= g_TipY + 8 &&
+        t && IsPlausiblePtr(t))
+    {
+        static int nH = 0;
+        if (nH < 900)
+        {
+            char hb1[16], hf[144];
+            unsigned hz = 0;
+            nH++; g_HeadN++;
+            hz = AppendCStr(hf, hz, "vhead: wch=", sizeof(hf));
+            hz += HtoA((unsigned)wc & 0xFFFFu, hf + hz);
+            hz = AppendCStr(hf, hz, " x=", sizeof(hf));
+            UtoA((unsigned)(x + 2000), hb1);
+            hz = AppendCStr(hf, hz, hb1, sizeof(hf));
+            hz = AppendCStr(hf, hz, " y=", sizeof(hf));
+            UtoA((unsigned)(y + 2000), hb1);
+            hz = AppendCStr(hf, hz, hb1, sizeof(hf));
+            hz = AppendCStr(hf, hz, " eff=", sizeof(hf));
+            hz += HtoA((unsigned)eff & 0xFFFFu, hf + hz);
+            hz = AppendCStr(hf, hz, " t=", sizeof(hf));
+            hz += HtoA((unsigned)(size_t)t, hf + hz);
+            hz = AppendCStr(hf, hz, " ps=", sizeof(hf));
+            UtoA(g_TipSeq, hb1);
+            hz = AppendCStr(hf, hz, hb1, sizeof(hf));
+            LogLine(hf);
+        }
+    }
+        /* 位置门 (颜色盲): 本 Print 的首个 Blit 落在当帧提示跨度内。
          * 边缘出屏字会被引擎跳过 (不调 Blit), 首 Blit 未必是串首,
-         * 故按跨度 [tipx-tot-16, tipx+tot+8] 认 (左界动态:
-         * 边缘引擎起笔比 a4 靠左, 紧门会把画盒拦停); 不按原点 ±8。
-         * 右界 tot+8: 本串字 ENGINE x 不会超 a4+tot (账本即此)。 */
-        if (!g_BlitTipSeen && g_LastTipX >= 0 &&
-            x >= g_LastTipX - g_TipTot - 16 &&
-            x <= g_LastTipX + g_TipTot + 8 &&
+         * 故按跨度 [tipx-tot-16, tipx+tot+8] 认; 不按原点 ±8。
+         * 右界 tot+8: 本串字 ENGINE x 不会超 a4+tot (账本即此)。
+         * 每批只进一次 (seen 守卫): 串内后续字的 tx 天然递增,
+         * 绝不能按"漂移"重画盒, 否则盒跟着字走、越走越偏 (v65 教训)。
+         * 单线程 Print→Blits 同步, 陈旧跨 Print 不可能, 无需漂移。 */
+        if (!g_BlitTipSeen &&
+            tx >= g_LastTipX - g_TipTot - 16 &&
+            tx <= g_LastTipX + g_TipTot + 8 &&
             y >= g_TipY - 8 && y <= g_TipY + 8 &&
             t && IsPlausiblePtr(t))
         {
@@ -2487,19 +2476,23 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
              * (纹理保留, 同 tone 无缝), 采样红画新边框, 字随后画上。
              * 坐标全落在已扫描安全区内; 关游戏即无残留 (世界每帧重画)。
              * TipBox=0 关闭。 */
+            /* 定制盒: 每批首个落点 Blit 进一次 (seen 守卫),
+             * 串内后续字不进; 锚点/几何见下, 出屏即真裁剪。 */
             if (g_VT.TipBox && g_TipTot >= 50 && g_TipTot <= 400 &&
                 bb && IsPlausiblePtr((void*)bb) &&
                 pp >= 64 && pp <= 4096)
             {
-                /* 盒原点取 min(Print 落笔, 首 Blit x):
-                 * 中间两者一致; 边缘引擎实际起笔比 a4 靠左 (字画在盒左),
-                 * 跟 Blit x 才包得住; 首字出屏被跳过时首 Blit 偏右,
-                 * 此时 min 回落到 a4, 盒不偏右。 */
-                int bx0 = (x < g_LastTipX) ? x : g_LastTipX;
-                int cx = bx0 + g_TipTot / 2;
+                /* 盒锚点取 max(Print 落笔, 首 Blit x):
+                 * 中间两者一致; 首字出屏被跳过时首 Blit 偏右 (前面
+                 * 几个字已在屏外), 跟 Blit x 左沿才与可见字
+                 * 对齐, 右沿仍用 Print 真右沿 (tipx+tot, 不多占);
+                 * 取 min 会把盒钉在旧落笔、字溢出右沿 (图 2 的病)。
+                 * cx (引擎窄盒中心) 仍按 Print 版式取, 与裁剪无关。 */
+                int anchor = (tx > g_LastTipX) ? tx : g_LastTipX;
+                int cx = g_LastTipX + g_TipTot / 2;
                 int oldHW = (g_TipOw > 0 ? g_TipOw : 118) / 2 + 4;
                 int oldL = cx - oldHW, oldR = cx + oldHW - 1;
-                int newL = bx0 - 4, newR = bx0 + g_TipTot + 4;
+                int newL = anchor - 4, newR = g_LastTipX + g_TipTot + 4;
                 int yT = y - 2, yB = y + 18, ym = y + 9;
                 int xx, yy;
                 /* 边缘钳制: 只画屏内部分。oldL/oldR 随 ow 自适应
@@ -2514,6 +2507,11 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                 int fR1 = oldR < L0 ? L0 : oldR, fR2 = R0;
                 int cL = oldL < L0 ? L0 : oldL;
                 int cR = oldR > R0 ? R0 : oldR;
+                /* 真裁剪 (无模式切换): 盒与字永远同宽同锚
+                 * ([anchor-4, tipx+tot+4]), 作为一个整体进出屏幕;
+                 * 填充/采样天然钳在屏内 (L0/R0), 出屏侧不画边框。
+                 * v67 序号证 Print:Simple_=1:1, 无额外绘制;
+                 * 此前"突然缩短"是出界回落在 tipx≈4 处跳变, 已删。 */
                 if (L0 <= R0 && yT >= 0 && yB <= 4096)
                 {
                     long mR = 0, mG = 0, mB = 0, bR = 0, bG = 0, bB = 0;
@@ -2531,12 +2529,17 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                         mR += (c >> 11) & 31u; mG += (c >> 5) & 63u;
                         mB += c & 31u; mN++;
                     }
+                    /* 地面采样只取真盒外像素: 出屏侧钳入段落在真盒内
+                     * (盒 tone), 会把比例拉偏、接缝露馅, 故跳过,
+                     * 用另一侧邻地 ( tones 一致, 同一材质)。 */
+                    if (newL >= 0)
                     for (xx = sL1; xx <= sL2; xx++)
                     {
                         unsigned c = bb[ym * pp + xx];
                         bR += (c >> 11) & 31u; bG += (c >> 5) & 63u;
                         bB += c & 31u; bN++;
                     }
+                    if (newR < pp)
                     for (xx = sR1; xx <= sR2; xx++)
                     {
                         unsigned c = bb[ym * pp + xx];
@@ -2600,14 +2603,20 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                         bb[yT * pp + xx] = (unsigned short)bc;
                         bb[yB * pp + xx] = (unsigned short)bc;
                     }
+                    /* 竖边框只画屏内段: 出屏侧顶着屏沿画会造出一条
+                     * 本不存在的假边框 (左对齐即此), 直接跳过。 */
                     for (yy = yT + 1; yy <= yB - 1; yy++)
                     {
-                        bb[yy * pp + L0] = (unsigned short)bc;
-                        bb[yy * pp + R0] = (unsigned short)bc;
+                        if (newL >= 0)
+                            bb[yy * pp + L0] = (unsigned short)bc;
+                        if (newR < pp)
+                            bb[yy * pp + R0] = (unsigned short)bc;
                     }
-                    /* 变化触发: 盒子动了才记 (中间稳定一次, 边缘必现形),
-                     * 上限 20 行。定案即删。 */
-                    if ((L0 != lastL || R0 != lastR) && n2 < 20)
+                    /* 深水区专线 (长 session 按位移记必烧穿): 前 8 行必记,
+                     * 之后只记 L0<120。上限 400。定案即删。 */
+                    {
+                        if ((L0 != lastL || R0 != lastR) && n2 < 400 &&
+                            (n2 < 8 || L0 < 120))
                     {
                         n2++;
                         lastL = L0; lastR = R0;
@@ -2633,7 +2642,17 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                         z = AppendCStr(fbuf, z, " sh=", sizeof(fbuf));
                         UtoA((unsigned)(g_TipShift + 1000), b1);
                         z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        z = AppendCStr(fbuf, z, " ps=", sizeof(fbuf));
+                        UtoA(g_TipSeq, b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        z = AppendCStr(fbuf, z, " tx=", sizeof(fbuf));
+                        UtoA((unsigned)(tx + 2000), b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        z = AppendCStr(fbuf, z, " tipx=", sizeof(fbuf));
+                        UtoA((unsigned)(g_LastTipX + 2000), b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
                         LogLine(fbuf);
+                        }
                     }
                 }
             }
@@ -2814,40 +2833,6 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                         {
                             VecFillBox(bb, pp, x0, y0, x1, y1,
                                        (unsigned short)first);
-                            if (g_BoxLogs < 0)   /* 退役 (定案: 地图提示无盒/面板半透明), 日志静默 */
-                            {
-                                char b1[16], fbuf[192];
-                                unsigned z = 0;
-                                g_BoxLogs++;
-                            z = AppendCStr(fbuf, z, "vbox: px=", sizeof(fbuf));
-                            UtoA((unsigned)px, b1);
-                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                            z = AppendCStr(fbuf, z, " tx=", sizeof(fbuf));
-                            UtoA((unsigned)g_ToolX, b1);
-                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                            z = AppendCStr(fbuf, z, " ink=", sizeof(fbuf));
-                            UtoA((unsigned)g_ToolInk0, b1);
-                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                            z = AppendCh(fbuf, z, ',', sizeof(fbuf));
-                            UtoA((unsigned)g_ToolInkEnd, b1);
-                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                            z = AppendCStr(fbuf, z, " fill=", sizeof(fbuf));
-                            UtoA((unsigned)x0, b1);
-                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                            z = AppendCh(fbuf, z, ',', sizeof(fbuf));
-                            UtoA((unsigned)x1, b1);
-                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                            z = AppendCh(fbuf, z, ',', sizeof(fbuf));
-                            UtoA((unsigned)y0, b1);
-                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                            z = AppendCh(fbuf, z, ',', sizeof(fbuf));
-                            UtoA((unsigned)y1, b1);
-                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                            z = AppendCStr(fbuf, z, " s=", sizeof(fbuf));
-                            z += HtoA((unsigned)g_ToolStr[0] & 0xFFFFu,
-                                      fbuf + z);
-                            LogLine(fbuf);
-                            }
                         }
                         else
                         {
@@ -2857,8 +2842,6 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                             int sxL = g_ToolX + g_ToolInk0 + 2;
                             int sxR = g_ToolX + g_ToolInkEnd + 2;
                             int lx = sxL, rx;
-                            char b1[16], fbuf[192];
-                            unsigned z = 0;
                             while (lx > 0 && sxL - lx < 600 &&
                                 bb[ym * pp + lx - 1] ==
                                 (unsigned short)first) lx--;
@@ -2873,157 +2856,6 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                                     bb[ym * pp + rx + 1] ==
                                     (unsigned short)first) rx++;
                             }
-                            if (g_BoxLogs < 0)   /* 退役 (定案: 地图提示无盒/面板半透明), 日志静默 */
-                            {
-                                g_BoxLogs++;
-                                z = AppendCStr(fbuf, z, "vbox: probe tx=",
-                                               sizeof(fbuf));
-                                UtoA((unsigned)g_ToolX, b1);
-                                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                                z = AppendCStr(fbuf, z, " tot=",
-                                               sizeof(fbuf));
-                                UtoA((unsigned)tot, b1);
-                                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                                z = AppendCStr(fbuf, z, " ink=",
-                                               sizeof(fbuf));
-                                UtoA((unsigned)g_ToolInk0, b1);
-                                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                                z = AppendCh(fbuf, z, ',', sizeof(fbuf));
-                                UtoA((unsigned)g_ToolInkEnd, b1);
-                                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                                z = AppendCStr(fbuf, z, " run=",
-                                               sizeof(fbuf));
-                                UtoA((unsigned)lx, b1);
-                                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                                z = AppendCh(fbuf, z, ',', sizeof(fbuf));
-                                if (rx < 0)
-                                    z = AppendCh(fbuf, z, '?',
-                                                 sizeof(fbuf));
-                                else
-                                {
-                                    UtoA((unsigned)rx, b1);
-                                    z = AppendCStr(fbuf, z, b1,
-                                                   sizeof(fbuf));
-                                }
-                                z = AppendCStr(fbuf, z, " c=",
-                                               sizeof(fbuf));
-                                z += HtoA(first, fbuf + z);
-                                z = AppendCStr(fbuf, z, " s=",
-                                               sizeof(fbuf));
-                                z += HtoA((unsigned)g_ToolStr[0] &
-                                          0xFFFFu, fbuf + z);
-                                LogLine(fbuf);
-                            }
-                        }
-                    }
-                    else if (g_BoxLogs < 0)   /* 退役 (定案: 地图提示无盒/面板半透明), 日志静默 */
-                    {
-                        if (g_VT.ToolBox == 2)
-                        {
-                            /* 探测模式 SKIP 明细: 门不过的真实原因。
-                             * m=门 4 采样, l/r=字左右外像素,
-                             * v=字左外垂直列 (盒高假设), ty=Print 落笔 y。 */
-                            char b1[16], fbuf[256];
-                            unsigned z = 0;
-                            int lx0 = g_ToolX - 8, lx1 = g_ToolX - 4;
-                            int rx0 = g_ToolX + tot + 4;
-                            int rx1 = g_ToolX + tot + 8;
-                            int vx = g_ToolX - 4, vi;
-                            int mids[4], ls[2], rs[2], vs[4];
-                            for (k = 0; k < 4; k++)
-                                mids[k] = VecProbePx(bb, pp,
-                                    g_ToolX + g_ToolInk0 + 2 + k * 4, ym);
-                            ls[0] = VecProbePx(bb, pp, lx0, ym);
-                            ls[1] = VecProbePx(bb, pp, lx1, ym);
-                            rs[0] = VecProbePx(bb, pp, rx0, ym);
-                            rs[1] = VecProbePx(bb, pp, rx1, ym);
-                            vs[0] = VecProbePx(bb, pp, vx, ym - 16);
-                            vs[1] = VecProbePx(bb, pp, vx, ym - 8);
-                            vs[2] = VecProbePx(bb, pp, vx, ym + 8);
-                            vs[3] = VecProbePx(bb, pp, vx, ym + 16);
-                            g_BoxLogs++;
-                            z = AppendCStr(fbuf, z, "vbox: probe2 tx=",
-                                           sizeof(fbuf));
-                            UtoA((unsigned)g_ToolX, b1);
-                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                            z = AppendCStr(fbuf, z, " ty=", sizeof(fbuf));
-                            UtoA((unsigned)g_ToolY, b1);
-                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                            z = AppendCStr(fbuf, z, " tot=", sizeof(fbuf));
-                            UtoA((unsigned)tot, b1);
-                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                            z = AppendCStr(fbuf, z, " ym=", sizeof(fbuf));
-                            UtoA((unsigned)ym, b1);
-                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                            z = AppendCStr(fbuf, z, " m=", sizeof(fbuf));
-                            for (k = 0; k < 4; k++)
-                            {
-                                if (k) z = AppendCh(fbuf, z, ',',
-                                                    sizeof(fbuf));
-                                if (mids[k] < 0)
-                                    z = AppendCh(fbuf, z, 'X',
-                                                 sizeof(fbuf));
-                                else
-                                    z += HtoA((unsigned)mids[k],
-                                              fbuf + z);
-                            }
-                            z = AppendCStr(fbuf, z, " l=", sizeof(fbuf));
-                            for (k = 0; k < 2; k++)
-                            {
-                                if (k) z = AppendCh(fbuf, z, ',',
-                                                    sizeof(fbuf));
-                                if (ls[k] < 0)
-                                    z = AppendCh(fbuf, z, 'X',
-                                                 sizeof(fbuf));
-                                else
-                                    z += HtoA((unsigned)ls[k], fbuf + z);
-                            }
-                        z = AppendCStr(fbuf, z, " tot=", sizeof(fbuf));
-                        UtoA((unsigned)g_TipTot, b1);
-                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                        z = AppendCStr(fbuf, z, " r=", sizeof(fbuf));
-                            for (k = 0; k < 2; k++)
-                            {
-                                if (k) z = AppendCh(fbuf, z, ',',
-                                                    sizeof(fbuf));
-                                if (rs[k] < 0)
-                                    z = AppendCh(fbuf, z, 'X',
-                                                 sizeof(fbuf));
-                                else
-                                    z += HtoA((unsigned)rs[k], fbuf + z);
-                            }
-                            z = AppendCStr(fbuf, z, " v=", sizeof(fbuf));
-                            for (vi = 0; vi < 4; vi++)
-                            {
-                                if (vi) z = AppendCh(fbuf, z, ',',
-                                                     sizeof(fbuf));
-                                if (vs[vi] < 0)
-                                    z = AppendCh(fbuf, z, 'X',
-                                                 sizeof(fbuf));
-                                else
-                                    z += HtoA((unsigned)vs[vi],
-                                              fbuf + z);
-                            }
-                            z = AppendCStr(fbuf, z, " s=", sizeof(fbuf));
-                            z += HtoA((unsigned)g_ToolStr[0] & 0xFFFFu,
-                                      fbuf + z);
-                            LogLine(fbuf);
-                        }
-                        {
-                        char b1[16], fbuf[128];
-                        unsigned z = 0;
-                        g_BoxLogs++;
-                        z = AppendCStr(fbuf, z, "vbox: SKIP tx=",
-                                       sizeof(fbuf));
-                        UtoA((unsigned)g_ToolX, b1);
-                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                        z = AppendCStr(fbuf, z, " tot=", sizeof(fbuf));
-                        UtoA((unsigned)tot, b1);
-                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
-                        z = AppendCStr(fbuf, z, " s=", sizeof(fbuf));
-                        z += HtoA((unsigned)g_ToolStr[0] & 0xFFFFu,
-                                  fbuf + z);
-                        LogLine(fbuf);
                         }
                     }
                 }
@@ -3171,7 +3003,48 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                 if (adv < 1) adv = 1;
             }
             yOff = g_VT.VShift + (cred ? g_VT.CreditDY : 0);
-            r = VecRender(t, wc, adv, h, x, y, eff, px, yOff);
+            r = VecRender(t, wc, adv, h, (inTip ? tx : x), y, eff,
+                          px, yOff);
+            /* 渲染取证 (vren): 只抓近边缘批次 (tipx<40), tip 跨度内
+             * 每字的输入 adv、返回步进与 t 指针, 定混合步进是哪条
+             * 返回路径、有无双字体对象。上限 400 行。 */
+            {
+                static int nR = 0;
+                if (nR < 400 && g_TipTot > 0 && g_LastTipX < 40 &&
+                    tx >= g_LastTipX - g_TipTot - 16 &&
+                    tx <= g_LastTipX + g_TipTot + 8 &&
+                    y >= g_TipY - 8 && y <= g_TipY + 8)
+                {
+                    char rb1[16], rf[160];
+                    unsigned rz = 0;
+                    nR++;
+                    rz = AppendCStr(rf, rz, "vren: wch=", sizeof(rf));
+                    rz += HtoA((unsigned)wc & 0xFFFFu, rf + rz);
+                    rz = AppendCStr(rf, rz, " adv=", sizeof(rf));
+                    UtoA((unsigned)adv, rb1);
+                    rz = AppendCStr(rf, rz, rb1, sizeof(rf));
+                    rz = AppendCStr(rf, rz, " t=", sizeof(rf));
+                    rz += HtoA((unsigned)(size_t)t, rf + rz);
+                    rz = AppendCStr(rf, rz, " r=", sizeof(rf));
+                    if (r < 0)
+                        rz = AppendCStr(rf, rz, "orig", sizeof(rf));
+                    else
+                    {
+                        int rr = r - x;
+                        if (rr < 0)
+                        {
+                            rz = AppendCh(rf, rz, '-', sizeof(rf));
+                            rr = -rr;
+                        }
+                        UtoA((unsigned)rr, rb1);
+                        rz = AppendCStr(rf, rz, rb1, sizeof(rf));
+                    }
+                    rz = AppendCStr(rf, rz, " ps=", sizeof(rf));
+                    UtoA(g_TipSeq, rb1);
+                    rz = AppendCStr(rf, rz, rb1, sizeof(rf));
+                    LogLine(rf);
+                }
+            }
             if (wc >= 0x30 && wc <= 0x39 && g_VT.LogAdv)
                 VecDigitLog(wc, px, yOff, r >= 0, x, y, cred);
             if (swForce)
@@ -3192,7 +3065,7 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                 }
                 return x + adv;
             }
-            if (r >= 0) return r - (x - ox);
+            if (r >= 0) return r + (inTip ? g_TipPush : 0) - (x - ox);
         }
     }
     return g_OrigBlit(t, NULL, wch, ox, y, color);
@@ -3326,7 +3199,6 @@ void VecText_Install(void)
     g_VT.MenuTake = GetPrivateProfileIntA(VT_SECTION, "MenuTake", 1, g_IniPath);
     g_VT.DigitTrack = GetPrivateProfileIntA(VT_SECTION, "DigitTrack", 0, g_IniPath);
     g_VT.ToolBox = GetPrivateProfileIntA(VT_SECTION, "ToolBox", 1, g_IniPath);
-    g_VT.BoxProbe = GetPrivateProfileIntA(VT_SECTION, "BoxProbe", 0, g_IniPath);
     g_VT.TipBox = GetPrivateProfileIntA(VT_SECTION, "TipBox", 1, g_IniPath);
     g_VT.BriefBox = GetPrivateProfileIntA(VT_SECTION, "BriefBox", 1, g_IniPath);
     g_VT.BriefClip = GetPrivateProfileIntA(VT_SECTION, "BriefClip", 1, g_IniPath);
@@ -3348,8 +3220,6 @@ void VecText_Install(void)
     if (g_VT.DigitTrack > 8) g_VT.DigitTrack = 8;
     if (g_VT.ToolBox < 0) g_VT.ToolBox = 0;
     if (g_VT.ToolBox > 2) g_VT.ToolBox = 2;
-    if (g_VT.BoxProbe < 0) g_VT.BoxProbe = 0;
-    if (g_VT.BoxProbe > 3) g_VT.BoxProbe = 3;
     g_VT.TipBox = g_VT.TipBox ? 1 : 0;
     g_VT.BriefBox = g_VT.BriefBox ? 1 : 0;
     g_VT.BriefClip = g_VT.BriefClip ? 1 : 0;
@@ -3388,8 +3258,8 @@ void VecText_Install(void)
     p = AppendCStr(buf, p, " tb=", sizeof(buf));
     UtoA((unsigned)g_VT.ToolBox, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " bp=", sizeof(buf));
-    UtoA((unsigned)g_VT.BoxProbe, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " v=56", sizeof(buf));   /* 发版自增, 日志对版本 */
+    UtoA(0u, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCStr(buf, p, " v=76", sizeof(buf));   /* 发版自增, 日志对版本 */
     LogLine(buf);
     if (!g_VT.Enable) { LogLine("vtext: disabled"); return; }
     if (!BytesSame((unsigned char*)ADDR_BLIT, kWantBlit, 7))
