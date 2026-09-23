@@ -70,6 +70,7 @@ extern "C" void* memset(void* s, int c, unsigned n)
 HANDLE g_Log = NULL;
 char   g_IniPath[MAX_PATH_LEN];
 char   g_LogPath[MAX_PATH_LEN];
+int    g_LogDetail = 0;
 
 void BuildPaths(void)
 {
@@ -556,25 +557,28 @@ int GdiEnsure(int fontPx, int bold, int slot, const wchar_t* face)
     CopyFace(s->face, face);
     g_G = s;
 
-    p = 0;
-    p = AppendCStr(buf, p, "gdi: slot=", sizeof(buf));
-    UtoA((unsigned)slot, b2);
-    p = AppendCStr(buf, p, b2, sizeof(buf));
-    p = AppendCStr(buf, p, " fontPx=", sizeof(buf));
-    p += UtoA((unsigned)fontPx, buf + p);
-    p = AppendCStr(buf, p, " bold=", sizeof(buf));
-    UtoA((unsigned)wantBold, b2);
-    p = AppendCStr(buf, p, b2, sizeof(buf));
-    p = AppendCStr(buf, p, " tmHeight=", sizeof(buf));
-    UtoA((unsigned)tm.tmHeight, b1);
-    p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " lineAdv=", sizeof(buf));
-    UtoA((unsigned)s->adv, b1);
-    p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " face=", sizeof(buf));
-    { int fi = 0; while (face[fi] && p < sizeof(buf) - 1)
-      { wchar_t wc = face[fi++]; buf[p++] = (wc >= 32 && wc < 127) ? (char)wc : '?'; } buf[p] = 0; }
-    LogLine(buf);
+    if (g_LogDetail)
+    {
+        p = 0;
+        p = AppendCStr(buf, p, "gdi: slot=", sizeof(buf));
+        UtoA((unsigned)slot, b2);
+        p = AppendCStr(buf, p, b2, sizeof(buf));
+        p = AppendCStr(buf, p, " fontPx=", sizeof(buf));
+        p += UtoA((unsigned)fontPx, buf + p);
+        p = AppendCStr(buf, p, " bold=", sizeof(buf));
+        UtoA((unsigned)wantBold, b2);
+        p = AppendCStr(buf, p, b2, sizeof(buf));
+        p = AppendCStr(buf, p, " tmHeight=", sizeof(buf));
+        UtoA((unsigned)tm.tmHeight, b1);
+        p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " lineAdv=", sizeof(buf));
+        UtoA((unsigned)s->adv, b1);
+        p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " face=", sizeof(buf));
+        { int fi = 0; while (face[fi] && p < sizeof(buf) - 1)
+          { wchar_t wc = face[fi++]; buf[p++] = (wc >= 32 && wc < 127) ? (char)wc : '?'; } buf[p] = 0; }
+        LogLine(buf);
+    }
     return 1;
 }
 
