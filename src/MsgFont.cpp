@@ -18,7 +18,7 @@
 #include "GdiText.h"
 #include "VecText.h"
 
-#define MF_VERSION   "0.2.0"
+#define MF_VERSION   "0.2.9"
 #define MF_SECTION   "MsgFont"
 
 /* ---------------- 地址 ---------------- */
@@ -74,6 +74,7 @@ typedef struct {
     int ShadowOpacity; /* 阴影不透明度 0~100 */
     int MaxLines;
     int BoardOpacity;
+    int HoverMinOpacity; /* 悬停最低透明度 0~100 (找触发区用, 默认5); 0=沿用渐隐 */
     int PosX;
     int PosY;
     int TopGapLines;
@@ -180,6 +181,7 @@ static void LoadConfig(void)
     g_Cfg.ShadowOpacity = GetPrivateProfileIntA(MF_SECTION, "ShadowOpacity", 60, g_IniPath);
     g_Cfg.MaxLines    = GetPrivateProfileIntA(MF_SECTION, "MaxLines", 8, g_IniPath);
     g_Cfg.BoardOpacity= GetPrivateProfileIntA(MF_SECTION, "BoardOpacity", 45, g_IniPath);
+    g_Cfg.HoverMinOpacity = GetPrivateProfileIntA(MF_SECTION, "HoverMinOpacity", 5, g_IniPath);
     g_Cfg.PosX        = GetPrivateProfileIntA(MF_SECTION, "PosX", 8, g_IniPath);
     g_Cfg.PosY        = GetPrivateProfileIntA(MF_SECTION, "PosY", 8, g_IniPath);
     g_Cfg.TopGapLines = GetPrivateProfileIntA(MF_SECTION, "TopGapLines", 1, g_IniPath);
@@ -228,6 +230,8 @@ static void LoadConfig(void)
     if (g_Cfg.MaxLines > 40) g_Cfg.MaxLines = 40;
     if (g_Cfg.BoardOpacity < 0) g_Cfg.BoardOpacity = 0;
     if (g_Cfg.BoardOpacity > 100) g_Cfg.BoardOpacity = 100;
+    if (g_Cfg.HoverMinOpacity < 0) g_Cfg.HoverMinOpacity = 0;
+    if (g_Cfg.HoverMinOpacity > 100) g_Cfg.HoverMinOpacity = 100;
     if (g_Cfg.MaxWidth < 0) g_Cfg.MaxWidth = 0;
     g_Cfg.CampBottom = g_Cfg.CampBottom ? 1 : 0;
     if (g_Cfg.CampBottomMargin < 0) g_Cfg.CampBottomMargin = 0;
@@ -328,6 +332,8 @@ static void EnsureInit(void)
     p += UtoA((unsigned)g_Cfg.Shadow, buf + p);
     p = AppendCh(buf, p, '/', sizeof(buf));
     p += UtoA((unsigned)g_Cfg.ShadowOpacity, buf + p);
+    p = AppendCStr(buf, p, " HovMinOp=", sizeof(buf));
+    p += UtoA((unsigned)g_Cfg.HoverMinOpacity, buf + p);
     LogLine(buf);
     /* 字体解析放日志打开之后, 解析结果才能记入日志 */
     ResolveFontFace(g_Cfg.FontFace, "camp", g_CampFace, L"Microsoft YaHei");
@@ -724,6 +730,7 @@ typedef struct {
     int limit;       /* 显示行数 */
     int rowBudget;   /* 挑选行预算 (战役长留给大, 提示给小) */
     int opacity;
+    int fade;        /* 0-100, DrawBox 内缩放底板/阴影/文字/滚动条透明度 */
     int shadowNoBoard; /* 1 = 底板透明度为 0 时仍画文字阴影 (提示框用) */
     int fontPx;      /* 0 = 跟随 BitFont */
     int bold;
@@ -827,6 +834,9 @@ static int MouseXY(int* x, int* y)
 static RectangleStruct g_CampRect;
 static int g_CampValid = 0;
 
+/* 注: 悬停展开无需防抖——透明度斜坡已保证无硬闪, 历史随底板一起淡入。
+ * 展开跟瞬时悬停 (原版语义), 划过即见淡影找区。 */
+
 /* 触发条几何与顶部战役文本同源 (见 CampTriggerRect): 左右对齐、1 行高。
  * 悬停/滚轮命中沿用同一判定, 不再使用固定的 340x240 大热角。 */
 
@@ -876,20 +886,6 @@ static int HasLiveCamp(void)
         if (m->sp == 0 && MsgHasContent(m) && MsgVisible(m)) return 1;
     }
     return 0;
-}
-
-/* 存活原因: 0=无 1=有计时内消息 2=仅有永不过期消息 */
-static int LiveKind(void)
-{
-    int i, n = 0, eternal = 0;
-    for (i = g_CampRing.count - 1; i >= 0 && n < 64; i--, n++)
-    {
-        ChatMsg* m = MsgAt(&g_CampRing, i);
-        if (m->sp != 0 || !MsgHasContent(m)) continue;
-        if (m->expire == 0) eternal = 1;
-        else if (MsgVisible(m)) return 1;
-    }
-    return eternal ? 2 : 0;
 }
 
 /* 提示框显隐跳变日志 (newestExpIn = 最新提示距引擎过期还剩多少 tick, 62.5 tick≈1秒;
@@ -981,7 +977,7 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
 {
     int fontPx, adv, maxW, textW, x, y;
     int picked = 0, totalAll, k, r, rowCursor, rowBegin, rowEnd, limit, totalRows, skip = 0;
-    int drawn = 0;
+    int drawn = 0, boardOp = 0;
     RectangleStruct rect;
     ColorStruct board;
     unsigned char* locked;
@@ -1034,9 +1030,13 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
     rect.Width = maxW + 6;
     rect.Height = totalRows * adv + 4;
     board.R = 0; board.G = 0; board.B = 0;
-    /* 透明度 0 = 不画底板 (战役框同时省阴影; 提示框阴影照画, 见下) */
-    if (B->opacity > 0)
-        FillRectTransVt(surf, &rect, &board, B->opacity);
+    /* 底板透明度叠渐隐 (fade=100 与原来一致); 0 不画底板
+     * (战役框同时省阴影; 提示框阴影照画, 见下) */
+    {
+        boardOp = B->opacity * B->fade / 100;
+        if (boardOp > 0)
+            FillRectTransVt(surf, &rect, &board, boardOp);
+    }
 
     vt = *(unsigned char**)surf;
     lockFn = (LockFn)(*(void**)(vt + VT_LOCK));
@@ -1068,16 +1068,16 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
             if (w <= 0) { drawn++; continue; }
             /* 阴影 (战役框底板透明度 0 时跳过; 提示框 0 也画; ShadowSize>1 加厚) */
             if (g_Cfg.Shadow && g_Cfg.ShadowOpacity > 0 &&
-                (B->opacity > 0 || B->shadowNoBoard))
+                (boardOp > 0 || B->shadowNoBoard))
             {
                 int ox, oy;
                 for (oy = 0; oy < g_Cfg.ShadowSize; oy++)
                     for (ox = 0; ox < g_Cfg.ShadowSize; ox++)
                         BlitCoverage(locked, surfPitch, surfW, surfH,
                                      x + g_Cfg.ShadowDX + ox, ly + g_Cfg.ShadowDY + oy,
-                                     w + 2, adv, 0, 0, 0, (unsigned)g_Cfg.ShadowOpacity);
+                                     w + 2, adv, 0, 0, 0, (unsigned)(g_Cfg.ShadowOpacity * B->fade / 100));
             }
-            BlitCoverage(locked, surfPitch, surfW, surfH, x, ly, w + 2, adv, fg.R, fg.G, fg.B, 100);
+            BlitCoverage(locked, surfPitch, surfW, surfH, x, ly, w + 2, adv, fg.R, fg.G, fg.B, (unsigned)B->fade);
             drawn++;
         }
     }
@@ -1105,10 +1105,10 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
                                    : barY + barH - thumbH;
             bar.X = barX; bar.Y = barY; bar.Width = 4; bar.Height = barH;
             c.R = 30; c.G = 30; c.B = 30;
-            FillRectTransVt(surf, &bar, &c, 55);
+            FillRectTransVt(surf, &bar, &c, 55 * B->fade / 100);
             bar.Y = thumbY; bar.Height = thumbH;
             c.R = 170; c.G = 170; c.B = 170;
-            FillRectTransVt(surf, &bar, &c, 90);
+            FillRectTransVt(surf, &bar, &c, 90 * B->fade / 100);
         }
     }
 
@@ -1437,8 +1437,8 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
     void* surf;
     unsigned tick;
     int bitLineH, screenW, surfW, surfH, surfPitch;
-    int drew = 0, rc, showCamp = 0, zoneDrew = 0;
-    int liveCamp = 0, hoverCamp = 0, hintOn = 0;
+    int drew = 0, rc, showCamp = 0;
+    int liveCamp = 0, hoverCamp = 0;
     int dbgMX = -1, dbgMY = -1;
     static int s_lastShow = -1;
     BoxSpec camp, hint;
@@ -1544,10 +1544,58 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
                         MouseInTriggerRect(mx, my, bitLineH, screenW, surfH);
         }
         liveCamp = HasLiveCamp();
-        showCamp = liveCamp || hoverCamp;
-        camp.bar = hoverCamp;   /* 滚动条平时隐藏, 悬停才显示 */
-        /* 平时只显示活消息 (超时即隐藏); 悬停才展开全部历史 */
-        camp.ignoreTimeout = hoverCamp;
+        /* 显隐淡入淡出 0.5s (现实毫秒 GetTickCount, 与游戏帧数无关):
+         * 全程 500ms, 步进按流逝毫秒算故与帧率无关; 滑过只走到一半
+         * 就回来, 不闪。fade==0 时 showCamp=0, 整帧跳过绘制。
+         * 目标分三档: 活消息=100; 区内驻留 (静止 300ms)=100;
+         * 区内移动=托底 (HoverMinOpacity, 找区用); 离开=0。
+         * 展开 (滚动条 + 全部历史) 跟瞬时悬停, 随底板一起淡入淡出。 */
+        {
+            static int s_fade = 0;
+            static unsigned s_lastMs = 0;
+            static int s_px = -9999, s_py = -9999;
+            static unsigned s_moveMs = 0;
+            unsigned nowMs = GetTickCount();
+            int target;
+            int parked;
+            if (mx != -1 && (mx < s_px - 2 || mx > s_px + 2 ||
+                             my < s_py - 2 || my > s_py + 2))
+            {
+                s_px = mx; s_py = my;
+                s_moveMs = nowMs;
+            }
+            parked = (hoverCamp && nowMs - s_moveMs >= 300);
+            if (liveCamp) target = 100;
+            else if (parked) target = 100;
+            else if (hoverCamp) target = g_Cfg.HoverMinOpacity;
+            else target = 0;
+            /* 全显锁存: 已到 100 且鼠标还在区上, 区内移动不再压暗,
+             * 离开才淡出 (重进移动中则仍走托底, 住下再提亮)。 */
+            if (hoverCamp && s_fade >= 100) target = 100;
+            unsigned dt = s_lastMs ? nowMs - s_lastMs : 0;
+            int step;
+            if (dt > 500) dt = 500;
+            step = (int)(dt * 100 / 500);
+            if (step < 1) step = 1;
+            s_lastMs = nowMs;
+            if (s_fade < target) { s_fade += step; if (s_fade > target) s_fade = target; }
+            else if (s_fade > target) { s_fade -= step; if (s_fade < target) s_fade = target; }
+            showCamp = (s_fade > 0);
+            camp.fade = s_fade;
+        }
+        {
+            /* 展开锁存: 悬停即展开; 淡出中保持 (历史可见淡出), 否则淡出的
+             * 是空盒、看起来像瞬灭; fade 到 0 才收回。活消息独占时仍只看
+             * 活的 (不受锁存污染)。 */
+            static int s_expand = 0;
+            if (hoverCamp) s_expand = 1;
+            else if (liveCamp) s_expand = 0;
+            else if (camp.fade == 0) s_expand = 0;
+            else if (!HasCampHistory()) s_expand = 0;
+            else s_expand = 1;
+            camp.bar = s_expand;   /* 滚动条悬停/淡出即显示 (alpha 随斜坡, 不闪) */
+            camp.ignoreTimeout = s_expand;
+        }
         {
             static int s_lastHover = -1;
             if (hoverCamp != s_lastHover) { s_lastHover = hoverCamp; g_Skip = 0; }
@@ -1626,6 +1674,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
     hint.limit = g_Cfg.HintMaxLines;
     hint.rowBudget = g_Cfg.HintMaxLines;
     hint.opacity = g_Cfg.HintOpacity; hint.shadowNoBoard = 1;  /* 0=无底但阴影照画 */
+    hint.fade = 100;   /* 提示框不渐隐, 行为不变 */
     hint.fontPx = g_Cfg.HintFontHeight; hint.bold = g_Cfg.HintBold;
     hint.pSkip = NULL; hint.bar = 0;
     hint.ring = &g_HintRing;
@@ -1647,7 +1696,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
         FillRectTransVt(surf, &zr, &zc, 30);
         DrawOutline(surf, zr.X, zr.Y, zr.Width, zr.Height, 0, 255, 0, 90);
         drew = 1;
-        zoneDrew = 1;
     }
 
     if (showCamp)
@@ -1665,7 +1713,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
         on = (rc == 1);
         if (on != s_lastHint) { s_lastHint = on; LogHintWhy(on); }
         if (rc < 0) { StatTick(tick, rc == -1 ? 2 : 4); return 0; }
-        if (rc == 1) { drew = 1; hintOn = 1; }
+        if (rc == 1) drew = 1;
     }
 
     /* 超武面板: 右下整块重绘 (Print 入口已隐藏+收集, 此处统一画)。
@@ -1679,46 +1727,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
 
     if (!drew && !g_Cfg.ShowHotZone) { StatTick(tick, 1); return 0; }
     StatTick(tick, drew ? 0 : 1);
-    {
-        static unsigned s_dbgLast = 0;
-        if (tick - s_dbgLast >= 300)
-        {
-            char db[256], n1[16], n2[16], n3[16], n4[16], n5[16], n6[16];
-            unsigned q = 0;
-            s_dbgLast = tick;
-            q = AppendCStr(db, q, "dbg: mouse=", sizeof(db));
-            UtoA((unsigned)(dbgMX < 0 ? 0 : dbgMX), n1); q = AppendCStr(db, q, n1, sizeof(db));
-            q = AppendCh(db, q, ',', sizeof(db));
-            UtoA((unsigned)(dbgMY < 0 ? 0 : dbgMY), n2); q = AppendCStr(db, q, n2, sizeof(db));
-            q = AppendCStr(db, q, " valid=", sizeof(db));
-            UtoA((unsigned)g_CampValid, n3); q = AppendCStr(db, q, n3, sizeof(db));
-            q = AppendCStr(db, q, " rect=", sizeof(db));
-            UtoA((unsigned)(g_CampRect.X < 0 ? 0 : g_CampRect.X), n4); q = AppendCStr(db, q, n4, sizeof(db));
-            q = AppendCh(db, q, ',', sizeof(db));
-            UtoA((unsigned)(g_CampRect.Y < 0 ? 0 : g_CampRect.Y), n5); q = AppendCStr(db, q, n5, sizeof(db));
-            q = AppendCh(db, q, ',', sizeof(db));
-            UtoA((unsigned)g_CampRect.Width, n6); q = AppendCStr(db, q, n6, sizeof(db));
-            q = AppendCh(db, q, ',', sizeof(db));
-            UtoA((unsigned)g_CampRect.Height, n1); q = AppendCStr(db, q, n1, sizeof(db));
-            q = AppendCStr(db, q, " show=", sizeof(db));
-            UtoA((unsigned)showCamp, n2); q = AppendCStr(db, q, n2, sizeof(db));
-            q = AppendCStr(db, q, " live=", sizeof(db));
-            UtoA((unsigned)liveCamp, n3); q = AppendCStr(db, q, n3, sizeof(db));
-            q = AppendCStr(db, q, " hover=", sizeof(db));
-            UtoA((unsigned)hoverCamp, n4); q = AppendCStr(db, q, n4, sizeof(db));
-            q = AppendCStr(db, q, " hint=", sizeof(db));
-            UtoA((unsigned)hintOn, n5); q = AppendCStr(db, q, n5, sizeof(db));
-            q = AppendCStr(db, q, " lk=", sizeof(db));
-            UtoA((unsigned)LiveKind(), n1); q = AppendCStr(db, q, n1, sizeof(db));
-            q = AppendCStr(db, q, " skip=", sizeof(db));
-            UtoA((unsigned)g_Skip, n6); q = AppendCStr(db, q, n6, sizeof(db));
-            q = AppendCStr(db, q, " zone=", sizeof(db));
-            UtoA((unsigned)zoneDrew, n1); q = AppendCStr(db, q, n1, sizeof(db));
-            q = AppendCStr(db, q, " zh=", sizeof(db));
-            UtoA((unsigned)HasCampHistory(), n2); q = AppendCStr(db, q, n2, sizeof(db));
-            LogLine(db);
-        }
-    }
     if (s_firstDraw)
     {
         char b1[16], b2[16], b3[16], buf[256];
