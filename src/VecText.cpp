@@ -843,6 +843,11 @@ static int g_PrevMinY = 9999;
 static int g_BlitMaxY = -9999;
 static int g_PrevMaxY = -9999;
 static int g_MutModeLog = 0;
+/* 世界悬浮提示活跨 (任意 0x4A5FF2 CJK 浮框, 电力/建筑名): Blit 层用它把
+ * 悬浮文本排除出超武区接管。否则提示飘到右侧带时被 SuperPx 重绘且按引擎
+ * 窄 adv 步进, 字被压窄左移、整串变短 -> 右侧留大空隙 (偏移与压缩根因)。 */
+static int g_WtActive = 0;
+static int g_WtX = 0, g_WtY = -9999, g_WtTot = 0;
 /* 多槽宽度表 (单槽会被同帧其它串冲掉, 见 vfixq ow=30 教训):
  * ring 32 项, 按指针/首字+长度命中, 跨帧也有效。 */
 #define DIMCACHE_N 32
@@ -866,6 +871,34 @@ typedef struct {
 } StkCE;
 static StkCE g_StkC[STICKY_N];
 static int g_StkRR = 0;
+
+/* 全串宽度查表 (主 ring + sticky), 逐字内容全比对, 找不到返回 0。
+ * 供世界悬浮提示排除超武区渲染用 (任意 0x4A5FF2 文本, 不限电力串)。 */
+static int VecDimLookup(const wchar_t* s, int len)
+{
+    int ci, si, k;
+    if (!s || len <= 0) return 0;
+    for (ci = 0; ci < DIMCACHE_N; ci++)
+    {
+        DimCE* e = &g_DimC[ci];
+        if (!e->ptr || e->w0 != ((unsigned)s[0] & 0xFFFFu) || e->n != len)
+            continue;
+        if (!IsPlausiblePtr((void*)e->ptr)) continue;
+        for (k = 0; k < len; k++)
+            if (e->ptr[k] != s[k]) break;
+        if (k == len) return e->nw;
+    }
+    for (si = 0; si < STICKY_N; si++)
+    {
+        StkCE* st = &g_StkC[si];
+        if (!st->used || st->w0 != ((unsigned)s[0] & 0xFFFFu) || st->n != len)
+            continue;
+        for (k = 0; k < len; k++)
+            if (st->tx[k] != s[k]) break;
+        if (k == len) return st->nw;
+    }
+    return 0;
+}
 
 /* 盒几何实测 (定案即删): 沿 y-4..y+28 找长红边 (>=40px 连续)。
  * ph=0: Print 入口 (盒已画字未画); ph=1: Simple 返回后 (全画完)。
@@ -1293,7 +1326,31 @@ int __fastcall VecPrintEntry(void* t, void* e,
             return 1;
     }
     if (!g_OrigPrint) { if (toolTake) g_ToolDepth--; return 0; }
+    /* 世界悬浮提示活跨 (CJK 浮框): 记落笔+全串宽, Blit 层据此把提示排
+     * 除出超武区接管 (见 g_Wt 注释)。只在本 Print 的同步 Blit 期间有效,
+     * 转发返回即清 (无泄漏)。表宽查不到 (首帧) 不激活, 下一帧起生效。 */
+    g_WtActive = 0;
+    {
+        const wchar_t* ws = (const wchar_t*)a3;
+        if (caller == 0x004A5FF2u && ws && IsPlausiblePtr((void*)ws))
+        {
+            unsigned c0 = (unsigned)ws[0] & 0xFFFFu;
+            if ((c0 >= 0x2E80u && c0 < 0xA000u) ||
+                (c0 >= 0xFF00u && c0 < 0xFFF0u))
+            {
+                int wl = 0, nw;
+                while (wl < 64 && ws[wl]) wl++;
+                nw = VecDimLookup(ws, wl);
+                if (nw > 0)
+                {
+                    g_WtActive = 1;
+                    g_WtX = a4; g_WtY = a5; g_WtTot = nw;
+                }
+            }
+        }
+    }
     r = g_OrigPrint(t, NULL, a1, a2, a3, a4 + pushK, a5, a6, a7);
+    g_WtActive = 0;
     if (toolTake) g_ToolDepth--;
     return r;
 }
@@ -2398,6 +2455,12 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                  tx >= g_LastTipX - g_TipTot - 16 &&
                  tx <= g_LastTipX + g_TipTot + 8 &&
                  y >= g_TipY - 8 && y <= g_TipY + 8);
+    /* 世界悬浮提示 (电力/建筑名) 跨度: 提示字必须排除超武区接管。
+     * 否则提示飘到右侧带时被换成 SuperPx 字体, 且返回引擎窄 adv,
+     * 字被压窄左移、整串变短, 盒 (按全宽画) 右侧留大空隙。 */
+    int inWt = (g_WtActive && g_WtTot > 0 &&
+                tx >= g_WtX - 16 && tx <= g_WtX + g_WtTot + 8 &&
+                y >= g_WtY - 8 && y <= g_WtY + 8);
     /* 出界: 提示首字 Blit 时扫有效画布 (盒若上游预画, 此时无字污染
      * 最干净; bb 与渲染同源, 必有效)。上限 4 帧, 定案即删。 */
     {
@@ -2982,6 +3045,9 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
              * (同锁同裁剪, 笔位/背景/后续全是引擎的)。
              * 列表不是顶栏, CreditDY 不掺和。 */
             swForce = VecSWRegion(t, x, y);
+            /* 悬浮提示不属于超武列表: 即使落进右侧带也不许 SuperPx 接管,
+             * 否则窄 adv 步进会把整串压短 (偏移/空隙的根因)。 */
+            if (swForce && (inTip || inWt)) swForce = 0;
             if (swForce)
             {
                 px = g_VT.SuperPx;
