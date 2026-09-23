@@ -7,11 +7,11 @@
  *   混入已 Lock 的 16 位面, advance 与原版逐字一致。
  * 任何异常 (度量失败/面信息非法/字形超大) 都走跳板调原版, 绝不花屏。
  *
- * 场景区分只剩一条: 顶栏条带 (Blit 层 y<32 的数字吃 CreditPx/DY)。
- *   函数白名单已删 (顶栏函数也会画超武列表等, 函数粒度分不开导致串扰)。
- * 字号: 全局 FontPx (墨水与字宽等比) > 自动校准 (墨水对原墨水高)。
- * 摆位整体垂直居中 (整块在格内上下均分, 不关心字体多高)。
- * 简报正文: 盒子加高 (BriefBox) + 裁剪底同步 (BriefClip, 带 pitch 安全阀)。
+ * 场景区分按路径, 不按坐标/内容 (坐标门曾误收右侧提示, 见笔记 v80 起):
+ *   顶栏条带 (y<32 数字吃 CreditPx/DY); 超武收集只认侧栏发起者 0x004A6345;
+ *   Blit 超武门只认 DrawText 路径, 提示 DrawText 子树 (0x479041 小矩形)
+ *   与 Print 直系一律豁免。函数白名单已删 (粒度分不开导致串扰)。
+ * 坐标归一 (VecNormC): 引擎笔位/裁剪只低 16 位有效; 空裁剪哨兵退主面边界。
  *
  * BitFont 对象实测布局 (Lock 0x4348F0 反汇编实证):
  *   +0x0C 锁定的 WORD 像素缓冲, +0x10 pitch(WORD 数),
@@ -70,7 +70,6 @@ typedef struct {
     int BriefClip;  /* 1=简报裁剪底边跟盒子走 (面板子面切，需配合 BriefBox) */
     int Bold;
     int VShift;     /* 字形垂直偏移 (像素, 正=下移) */
-    int LogAdv;     /* 1=记入口日志 (vcall 等); 0=静默 */
     int LogDetail;  /* 1=记 gdi 逐字光栅日志; 0=只记关键 (默认) */
     int Render;
 } VTConfig;
@@ -129,6 +128,15 @@ static int VecIsBriefCaller(unsigned caller)
     if (caller >= 0x00479000u && caller < 0x00479100u) return 1;
     if (caller == 0x00621144u) return 1;
     return 0;
+}
+
+/* 坐标归一 (v83): 引擎笔位/裁剪只有低 16 位有效, 高 16 位偶带脏数据
+ * (右侧提示实测 Blit x=0xFF87066D/y=0xFF8C02F4, 低 16 位 1645/756 才是
+ * 真坐标; 引擎自有光栅按 16 位取故不受影响, 我们按 32 位取则全灭)。
+ * 符号扩展保留真负坐标 (左沿出屏字 x∈[-32768,0) 不受影响)。 */
+static int VecNormC(int v)
+{
+    return (int)(short)(v & 0xFFFF);
 }
 
 /* DrawText 字形计数 / 行跨度 (探针已删, 只留正文盒判据) */
@@ -217,7 +225,8 @@ static int VecSWRegion(void* t, int x, int y)
  * 与字形同一调用, 入口跳过即连底+字一起消失, 不管内容细节不逐条绘制。
  * 命中 (主画布 + 落列表带 + 名/计时器形状) 即收表 (串,坐标,原前景色)
  * 并跳过; 空串只收表不跳过 (引擎底色行为与原版一致, 闪烁靠 150ms 过期)。
- * 门不全走原版; Print 入口保留同带收集做后备 (fore 不见时用名青/计时器白)。
+ * 门不全走原版; Print 入口只保留冒号计时器后备收集
+ * (Simple_ 钩漏网时才跑到这, fore 不见用计时器白)。
  * DrawText 计时器 (侧栏图标叠字, 非列表) 与 Blit 层漏网 backstop 不动。 */
 
 /* 提示串排除 ("电力 = 24660" 会飘进右侧带, 误收进行列表污染超武面板):
@@ -334,6 +343,14 @@ static int VecSWCapture(void* surf, int kind, const wchar_t* s, int x, int y)
  * 原字形一次不画 (灾难失败才回落原版保底可读)。 */
 static int g_MenuDepth = 0;
 #define MENU_MAXCH 64
+/* DrawText 全深度 (不限 brief/menu, 进转发即加): Blit 层超武门只认
+ * DrawText 路径。列表计时器/叠字经 DrawText 系 Blit; 悬浮提示与 Print
+ * 系名单都走 Print 直系 Blit。按路径一刀切, 不靠坐标/内容猜。 */
+static int g_DTAllDepth = 0;
+/* 提示 DrawText 子树深 (v85): 0x00479041 小矩形 (悬浮提示盒, 如 93x21)
+ * 转发期间才加。Blit 层凭它豁免 swForce (正确字号 + 失败回落可见)。
+ * 计时器 DrawText 出自别的调用者, 不受影响。 */
+static int g_TipDrawDepth = 0;
 static wchar_t g_MenuStr[MENU_MAXCH + 1];
 static int g_MenuAdv[MENU_MAXCH];
 static int g_MenuN = 0;
@@ -414,9 +431,13 @@ int __fastcall VecDrawTextEntry(void* t, void* e,
     int a6, int a7, int a8, int a9, int a10)
 {
     unsigned caller = (unsigned)__builtin_return_address(0);
-    int brief, r, menuTake = 0;
+    int brief, r, menuTake = 0, tipTake = 0;
     brief = VecIsBriefCaller(caller);
     menuTake = VecMenuMatch(caller, a6, a7, a8);
+    /* 提示盒 DrawText (v85 取证: c=0x00479041, 矩形≈提示串大小):
+     * 小矩形才认 (大矩形是简报/面板, 不碰), 只立深度标志。 */
+    tipTake = (caller == 0x00479041u && a6 > 0 && a6 <= 400 &&
+               a7 > 0 && a7 <= 60);
     if (menuTake)
     {
         /* 收串+矩形 (只收首层): 给 Blit 层自有版式用 */
@@ -451,7 +472,11 @@ int __fastcall VecDrawTextEntry(void* t, void* e,
             g_DTBody = (caller == 0x00621144u && a6 >= 400 && a7 >= 100);
         }
     }
+    g_DTAllDepth++;
+    if (tipTake) g_TipDrawDepth++;
     r = g_OrigDrawText(t, NULL, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
+    if (tipTake) g_TipDrawDepth--;
+    g_DTAllDepth--;
     if (menuTake) g_MenuDepth--;
     if (brief)
     {
@@ -693,21 +718,17 @@ int __fastcall VecPrintEntry(void* t, void* e,
         toolTake = 1;
         g_ToolDepth++;
     }
-    /* 超武列表整体隐藏+收集: 右侧面板区 CJK/冒号串, 命中即收表并跳过
-     * 原调用 (字+黑底一起消失); 门不全 (面板关/异面/形状不符) 走原版。 */
+    /* 超武列表整体隐藏+收集: 只收冒号计时器 ("00:00"), 命中即收表
+     * 并跳过原调用; 门不全 (面板关/异面) 走原版。
+     * CJK 名串不在此收: Print 层名与悬浮提示不可区分 (同经 0x4A5FF2、
+     * 同落右侧带、同 CJK 首字), 收则把靠右的建筑名提示整个吞掉
+     * (Simple_ 的底已画 -> 黑盒留、字灭, 图 1 的病)。名收集只在
+     * Simple_ 做 (主门, 那边认合成结构, 提示不走故不误收)。 */
     if (a4 >= 1300 && a5 >= 32)
     {
         const wchar_t* s = (const wchar_t*)a3;
-        unsigned c0 = 0;
-        int kind = -1;
-        if (s && IsPlausiblePtr(s)) c0 = (unsigned)s[0] & 0xFFFFu;
-        if ((c0 >= 0x2E80u && c0 < 0xA000u) ||
-            (c0 >= 0xFF00u && c0 < 0xFFF0u))
-            kind = 0;
-        else if (VecSWColon(s))
-            kind = 1;
-        if (kind >= 0 && !VecSWHasEq(s) &&
-            VecSWCapture((void*)a2, kind, s, a4, a5))
+        if (VecSWColon(s) && !VecSWHasEq(s) &&
+            VecSWCapture((void*)a2, 1, s, a4, a5))
             return 1;
     }
     if (!g_OrigPrint) { if (toolTake) g_ToolDepth--; return 0; }
@@ -771,7 +792,14 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
     /* 提示盒跟字走 (电力提示出界修复): Simple_Wide 的盒 R 参数 a6
      * (盒右界=a6+2, 反汇编双盒路径同源) 取自上游旧字宽; GetDim 接管已把
      * 宽字宽替换, 盒由引擎自画 (半透明+红边框原样, 一像素不碰)。 */
-    if (g_SWPanelOn && g_SWCompW && IsPlausiblePtr((void*)a1))
+    /* 超武名单行只出自侧栏绘制者 0x004A6345 (vswcaller 取证:
+     * 名/计时器行 c=0x004A6345, fore=0x07FF/0xFFFF, 名 x=1722 计时器 x=1749;
+     * 世界悬浮提示出自扩展模块 (c=0x73AC616A, 如红字 fore=0xA92A)。
+     * 同带同形但发起者不同, 在此按发起者一刀切: 非侧栏一律放行,
+     * 提示串再也进不了收集表。 */
+    if (g_SWPanelOn && g_SWCompW &&
+        (unsigned)__builtin_return_address(0) == 0x004A6345u &&
+        IsPlausiblePtr((void*)a1))
     {
         int* b = (int*)a1;
         if (b[1] == g_SWCompW && b[2] == g_SWCompH &&
@@ -1193,9 +1221,20 @@ static int VecRender(void* t, wchar_t wch, int adv, int h, int x, int y,
     pitchW = *(int*)((char*)t + 0x10);
     if (!buf || !IsPlausiblePtr(buf)) { g_VecWhy = 3; return VC_FAIL; }
     if (pitchW < 64 || pitchW > 4096) { g_VecWhy = 4; return VC_FAIL; }
-    Tp = *(int*)((char*)t + 0x34);
-    B = *(int*)((char*)t + 0x3C);
-    if (B < Tp) { g_VecWhy = 5; return VC_FAIL; }
+    Tp = VecNormC(*(int*)((char*)t + 0x34));
+    B = VecNormC(*(int*)((char*)t + 0x3C));
+    if (B < Tp)
+    {
+        /* 空裁剪哨兵 (0,0,-1,-1: 未设置, 非剔除): 引擎照画, 故退到主面
+         * 边界 (pp 对上合成宽才认, 否则保持失败走原版, 防小面越界)。
+         * 右侧提示经 DrawText(0x479041 小矩形) 进来即此形状 (v84 取证:
+         * c=0,0,-1,-1 pp=1752)。 */
+        int cR = VecNormC(*(int*)((char*)t + 0x38));
+        if (cR >= 0 && B >= 0) { g_VecWhy = 5; return VC_FAIL; }
+        if (pitchW != g_SWCompW || g_SWCompW <= 0 || g_SWCompH <= 0)
+        { g_VecWhy = 5; return VC_FAIL; }
+        Tp = 0; B = g_SWCompH - 1;
+    }
     if (Tp < 0) Tp = 0;
     if (B > 4096) B = 4096;
     Calibrate();
@@ -1368,8 +1407,8 @@ static int VecMenuRender(void* t, wchar_t wch, int adv, int h, int x, int y,
     pitchW = *(int*)((char*)t + 0x10);
     if (!buf || !IsPlausiblePtr(buf)) return -1;
     if (pitchW < 64 || pitchW > 4096) return -1;
-    Tp = *(int*)((char*)t + 0x34);
-    B = *(int*)((char*)t + 0x3C);
+    Tp = VecNormC(*(int*)((char*)t + 0x34));
+    B = VecNormC(*(int*)((char*)t + 0x3C));
     if (B < Tp) return -1;
     if (Tp < 0) Tp = 0;
     if (B > 4096) B = 4096;
@@ -1447,6 +1486,10 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
     /* TAB 走原版特殊公式, 缺字/度量失败也走原版 (保留 0x5555 兜底行为) */
     if (!t || !IsPlausiblePtr(t) || wc == 9)
         return g_OrigBlit(t, NULL, wch, x, y, color);
+    /* 坐标归一 (脏高位清掉, 见 VecNormC): 以下 inTip 跨度、接管区、
+     * ToolBox 取样与 VecRender 全用真坐标。 */
+    x = VecNormC(x);
+    y = VecNormC(y);
     eff = (color == -1) ? (int)(*(unsigned short*)((char*)t + 0x24)) : color;
     adv = VecMeasure(t, wc, &h);
     if (adv < 0)
@@ -1656,8 +1699,8 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
             {
                 unsigned short* bb = *(unsigned short**)((char*)t + 0x0C);
                 int pp = *(int*)((char*)t + 0x10);
-                int Tp = *(int*)((char*)t + 0x34);
-                int B = *(int*)((char*)t + 0x3C);
+                int Tp = VecNormC(*(int*)((char*)t + 0x34));
+                int B = VecNormC(*(int*)((char*)t + 0x3C));
                 int dy = y + (h - oh) / 2;
                 int lo = Tp, hi = B - oh + 1, ym, k, flat = 1;
                 unsigned first = 0;
@@ -1862,9 +1905,13 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
              * (同锁同裁剪, 笔位/背景/后续全是引擎的)。
              * 列表不是顶栏, CreditDY 不掺和。 */
             swForce = VecSWRegion(t, x, y);
-            /* 悬浮提示不属于超武列表: 即使落进右侧带也不许 SuperPx 接管,
-             * 否则窄 adv 步进会把整串压短 (偏移/空隙的根因)。 */
-            if (swForce && (inTip || inWt)) swForce = 0;
+            /* 超武门只认 DrawText 路径 (列表计时器/叠字系), 以下一律豁免:
+             * Print 直系 (悬浮提示/漏网名单)、提示 DrawText 子树
+             * (0x479041 小矩形)。落进右侧带也不许 SuperPx 接管, 否则窄
+             * adv 压短整串、失败时一笔不画 (靠右缩短/消失的根因)。
+             * inTip/inWt 保留作叠甲。 */
+            if (swForce && (g_DTAllDepth <= 0 || g_TipDrawDepth > 0 ||
+                            inTip || inWt)) swForce = 0;
             if (swForce)
             {
                 px = g_VT.SuperPx;
@@ -2045,7 +2092,6 @@ void VecText_Install(void)
     g_VT.BriefBox = GetPrivateProfileIntA(VT_SECTION, "BriefBox", 1, g_IniPath);
     g_VT.BriefClip = GetPrivateProfileIntA(VT_SECTION, "BriefClip", 1, g_IniPath);
     g_VT.VShift = GetPrivateProfileIntA(VT_SECTION, "VShift", 0, g_IniPath);
-    g_VT.LogAdv = GetPrivateProfileIntA(VT_SECTION, "LogAdv", 1, g_IniPath);
     g_VT.LogDetail = GetPrivateProfileIntA(VT_SECTION, "LogDetail", 0, g_IniPath);
     g_VT.Render = GetPrivateProfileIntA(VT_SECTION, "Render", 0, g_IniPath);
     g_VT.Enable = g_VT.Enable ? 1 : 0;
@@ -2068,7 +2114,6 @@ void VecText_Install(void)
     g_VT.BriefClip = g_VT.BriefClip ? 1 : 0;
     if (g_VT.VShift < -8) g_VT.VShift = -8;
     if (g_VT.VShift > 8) g_VT.VShift = 8;
-    g_VT.LogAdv = g_VT.LogAdv ? 1 : 0;
     g_VT.LogDetail = g_VT.LogDetail ? 1 : 0;
     g_LogDetail = g_VT.LogDetail;   /* 同步给 GdiText 的 gdi 日志 */
     g_VT.Render = g_VT.Render ? 1 : 0;
@@ -2076,8 +2121,8 @@ void VecText_Install(void)
     p = 0;
     p = AppendCStr(buf, p, "vtext: start en=", sizeof(buf));
     UtoA((unsigned)g_VT.Enable, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " log=", sizeof(buf));
-    UtoA((unsigned)g_VT.LogAdv, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCStr(buf, p, " dtail=", sizeof(buf));
+    UtoA((unsigned)g_VT.LogDetail, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " render=", sizeof(buf));
     UtoA((unsigned)g_VT.Render, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " px=", sizeof(buf));
@@ -2104,7 +2149,7 @@ void VecText_Install(void)
     UtoA((unsigned)g_VT.ToolBox, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " bp=", sizeof(buf));
     UtoA(0u, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " v=79", sizeof(buf));   /* 发版自增, 日志对版本 */
+    p = AppendCStr(buf, p, " v=86", sizeof(buf));   /* 发版自增, 日志对版本 */
     LogLine(buf);
     if (!g_VT.Enable) { LogLine("vtext: disabled"); return; }
     if (!BytesSame((unsigned char*)ADDR_BLIT, kWantBlit, 7))
