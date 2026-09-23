@@ -26,7 +26,8 @@
 #define VT_SECTION       "VecText"
 #define ADDR_BLIT        0x00434120u
 #define ADDR_BLIT_BACK   0x00434127u
-#define ADDR_GETDIM      0x00433CF0u
+#define ADDR_GETDIM 0x00433CF0u
+#define ADDR_GETDIM_BACK 0x00433CF6u
 #define ADDR_DRAWTEXT    0x00434CD0u
 #define ADDR_DRAWTEXT_BACK 0x00434CD6u
 #define ADDR_PRINT       0x00434B90u
@@ -44,6 +45,9 @@ static const unsigned char kWantPrint[10] = { 0x56, 0x8B, 0x74, 0x24, 0x08,
 /* Simple_ 头 7 字节 (sub esp,0x28 + mov eax,[esp+0x34]) */
 static const unsigned char kWantSimple[7] = { 0x83, 0xEC, 0x28,
                                               0x8B, 0x44, 0x24, 0x34 };
+/* GetDim 头 6 字节 (sub esp,0x1C + mov eax,[ecx+4], gamemd 静态对过) */
+static const unsigned char kWantGetDim[6] = { 0x83, 0xEC, 0x1C,
+                                              0x8B, 0x41, 0x04 };
 
 /* 场景区分只认位置条带 (Blit 层 y<32 的数字, 见 BlitHook), 不认函数。
  * 函数白名单已删除: 顶栏那几个函数也会画别的文本 (如按 House 遍历的
@@ -58,6 +62,11 @@ typedef struct {
     int CreditPx;   /* 顶栏条带数字单独字号 (0=跟随全局; >0 覆盖, 仅换墨水字宽不动) */
     int CreditDY;   /* 顶栏数字垂直偏移 (像素, 负=上移) */
     int SuperPx;    /* Blit 层漏网重绘字号 (0=关闭; 列表整体接管另由 [SWPanel] 开关) */
+    int MenuTake;   /* 1=菜单按钮整体替换 (禁用原字形, 全墨水自定义绘制) */
+    int DigitTrack; /* 数字字距微调像素 (负=收紧, 正=放松, 只影响 0-9 步进) */
+    int ToolBox;    /* 0=关, 1=悬浮提示背景盒跟字走 (取样实色底才拓盒), 2=探测 */
+    int BoxProbe;   /* 出界实验: 0=关, 1=a3[2]收窄200, 2=a3[2]放宽600 (调完恢复) */
+    int TipBox;     /* 1=电力提示定制盒 (按列调映射补齐, 与引擎同 tone) */
     int BriefBox;   /* 1=简报正文盒加高 (界面适配字体), 0=保持原版盒子 */
     int BriefClip;  /* 1=简报裁剪底边跟盒子走 (面板子面切，需配合 BriefBox) */
     int Bold;
@@ -77,7 +86,8 @@ static BlitFn g_OrigBlit = NULL;
 
 typedef int (__fastcall *GetDimFn)(void* t, void* edxUnused,
                                    const wchar_t* s, int* w, int* h, int maxW);
-static GetDimFn g_GetDim = NULL;
+static GetDimFn g_OrigGetDim = NULL;   /* 度量原版 (跳板); 引擎算字宽唯一入口,
+                                        * 由 VecGetDimEntry 接管改宽 */
 
 /* ---------------- 入口钩 ----------------
  * DrawText/Print 入口只做诊断记录 (vcall) 与简报盒补丁;
@@ -144,6 +154,25 @@ static unsigned VecFindOuter(void)
         v = *(unsigned*)esp;
         if (v >= 0x00400000u && v < 0x00900000u && !InPipeline(v) &&
             VecIsRetAddr(v))
+            return v;
+        esp += 4;
+    }
+    return 0;
+}
+
+/* 栈上找直接上游: 第一个落在游戏代码段且通过返回地址校验的
+ * (不管线内外之分)。-O2 无帧指针, __builtin_return_address 不可用,
+ * 用它抓 Simple_Wide 的直接调用点 (反汇编定盒宽来源)。 */
+static unsigned VecFindDirect(void)
+{
+    unsigned esp, i;
+    __asm__ volatile ("movl %%esp, %0" : "=r"(esp));
+    for (i = 0; i < 256; i++)
+    {
+        unsigned v;
+        if (!IsPlausiblePtr((void*)esp)) break;
+        v = *(unsigned*)esp;
+        if (v >= 0x00400000u && v < 0x00900000u && VecIsRetAddr(v))
             return v;
         esp += 4;
     }
@@ -284,6 +313,8 @@ static unsigned g_VlenPrevCaller = 0;
 static int g_VlenPrevA[10] = { 0 };
 /* 行跨度统计 (vrows 用): 最外层是简报绘制时才记 */
 static int g_DTBrief = 0;
+/* 简报正文盒内 (引擎按自有宽度换行): 步进保持原笔位, 不加宽 */
+static int g_DTBody = 0;
 static int g_YMin = 0, g_YMax = 0, g_YOffGrid = 0;
 static int g_ClipLogged = 0;
 
@@ -441,6 +472,20 @@ static void VecSWBandLog(wchar_t wc, int x, int y, int pitchW)
  * 门不全走原版; Print 入口保留同带收集做后备 (fore 不见时用名青/计时器白)。
  * DrawText 计时器 (侧栏图标叠字, 非列表) 与 Blit 层漏网 backstop 不动。 */
 
+/* 提示串排除 ("电力 = 24660" 会飘进右侧带, 误收进行列表污染超武面板):
+ * 前 16 字含 '=' 即非列表串。超武名/计时器从不含 '='。 */
+static int VecSWHasEq(const wchar_t* s)
+{
+    int k;
+    if (!s || !IsPlausiblePtr((void*)s)) return 0;
+    for (k = 0; k < 16; k++)
+    {
+        unsigned c = (unsigned)s[k] & 0xFFFFu;
+        if (!c) break;
+        if (c == 0x3Du) return 1;
+    }
+    return 0;
+}
 /* 冒号嗅探 ("00:00" 经任何 Print 路径; 顶栏纯数字天然区分) */
 static int VecSWColon(const wchar_t* s)
 {
@@ -459,27 +504,6 @@ SWCapRow g_SWCap[SWCAP_MAX];
 int g_SWCapN = 0;
 int g_SWCompW = 0, g_SWCompH = 0;
 int g_SWPanelOn = 0;
-
-/* 新坐标只记一次 (vswcap), 上限 48, 重画不刷屏 */
-static int g_SWCapLogs = 0;
-
-static void VecSWCapLog(int kind, int x, int y, int n)
-{
-    char b1[16], buf[128];
-    unsigned p;
-    if (g_SWCapLogs >= 48) return;
-    g_SWCapLogs++;
-    p = 0;
-    p = AppendCStr(buf, p, "vswcap: ", sizeof(buf));
-    p = AppendCh(buf, p, kind == 0 ? 'N' : 'T', sizeof(buf));
-    p = AppendCStr(buf, p, " xy=", sizeof(buf));
-    UtoA((unsigned)x, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCh(buf, p, ',', sizeof(buf));
-    UtoA((unsigned)y, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " n=", sizeof(buf));
-    UtoA((unsigned)n, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    LogLine(buf);
-}
 
 /* 收表 (同坐标覆盖, 空串也收: 杀过期旧文, 面板画空=闪烁灭态)。
  * src: 0=Simple_ (带原色), 1=Print 后备 (无色)。
@@ -504,7 +528,6 @@ static void VecSWStore(int kind, const wchar_t* s, int n, int fore, int x,
         r = &g_SWCap[g_SWCapN++];
         r->x = x; r->y = y;
         r->fore = -1;
-        VecSWCapLog(kind, x, y, n);
     }
     else
     {
@@ -551,85 +574,196 @@ static int VecSWCapture(void* surf, int kind, const wchar_t* s, int x, int y)
     return n > 0 ? 1 : 0;   /* 空串不跳过 (底色行为与原版一致) */
 }
 
-/* 一次性探针 (黑条+原色定案): 主画布区域调用记形状与全参。
- * kind>=0 (名/计时器): 记 a1/a6/a7 找颜色槽 (原青 0x7FF/白 0xFFFF/-1 默认);
- * kind<0 (黑条嫌疑): 记首字+长度 (空格填充串即黑条)。同坐标只记一次, 上限 40。 */
-static int g_SWProbeN = 0;
-static int g_SWPX[40], g_SWPY[40];
+/* (旧捕获/重画/探针已删除: 定案为 Simple_ 当场收集 + 整块重绘) */
 
-static void VecSWProbe(void* surf, int kind, const wchar_t* s,
-                       int x, int y, int a1, int a6, int a7)
+/* ---------------- 菜单按钮整体替换 ----------------
+ * 路径定案 (vmenu 探针, 已删): DrawText caller=0x00621144 (与简报正文
+ * 同一调用者, 再用标志+尺寸区分), flags=5, 123x24 (正文, 如 1773,231
+ * 游戏控制) / 121x20 (阴影, +2,+2 偏移)。
+ * 入口时表面尚未锁定 (t+0x0C 无效), 故入口只收串+矩形 (t 在此不可靠,
+ * 不建字形); 首个 Blit 建全串字形 (Blit 的 t 才是真 BitFont)、算总宽、
+ * 矩形内居中起笔, 之后按实际墨水宽度走笔, 引擎 x 不用。
+ * 原字形一次不画 (灾难失败才回落原版保底可读)。 */
+static int g_MenuDepth = 0;
+#define MENU_MAXCH 64
+static wchar_t g_MenuStr[MENU_MAXCH + 1];
+static int g_MenuAdv[MENU_MAXCH];
+static int g_MenuN = 0;
+static int g_MenuRX = 0, g_MenuRW = 0;
+static int g_MenuIdx = 0;      /* 已画字数 */
+static int g_MenuPenX = 0;     /* 自有笔位 */
+static int g_MenuBuilt = 0;
+
+static int VecMenuMatch(unsigned caller, int w, int h, int flags)
 {
-    int sw = 0, sh = 0, n = 0, i;
-    unsigned c0 = 0;
-    char buf[224];
-    unsigned p;
-    if (!g_SWPanelOn || g_SWProbeN >= 40) return;
-    if (surf && IsPlausiblePtr(surf))
-    {
-        int* b = (int*)surf;
-        sw = b[1]; sh = b[2];
-    }
-    if (sw <= 0 || sw != g_SWCompW || sh != g_SWCompH) return;
-    for (i = 0; i < g_SWProbeN; i++)
-        if (g_SWPX[i] == x && g_SWPY[i] == y) return;
-    g_SWPX[g_SWProbeN] = x; g_SWPY[g_SWProbeN] = y; g_SWProbeN++;
-    if (s && IsPlausiblePtr(s))
-    {
-        c0 = (unsigned)s[0] & 0xFFFFu;
-        while (s[n] && n < 64) n++;
-    }
-    p = 0;
-    p = AppendCStr(buf, p, "vswp: ", sizeof(buf));
-    p = AppendCh(buf, p, kind == 0 ? 'N' : kind == 1 ? 'T' : '?', sizeof(buf));
-    p = AppendCStr(buf, p, " xy=", sizeof(buf));
-    p += UtoA((unsigned)x, buf + p);
-    p = AppendCh(buf, p, ',', sizeof(buf));
-    p += UtoA((unsigned)y, buf + p);
-    p = AppendCStr(buf, p, " c0=", sizeof(buf));
-    p += HtoA(c0, buf + p);
-    p = AppendCStr(buf, p, " n=", sizeof(buf));
-    p += UtoA((unsigned)n, buf + p);
-    p = AppendCStr(buf, p, " a1=", sizeof(buf));
-    p += HtoA((unsigned)a1, buf + p);
-    p = AppendCStr(buf, p, " a6=", sizeof(buf));
-    p += HtoA((unsigned)a6, buf + p);
-    p = AppendCStr(buf, p, " a7=", sizeof(buf));
-    p += HtoA((unsigned)a7, buf + p);
-    LogLine(buf);
+    if (!g_VT.MenuTake) return 0;
+    if (caller != 0x00621144u) return 0;
+    if (flags != 5) return 0;
+    if ((w == 123 && h == 24) || (w == 121 && h == 20)) return 1;
+    return 0;
 }
 
-/* (捕获/重画/入口发现已删除: 改当场渲染+Blit 层判决, 见上) */
+/* ---------------- 悬浮提示背景盒自适应 ----------------
+ * 定案: 世界悬浮框经 Print (caller=0x4A5FF2 内层), 如 (776,571) "电力 = …"、
+ * 建筑名标签。引擎盒要么固定尺寸、要么按自有窄字宽算, 我们的宽字撑出去,
+ * 故盒跟字走 (GetDim 钩够不着固定盒)。
+ * Print 入口收串+坐标 (超武带除外; 不认 outer, 发起者链不稳定),
+ * 首个 Blit 建全串字形算总宽 (GDI 自然步进),
+ * 取样确认是实色暗底才拓盒 (花面无盒不碰), 再自有笔位画字。
+ * 原字形一次不画。分段多色 (如红字负载) 各段独立收/拓/画,
+ * 同行相邻段无缝衔接 (500ms 内同行即连续, 左垫省略防吃掉上段尾巴)。 */
+static int g_ToolDepth = 0;
+#define TOOL_MAXCH 64
+static wchar_t g_ToolStr[TOOL_MAXCH + 1];
+static int g_ToolAdv[TOOL_MAXCH];
+static int g_ToolN = 0;
+static int g_ToolX = 0, g_ToolY = 0;
+static int g_ToolIdx = 0;
+static int g_ToolPenX = 0;
+static int g_ToolBuilt = 0;   /* 0=未建, 1=已建, -1=失败走引擎笔位 */
+static int g_ToolLastX1 = -9999, g_ToolLastY = -9999;
+static unsigned g_ToolLastTick = 0;
+static int g_BoxLogs = 0;   /* 临时计数 (定案即删) */
+static int g_ToolStepA[TOOL_MAXCH];
+static int g_ToolInk0 = 0, g_ToolInkEnd = 0;   /* 首/尾墨水相对 x 偏移 */
+static unsigned g_ToolGateTick = 0;   /* 取样门上次判决时刻 */
+static int g_ToolGateOK = 0;
+static unsigned g_ToolGateColor = 0;
+
+static int VecToolMatch(unsigned caller, const wchar_t* s, int x, int y)
+{
+    unsigned c0;
+    if (!g_VT.ToolBox) return 0;
+    if (caller != 0x004A5FF2u) return 0;
+    /* 超武带归 SW (那边收表+跳过, 不抢) */
+    if (x >= 1300 && x <= 1752 && y >= 32 && y <= 1080) return 0;
+    if (!s || !IsPlausiblePtr((void*)s)) return 0;
+    c0 = (unsigned)s[0] & 0xFFFFu;
+    if (!((c0 >= 0x2E80u && c0 < 0xA000u) ||
+          (c0 >= 0xFF00u && c0 < 0xFFF0u))) return 0;
+    /* 不认 outer: 发起者链不稳定 (同串跨局 outer 会变), 认"盒"不认"路":
+     * 取样门 (实色暗底) 自己会排除无盒绘制, 花面一笔不碰。 */
+    return 1;
+}
+
+/* 探测读像素 (越界/非法面返回 -1, 只读不写; 日志已退役静默, 保留消警告) */
+static int VecProbePx(unsigned short* bb, int pp, int x, int y)
+{
+    if (!bb || !IsPlausiblePtr((void*)bb)) return -1;
+    if (pp < 64 || pp > 4096 || y < 0 || y > 4096) return -1;
+    if (x < 0 || x >= pp) return -1;
+    return (int)bb[y * pp + x];
+}
+
+/* 面内实色填充 (调用方保证 y1<=B; x 钳到行宽内) */
+static void VecFillBox(unsigned short* buf, int pitchW,
+                       int x0, int y0, int x1, int y1, unsigned color)
+{
+    int yy, xx;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= pitchW) x1 = pitchW - 1;
+    if (x1 < x0 || y1 < y0) return;
+    for (yy = y0; yy <= y1; yy++)
+    {
+        unsigned short* row = buf + yy * pitchW;
+        for (xx = x0; xx <= x1; xx++) row[xx] = (unsigned short)color;
+    }
+}
 
 int __fastcall VecDrawTextEntry(void* t, void* e,
     int a1, int a2, int a3, int a4, int a5,
     int a6, int a7, int a8, int a9, int a10)
 {
     unsigned caller = (unsigned)__builtin_return_address(0);
-    int brief = 0, r, k;
+    int brief = 0, r, k, menuTake = 0;
     int av[10];
     if (g_VT.LogAdv) VecCallerLog('D', caller, a3);
+    /* 出界: DrawText 矩形普查 (定案即删)。盒若经 DrawText 画,
+     * 矩形必含提示星座数 (393/569/480/384/329/118 附近)。
+     * 命中任一或前 4 次无条件记, 上限 16 行。 */
+    {
+        static int n = 0;
+        static unsigned seen[16];
+        int av[10];
+        int hit = 0, si, ai;
+        av[0] = a1; av[1] = a2; av[2] = a3; av[3] = a4; av[4] = a5;
+        av[5] = a6; av[6] = a7; av[7] = a8; av[8] = a9; av[9] = a10;
+        for (ai = 0; ai < 10 && !hit; ai++)
+        {
+            int v = av[ai];
+            if (v == 393 || v == 569 || v == 480 || v == 384 ||
+                v == 329 || (v >= 100 && v <= 200)) hit = 1;
+        }
+        for (si = 0; si < 16; si++)
+            if (seen[si] == caller) break;
+        if (n < 16 && (hit || n < 4) && si >= 16)
+        {
+            char b1[16], fbuf[192];
+            unsigned z = 0;
+            seen[n] = caller; n++;
+            z = AppendCStr(fbuf, z, "vdt: c=", sizeof(fbuf));
+            z += HtoA(caller, fbuf + z);
+            for (ai = 0; ai < 10; ai++)
+            {
+                z = AppendCStr(fbuf, z, " a", sizeof(fbuf));
+                UtoA((unsigned)(ai + 1), b1);
+                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                z = AppendCh(fbuf, z, '=', sizeof(fbuf));
+                UtoA((unsigned)av[ai], b1);
+                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            }
+            LogLine(fbuf);
+        }
+    }
     brief = VecIsBriefCaller(caller);
     av[0] = a1; av[1] = a2; av[2] = a3; av[3] = a4; av[4] = a5;
     av[5] = a6; av[6] = a7; av[7] = a8; av[8] = a9; av[9] = a10;
     if (brief) VecBriefLog(caller, av, t);
+    menuTake = VecMenuMatch(caller, a6, a7, a8);
+    if (menuTake)
+    {
+        /* 收串+矩形 (只收首层): 给 Blit 层自有版式用 */
+        if (g_MenuDepth == 0)
+        {
+            const wchar_t* ms = (const wchar_t*)a3;
+            int mn = 0;
+            if (ms && IsPlausiblePtr((void*)ms))
+            {
+                while (mn < MENU_MAXCH && ms[mn] && ms[mn] != 0x0Au)
+                { g_MenuStr[mn] = ms[mn]; mn++; }
+            }
+            g_MenuStr[mn] = 0;
+            g_MenuN = mn;
+            g_MenuRX = a4; g_MenuRW = a6;
+            g_MenuIdx = 0; g_MenuBuilt = 0;
+        }
+        g_MenuDepth++;
+    }
     /* DrawText 不碰 (计时器侧栏叠字非列表 + 简报正文, 全部走原版;
-     * 列表的隐藏/收集只在 Print 入口做, 高层级一次干掉, 不逐条) */
-    if (!g_OrigDrawText) return 0;
+     * 列表的隐藏/收集只在 Print 入口做, 高层级一次干掉, 不逐条;
+     * 菜单按钮只立深度标志, 字形替换在 Blit 层做) */
+    if (!g_OrigDrawText) { if (menuTake) g_MenuDepth--; return 0; }
     if (brief)
     {
         /* 简报正文盒加高 (界面适配字体, 精确匹配才改) */
         if (caller == 0x00621144u) VecBriefBox(&a4, &a5, &a6, &a7);
         g_DTDepth++;
-        if (g_DTDepth == 1) { g_DTBlit0 = g_BlitN; g_DTBrief = 1; }
+        if (g_DTDepth == 1)
+        {
+            g_DTBlit0 = g_BlitN; g_DTBrief = 1;
+            g_DTBody = (caller == 0x00621144u && a6 >= 400 && a7 >= 100);
+        }
     }
     r = g_OrigDrawText(t, NULL, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
+    if (menuTake) g_MenuDepth--;
     if (brief)
     {
         unsigned n;
         g_DTDepth--;
         if (g_DTDepth != 0) return r;
         g_DTBrief = 0;
+        g_DTBody = 0;
         n = g_BlitN - g_DTBlit0;
         if (g_BriefLogs < 48)
         {
@@ -681,12 +815,492 @@ int __fastcall VecDrawTextEntry(void* t, void* e,
     return r;
 }
 
+/* 盒拓宽缓存: GetDim 成功替换后记 (串指针/首字/旧宽/新宽),
+ * Simple 入口核对后给盒 R 参数 (a6) 加 nw-ow。声明在 Print/Simple 之前。 */
+static const wchar_t* g_LastDimPtr = NULL;
+static unsigned g_LastDimW0 = 0;
+static int g_LastDimOw = 0, g_LastDimNw = 0;
+/* 上一帧电力提示 Print 落笔 x (Simple 入口的 x 自校验用) */
+static int g_LastTipX = -1;
+/* 当帧提示串宽 (Print 入口由表查得, Blit 首字画盒用, 0=未知跳过) */
+static int g_TipTot = 0;
+static int g_TipOw = 0;
+/* 边缘位移 (Print 入口算, Blit 逐字消耗, 非提示串清零, 无泄漏) */
+static int g_TipShift = 0;
+static int g_TipShiftN = 0;
+/* 当帧提示落笔 (Print 入口记, 首字位置门用, 与颜色无关) */
+static int g_TipY = -9999;
+/* 当帧提示首字是否已扫描 (Print 入口清零, Blit 首字置位) */
+static int g_BlitTipSeen = 0;
+/* 边缘诊断 (定案即删): 当帧提示色 Blit 最小 x, Print 入口转存上一帧。
+ * 若引擎在边缘滚字 (minx 远小于 tipx 甚至为负), 盒 (跟 tipx) 与字
+ * (跟 Blit x) 必然错位。 */
+static int g_BlitMinX = 9999;
+static int g_PrevMinX = 9999;
+static int g_BlitMaxX = -9999;
+static int g_PrevMaxX = -9999;
+/* 出界实验状态 (BoxProbe): 改前快照, 转发后恢复, 误伤自愈。 */
+static int* g_MutP3 = NULL;
+static int g_MutSaved = 0;
+static int g_MutVal = 0;
+static int g_MutFrame = 0;
+static int g_MutModeLog = 0;
+/* 多槽宽度表 (单槽会被同帧其它串冲掉, 见 vfixq ow=30 教训):
+ * ring 32 项, 按指针/首字+长度命中, 跨帧也有效。 */
+#define DIMCACHE_N 32
+typedef struct {
+    const wchar_t* ptr;
+    unsigned w0;
+    int n, ow, nw;
+} DimCE;
+static DimCE g_DimC[DIMCACHE_N];
+static int g_DimCPos = 0;
+/* 防冲 sticky (边缘修复): 主表是 ring, 出屏后 GetDim 不再刷新,
+ * 槽位被其它串冲掉致 Print 查表 miss (盒跳过、宽字溢窄盒)。
+ * 此处按 (首字,长度) 常驻 16 槽, 同槽只认同 key 覆盖,
+ * 取用时全串比对 (内容不同不用, 与 v49 同口径), 永不丢。 */
+#define STICKY_N 16
+typedef struct {
+    int used;
+    unsigned w0;
+    int n, ow, nw;
+    wchar_t tx[64];
+} StkCE;
+static StkCE g_StkC[STICKY_N];
+static int g_StkRR = 0;
+
+/* 盒几何实测 (定案即删): 沿 y-4..y+28 找长红边 (>=40px 连续)。
+ * ph=0: Print 入口 (盒已画字未画); ph=1: Simple 返回后 (全画完)。
+ * 两相对照定边框绘制时机; 与帧轮转联动定宽度杠杆。上限 16 行。 */
+static int g_ScanN = 0;
+static void VecScanBoxBuf(unsigned short* bb, int pp, int x, int y,
+                          int ph)
+{
+    char b1[16], fbuf[160];
+    unsigned z = 0;
+    int yy, xx, top = 0, bot = 0, bL = 0, bR = 0;
+    int loose = 0, minS = 99999;
+    unsigned minC = 0;
+    if (g_ScanN >= 20) return;
+    g_ScanN++;
+    if (bb && IsPlausiblePtr((void*)bb) && pp >= 64 && pp <= 4096)
+    {
+        for (yy = y - 4; yy <= y + 28; yy++)
+        {
+            int runL = -1, runR = -1;
+            if (yy < 0 || yy > 4096) continue;
+            for (xx = x - 200; xx <= x + 400; xx++)
+            {
+                unsigned c, R, G, B;
+                int isRed;
+                if (xx < 0 || xx >= pp) continue;
+                c = bb[yy * pp + xx];
+                R = (c >> 11) & 31u; G = (c >> 5) & 63u; B = c & 31u;
+                isRed = (R >= 12 && R > G + 6 && R > B + 6);
+                if (R >= 8 && R > G + 2 && R > B + 2) loose++;
+                {
+                    int s2 = (int)R + (int)G + (int)B;
+                    if (s2 < minS) { minS = s2; minC = c; }
+                }
+                if (isRed)
+                {
+                    if (runL < 0) runL = xx;
+                    runR = xx;
+                }
+                else if (runL >= 0)
+                {
+                    if (runR - runL + 1 >= 40)
+                    {
+                        if (!top) { top = yy; bL = runL; bR = runR; }
+                        else bot = yy;
+                    }
+                    runL = -1;
+                }
+            }
+            if (runL >= 0 && runR - runL + 1 >= 40)
+            {
+                if (!top) { top = yy; bL = runL; bR = runR; }
+                else bot = yy;
+            }
+        }
+    }
+    z = AppendCStr(fbuf, z, "vscan: m=", sizeof(fbuf));
+    UtoA((unsigned)g_MutModeLog, b1);
+    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+    z = AppendCStr(fbuf, z, " ph=", sizeof(fbuf));
+    UtoA((unsigned)ph, b1);
+    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+    z = AppendCStr(fbuf, z, " top=", sizeof(fbuf));
+    UtoA((unsigned)top, b1);
+    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+    z = AppendCStr(fbuf, z, " bot=", sizeof(fbuf));
+    UtoA((unsigned)bot, b1);
+    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+    z = AppendCStr(fbuf, z, " L=", sizeof(fbuf));
+    UtoA((unsigned)bL, b1);
+    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+    z = AppendCStr(fbuf, z, " R=", sizeof(fbuf));
+    UtoA((unsigned)bR, b1);
+    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+    z = AppendCStr(fbuf, z, " lr=", sizeof(fbuf));
+    UtoA((unsigned)loose, b1);
+    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+    z = AppendCStr(fbuf, z, " dk=", sizeof(fbuf));
+    z += HtoA(minC, fbuf + z);
+    LogLine(fbuf);
+}
+
 int __fastcall VecPrintEntry(void* t, void* e,
     int a1, int a2, int a3, int a4, int a5, int a6, int a7)
 {
     unsigned caller = (unsigned)__builtin_return_address(0);
-    int r;
+    int r, toolTake = 0;
     if (g_VT.LogAdv) VecCallerLog('P', caller, a3);
+    /* 电力提示落笔 x 记录 (Simple 盒 R 自校验用, 只读 First 字) */
+    {
+        const wchar_t* ps = (const wchar_t*)a3;
+        if (ps && IsPlausiblePtr((void*)ps) &&
+            (((unsigned)ps[0] & 0xFFFFu) == 0x7535u))
+        {
+            int tl = 0, ci;
+            g_LastTipX = a4;
+            g_TipY = a5;
+            g_BlitTipSeen = 0;
+            g_PrevMinX = g_BlitMinX;
+            g_BlitMinX = 9999;
+            g_PrevMaxX = g_BlitMaxX;
+            g_BlitMaxX = -9999;
+            /* 取本串宽度 (表对齐缓存): Blit 首字画盒用, 查不到=0跳过 */
+            g_TipTot = 0;
+            g_TipOw = 0;
+            while (tl < 64 && ps[tl]) tl++;
+            /* 精确内容匹配 (指针复用会 stale, 只认全串相同):
+             * 首字+n 预滤, 再逐字比对, 对上才取宽。 */
+            for (ci = 0; ci < DIMCACHE_N; ci++)
+            {
+                DimCE* e = &g_DimC[ci];
+                int k, same;
+                if (!e->ptr ||
+                    e->w0 != ((unsigned)ps[0] & 0xFFFFu) ||
+                    e->n != tl)
+                    continue;
+                if (!IsPlausiblePtr((void*)e->ptr)) continue;
+                same = 1;
+                for (k = 0; k < tl; k++)
+                {
+                    if (e->ptr[k] != ps[k]) { same = 0; break; }
+                }
+                if (same)
+                {
+                    int si, done = 0;
+                    g_TipTot = e->nw; g_TipOw = e->ow;
+                    /* 写透 sticky: 同 key 覆盖, 否则轮转新槽 */
+                    for (si = 0; si < STICKY_N; si++)
+                    {
+                        StkCE* s = &g_StkC[si];
+                        if (s->used && s->w0 == e->w0 && s->n == tl)
+                        {
+                            s->nw = e->nw; s->ow = e->ow;
+                            for (k = 0; k < tl; k++) s->tx[k] = ps[k];
+                            s->tx[tl] = 0;
+                            done = 1;
+                            break;
+                        }
+                    }
+                    if (!done)
+                    {
+                        StkCE* s = &g_StkC[g_StkRR % STICKY_N];
+                        g_StkRR++;
+                        s->used = 1; s->w0 = e->w0; s->n = tl;
+                        s->nw = e->nw; s->ow = e->ow;
+                        for (k = 0; k < tl; k++) s->tx[k] = ps[k];
+                        s->tx[tl] = 0;
+                    }
+                    break;
+                }
+            }
+            /* 主表 miss 回 sticky (边缘 GetDim 停量后槽位被冲):
+             * 全串比对, 对上才取宽。 */
+            if (g_TipTot == 0 && tl >= 10 && tl < 64)
+            {
+                int si;
+                for (si = 0; si < STICKY_N; si++)
+                {
+                    StkCE* s = &g_StkC[si];
+                    int k2, same2;
+                    if (!s->used ||
+                        s->w0 != ((unsigned)ps[0] & 0xFFFFu) ||
+                        s->n != tl)
+                        continue;
+                    same2 = 1;
+                    for (k2 = 0; k2 < tl; k2++)
+                    {
+                        if (s->tx[k2] != ps[k2]) { same2 = 0; break; }
+                    }
+                    if (same2) { g_TipTot = s->nw; g_TipOw = s->ow; break; }
+                }
+            }
+            /* vtip (边缘诊断, 定案即删): tipx/tot/minx/maxx 同行,
+             * 变化触发, 上限 40, 长短串全记 (看 Print 是否批量交错;
+             * minx/maxx=上一帧带内提示色 Blit 的实际起笔/终笔,
+             * 与盒 [L0,R0] 对照即见错位)。
+             * tipx/minx/maxx 偏置 +2000 (屏内恒正); minx=11999
+             * 表示上一帧带内无提示色 Blit; tot=0 表示查表 miss (盒跳过)。 */
+            {
+                static int nV = 0;
+                static int vX = -99999, vT = -1, vM = -99999, vA = -99999;
+                if ((a4 != vX || g_TipTot != vT ||
+                     g_PrevMinX != vM || g_PrevMaxX != vA) && nV < 40)
+                {
+                    char vb1[16], vf[160];
+                    unsigned vz = 0;
+                    nV++;
+                    vX = a4; vT = g_TipTot;
+                    vM = g_PrevMinX; vA = g_PrevMaxX;
+                    vz = AppendCStr(vf, vz, "vtip: n=", sizeof(vf));
+                    UtoA((unsigned)tl, vb1);
+                    vz = AppendCStr(vf, vz, vb1, sizeof(vf));
+                    vz = AppendCStr(vf, vz, " tipx=", sizeof(vf));
+                    UtoA((unsigned)(a4 + 2000), vb1);
+                    vz = AppendCStr(vf, vz, vb1, sizeof(vf));
+                    vz = AppendCStr(vf, vz, " tot=", sizeof(vf));
+                    UtoA((unsigned)g_TipTot, vb1);
+                    vz = AppendCStr(vf, vz, vb1, sizeof(vf));
+                    vz = AppendCStr(vf, vz, " minx=", sizeof(vf));
+                    UtoA((unsigned)(g_PrevMinX + 2000), vb1);
+                    vz = AppendCStr(vf, vz, vb1, sizeof(vf));
+                    vz = AppendCStr(vf, vz, " maxx=", sizeof(vf));
+                    UtoA((unsigned)(g_PrevMaxX + 2000), vb1);
+                    vz = AppendCStr(vf, vz, vb1, sizeof(vf));
+                    LogLine(vf);
+                }
+            }
+            /* 边缘位移已退役 (出界按原版裁剪消失, 不强制对齐):
+             * 位移恒零, 盒仍钳制贴合可见字。 */
+            g_TipShift = 0;
+            g_TipShiftN = 0;
+            if (0 && g_TipTot >= 50 && g_TipTot <= 400)
+            {
+                if (a4 < 4) g_TipShift = 4 - a4;
+                else if (a4 + g_TipTot + 4 >= 1752)
+                    g_TipShift = 1751 - (a4 + g_TipTot + 4);
+                if (g_TipShift != 0) g_TipShiftN = tl;
+            }
+        }
+        else
+        {
+            g_TipShift = 0;
+            g_TipShiftN = 0;
+        }
+    }
+    /* 出界: Print 收到的串 (m=6 若传子串, 即盒交集, 边界反推盒宽)。
+     * 每种模式记一次, 定案即删。 */
+    {
+        static int logged = 0;
+        int mode = g_MutModeLog;
+        const wchar_t* ps = (const wchar_t*)a3;
+        if (!(logged & (1 << mode)) && ps && IsPlausiblePtr((void*)ps) &&
+            (((unsigned)ps[0] & 0xFFFFu) == 0x7535u) &&
+            mode >= 0 && mode <= 6)
+        {
+            char b1[16], fbuf[96];
+            unsigned z = 0;
+            int nl = 0;
+            logged |= (1 << mode);
+            while (nl < 64 && ps[nl]) nl++;
+            z = AppendCStr(fbuf, z, "vstr: m=", sizeof(fbuf));
+            UtoA((unsigned)mode, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " n=", sizeof(fbuf));
+            UtoA((unsigned)nl, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " s0=", sizeof(fbuf));
+            z += HtoA((unsigned)ps[0] & 0xFFFFu, fbuf + z);
+            z = AppendCStr(fbuf, z, " s1=", sizeof(fbuf));
+            z += HtoA(nl >= 2 ? ((unsigned)ps[1] & 0xFFFFu) : 0,
+                      fbuf + z);
+            LogLine(fbuf);
+        }
+    }
+    /* 盒几何实测 ph=0 (Print 入口): 见 VecScanBox (老内联版已退役)。
+     * ph=3: 同扫 a2 surface 像素 (若画布与 surface 不是同一块内存,
+     * 盒可能画在 surface 上)。vbuf 对比两块地址。 */
+    {
+        static int n = 0;
+        const wchar_t* ps = (const wchar_t*)a3;
+        if (ps && IsPlausiblePtr((void*)ps) &&
+            (((unsigned)ps[0] & 0xFFFFu) == 0x7535u))
+        {
+            /* ph=0 (画布) 已证无效 (cbb=NULL), 退役省行数, 只扫 surface */
+            if (n < 4 && IsPlausiblePtr((void*)a2))
+            {
+                int* sd = (int*)a2;
+                char b1[16], fbuf[128];
+                unsigned z = 0;
+                unsigned short* cbb = NULL;
+                n++;
+                if (IsPlausiblePtr((void*)a1))
+                    cbb = *(unsigned short**)((char*)a1 + 0x0C);
+                z = AppendCStr(fbuf, z, "vbuf: cbb=", sizeof(fbuf));
+                z += HtoA((unsigned)cbb, fbuf + z);
+                z = AppendCStr(fbuf, z, " spx=", sizeof(fbuf));
+                z += HtoA((unsigned)sd[0], fbuf + z);
+                z = AppendCStr(fbuf, z, " pp=", sizeof(fbuf));
+                UtoA((unsigned)sd[1], b1);
+                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                z = AppendCStr(fbuf, z, " xy=", sizeof(fbuf));
+                UtoA((unsigned)a4, b1);
+                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                UtoA((unsigned)a5, b1);
+                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                LogLine(fbuf);
+                VecScanBoxBuf((unsigned short*)sd[0], sd[1], a4, a5, 3);
+            }
+        }
+    }
+    /* 盒几何实测 (定案即删): Print 入口时盒已画好字未画, 沿 y-2..y+24
+     * 找长红边 (>=40px 连续, 字墨形不成这么长的连笔), 定盒上下左右。
+     * 与帧轮转实验联动, 一次跑出基线 + 各候选的 ΔR。上限 12 行。 */
+    {
+        static int n = 0;
+        const wchar_t* ps = (const wchar_t*)a3;
+        if (0 && n < 12 && ps && IsPlausiblePtr((void*)ps) &&
+            (((unsigned)ps[0] & 0xFFFFu) == 0x7535u) &&
+            IsPlausiblePtr((void*)a1))
+        {
+            unsigned short* bb = *(unsigned short**)((char*)a1 + 0x0C);
+            int pp = *(int*)((char*)a1 + 0x10);
+            char b1[16], fbuf[128];
+            unsigned z = 0;
+            int yy, xx, top = 0, bot = 0, bL = 0, bR = 0;
+            n++;
+            if (bb && IsPlausiblePtr((void*)bb) &&
+                pp >= 64 && pp <= 4096)
+            {
+                for (yy = a5 - 2; yy <= a5 + 24; yy++)
+                {
+                    int runL = -1, runR = -1;
+                    if (yy < 0 || yy > 4096) continue;
+                    for (xx = a4 - 200; xx <= a4 + 400; xx++)
+                    {
+                        unsigned c;
+                        int isRed;
+                        if (xx < 0 || xx >= pp) continue;
+                        c = bb[yy * pp + xx];
+                        isRed = (((c >> 11) & 31) >= 24 &&
+                                 ((c >> 5) & 63) <= 12 &&
+                                 (c & 31) <= 12);
+                        if (isRed)
+                        {
+                            if (runL < 0) runL = xx;
+                            runR = xx;
+                        }
+                        else if (runL >= 0)
+                        {
+                            if (runR - runL + 1 >= 40 && !top)
+                            {
+                                top = yy; bot = yy;
+                                bL = runL; bR = runR;
+                            }
+                            else if (runR - runL + 1 >= 40)
+                                bot = yy;
+                            runL = -1;
+                        }
+                    }
+                    if (runL >= 0 && runR - runL + 1 >= 40)
+                    {
+                        if (!top) { top = yy; bL = runL; bR = runR; }
+                        else bot = yy;
+                    }
+                }
+            }
+            z = AppendCStr(fbuf, z, "vscan: m=", sizeof(fbuf));
+            UtoA((unsigned)g_MutModeLog, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " top=", sizeof(fbuf));
+            UtoA((unsigned)top, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " bot=", sizeof(fbuf));
+            UtoA((unsigned)bot, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " L=", sizeof(fbuf));
+            UtoA((unsigned)bL, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " R=", sizeof(fbuf));
+            UtoA((unsigned)bR, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            LogLine(fbuf);
+        }
+    }
+    /* 提示盒宽度来源探测 (只读日志, 上限 6 行): outer=0x4BAF63 电力提示行
+     * 的 Print 全参数 + 画布裁剪 LTRB + a2 解引用, 看盒宽是否经参数传递。 */
+    {
+        static int n = 0;
+        if (0 && caller == 0x004A5FF2u && n < 6 && InPipeline(caller) &&
+            VecFindOuter() == 0x004BAF63u)
+        {
+            char b1[16], fbuf[256];
+            unsigned z = 0;
+            int ci;
+            n++;
+            z = AppendCStr(fbuf, z, "vparg: a1=", sizeof(fbuf));
+            z += HtoA((unsigned)a1, fbuf + z);
+            z = AppendCStr(fbuf, z, " a2=", sizeof(fbuf));
+            z += HtoA((unsigned)a2, fbuf + z);
+            z = AppendCStr(fbuf, z, " x=", sizeof(fbuf));
+            UtoA((unsigned)a4, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " y=", sizeof(fbuf));
+            UtoA((unsigned)a5, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " a6=", sizeof(fbuf));
+            UtoA((unsigned)a6, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " a7=", sizeof(fbuf));
+            UtoA((unsigned)a7, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " clip=", sizeof(fbuf));
+            if (IsPlausiblePtr((void*)a1))
+            {
+                int* cp = (int*)((char*)a1 + 0x30);
+                for (ci = 0; ci < 4; ci++)
+                {
+                    if (ci) z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                    UtoA((unsigned)cp[ci], b1);
+                    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                }
+            }
+            else z = AppendCh(fbuf, z, 'X', sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " a2d=", sizeof(fbuf));
+            if (IsPlausiblePtr((void*)a2))
+            {
+                int* dp = (int*)a2;
+                for (ci = 0; ci < 4; ci++)
+                {
+                    if (ci) z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                    UtoA((unsigned)dp[ci], b1);
+                    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                }
+            }
+            else z = AppendCh(fbuf, z, 'X', sizeof(fbuf));
+            LogLine(fbuf);
+        }
+    }
+    /* 悬浮提示收串: CJK Print (超武带除外), 首层才收; 不认 outer */
+    if (g_ToolDepth == 0 &&
+        VecToolMatch(caller, (const wchar_t*)a3, a4, a5))
+    {
+        const wchar_t* ms = (const wchar_t*)a3;
+        int mn = 0;
+        while (mn < TOOL_MAXCH && ms[mn]) { g_ToolStr[mn] = ms[mn]; mn++; }
+        g_ToolStr[mn] = 0;
+        g_ToolN = mn;
+        g_ToolX = a4; g_ToolY = a5;
+        g_ToolIdx = 0; g_ToolBuilt = 0;
+        toolTake = 1;
+        g_ToolDepth++;
+    }
     /* 超武列表整体隐藏+收集: 右侧面板区 CJK/冒号串, 命中即收表并跳过
      * 原调用 (字+黑底一起消失); 门不全 (面板关/异面/形状不符) 走原版。 */
     if (a4 >= 1300 && a5 >= 32)
@@ -700,18 +1314,19 @@ int __fastcall VecPrintEntry(void* t, void* e,
             kind = 0;
         else if (VecSWColon(s))
             kind = 1;
-        VecSWProbe((void*)a2, kind, s, a4, a5, a1, a6, a7);
-        if (kind >= 0 && VecSWCapture((void*)a2, kind, s, a4, a5))
+        if (kind >= 0 && !VecSWHasEq(s) &&
+            VecSWCapture((void*)a2, kind, s, a4, a5))
             return 1;
     }
-    if (!g_OrigPrint) return 0;
+    if (!g_OrigPrint) { if (toolTake) g_ToolDepth--; return 0; }
     r = g_OrigPrint(t, NULL, a1, a2, a3, a4, a5, a6, a7);
+    if (toolTake) g_ToolDepth--;
     return r;
 }
 
 /* 文本槽判定: CJK 首字=0 (名), 前 8 字含冒号=1 (计时器), 否则 -1。
- * 调用方只传 EDX (文本槽实证; ECX 是调用方暂存, 首字偶落 CJK 区,
- * 碰它即误收; 栈槽整数如 flags=0x4618 也恰落 CJK 区, 碰不得)。 */
+ * 只认 EDX: ECX 是调用方暂存 (内容不定, 首字偶落 CJK 区);
+ * 栈槽整数 (如 flags=0x4618) 也恰落 CJK 区, 碰不得。 */
 static int VecSWTextKind(int slot, const wchar_t** out)
 {
     const wchar_t* s;
@@ -731,87 +1346,165 @@ static int VecSWTextKind(int slot, const wchar_t** out)
     return -1;
 }
 
-/* Simple_ 双槽取证 (vswx): 文本只认 EDX (ECX 是调用方暂存, 内容不定,
- * 新存档实证其首字恰落 CJK 区造成误收)。e=/c= 各记前 4 字, 命中脱靶都记。
- * 内容键去重, 上限 60。 */
-static int g_SWsN = 0;
-static unsigned g_SWsK[60], g_SWsC0[60], g_SWsNN[60];
-
-static void VecSWxLog(int kind, int inband, unsigned c0, int n, int sx, int sy,
-                      int fore, int ecxIn, int edxIn, int* v9)
-{
-    char buf[384];
-    unsigned p, key, eh[4] = { 0, 0, 0, 0 }, ch[4] = { 0, 0, 0, 0 };
-    int i, j;
-    if (g_SWsN >= 60) return;
-    key = ((unsigned)(kind + 2) << 24) ^ ((unsigned)inband << 23);
-    for (i = 0; i < g_SWsN; i++)
-        if (g_SWsK[i] == key && g_SWsC0[i] == c0 && g_SWsNN[i] == (unsigned)n)
-            return;
-    g_SWsK[g_SWsN] = key; g_SWsC0[g_SWsN] = c0; g_SWsNN[g_SWsN] = (unsigned)n;
-    g_SWsN++;
-    if (IsPlausiblePtr((void*)edxIn))
-    {
-        const wchar_t* s = (const wchar_t*)edxIn;
-        for (j = 0; j < 4; j++) eh[j] = (unsigned)s[j] & 0xFFFFu;
-    }
-    if (IsPlausiblePtr((void*)ecxIn))
-    {
-        const wchar_t* s = (const wchar_t*)ecxIn;
-        for (j = 0; j < 4; j++) ch[j] = (unsigned)s[j] & 0xFFFFu;
-    }
-    p = 0;
-    p = AppendCStr(buf, p, "vswx: ", sizeof(buf));
-    p = AppendCh(buf, p, kind == 0 ? 'N' : kind == 1 ? 'T' : kind == 2 ? 'E' : '?',
-                 sizeof(buf));
-    p = AppendCStr(buf, p, inband ? " in" : " out", sizeof(buf));
-    p = AppendCStr(buf, p, " xy=", sizeof(buf));
-    {
-        int v = sx < 0 ? -sx : sx;
-        if (sx < 0) p = AppendCh(buf, p, '-', sizeof(buf));
-        p += UtoA((unsigned)v, buf + p);
-    }
-    p = AppendCh(buf, p, ',', sizeof(buf));
-    {
-        int v = sy < 0 ? -sy : sy;
-        if (sy < 0) p = AppendCh(buf, p, '-', sizeof(buf));
-        p += UtoA((unsigned)v, buf + p);
-    }
-    p = AppendCStr(buf, p, " fore=", sizeof(buf));
-    p += HtoA((unsigned)fore, buf + p);
-    p = AppendCStr(buf, p, " e=", sizeof(buf));
-    for (j = 0; j < 4; j++)
-    {
-        char h[16];
-        HtoA(eh[j], h);
-        p = AppendCStr(buf, p, h + 2, sizeof(buf));
-        p = AppendCh(buf, p, (j == 3) ? ' ' : ',', sizeof(buf));
-    }
-    p = AppendCStr(buf, p, "c=", sizeof(buf));
-    for (j = 0; j < 4; j++)
-    {
-        char h[16];
-        HtoA(ch[j], h);
-        p = AppendCStr(buf, p, h + 2, sizeof(buf));
-        p = AppendCh(buf, p, (j == 3) ? ' ' : ',', sizeof(buf));
-    }
-    p = AppendCStr(buf, p, "n=", sizeof(buf));
-    p += UtoA((unsigned)n, buf + p);
-    p = AppendCStr(buf, p, " v=", sizeof(buf));
-    for (i = 0; i < 9; i++)
-    {
-        p += HtoA((unsigned)v9[i], buf + p);
-        p = AppendCh(buf, p, (i == 8) ? ' ' : ',', sizeof(buf));
-    }
-    LogLine(buf);
-}
-
 /* Simple_ 入口: 命中 (主画布 + 落列表带 + 名/计时器) 即收表并跳过
  * (底+字同死); 空串只收表不跳过; 其余原样转发 (ECX/EDX 原值进跳板)。 */
 int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
     int a1, int a2, int a3, int a4, int a5, int a6, int a7)
 {
     if (!g_OrigSimple) return 0;
+    /* 提示盒跟字走 (电力提示出界修复): Simple_Wide 的盒 R 参数 a6
+     * (盒右界=a6+2, 反汇编双盒路径同源) 取自上游旧字宽; 用 GetDim 缓存的
+     * nw-ow 加宽后转发, 盒由引擎自画 (半透明+红边框原样, 一像素不碰)。
+     * 三重门: 电力串 + 调用签名 (a4/a5/a7) + x 自校验 (a6≈x+ow-2)。
+     * 首帧无缓存静默跳过 (视觉无差)。 */
+    {
+        static int n = 0;
+        static int nq = 0;
+        const wchar_t* ts = (const wchar_t*)edxIn;
+        /* 结构探测 (定案即删): a2/a3 解引用, 盒几何定位。
+         * SW 已证 p2[0]+p3[0]=落笔x; 看 R/B 藏在哪个槽。上限 6 行。 */
+        if (nq < 6 && ts && IsPlausiblePtr((void*)ts) &&
+            (((unsigned)ts[0] & 0xFFFFu) == 0x7535u))
+        {
+            char b1[16], fbuf[288];
+            unsigned z = 0;
+            int ci;
+            nq++;
+            z = AppendCStr(fbuf, z, "vss: p2=", sizeof(fbuf));
+            if (IsPlausiblePtr((void*)a2))
+            {
+                int* p2 = (int*)a2;
+                for (ci = 0; ci < 4; ci++)
+                {
+                    if (ci) z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                    UtoA((unsigned)p2[ci], b1);
+                    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                }
+            }
+            else z = AppendCh(fbuf, z, 'X', sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " p3=", sizeof(fbuf));
+            if (IsPlausiblePtr((void*)a3))
+            {
+                int* p3 = (int*)a3;
+                for (ci = 0; ci < 4; ci++)
+                {
+                    if (ci) z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                    UtoA((unsigned)p3[ci], b1);
+                    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                }
+            }
+            else z = AppendCh(fbuf, z, 'X', sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " a6=", sizeof(fbuf));
+            UtoA((unsigned)a6, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " tipx=", sizeof(fbuf));
+            UtoA((unsigned)(g_LastTipX + 1), b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " vr=", sizeof(fbuf));
+            z += HtoA(VecFindDirect(), fbuf + z);
+            z = AppendCStr(fbuf, z, " pp=", sizeof(fbuf));
+            {
+                int* p33 = NULL;
+                int q = 0;
+                if (IsPlausiblePtr((void*)a3))
+                    q = ((int*)a3)[3];
+                if (q && IsPlausiblePtr((void*)q)) p33 = (int*)q;
+                if (p33)
+                {
+                    for (ci = 0; ci < 4; ci++)
+                    {
+                        int q2 = p33[ci];
+                        if (ci) z = AppendCh(fbuf, z, ',',
+                                            sizeof(fbuf));
+                        UtoA((unsigned)q2, b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        z = AppendCh(fbuf, z, ':', sizeof(fbuf));
+                        if (q2 && IsPlausiblePtr((void*)q2))
+                            z += HtoA((unsigned)(*(wchar_t*)q2) &
+                                      0xFFFFu, fbuf + z);
+                        else
+                            z = AppendCh(fbuf, z, 'X', sizeof(fbuf));
+                    }
+                }
+                else z = AppendCh(fbuf, z, 'X', sizeof(fbuf));
+            }
+            LogLine(fbuf);
+        }
+        if (ts && IsPlausiblePtr((void*)ts) &&
+            (((unsigned)ts[0] & 0xFFFFu) == 0x7535u) &&
+            a4 == 0xA92Au && a5 == 0 && a7 == 1 &&
+            g_LastTipX >= 0)
+        {
+            /* 出界实验 (BoxProbe ini): 帧轮转, 只改本调用栈值。
+             * eff: 0=基线, 5=a4 去 0x8000 位, 6=a7 置 0。
+             * BoxProbe=3 时按 {0,5,6} 轮转, vscan 实测每帧盒矩形。 */
+            int mode = g_VT.BoxProbe;
+            int eff = mode;
+            int seqs[3] = {0, 5, 6};
+            if (mode == 3) eff = seqs[(g_MutFrame++) % 3];
+            g_MutModeLog = eff;
+            /* eff: 0=基线, 5=a4 去 0x8000 位 (若 a4 兼标志, 盒位即落),
+             * 6=a7 置 0 (若 a7 是盒开关, 边框即灭)。
+             * a4/a7 皆小整数值, 非指针, 只改本调用, 无崩溃风险。 */
+            if (eff == 5)
+            {
+                a4 &= ~0x8000;
+                if (n < 6)
+                {
+                    char fbuf[64];
+                    unsigned z = 0;
+                    n++;
+                    z = AppendCStr(fbuf, z, "vmut: a4&~80",
+                                   sizeof(fbuf));
+                    LogLine(fbuf);
+                }
+            }
+            else if (eff == 6)
+            {
+                a7 = 0;
+                if (n < 6)
+                {
+                    char fbuf[64];
+                    unsigned z = 0;
+                    n++;
+                    z = AppendCStr(fbuf, z, "vmut: a7=0",
+                                   sizeof(fbuf));
+                    LogLine(fbuf);
+                }
+            }
+        }
+    }
+    /* 入口盒预检 (定案即删): Simple 运行前画布上已有盒 => 上游预画。
+     * 鼠标不动时是上一帧残留 (fresh=0, 无判决力); 刚悬停的新位置
+     * (fresh=1) 才定 Mis 时机: 有盒=上游画, 无盒=Simple 内或更晚画。
+     * ph=2, 上限 4 组。 */
+    {
+        static int n = 0;
+        static int lx = -9999, ly = -9999;
+        const wchar_t* ts0 = (const wchar_t*)edxIn;
+        if (n < 4 && ts0 && IsPlausiblePtr((void*)ts0) &&
+            (((unsigned)ts0[0] & 0xFFFFu) == 0x7535u) &&
+            IsPlausiblePtr((void*)a3))
+        {
+            int* p30 = (int*)a3;
+            int fresh = (p30[0] != lx || p30[1] != ly);
+            char b1[16], fbuf[64];
+            unsigned z = 0;
+            n++;
+            lx = p30[0]; ly = p30[1];
+            /* 入口扫 surface 真内存 (画布未锁定, ph=0/1/2 的 a1 扫描无效) */
+            if (IsPlausiblePtr((void*)a1))
+            {
+                int* sd0 = (int*)a1;
+                VecScanBoxBuf((unsigned short*)sd0[0], sd0[1],
+                              p30[0], p30[1], 5);
+            }
+            z = AppendCStr(fbuf, z, "vfresh: f=", sizeof(fbuf));
+            UtoA((unsigned)(fresh ? 1 : 0), b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            LogLine(fbuf);
+        }
+    }
     if (g_SWPanelOn && g_SWCompW && IsPlausiblePtr((void*)a1))
     {
         int* b = (int*)a1;
@@ -822,22 +1515,12 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
             int* p3 = (int*)a3;
             const wchar_t* text = NULL;
             int kind = VecSWTextKind(edxIn, &text);   /* 文本只认 EDX */
-            int n = 0, sx, sy, v9[9];
-            unsigned c0 = 0;
+            int n = 0, sx, sy;
             int inband;
             sx = p2[0] + p3[0]; sy = p2[1] + p3[1];
             inband = (sx >= 1300 && sx <= 1752 && sy >= 32 && sy <= 1080);
-            if (text)
-            {
-                c0 = (unsigned)text[0] & 0xFFFFu;
-                while (text[n] && n < 64) n++;
-            }
-            v9[0] = ecxIn; v9[1] = edxIn;
-            v9[2] = a1; v9[3] = a2; v9[4] = a3; v9[5] = a4;
-            v9[6] = a5; v9[7] = a6; v9[8] = a7;
-            VecSWxLog(text ? (n > 0 ? kind : 2) : -1, inband, c0, n, sx, sy,
-                      a4, ecxIn, edxIn, v9);
-            if (text && inband)
+            if (text) { while (text[n] && n < 64) n++; }
+            if (text && inband && !VecSWHasEq(text))
             {
                 VecSWStore(kind, text, n, a4, sx, sy, 0);
                 if (n > 0)
@@ -852,7 +1535,31 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
             }
         }
     }
-    return g_OrigSimple(ecxIn, edxIn, a1, a2, a3, a4, a5, a6, a7);
+    {
+        int r;
+        if (g_MutP3) g_MutP3[2] = g_MutVal;   /* 出界实验值 */
+        r = g_OrigSimple(ecxIn, edxIn, a1, a2, a3, a4, a5, a6, a7);
+        if (g_MutP3) { g_MutP3[2] = g_MutSaved; g_MutP3 = NULL; }   /* 恢复 */
+        {
+            /* ph=1: Simple 全画完后实测 (与 ph=0 对照定边框绘制时机) */
+            const wchar_t* ts2 = (const wchar_t*)edxIn;
+            if (ts2 && IsPlausiblePtr((void*)ts2) &&
+                (((unsigned)ts2[0] & 0xFFFFu) == 0x7535u) &&
+                IsPlausiblePtr((void*)a3))
+            {
+                int* p3 = (int*)a3;
+                /* ph=1 (画布壳) 已证无效 (Simple 上下文 a1 是 surface,
+                 * 按画布解读全是零), 退役。只扫 surface 真内存。 */
+                if (IsPlausiblePtr((void*)a1))
+                {
+                    int* sd1 = (int*)a1;
+                    VecScanBoxBuf((unsigned short*)sd1[0], sd1[1],
+                                  p3[0], p3[1], 4);
+                }
+            }
+        }
+        return r;
+    }
 }
 
 /* ---------------- 探针记录 ---------------- */
@@ -872,14 +1579,173 @@ typedef struct {
 static ProbeEnt g_Probe[PROBE_MASK + 1];
 static int g_ProbeLogs = 0;
 
-/* 引擎单字度量: 成功返回宽, 高进 *ph; 失败返回 -1 */
+/* GetTextDimension 宽度接管: 引擎所有算字宽处 (盒子/居中/步进/换行)
+ * 全走这里, 一处替换处处生效。只动单行适配宽度, 高度与换行逻辑原样:
+ * 先走原版取 h (与原版同口径), w 用 GDI 自然步进和
+ * (与绘制笔位同口径: ABC 全宽 + 数字 DigitTrack)。
+ * 控制串 (\t \n 等)、超长 (>255 字)、触 maxW (换行逻辑) 一律走原版。
+ * 重入守卫: 嵌套调用直接走原版 (防栈爆)。未开 Render 不接管。 */
+static int g_GDDepth = 0;
+/* 临时计数 (定案即删): 钩子改了谁的宽 */
+static int g_DimLogs = 0;
+
+/* GetDim 决策记录 (定案即删): 电力串每次度量的 maxW/原宽/替换与否。
+ * 若上游用小 maxW 调 GetDim (ow>=maxW 走原版 fwd), 盒宽即从此漏出。
+ * 上限 8 行。 */
+static int g_Dim2N = 0;
+static void VecDim2Log(const wchar_t* s, int maxW, int ow, int rep)
+{
+    char b1[16], fbuf[128];
+    unsigned z = 0;
+    if (g_Dim2N >= 8) return;
+    if (!s || !IsPlausiblePtr((void*)s)) return;
+    g_Dim2N++;
+    z = AppendCStr(fbuf, z, "vdim2: maxW=", sizeof(fbuf));
+    UtoA((unsigned)maxW, b1);
+    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+    z = AppendCStr(fbuf, z, " ow=", sizeof(fbuf));
+    UtoA((unsigned)ow, b1);
+    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+    z = AppendCStr(fbuf, z, " rep=", sizeof(fbuf));
+    UtoA((unsigned)rep, b1);
+    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+    z = AppendCStr(fbuf, z, " s=", sizeof(fbuf));
+    z += HtoA((unsigned)s[0] & 0xFFFFu, fbuf + z);
+    LogLine(fbuf);
+}
+
+int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
+                              int* w, int* h, int maxW)
+{
+    int ow = 0, oh = 0, r;
+    int px, i, tot;
+    (void)e;
+    if (!g_OrigGetDim) return 0;
+    if (g_GDDepth > 0 || !g_VT.Render)
+        return g_OrigGetDim(t, e, s, w, h, maxW);
+    if (!t || !IsPlausiblePtr(t) || !s || !IsPlausiblePtr((void*)s) ||
+        !w || !h || maxW <= 0)
+        return g_OrigGetDim(t, e, s, w, h, maxW);
+    g_GDDepth++;
+    r = g_OrigGetDim(t, e, s, &ow, &oh, maxW);
+    if (!r || ow >= maxW) goto fwd;   /* 失败/触顶: 原样 */
+    px = VecPickPx(t);
+    if (px < 8 || px > 40 || !GdiEnsure(px, g_VT.Bold, 2, g_VTFace))
+        goto fwd;
+    tot = 0;
+    for (i = 0; i < 256; i++)
+    {
+        wchar_t wc = s[i];
+        ABC abc;
+        int ga;
+        if (!wc) break;
+        if (wc < 0x20) goto fwd;   /* 控制串: 原样 */
+        if (!g_G || !g_G->dc ||
+            !GetCharABCWidthsW(g_G->dc, wc, wc, &abc)) goto fwd;
+        ga = abc.abcA + abc.abcB + abc.abcC;
+        if (wc >= 0x30 && wc <= 0x39) ga += g_VT.DigitTrack;
+        if (ga < 0) ga = 0;
+        tot += ga;
+        if (tot >= maxW) goto fwd;   /* 触顶 (换行逻辑): 原样 */
+    }
+    if (i >= 256) goto fwd;   /* 超长未见尾: 原样 */
+    *w = tot; *h = oh;
+    g_LastDimPtr = s; g_LastDimW0 = (unsigned)s[0] & 0xFFFFu;
+    g_LastDimOw = ow; g_LastDimNw = tot;
+    /* 字体解剖 (定案即删): 电力串上下文的字体对象字段 + 候选表探测。
+     * 找内联求和读的那张表 (WORD[字] / BYTE[字]), 下版按 GDI 步进对齐。 */
+    {
+        static int n = 0;
+        if (n < 2 && ((unsigned)s[0] & 0xFFFFu) == 0x7535u &&
+            t && IsPlausiblePtr(t))
+        {
+            char b1[16], fbuf[256];
+            unsigned z = 0;
+            int fi;
+            int* fo = (int*)t;
+            n++;
+            z = AppendCStr(fbuf, z, "vfont: t=", sizeof(fbuf));
+            z += HtoA((unsigned)t, fbuf + z);
+            z = AppendCStr(fbuf, z, " o=", sizeof(fbuf));
+            for (fi = 0; fi < 12; fi++)
+            {
+                if (fi) z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                UtoA((unsigned)fo[fi], b1);
+                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            }
+            LogLine(fbuf);
+            z = 0;
+            z = AppendCStr(fbuf, z, "vftab:", sizeof(fbuf));
+            for (fi = 0; fi < 12; fi++)
+            {
+                int v = fo[fi];
+                if (v && IsPlausiblePtr((void*)v) && (v & 3) == 0)
+                {
+                    unsigned short* tw = (unsigned short*)v;
+                    unsigned char* tb = (unsigned char*)v;
+                    z = AppendCStr(fbuf, z, " [", sizeof(fbuf));
+                    UtoA((unsigned)fi, b1);
+                    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                    z = AppendCh(fbuf, z, ']', sizeof(fbuf));
+                    z += HtoA(v, fbuf + z);
+                    z = AppendCStr(fbuf, z, " w=", sizeof(fbuf));
+                    UtoA((unsigned)tw[0x7535], b1);
+                    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                    z = AppendCStr(fbuf, z, " b=", sizeof(fbuf));
+                    UtoA((unsigned)tb[0x7535], b1);
+                    z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                }
+            }
+            LogLine(fbuf);
+        }
+    }
+    {
+        DimCE* e = &g_DimC[g_DimCPos % DIMCACHE_N];
+        g_DimCPos++;
+        e->ptr = s; e->w0 = (unsigned)s[0] & 0xFFFFu;
+        e->n = i; e->ow = ow; e->nw = tot;
+    }
+    if (((unsigned)s[0] & 0xFFFFu) == 0x7535u)
+        VecDim2Log(s, maxW, ow, 1);
+    if (g_DimLogs < 60 && i >= 10)
+    {
+        char b1[16], dbuf[160];
+        unsigned q = 0;
+        g_DimLogs++;
+        q = AppendCStr(dbuf, q, "vdim: px=", sizeof(dbuf));
+        UtoA((unsigned)px, b1); q = AppendCStr(dbuf, q, b1, sizeof(dbuf));
+        q = AppendCStr(dbuf, q, " ow=", sizeof(dbuf));
+        UtoA((unsigned)ow, b1); q = AppendCStr(dbuf, q, b1, sizeof(dbuf));
+        q = AppendCStr(dbuf, q, " nw=", sizeof(dbuf));
+        UtoA((unsigned)tot, b1); q = AppendCStr(dbuf, q, b1, sizeof(dbuf));
+        q = AppendCStr(dbuf, q, " n=", sizeof(dbuf));
+        UtoA((unsigned)i, b1); q = AppendCStr(dbuf, q, b1, sizeof(dbuf));
+        q = AppendCStr(dbuf, q, " s=", sizeof(dbuf));
+        q += HtoA((unsigned)s[0] & 0xFFFFu, dbuf + q);
+        q = AppendCh(dbuf, q, ',', sizeof(dbuf));
+        q += HtoA((unsigned)s[1] & 0xFFFFu, dbuf + q);
+        LogLine(dbuf);
+    }
+    g_GDDepth--;
+    return r;
+fwd:
+    if (s && IsPlausiblePtr((void*)s) &&
+        (((unsigned)s[0] & 0xFFFFu) == 0x7535u))
+        VecDim2Log(s, maxW, ow, 0);
+    if (r) { *w = ow; *h = oh; }
+    g_GDDepth--;
+    return r;
+}
+
+/* 引擎单字度量: 成功返回宽, 高进 *ph; 失败返回 -1。
+ * 走原版 (笔位基准不动; 布局修正由 GetDim 钩做)。 */
 static int VecMeasure(void* t, wchar_t wch, int* ph)
 {
     wchar_t s[2];
     int w = 0, h = 0;
-    if (!t || !IsPlausiblePtr(t) || !g_GetDim) return -1;
+    if (!t || !IsPlausiblePtr(t) || !g_OrigGetDim) return -1;
     s[0] = wch; s[1] = 0;
-    if (!g_GetDim(t, NULL, s, &w, &h, 10000)) return -1;
+    if (!g_OrigGetDim(t, NULL, s, &w, &h, 10000)) return -1;
     if (w <= 0 || w > 64 || h <= 0 || h > 64) return -1;
     if (ph) *ph = h;
     return w;
@@ -937,6 +1803,9 @@ typedef struct {
     int adv;
     int h;
     int outh;         /* 自然输出高度 (基准窗全高, 1:1, 不压缩) */
+    int fullW;        /* 墨水右缘 (off+inkW): 数字按实际宽度回笔用 */
+    int gdiW;         /* GDI 自然步进 (ABC 全宽, 含边距): 字间距用它才有缝 */
+    int off, inkW;    /* 墨水在格内的摆位与宽度: 填充只包墨水用 */
     unsigned char cov[VC_MAXW * VC_MAXH];
 } VCEnt;
 
@@ -1160,33 +2029,12 @@ static int VecPickPx(void* t)
     return VecPxCalibrate(t);
 }
 
-/* 横向超宽记录 (诊断用, 上限 20): 哪个字被裁边/重采样一目了然。
- * m=0 对称裁边 (≤4px), m=1 重采样 (>4px)。 */
-static int g_SqzLogs = 0;
-
-static void VecSqueezeLog(wchar_t wch, int adv, int inkW, int m)
-{
-    char b1[16], buf[96];
-    unsigned p = 0;
-    if (g_SqzLogs >= 20) return;
-    g_SqzLogs++;
-    p = AppendCStr(buf, p, "vsqz: wch=", sizeof(buf));
-    p += HtoA((unsigned)wch & 0xFFFFu, buf + p);
-    p = AppendCStr(buf, p, " adv=", sizeof(buf));
-    UtoA((unsigned)adv, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " inkW=", sizeof(buf));
-    UtoA((unsigned)inkW, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " m=", sizeof(buf));
-    UtoA((unsigned)m, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    LogLine(buf);
-}
-
 static VCEnt* VecGlyph(void* t, wchar_t wch, int adv, int h, int px)
 {
     unsigned idx = ((unsigned)wch) & VC_MASK;
     VCEnt* e = &g_VC[idx];
     void* idata = *(void**)((char*)t + 4);
-    int gw, dx, y, L, R, inkW, x;
+    int gw, dx, y, L, R, inkW, x, off, gdiW;
     /* 字形四周边距: GDI 墨水会超出 extent (左右 overhang), 顶边画必被裁。
      * 垂直用基准窗 1:1 映射 (见 VecRefCalibrate), 基线全字体一致,
      * 自然高度, 不压缩。 */
@@ -1223,70 +2071,55 @@ static VCEnt* VecGlyph(void* t, wchar_t wch, int adv, int h, int px)
         for (x = 0; x < scanW; x++)
             if (row[x * 4 + 2]) { if (x < L) L = x; if (x > R) R = x; }
     }
+    /* 摆位 (与行无关, 算一次): 满格 (CJK/数字) 左对齐, 与原版起笔一致;
+     * 窄字形 (标点等, 墨水不足格宽 2/3) 按 GDI 自然边距摆,
+     * 格子比 GDI 步进宽出的部分左右均分 (如":"不再贴边)。
+     * 全墨水不压缩: 紧墨水盒原样端上, 溢出格子由面界收尾
+     * (与 GDI 自然 overhang 一致)。任何挤压 (裁边/重采样/
+     * 滤波) 都会窄化或切掉笔画, 已全部删除。
+     * gdiW = GDI 自然步进 (ABC 全宽, 含边距): 字间距走它才有缝。 */
+    inkW = (R >= L) ? R - L + 1 : 0;
+    off = 0;
+    gdiW = 0;
+    if (g_G && g_G->dc)
+    {
+        ABC abc;
+        if (GetCharABCWidthsW(g_G->dc, wch, wch, &abc))
+        {
+            gdiW = abc.abcA + abc.abcB + abc.abcC;
+            if (inkW > 0 && inkW * 3 <= adv * 2)
+            {
+                off = abc.abcA + (adv - gdiW) / 2;
+                if (off < 0) off = 0;
+                if (off > adv - 1) off = adv - 1;
+            }
+        }
+    }
+    if (off + inkW > VC_MAXW) return NULL;   /* 巨墨水不接, 走原版 */
     for (y = 0; y < outH; y++)
     {
         unsigned char* row = bits + (winTop + y) * pitch;
         unsigned char* dst = e->cov + y * VC_MAXW;
-        for (dx = 0; dx < adv; dx++) dst[dx] = 0;
-        if (R < L) continue;   /* 空白字 (空格): 占宽, 不画 */
-        inkW = R - L + 1;
-        {
-            /* 摆位: 满格 (CJK/数字) 左对齐, 与原版起笔一致;
-             * 窄字形 (标点等, 墨水不足格宽 2/3) 按 GDI 自然边距摆,
-             * 格子比 GDI 步进宽出的部分左右均分 (如":"不再贴边)。
-             * 超宽才水平挤, 起点为摆位偏移。 */
-            int off = 0, avail;
-            if (inkW * 3 <= adv * 2 && g_G && g_G->dc)
-            {
-                ABC abc;
-                if (GetCharABCWidthsW(g_G->dc, wch, wch, &abc))
-                {
-                    int gdiAdv = abc.abcA + abc.abcB + abc.abcC;
-                    off = abc.abcA + (adv - gdiAdv) / 2;
-                    if (off < 0) off = 0;
-                    if (off > adv - 1) off = adv - 1;
-                }
-            }
-            avail = adv - off;
-            if (avail < 1) avail = 1;
-            if (inkW <= avail)
-            {
-                int n = inkW < avail ? inkW : avail;
-                for (dx = 0; dx < n; dx++) dst[off + dx] = row[(L + dx) * 4 + 2];
-            }
-            else if (inkW - avail <= 4)
-            {
-                /* 轻微超宽 (≤4px): 对称裁边距, 不重采样。
-                 * 重采样会吃掉笔画间空白 ("空白被切掉"感);
-                 * 边距本来就是富余的, 切 1~2px 两边看不出。 */
-                int dropL = (inkW - avail) / 2;
-                int dx2;
-                for (dx2 = 0; dx2 < avail; dx2++)
-                    dst[off + dx2] = row[(L + dropL + dx2) * 4 + 2];
-                VecSqueezeLog(wch, adv, inkW, 0);
-            }
-            else
-            {
-                for (dx = 0; dx < avail; dx++)
-                {
-                    int sx = L + (dx * inkW) / avail;
-                    dst[off + dx] = row[sx * 4 + 2];
-                }
-                VecSqueezeLog(wch, adv, inkW, 1);
-            }
-        }
+        for (dx = 0; dx < VC_MAXW; dx++) dst[dx] = 0;
+        if (!inkW) continue;   /* 空白字 (空格): 占宽, 不画 */
+        for (dx = 0; dx < inkW; dx++)
+            dst[off + dx] = row[(L + dx) * 4 + 2];
     }
     e->used = 1; e->wch = wch; e->idata = idata; e->px = px; e->adv = adv; e->h = h;
     e->outh = outH;
+    e->fullW = off + inkW;
+    e->gdiW = gdiW;
+    e->off = off; e->inkW = inkW;
     return e;
 }
 
-/* 矢量替换: 成功返回 X+adv (与原版返回值口径一致), 失败返回 -1 走原版 */
+/* 矢量替换: 成功返回 X+实际笔位 (数字按 GDI 自然步进, 其它按原版 adv),
+ * 与原版返回值口径一致 (调用方用它链下一笔), 失败返回 -1 走原版 */
 static int VecRender(void* t, wchar_t wch, int adv, int h, int x, int y,
                      int colorW, int px, int yOff)
 {
     unsigned short* buf;
-    int pitchW, L, Tp, R, B, dx, dy;
+    int pitchW, Tp, B, dx, dy;
     unsigned char fr, fg, fb;
     VCEnt* e;
     if (!t || !IsPlausiblePtr(t)) return -1;
@@ -1295,14 +2128,10 @@ static int VecRender(void* t, wchar_t wch, int adv, int h, int x, int y,
     pitchW = *(int*)((char*)t + 0x10);
     if (!buf || !IsPlausiblePtr(buf)) return -1;
     if (pitchW < 64 || pitchW > 4096) return -1;
-    L = *(int*)((char*)t + 0x30);
     Tp = *(int*)((char*)t + 0x34);
-    R = *(int*)((char*)t + 0x38);
     B = *(int*)((char*)t + 0x3C);
-    if (R < L || B < Tp) return -1;
-    if (L < 0) L = 0;
+    if (B < Tp) return -1;
     if (Tp < 0) Tp = 0;
-    if (R > 4096) R = 4096;
     if (B > 4096) B = 4096;
     Calibrate();
     e = VecGlyph(t, wch, adv, h, px);
@@ -1335,13 +2164,179 @@ static int VecRender(void* t, wchar_t wch, int adv, int h, int x, int y,
         if (sy < Tp || sy > B) continue;
         row = buf + sy * pitchW;
         cov = e->cov + y * VC_MAXW;
-        for (dx = 0; dx < adv; dx++)
+        /* 横向只认面界 (0..pitchW), 不认引擎裁剪: 全墨水溢出格子是
+         * 正常的 GDI overhang, 切掉才是 bug。 */
+        for (dx = 0; dx < VC_MAXW; dx++)
         {
             int sx = x + dx;
             unsigned a;
-            if (sx < L || sx > R) continue;
+            if (sx < 0 || sx >= pitchW) continue;
             if (!cov[dx]) continue;
             a = cov[dx];   /* 灰度即 alpha, 全浓度 */
+            row[sx] = Blend16(row[sx], fr, fg, fb, a);
+        }
+    }
+    /* 步进: GDI 自然步进优先 (含边距, 字间自带缝), 只加宽不收窄。
+     * 简报正文盒内 (引擎按自有宽度换行, 加宽会撑出盒子) 保持原笔位,
+     * 数字除外 (正文里极少, 顶栏/计时器数字必须散开)。
+     * 数字另吃 DigitTrack 微调 (负=收紧)。 */
+    {
+        int digit = (wch >= 0x30 && wch <= 0x39);
+        int st = (e->gdiW > 0) ? e->gdiW + (digit ? g_VT.DigitTrack : 0)
+                               : e->fullW;
+        if (st > adv && (digit || !g_DTBody)) return x + st;
+    }
+    return x + adv;
+}
+
+/* 菜单字形缓存: 全墨水不挤压, 键 (wch,idata,px,adv,h), 存 off/inkW。
+ * 巨墨水 (off+inkW > 32) 不接, 返回 NULL 走原版 (保底可读)。 */
+#define MV_MASK 127
+typedef struct {
+    int used;
+    wchar_t wch;
+    void* idata;
+    int px, adv, h;
+    int off, inkW, outh;
+    int gdiW;         /* GDI 自然步进 (ABC 全宽, 含边距): 菜单字间距用它 */
+    unsigned char cov[VC_MAXW * VC_MAXH];
+} MVEnt;
+static MVEnt g_MV[MV_MASK + 1];
+
+static MVEnt* VecMenuGlyph(void* t, wchar_t wch, int adv, int h, int px)
+{
+    unsigned idx = ((unsigned)wch) & MV_MASK;
+    MVEnt* e = &g_MV[idx];
+    void* idata = *(void**)((char*)t + 4);
+    int gw, dx, y, L, R, inkW, x, off, gdiW;
+    int scanW;
+    unsigned char* bits;
+    int pitch;
+    int winTop, outH;
+    if (!t || !IsPlausiblePtr(t)) return NULL;
+    if (px < 8 || px > 40) return NULL;
+    if (e->used && e->wch == wch && e->idata == idata && e->px == px &&
+        e->adv == adv && e->h == h)
+        return e;
+    if (!GdiEnsure(px, g_VT.Bold, 2, g_VTFace)) return NULL;
+    VecRefCalibrate(px);
+    gw = GtRenderGlyphAt(wch, GL_M, GL_Y0, NULL);
+    if (gw <= 0 || h > VC_MAXH) return NULL;
+    bits = g_G->bits;
+    pitch = g_G->pitch;
+    scanW = GL_M + gw + GL_M;
+    if (scanW > DIB_W) scanW = DIB_W;
+    winTop = g_RefT;
+    outH = g_RefB - g_RefT + 1;
+    if (outH < 1) outH = h;
+    if (outH > VC_MAXH) return NULL;
+    if (winTop < 0 || winTop + outH > DIB_H) return NULL;
+    /* 紧墨水盒 (只定左右, 全要, 不裁) */
+    L = scanW; R = -1;
+    for (y = 0; y < outH; y++)
+    {
+        unsigned char* row = bits + (winTop + y) * pitch;
+        for (x = 0; x < scanW; x++)
+            if (row[x * 4 + 2]) { if (x < L) L = x; if (x > R) R = x; }
+    }
+    inkW = (R >= L) ? R - L + 1 : 0;
+    off = 0;
+    gdiW = 0;
+    if (g_G && g_G->dc)
+    {
+        ABC abc;
+        if (GetCharABCWidthsW(g_G->dc, wch, wch, &abc))
+        {
+            gdiW = abc.abcA + abc.abcB + abc.abcC;
+            if (inkW > 0 && inkW * 3 <= adv * 2)
+            {
+                off = abc.abcA + (adv - gdiW) / 2;
+                if (off < 0) off = 0;
+                if (off > adv - 1) off = adv - 1;
+            }
+        }
+    }
+    if (off + inkW > VC_MAXW) return NULL;
+    for (y = 0; y < outH; y++)
+    {
+        unsigned char* row = bits + (winTop + y) * pitch;
+        unsigned char* dst = e->cov + y * VC_MAXW;
+        for (dx = 0; dx < VC_MAXW; dx++) dst[dx] = 0;
+        if (!inkW) continue;   /* 空白字: 占宽, 不画 */
+        for (dx = 0; dx < inkW; dx++)
+            dst[off + dx] = row[(L + dx) * 4 + 2];
+    }
+    e->used = 1; e->wch = wch; e->idata = idata; e->px = px; e->adv = adv;
+    e->h = h; e->off = off; e->inkW = inkW;
+    e->outh = outH;
+    e->gdiW = gdiW;
+    return e;
+}
+
+/* 菜单步进: GDI 自然步进优先 (含边距, 字间自带缝), 无则墨水右缘,
+ * 空白按引擎格。数字另吃 DigitTrack 微调。 */
+static int VecMenuStep(MVEnt* me, int fallback)
+{
+    int st;
+    if (!me) return fallback;
+    if (me->gdiW <= 0)
+        return (me->inkW > 0) ? me->off + me->inkW : fallback;
+    st = me->gdiW;
+    if (me->wch >= 0x30 && me->wch <= 0x39) st += g_VT.DigitTrack;
+    if (st < 1) st = 1;
+    return st;
+}
+
+/* 菜单字形绘制: 成功返回 X+adv (与原版笔位口径一致), 失败 -1 走原版。
+ * 横向全墨水不裁 (只认面界 0..pitchW, 溢出格子由面界收尾, 与 GDI 自然
+ * overhang 一致); 纵向摆位/裁剪与 VecRender 一致; 笔位/颜色走引擎。 */
+static int VecMenuRender(void* t, wchar_t wch, int adv, int h, int x, int y,
+                         int colorW, int px, int yOff)
+{
+    unsigned short* buf;
+    int pitchW, Tp, B, dx, dy;
+    unsigned char fr, fg, fb;
+    MVEnt* e;
+    if (!t || !IsPlausiblePtr(t)) return -1;
+    if (adv > VC_MAXW || h > VC_MAXH) return -1;
+    buf = *(unsigned short**)((char*)t + 0x0C);
+    pitchW = *(int*)((char*)t + 0x10);
+    if (!buf || !IsPlausiblePtr(buf)) return -1;
+    if (pitchW < 64 || pitchW > 4096) return -1;
+    Tp = *(int*)((char*)t + 0x34);
+    B = *(int*)((char*)t + 0x3C);
+    if (B < Tp) return -1;
+    if (Tp < 0) Tp = 0;
+    if (B > 4096) B = 4096;
+    Calibrate();
+    e = VecMenuGlyph(t, wch, adv, h, px);
+    if (!e) return -1;
+    GtUnpack16((unsigned short)(colorW & 0xFFFF), &fr, &fg, &fb);
+    dy = y + (h - e->outh) / 2;
+    {
+        int lo = Tp, hi = B - e->outh + 1;
+        if (hi >= lo)
+        {
+            if (dy < lo) dy = lo;
+            if (dy > hi) dy = hi;
+        }
+    }
+    dy += yOff;
+    for (y = 0; y < e->outh; y++)
+    {
+        int sy = dy + y;
+        unsigned short* row;
+        unsigned char* cov;
+        if (sy < 0 || sy > B) continue;
+        row = buf + sy * pitchW;
+        cov = e->cov + y * VC_MAXW;
+        for (dx = 0; dx < e->inkW; dx++)
+        {
+            int sx = x + e->off + dx;
+            unsigned a;
+            if (sx < 0 || sx >= pitchW) continue;
+            if (!cov[e->off + dx]) continue;
+            a = cov[e->off + dx];
             row[sx] = Blend16(row[sx], fr, fg, fb, a);
         }
     }
@@ -1384,6 +2379,19 @@ static void VecDigitLog(wchar_t wc, int px, int yOff, int ok, int x, int y,
     p = AppendCStr(buf, p, " r=", sizeof(buf));
     p = AppendCStr(buf, p, ok ? "vec" : "orig", sizeof(buf));
     LogLine(buf);
+}
+
+/* 提示步进: GDI 自然步进 (含边距), 无则墨水右缘, 空白按引擎格。
+ * 数字另吃 DigitTrack。自有版式无引擎约束, 不取 max。 */
+static int VecToolStep(VCEnt* e, int adv)
+{
+    int st;
+    if (!e) return (adv > 0) ? adv : 8;
+    st = (e->gdiW > 0) ? e->gdiW : e->fullW;
+    if (!st) return (adv > 0) ? adv : 8;
+    if (e->wch >= 0x30 && e->wch <= 0x39) st += g_VT.DigitTrack;
+    if (st < 1) st = 1;
+    return st;
 }
 
 int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y, int color)
@@ -1441,6 +2449,674 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
     adv = VecMeasure(t, wc, &h);
     if (adv < 0)
         return g_OrigBlit(t, NULL, wch, x, y, color);
+    /* 出界: 提示首字 Blit 时扫有效画布 (盒若上游预画, 此时无字污染
+     * 最干净; bb 与渲染同源, 必有效)。上限 4 帧, 定案即删。 */
+    {
+        static int n = 0;
+        /* 帧最小 x (边缘诊断, 定案即删): 提示色 Blit 全收录 (不限跨度门),
+         * 看引擎在边缘到底从哪起笔。 */
+        if (g_LastTipX >= 0 && y >= g_TipY - 8 && y <= g_TipY + 8 &&
+            t && IsPlausiblePtr(t) &&
+            (eff == 0xA92Au || eff == 0x292Au || eff == 0x07FFu ||
+             eff == 0xAEFCu))
+        {
+            if (x < g_BlitMinX) g_BlitMinX = x;
+            if (x > g_BlitMaxX) g_BlitMaxX = x;
+        }
+        /* 位置门 (颜色盲): 首个 Blit 落在当帧提示跨度内。
+         * 边缘出屏字会被引擎跳过 (不调 Blit), 首 Blit 未必是串首,
+         * 故按跨度 [tipx-tot-16, tipx+tot+8] 认 (左界动态:
+         * 边缘引擎起笔比 a4 靠左, 紧门会把画盒拦停); 不按原点 ±8。
+         * 右界 tot+8: 本串字 ENGINE x 不会超 a4+tot (账本即此)。 */
+        if (!g_BlitTipSeen && g_LastTipX >= 0 &&
+            x >= g_LastTipX - g_TipTot - 16 &&
+            x <= g_LastTipX + g_TipTot + 8 &&
+            y >= g_TipY - 8 && y <= g_TipY + 8 &&
+            t && IsPlausiblePtr(t))
+        {
+            unsigned short* bb = *(unsigned short**)((char*)t + 0x0C);
+            int pp = *(int*)((char*)t + 0x10);
+            g_BlitTipSeen = 1;
+            if (n < 4)
+            {
+                n++;
+                VecScanBoxBuf(bb, pp, x, y, 6);
+            }
+            /* 出界修复 (TipBox): 定制盒。引擎窄盒 [cx-63,cx+62] 已在,
+             * 按列调映射 r=盒内/盒旁 (逐通道钳 0.15~0.95) 补两侧条带
+             * (纹理保留, 同 tone 无缝), 采样红画新边框, 字随后画上。
+             * 坐标全落在已扫描安全区内; 关游戏即无残留 (世界每帧重画)。
+             * TipBox=0 关闭。 */
+            if (g_VT.TipBox && g_TipTot >= 50 && g_TipTot <= 400 &&
+                bb && IsPlausiblePtr((void*)bb) &&
+                pp >= 64 && pp <= 4096)
+            {
+                /* 盒原点取 min(Print 落笔, 首 Blit x):
+                 * 中间两者一致; 边缘引擎实际起笔比 a4 靠左 (字画在盒左),
+                 * 跟 Blit x 才包得住; 首字出屏被跳过时首 Blit 偏右,
+                 * 此时 min 回落到 a4, 盒不偏右。 */
+                int bx0 = (x < g_LastTipX) ? x : g_LastTipX;
+                int cx = bx0 + g_TipTot / 2;
+                int oldHW = (g_TipOw > 0 ? g_TipOw : 118) / 2 + 4;
+                int oldL = cx - oldHW, oldR = cx + oldHW - 1;
+                int newL = bx0 - 4, newR = bx0 + g_TipTot + 4;
+                int yT = y - 2, yB = y + 18, ym = y + 9;
+                int xx, yy;
+                /* 边缘钳制: 只画屏内部分。oldL/oldR 随 ow 自适应
+                 * (118->±63 实测; 长串按 ow+8 估, 截图校准)。 */
+                int L0 = newL < 0 ? 0 : newL;
+                int R0 = newR >= pp ? pp - 1 : newR;
+                int mL = oldL + 2 < L0 ? L0 : oldL + 2;
+                int mRb = oldR - 2 > R0 ? R0 : oldR - 2;
+                int sL1 = L0, sL2 = oldL - 1 > R0 ? R0 : oldL - 1;
+                int sR1 = oldR + 1 < L0 ? L0 : oldR + 1, sR2 = R0;
+                int fL1 = L0, fL2 = oldL > R0 ? R0 : oldL;
+                int fR1 = oldR < L0 ? L0 : oldR, fR2 = R0;
+                int cL = oldL < L0 ? L0 : oldL;
+                int cR = oldR > R0 ? R0 : oldR;
+                if (L0 <= R0 && yT >= 0 && yB <= 4096)
+                {
+                    long mR = 0, mG = 0, mB = 0, bR = 0, bG = 0, bB = 0;
+                    long mN = 0, bN = 0;
+                    long rR, rG, rB;
+                    unsigned bc = 0xF800u;
+                    unsigned bestR = 0;
+                    char b1[16], fbuf[96];
+                    unsigned z = 0;
+                    static int n2 = 0;
+                    static int lastL = -9999, lastR = -9999;
+                    for (xx = mL; xx <= mRb; xx++)
+                    {
+                        unsigned c = bb[ym * pp + xx];
+                        mR += (c >> 11) & 31u; mG += (c >> 5) & 63u;
+                        mB += c & 31u; mN++;
+                    }
+                    for (xx = sL1; xx <= sL2; xx++)
+                    {
+                        unsigned c = bb[ym * pp + xx];
+                        bR += (c >> 11) & 31u; bG += (c >> 5) & 63u;
+                        bB += c & 31u; bN++;
+                    }
+                    for (xx = sR1; xx <= sR2; xx++)
+                    {
+                        unsigned c = bb[ym * pp + xx];
+                        bR += (c >> 11) & 31u; bG += (c >> 5) & 63u;
+                        bB += c & 31u; bN++;
+                    }
+                    rR = (bR > 0 && mN > 0 && bN > 0) ?
+                        (mR * bN * 1000 / (bR * mN)) : 600;
+                    rG = (bG > 0 && mN > 0 && bN > 0) ?
+                        (mG * bN * 1000 / (bG * mN)) : 600;
+                    rB = (bB > 0 && mN > 0 && bN > 0) ?
+                        (mB * bN * 1000 / (bB * mN)) : 600;
+                    if (rR < 150) rR = 150;
+                    if (rR > 950) rR = 950;
+                    if (rG < 150) rG = 150;
+                    if (rG > 950) rG = 950;
+                    if (rB < 150) rB = 150;
+                    if (rB > 950) rB = 950;
+                    for (xx = cL; xx <= cR; xx++)
+                    {
+                        unsigned c = bb[yT * pp + xx];
+                        unsigned R = (c >> 11) & 31u;
+                        if (R > bestR)
+                        {
+                            bestR = R; bc = c;
+                        }
+                    }
+                    for (yy = yT + 1; yy <= yB - 1; yy++)
+                    {
+                        for (xx = fL1 + 1; xx <= fL2; xx++)
+                        {
+                            unsigned c = bb[yy * pp + xx];
+                            unsigned R = ((c >> 11) & 31u) * (unsigned)rR
+                                / 1000u;
+                            unsigned G = ((c >> 5) & 63u) * (unsigned)rG
+                                / 1000u;
+                            unsigned B = (c & 31u) * (unsigned)rB / 1000u;
+                            if (R > 31u) R = 31u;
+                            if (G > 63u) G = 63u;
+                            if (B > 31u) B = 31u;
+                            bb[yy * pp + xx] = (unsigned short)
+                                ((R << 11) | (G << 5) | B);
+                        }
+                        for (xx = fR1; xx < fR2; xx++)
+                        {
+                            unsigned c = bb[yy * pp + xx];
+                            unsigned R = ((c >> 11) & 31u) * (unsigned)rR
+                                / 1000u;
+                            unsigned G = ((c >> 5) & 63u) * (unsigned)rG
+                                / 1000u;
+                            unsigned B = (c & 31u) * (unsigned)rB / 1000u;
+                            if (R > 31u) R = 31u;
+                            if (G > 63u) G = 63u;
+                            if (B > 31u) B = 31u;
+                            bb[yy * pp + xx] = (unsigned short)
+                                ((R << 11) | (G << 5) | B);
+                        }
+                    }
+                    for (xx = L0; xx <= R0; xx++)
+                    {
+                        bb[yT * pp + xx] = (unsigned short)bc;
+                        bb[yB * pp + xx] = (unsigned short)bc;
+                    }
+                    for (yy = yT + 1; yy <= yB - 1; yy++)
+                    {
+                        bb[yy * pp + L0] = (unsigned short)bc;
+                        bb[yy * pp + R0] = (unsigned short)bc;
+                    }
+                    /* 变化触发: 盒子动了才记 (中间稳定一次, 边缘必现形),
+                     * 上限 20 行。定案即删。 */
+                    if ((L0 != lastL || R0 != lastR) && n2 < 20)
+                    {
+                        n2++;
+                        lastL = L0; lastR = R0;
+                        z = AppendCStr(fbuf, z, "vbox2: box=",
+                                       sizeof(fbuf));
+                        UtoA((unsigned)L0, b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                        UtoA((unsigned)R0, b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        z = AppendCStr(fbuf, z, " tot=", sizeof(fbuf));
+                        UtoA((unsigned)g_TipTot, b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        z = AppendCStr(fbuf, z, " r=", sizeof(fbuf));
+                        UtoA((unsigned)rR, b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                        UtoA((unsigned)rG, b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                        UtoA((unsigned)rB, b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        z = AppendCStr(fbuf, z, " sh=", sizeof(fbuf));
+                        UtoA((unsigned)(g_TipShift + 1000), b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        LogLine(fbuf);
+                    }
+                }
+            }
+        }
+    }
+    /* 边缘位移: 本 Print 剩余字统一加 g_TipShift (边缘提示回屏)。
+     * Print 入口逐次重置 (else 清零), 无泄漏; 菜单/工具分支内不加
+     * (防串扰); 只影响本串像素, 引擎账本用原 x (返回值去位移,
+     * 防引擎拿返回值步进造成累加拉长)。 */
+    int ox = x;
+    if (g_TipShiftN > 0 && g_MenuDepth == 0 && g_ToolDepth == 0)
+    {
+        x += g_TipShift;
+        g_TipShiftN--;
+    }
+    /* 出界: 读画布裁剪 (盒矩形的信使)。提示色 (0xA92A/m5 变体) 才记,
+     * 宽度变化才记, 上限 8 行。m=6 (a7=0) 的裁剪宽度即盒宽。 */
+    {
+        static int n = 0;
+        static int lastW = -1;
+        if (n < 8 && (eff == 0xA92Au || eff == 0x292Au) &&
+            t && IsPlausiblePtr(t))
+        {
+            int* cp = (int*)((char*)t + 0x30);
+            int w = cp[2] - cp[0];
+            if (w != lastW && w > 0 && w < 2000)
+            {
+                char b1[16], fbuf[128];
+                unsigned z = 0;
+                lastW = w; n++;
+                z = AppendCStr(fbuf, z, "vclip: m=", sizeof(fbuf));
+                UtoA((unsigned)g_MutModeLog, b1);
+                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                z = AppendCStr(fbuf, z, " L=", sizeof(fbuf));
+                UtoA((unsigned)cp[0], b1);
+                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                z = AppendCStr(fbuf, z, " T=", sizeof(fbuf));
+                UtoA((unsigned)cp[1], b1);
+                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                z = AppendCStr(fbuf, z, " R=", sizeof(fbuf));
+                UtoA((unsigned)cp[2], b1);
+                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                z = AppendCStr(fbuf, z, " B=", sizeof(fbuf));
+                UtoA((unsigned)cp[3], b1);
+                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                LogLine(fbuf);
+            }
+        }
+    }
+    /* 出界: BitFont 对象状态快照 (盒边界的藏身处)。
+     * 提示色门控, 每种模式记首字 (m=0/5/6 各一行), 对比找差异字段。
+     * 定案即删。 */
+    {
+        static int logged = 0;
+        int mode = g_MutModeLog;
+        if (!(logged & (1 << mode)) &&
+            (eff == 0xA92Au || eff == 0x292Au) &&
+            t && IsPlausiblePtr(t) && mode >= 0 && mode <= 6)
+        {
+            char b1[16], fbuf[224];
+            unsigned z = 0;
+            int fi;
+            int* fo = (int*)t;
+            logged |= (1 << mode);
+            z = AppendCStr(fbuf, z, "vdump: m=", sizeof(fbuf));
+            UtoA((unsigned)mode, b1);
+            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            z = AppendCStr(fbuf, z, " o=", sizeof(fbuf));
+            for (fi = 0; fi < 16; fi++)
+            {
+                if (fi) z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                UtoA((unsigned)fo[fi], b1);
+                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+            }
+            LogLine(fbuf);
+        }
+    }
+    if (g_ToolDepth > 0)
+    {
+        /* 悬浮提示自有版式+背景盒自适应: 首 Blit 建全串字形算总宽,
+         * 取样是实色暗底才拓盒 (花面无盒不碰), 之后自有笔位画字,
+         * 原字形一次不画。串序对不上/建失败回落引擎笔位画自定义字形,
+         * 再失败走原版 (保底可读)。 */
+        px = VecPickPx(t);
+        if (px >= 0 && g_ToolN > 0 && g_ToolBuilt == 0)
+        {
+            int i, tot = 0, ok = 1, oh = 0;
+            int ink0 = 0, inkEnd = 0, seenInk = 0;
+            for (i = 0; i < g_ToolN; i++)
+            {
+                int ca, chh = 0, st;
+                VCEnt* ge;
+                ca = VecMeasure(t, g_ToolStr[i], &chh);
+                if (ca < 0) ca = 8;
+                g_ToolAdv[i] = ca;
+                ge = VecGlyph(t, g_ToolStr[i], ca, h, px);
+                if (!ge) { ok = 0; break; }
+                st = VecToolStep(ge, ca);
+                g_ToolStepA[i] = st;
+                if (ge->inkW > 0)
+                {
+                    if (!seenInk) { ink0 = tot; seenInk = 1; }
+                    inkEnd = tot + st;
+                }
+                tot += st;
+                if (i == 0) oh = ge->outh;
+            }
+            g_ToolInk0 = ink0;
+            g_ToolInkEnd = seenInk ? inkEnd : 0;
+            if (ok && oh > 0)
+            {
+                unsigned short* bb = *(unsigned short**)((char*)t + 0x0C);
+                int pp = *(int*)((char*)t + 0x10);
+                int Tp = *(int*)((char*)t + 0x34);
+                int B = *(int*)((char*)t + 0x3C);
+                int dy = y + (h - oh) / 2;
+                int lo = Tp, hi = B - oh + 1, ym, k, flat = 1;
+                unsigned first = 0;
+                if (B > 4096) B = 4096;
+                if (hi >= lo)
+                {
+                    if (dy < lo) dy = lo;
+                    if (dy > hi) dy = hi;
+                }
+                ym = dy + oh / 2;
+                {
+                    unsigned nowG = GetTickCount();
+                    int dytG = (int)nowG - (int)g_ToolLastTick;
+                    int contig = (dytG >= 0 && dytG < 500 &&
+                        y - g_ToolLastY >= -4 && y - g_ToolLastY <= 4 &&
+                        g_ToolX - g_ToolLastX1 >= -8 &&
+                        g_ToolX - g_ToolLastX1 <= 64);
+                    int inkBytes = g_ToolInkEnd - g_ToolInk0;
+                    int surfOK = (bb && IsPlausiblePtr(bb) && pp >= 64 &&
+                                  pp <= 4096 && ym >= 0 && ym <= B);
+                    /* 相邻段沿用门判决: 后帧取样会撞上自己上一帧的字
+                     * (自盲, 门永远不过); 8 秒以上重取样,
+                     * 防提示挪到花面还照填 */
+                    if (contig && surfOK && g_ToolGateOK && inkBytes > 0 &&
+                        nowG - g_ToolGateTick < 8000u)
+                    {
+                        flat = 1;
+                        first = g_ToolGateColor;
+                    }
+                    else if (surfOK && inkBytes > 0)
+                    {
+                        for (k = 0; k < 4; k++)
+                        {
+                            int sx = g_ToolX + g_ToolInk0 + 2 + k * 4;
+                            unsigned c;
+                            if (sx < 0 || sx >= pp) { flat = 0; break; }
+                            c = bb[ym * pp + sx];
+                            if (k == 0) first = c;
+                            else if (c != first) { flat = 0; break; }
+                        }
+                        if (flat)
+                        {
+                            unsigned r5 = (first >> 11) & 31u;
+                            unsigned g6 = (first >> 5) & 63u;
+                            unsigned b5 = first & 31u;
+                            if (r5 > 1u || g6 > 2u || b5 > 1u) flat = 0;
+                        }
+                        g_ToolGateOK = flat;
+                        g_ToolGateColor = first;
+                        g_ToolGateTick = nowG;
+                    }
+                    else flat = 0;
+                    if (flat)
+                    {
+                        /* 填充只包墨水 (前导/尾随空格不算,
+                         * 防盖住行首图标); 相邻段从上段尾巴起笔, 无缝 */
+                        int x0 = g_ToolX + g_ToolInk0 - 4;
+                        int x1 = g_ToolX + g_ToolInkEnd + 4;
+                        int y0 = dy - 2, y1 = dy + oh + 2;
+                        if (contig && x0 < g_ToolLastX1) x0 = g_ToolLastX1;
+                        if (y1 > B) y1 = B;
+                        if (g_VT.ToolBox == 1)
+                        {
+                            VecFillBox(bb, pp, x0, y0, x1, y1,
+                                       (unsigned short)first);
+                            if (g_BoxLogs < 0)   /* 退役 (定案: 地图提示无盒/面板半透明), 日志静默 */
+                            {
+                                char b1[16], fbuf[192];
+                                unsigned z = 0;
+                                g_BoxLogs++;
+                            z = AppendCStr(fbuf, z, "vbox: px=", sizeof(fbuf));
+                            UtoA((unsigned)px, b1);
+                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                            z = AppendCStr(fbuf, z, " tx=", sizeof(fbuf));
+                            UtoA((unsigned)g_ToolX, b1);
+                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                            z = AppendCStr(fbuf, z, " ink=", sizeof(fbuf));
+                            UtoA((unsigned)g_ToolInk0, b1);
+                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                            z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                            UtoA((unsigned)g_ToolInkEnd, b1);
+                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                            z = AppendCStr(fbuf, z, " fill=", sizeof(fbuf));
+                            UtoA((unsigned)x0, b1);
+                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                            z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                            UtoA((unsigned)x1, b1);
+                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                            z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                            UtoA((unsigned)y0, b1);
+                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                            z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                            UtoA((unsigned)y1, b1);
+                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                            z = AppendCStr(fbuf, z, " s=", sizeof(fbuf));
+                            z += HtoA((unsigned)g_ToolStr[0] & 0xFFFFu,
+                                      fbuf + z);
+                            LogLine(fbuf);
+                            }
+                        }
+                        else
+                        {
+                            /* 探测模式 (ToolBox=2): 只量数不落笔。
+                             * 沿中线向两侧扫实色连通域, 得盒宽假设 run;
+                             * 与字总宽 tot 对比, 看字是否溢出盒。 */
+                            int sxL = g_ToolX + g_ToolInk0 + 2;
+                            int sxR = g_ToolX + g_ToolInkEnd + 2;
+                            int lx = sxL, rx;
+                            char b1[16], fbuf[192];
+                            unsigned z = 0;
+                            while (lx > 0 && sxL - lx < 600 &&
+                                bb[ym * pp + lx - 1] ==
+                                (unsigned short)first) lx--;
+                            if (sxR < 0 || sxR >= pp ||
+                                bb[ym * pp + sxR] !=
+                                (unsigned short)first)
+                                rx = -1;
+                            else
+                            {
+                                rx = sxR;
+                                while (rx < pp - 1 && rx - sxR < 600 &&
+                                    bb[ym * pp + rx + 1] ==
+                                    (unsigned short)first) rx++;
+                            }
+                            if (g_BoxLogs < 0)   /* 退役 (定案: 地图提示无盒/面板半透明), 日志静默 */
+                            {
+                                g_BoxLogs++;
+                                z = AppendCStr(fbuf, z, "vbox: probe tx=",
+                                               sizeof(fbuf));
+                                UtoA((unsigned)g_ToolX, b1);
+                                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                                z = AppendCStr(fbuf, z, " tot=",
+                                               sizeof(fbuf));
+                                UtoA((unsigned)tot, b1);
+                                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                                z = AppendCStr(fbuf, z, " ink=",
+                                               sizeof(fbuf));
+                                UtoA((unsigned)g_ToolInk0, b1);
+                                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                                z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                                UtoA((unsigned)g_ToolInkEnd, b1);
+                                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                                z = AppendCStr(fbuf, z, " run=",
+                                               sizeof(fbuf));
+                                UtoA((unsigned)lx, b1);
+                                z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                                z = AppendCh(fbuf, z, ',', sizeof(fbuf));
+                                if (rx < 0)
+                                    z = AppendCh(fbuf, z, '?',
+                                                 sizeof(fbuf));
+                                else
+                                {
+                                    UtoA((unsigned)rx, b1);
+                                    z = AppendCStr(fbuf, z, b1,
+                                                   sizeof(fbuf));
+                                }
+                                z = AppendCStr(fbuf, z, " c=",
+                                               sizeof(fbuf));
+                                z += HtoA(first, fbuf + z);
+                                z = AppendCStr(fbuf, z, " s=",
+                                               sizeof(fbuf));
+                                z += HtoA((unsigned)g_ToolStr[0] &
+                                          0xFFFFu, fbuf + z);
+                                LogLine(fbuf);
+                            }
+                        }
+                    }
+                    else if (g_BoxLogs < 0)   /* 退役 (定案: 地图提示无盒/面板半透明), 日志静默 */
+                    {
+                        if (g_VT.ToolBox == 2)
+                        {
+                            /* 探测模式 SKIP 明细: 门不过的真实原因。
+                             * m=门 4 采样, l/r=字左右外像素,
+                             * v=字左外垂直列 (盒高假设), ty=Print 落笔 y。 */
+                            char b1[16], fbuf[256];
+                            unsigned z = 0;
+                            int lx0 = g_ToolX - 8, lx1 = g_ToolX - 4;
+                            int rx0 = g_ToolX + tot + 4;
+                            int rx1 = g_ToolX + tot + 8;
+                            int vx = g_ToolX - 4, vi;
+                            int mids[4], ls[2], rs[2], vs[4];
+                            for (k = 0; k < 4; k++)
+                                mids[k] = VecProbePx(bb, pp,
+                                    g_ToolX + g_ToolInk0 + 2 + k * 4, ym);
+                            ls[0] = VecProbePx(bb, pp, lx0, ym);
+                            ls[1] = VecProbePx(bb, pp, lx1, ym);
+                            rs[0] = VecProbePx(bb, pp, rx0, ym);
+                            rs[1] = VecProbePx(bb, pp, rx1, ym);
+                            vs[0] = VecProbePx(bb, pp, vx, ym - 16);
+                            vs[1] = VecProbePx(bb, pp, vx, ym - 8);
+                            vs[2] = VecProbePx(bb, pp, vx, ym + 8);
+                            vs[3] = VecProbePx(bb, pp, vx, ym + 16);
+                            g_BoxLogs++;
+                            z = AppendCStr(fbuf, z, "vbox: probe2 tx=",
+                                           sizeof(fbuf));
+                            UtoA((unsigned)g_ToolX, b1);
+                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                            z = AppendCStr(fbuf, z, " ty=", sizeof(fbuf));
+                            UtoA((unsigned)g_ToolY, b1);
+                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                            z = AppendCStr(fbuf, z, " tot=", sizeof(fbuf));
+                            UtoA((unsigned)tot, b1);
+                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                            z = AppendCStr(fbuf, z, " ym=", sizeof(fbuf));
+                            UtoA((unsigned)ym, b1);
+                            z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                            z = AppendCStr(fbuf, z, " m=", sizeof(fbuf));
+                            for (k = 0; k < 4; k++)
+                            {
+                                if (k) z = AppendCh(fbuf, z, ',',
+                                                    sizeof(fbuf));
+                                if (mids[k] < 0)
+                                    z = AppendCh(fbuf, z, 'X',
+                                                 sizeof(fbuf));
+                                else
+                                    z += HtoA((unsigned)mids[k],
+                                              fbuf + z);
+                            }
+                            z = AppendCStr(fbuf, z, " l=", sizeof(fbuf));
+                            for (k = 0; k < 2; k++)
+                            {
+                                if (k) z = AppendCh(fbuf, z, ',',
+                                                    sizeof(fbuf));
+                                if (ls[k] < 0)
+                                    z = AppendCh(fbuf, z, 'X',
+                                                 sizeof(fbuf));
+                                else
+                                    z += HtoA((unsigned)ls[k], fbuf + z);
+                            }
+                        z = AppendCStr(fbuf, z, " tot=", sizeof(fbuf));
+                        UtoA((unsigned)g_TipTot, b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        z = AppendCStr(fbuf, z, " r=", sizeof(fbuf));
+                            for (k = 0; k < 2; k++)
+                            {
+                                if (k) z = AppendCh(fbuf, z, ',',
+                                                    sizeof(fbuf));
+                                if (rs[k] < 0)
+                                    z = AppendCh(fbuf, z, 'X',
+                                                 sizeof(fbuf));
+                                else
+                                    z += HtoA((unsigned)rs[k], fbuf + z);
+                            }
+                            z = AppendCStr(fbuf, z, " v=", sizeof(fbuf));
+                            for (vi = 0; vi < 4; vi++)
+                            {
+                                if (vi) z = AppendCh(fbuf, z, ',',
+                                                     sizeof(fbuf));
+                                if (vs[vi] < 0)
+                                    z = AppendCh(fbuf, z, 'X',
+                                                 sizeof(fbuf));
+                                else
+                                    z += HtoA((unsigned)vs[vi],
+                                              fbuf + z);
+                            }
+                            z = AppendCStr(fbuf, z, " s=", sizeof(fbuf));
+                            z += HtoA((unsigned)g_ToolStr[0] & 0xFFFFu,
+                                      fbuf + z);
+                            LogLine(fbuf);
+                        }
+                        {
+                        char b1[16], fbuf[128];
+                        unsigned z = 0;
+                        g_BoxLogs++;
+                        z = AppendCStr(fbuf, z, "vbox: SKIP tx=",
+                                       sizeof(fbuf));
+                        UtoA((unsigned)g_ToolX, b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        z = AppendCStr(fbuf, z, " tot=", sizeof(fbuf));
+                        UtoA((unsigned)tot, b1);
+                        z = AppendCStr(fbuf, z, b1, sizeof(fbuf));
+                        z = AppendCStr(fbuf, z, " s=", sizeof(fbuf));
+                        z += HtoA((unsigned)g_ToolStr[0] & 0xFFFFu,
+                                  fbuf + z);
+                        LogLine(fbuf);
+                        }
+                    }
+                }
+                g_ToolPenX = g_ToolX;
+                /* 探测模式 (ToolBox=2) 只量数: 不自有笔位,
+                 * 全串引擎笔位正常渲染, 视觉与平时无异。 */
+                g_ToolBuilt = (g_VT.ToolBox == 2) ? -1 : 1;
+            }
+            else g_ToolBuilt = -1;
+        }
+        if (g_ToolBuilt == 1 && g_ToolIdx < g_ToolN &&
+            wc == g_ToolStr[g_ToolIdx])
+        {
+            VCEnt* te;
+            int step;
+            yOff = g_VT.VShift;
+            r = VecRender(t, wc, g_ToolAdv[g_ToolIdx], h, g_ToolPenX,
+                          y, eff, px, yOff);
+            if (r >= 0)
+            {
+                te = VecGlyph(t, wc, g_ToolAdv[g_ToolIdx], h, px);
+                step = VecToolStep(te, g_ToolAdv[g_ToolIdx]);
+                g_ToolPenX += step;
+                g_ToolIdx++;
+                g_ToolLastX1 = g_ToolPenX;
+                g_ToolLastY = y;
+                g_ToolLastTick = GetTickCount();
+                return x + adv;   /* 引擎账本照旧, 笔位我们自己走 */
+            }
+        }
+        if (px >= 0)
+        {
+            yOff = g_VT.VShift;
+            r = VecRender(t, wc, adv, h, x, y, eff, px, yOff);
+            if (r >= 0) return r - (x - ox);
+        }
+        return g_OrigBlit(t, NULL, wch, ox, y, color);
+    }
+    if (g_MenuDepth > 0)
+    {
+        /* 菜单整行自有版式: 首 Blit 建全串字形、算总宽、矩形内居中起笔,
+         * 之后按实际墨水宽度走笔 (空格按引擎 adv, 只加宽不收窄)。
+         * 串序对上才用自有笔位, 否则回落引擎笔位 (保底不错位);
+         * 原字形一次不画, 双双失败才走原版 (保底可读)。 */
+        int built = g_MenuBuilt;
+        px = VecPickPx(t);
+        if (px >= 0 && g_MenuN > 0 && !built)
+        {
+            int i, tot = 0, ok = 1;
+            for (i = 0; i < g_MenuN; i++)
+            {
+                int ca, chh = 0;
+                MVEnt* gi;
+                ca = VecMeasure(t, g_MenuStr[i], &chh);
+                if (ca < 0) ca = 8;
+                g_MenuAdv[i] = ca;
+                gi = VecMenuGlyph(t, g_MenuStr[i], ca, h, px);
+                if (!gi) { ok = 0; break; }
+                tot += VecMenuStep(gi, ca);
+            }
+            if (ok)
+            {
+                g_MenuPenX = g_MenuRX + (g_MenuRW - tot) / 2;
+                if (g_MenuPenX < g_MenuRX) g_MenuPenX = g_MenuRX;
+                g_MenuBuilt = 1;
+                built = 1;
+            }
+        }
+        if (built && g_MenuIdx < g_MenuN && wc == g_MenuStr[g_MenuIdx])
+        {
+            MVEnt* me;
+            int step;
+            yOff = g_VT.VShift;
+            r = VecMenuRender(t, wc, g_MenuAdv[g_MenuIdx], h, g_MenuPenX,
+                              y, eff, px, yOff);
+            if (r >= 0)
+            {
+                me = VecMenuGlyph(t, wc, g_MenuAdv[g_MenuIdx], h, px);
+                step = VecMenuStep(me, g_MenuAdv[g_MenuIdx]);
+                if (step < 1) step = 1;
+                g_MenuPenX += step;
+                g_MenuIdx++;
+                return x + adv;   /* 引擎账本照旧, 笔位我们自己走 */
+            }
+        }
+        if (px >= 0)
+        {
+            yOff = g_VT.VShift;
+            r = VecMenuRender(t, wc, adv, h, x, y, eff, px, yOff);
+            if (r >= 0) return r;
+        }
+        return g_OrigBlit(t, NULL, wch, x, y, color);
+    }
     if (g_VT.LogAdv) VecProbeLog(wc, adv, h, eff);
     if (g_VT.LogAdv) VecClipProbe(t, wc, x, y, adv, h, eff, color);
     if (g_VT.Render)
@@ -1490,7 +3166,7 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
             {
                 /* 注意用 effPx (全局或接管), 不是 g_VT.FontPx:
                  * FontPx=0 时接管链 effPx=SuperPx, 错用 FontPx 会把 adv
-                 * 压成 1 (整串字挤成细条, vsw 实证前没走到这纯属侥幸)。 */
+                 * 压成 1 (整串字挤成细条)。 */
                 adv = (adv * effPx + g_FontOrigH / 2) / g_FontOrigH;
                 if (adv < 1) adv = 1;
             }
@@ -1516,10 +3192,10 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                 }
                 return x + adv;
             }
-            if (r >= 0) return r;
+            if (r >= 0) return r - (x - ox);
         }
     }
-    return g_OrigBlit(t, NULL, wch, x, y, color);
+    return g_OrigBlit(t, NULL, wch, ox, y, color);
 }
 
 /* ---------------- 下钩 ---------------- */
@@ -1647,6 +3323,11 @@ void VecText_Install(void)
     g_VT.CreditPx = GetPrivateProfileIntA(VT_SECTION, "CreditPx", 0, g_IniPath);
     g_VT.CreditDY = GetPrivateProfileIntA(VT_SECTION, "CreditDY", 0, g_IniPath);
     g_VT.SuperPx = GetPrivateProfileIntA(VT_SECTION, "SuperPx", 0, g_IniPath);
+    g_VT.MenuTake = GetPrivateProfileIntA(VT_SECTION, "MenuTake", 1, g_IniPath);
+    g_VT.DigitTrack = GetPrivateProfileIntA(VT_SECTION, "DigitTrack", 0, g_IniPath);
+    g_VT.ToolBox = GetPrivateProfileIntA(VT_SECTION, "ToolBox", 1, g_IniPath);
+    g_VT.BoxProbe = GetPrivateProfileIntA(VT_SECTION, "BoxProbe", 0, g_IniPath);
+    g_VT.TipBox = GetPrivateProfileIntA(VT_SECTION, "TipBox", 1, g_IniPath);
     g_VT.BriefBox = GetPrivateProfileIntA(VT_SECTION, "BriefBox", 1, g_IniPath);
     g_VT.BriefClip = GetPrivateProfileIntA(VT_SECTION, "BriefClip", 1, g_IniPath);
     g_VT.VShift = GetPrivateProfileIntA(VT_SECTION, "VShift", 0, g_IniPath);
@@ -1662,14 +3343,21 @@ void VecText_Install(void)
     if (g_VT.CreditDY > 8) g_VT.CreditDY = 8;
     if (g_VT.SuperPx < 0) g_VT.SuperPx = 0;
     if (g_VT.SuperPx > 40) g_VT.SuperPx = 40;
+    g_VT.MenuTake = g_VT.MenuTake ? 1 : 0;
+    if (g_VT.DigitTrack < -8) g_VT.DigitTrack = -8;
+    if (g_VT.DigitTrack > 8) g_VT.DigitTrack = 8;
+    if (g_VT.ToolBox < 0) g_VT.ToolBox = 0;
+    if (g_VT.ToolBox > 2) g_VT.ToolBox = 2;
+    if (g_VT.BoxProbe < 0) g_VT.BoxProbe = 0;
+    if (g_VT.BoxProbe > 3) g_VT.BoxProbe = 3;
+    g_VT.TipBox = g_VT.TipBox ? 1 : 0;
     g_VT.BriefBox = g_VT.BriefBox ? 1 : 0;
     g_VT.BriefClip = g_VT.BriefClip ? 1 : 0;
     if (g_VT.VShift < -8) g_VT.VShift = -8;
     if (g_VT.VShift > 8) g_VT.VShift = 8;
     g_VT.LogAdv = g_VT.LogAdv ? 1 : 0;
     g_VT.Render = g_VT.Render ? 1 : 0;
-    g_GetDim = (GetDimFn)ADDR_GETDIM;
-    ResolveFontFace(g_VT.FontFace, "vtext", g_VTFace, L"SimHei");
+    ResolveFontFace(g_VT.FontFace, "vtext", g_VTFace, L"Microsoft YaHei");
     p = 0;
     p = AppendCStr(buf, p, "vtext: start en=", sizeof(buf));
     UtoA((unsigned)g_VT.Enable, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
@@ -1689,7 +3377,19 @@ void VecText_Install(void)
     }
     p = AppendCStr(buf, p, " swpx=", sizeof(buf));
     UtoA((unsigned)g_VT.SuperPx, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " v=9", sizeof(buf));   /* 发版自增, 日志对版本 */
+    p = AppendCStr(buf, p, " mt=", sizeof(buf));
+    UtoA((unsigned)g_VT.MenuTake, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCStr(buf, p, " dt=", sizeof(buf));
+    {
+        int dtr = g_VT.DigitTrack;
+        if (dtr < 0) { p = AppendCh(buf, p, '-', sizeof(buf)); dtr = -dtr; }
+        UtoA((unsigned)dtr, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    }
+    p = AppendCStr(buf, p, " tb=", sizeof(buf));
+    UtoA((unsigned)g_VT.ToolBox, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCStr(buf, p, " bp=", sizeof(buf));
+    UtoA((unsigned)g_VT.BoxProbe, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCStr(buf, p, " v=56", sizeof(buf));   /* 发版自增, 日志对版本 */
     LogLine(buf);
     if (!g_VT.Enable) { LogLine("vtext: disabled"); return; }
     if (!BytesSame((unsigned char*)ADDR_BLIT, kWantBlit, 7))
@@ -1729,4 +3429,13 @@ void VecText_Install(void)
         else { LogLine("vtext: simple hook OFF"); g_OrigSimple = NULL; }
     }
     else { LogLine("vtext: simple bytes mismatch"); LogBytes((unsigned char*)ADDR_SIMPLE); }
+    /* GetDim 宽度接管钩 (引擎算字宽唯一入口, 一处替换处处生效) */
+    if (BytesSame((unsigned char*)ADDR_GETDIM, kWantGetDim, 6))
+    {
+        g_OrigGetDim = (GetDimFn)BuildTrampAt(ADDR_GETDIM, 6, ADDR_GETDIM_BACK);
+        if (g_OrigGetDim && PatchAt(ADDR_GETDIM, (void*)(size_t)VecGetDimEntry, 6))
+            LogLine("vtext: getdim hook ON");
+        else { LogLine("vtext: getdim hook OFF"); g_OrigGetDim = NULL; }
+    }
+    else { LogLine("vtext: getdim bytes mismatch"); LogBytes((unsigned char*)ADDR_GETDIM); }
 }

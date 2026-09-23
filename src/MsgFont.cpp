@@ -1221,9 +1221,6 @@ static int DrawSWPanel(void* surf, int bitLineH, int surfW, int surfH,
     unsigned char* vt;
     LockFn lockFn;
     UnlockFn unlockFn;
-    static int s_lastN = -1;
-    char sb[128], t1[16], t2[16], t3[16], t4[16];
-    unsigned q;
 
     if (!g_SWPanelOn) return 0;
     now = GetTickCount();
@@ -1241,22 +1238,6 @@ static int DrawSWPanel(void* surf, int bitLineH, int surfW, int surfH,
         else ti[j] = i;
     }
     if (n > SWCAP_MAX) n = SWCAP_MAX;
-    if (n != s_lastN)
-    {
-        s_lastN = n;
-        q = 0;
-        q = AppendCStr(sb, q, n > 0 ? "swpanel: show n=" : "swpanel: hide", sizeof(sb));
-        if (n > 0)
-        {
-            UtoA((unsigned)n, t1); q = AppendCStr(sb, q, t1, sizeof(sb));
-            q = AppendCStr(sb, q, " surf=", sizeof(sb));
-            UtoA((unsigned)surfW, t2); q = AppendCStr(sb, q, t2, sizeof(sb));
-            q = AppendCh(sb, q, 'x', sizeof(sb));
-            UtoA((unsigned)surfH, t3); q = AppendCStr(sb, q, t3, sizeof(sb));
-            (void)t4;
-        }
-        LogLine(sb);
-    }
     if (n <= 0) return 0;
     for (i = 1; i < n; i++)   /* 按 y 排序 (插入, 行数小): 只定上下顺序 */
     {
