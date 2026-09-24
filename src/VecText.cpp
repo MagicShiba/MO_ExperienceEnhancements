@@ -23,7 +23,7 @@
 #include "GdiText.h"
 #include "VecText.h"
 
-#define VT_SECTION       "VecText"
+/* VT_SECTION 见 VecText.h (MsgFont 读电力键共用)。 */
 #define ADDR_BLIT        0x00434120u
 #define ADDR_BLIT_BACK   0x00434127u
 #define ADDR_GETDIM 0x00433CF0u
@@ -2018,6 +2018,21 @@ static void LogBytes(const unsigned char* p)
     LogLine(buf);
 }
 
+/* 顶栏资金字号 (CreditPx, >0=用户自定义绝对像素): 底部电量对标用。 */
+int VecText_CreditPx(void)
+{
+    return g_VT.CreditPx;
+}
+/* 资金解析后字体+粗体 ([VecText] FontFace/Bold): 电力同字用。 */
+const wchar_t* VecText_FontFace(void)
+{
+    return g_VTFace;
+}
+int VecText_Bold(void)
+{
+    return g_VT.Bold;
+}
+
 void VecText_Install(void)
 {
     char b1[16], buf[192];
@@ -2097,7 +2112,7 @@ void VecText_Install(void)
     UtoA((unsigned)g_VT.ToolBox, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " bp=", sizeof(buf));
     UtoA(0u, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " v=87", sizeof(buf));   /* 发版自增, 日志对版本 */
+    p = AppendCStr(buf, p, " v=97", sizeof(buf));   /* 发版自增, 日志对版本 */
     LogLine(buf);
     if (!g_VT.Enable) { LogLine("vtext: disabled"); return; }
     if (!BytesSame((unsigned char*)ADDR_BLIT, kWantBlit, 7))
@@ -2144,4 +2159,43 @@ void VecText_Install(void)
         else { LogLine("vtext: getdim hook OFF"); g_OrigGetDim = NULL; }
     }
     else { LogLine("vtext: getdim bytes mismatch"); LogBytes((unsigned char*)ADDR_GETDIM); }
+    /* 帧准备钩 (0x4F42F0, 首5B=A1 24 73 88 00): 每循环必跑, 底电"始终绘制"。
+     * 安装见 MsgFont (MsgFont_PrepareEntry/g_PrepareTramp)。 */
+    {
+        static const unsigned char kWantPrepare[5] = { 0xA1, 0x24, 0x73, 0x88, 0x00 };
+        if (BytesSame((unsigned char*)0x4F42F0u, kWantPrepare, 5))
+        {
+            g_PrepareTramp = BuildTrampAt(0x4F42F0u, 5, 0x4F42F5u);
+            if (g_PrepareTramp && PatchAt(0x4F42F0u, (void*)MsgFont_PrepareEntry, 5))
+                LogLine("vtext: prepare hook ON");
+            else { LogLine("vtext: prepare hook OFF"); g_PrepareTramp = NULL; }
+        }
+        else { LogLine("vtext: prepare bytes mismatch"); LogBytes((unsigned char*)0x4F42F0u); }
+    }
+    /* 上屏入口钩 (0x6A70E0, 首6B=83 EC 38 53 55 56): 每次呈现前先恢复。
+     * 安装见 MsgFont (MsgFont_BlitSbEntry/g_BlitSbTramp)。 */
+    {
+        static const unsigned char kWantBlitSb[6] = { 0x83, 0xEC, 0x38, 0x53, 0x55, 0x56 };
+        if (BytesSame((unsigned char*)0x6A70E0u, kWantBlitSb, 6))
+        {
+            g_BlitSbTramp = BuildTrampAt(0x6A70E0u, 6, 0x6A70E6u);
+            if (g_BlitSbTramp && PatchAt(0x6A70E0u, (void*)MsgFont_BlitSbEntry, 6))
+                LogLine("vtext: blitsb hook ON");
+            else { LogLine("vtext: blitsb hook OFF"); g_BlitSbTramp = NULL; }
+        }
+        else { LogLine("vtext: blitsb bytes mismatch"); LogBytes((unsigned char*)0x6A70E0u); }
+    }
+    /* 呈现入口钩 (0x4F4780, 首7B=83 EC 5C 8B 44 24 60): 非条带呈现路。
+     * 安装见 MsgFont (MsgFont_UpdateEntry/g_UpdateTramp)。 */
+    {
+        static const unsigned char kWantUpdate[7] = { 0x83, 0xEC, 0x5C, 0x8B, 0x44, 0x24, 0x60 };
+        if (BytesSame((unsigned char*)0x4F4780u, kWantUpdate, 7))
+        {
+            g_UpdateTramp = BuildTrampAt(0x4F4780u, 7, 0x4F4787u);
+            if (g_UpdateTramp && PatchAt(0x4F4780u, (void*)MsgFont_UpdateEntry, 7))
+                LogLine("vtext: update hook ON");
+            else { LogLine("vtext: update hook OFF"); g_UpdateTramp = NULL; }
+        }
+        else { LogLine("vtext: update bytes mismatch"); LogBytes((unsigned char*)0x4F4780u); }
+    }
 }

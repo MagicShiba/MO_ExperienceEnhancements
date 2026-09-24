@@ -18,12 +18,14 @@
 #include "GdiText.h"
 #include "VecText.h"
 
-#define MF_VERSION   "0.2.9"
+#define MF_VERSION   "0.2.42"
 #define MF_SECTION   "MsgFont"
 
 /* ---------------- 地址 ---------------- */
 
 #define ADDR_DSURFACE_COMPOSITE  0x0088731Cu
+#define ADDR_DSURFACE_SIDEBAR    0x00887300u
+#define ADDR_DSURFACE_PRIMARY    0x00887308u
 #define ADDR_DSURFACE_TEMP       0x00887314u
 #define ADDR_DSURFACE_VIEWBOUNDS 0x00886FA0u
 #define ADDR_BITFONT_INSTANCE    0x0089C4D0u
@@ -98,6 +100,10 @@ typedef struct {
     int HintMaxWidth;  /* 0 = 自动 */
     int HintOpacity;   /* 底板不透明度 0~100; 0=不画底板但文字阴影照画 */
     int HintTimeoutMul;/* 提示显示时长倍率 (1=原版速度) */
+    int PowerBottom; /* 1=底部电量显示 (闪电+负载/电力, 侧栏面) */
+    int PowerX;      /* 0=侧栏内居中 (默认); >0=侧栏绝对 x */
+    int PowerPad;    /* 底部电量距底边像素 (默认 6) */
+    int PowerMode;   /* 0=负载/电力 (默认); 1=余量纯数字 (够用正/不够负) */
 } MsgFontConfig;
 
 static MsgFontConfig g_Cfg;
@@ -212,7 +218,11 @@ static void LoadConfig(void)
     g_Cfg.HintMaxWidth= GetPrivateProfileIntA(MF_SECTION, "HintMaxWidth", 320, g_IniPath);
     g_Cfg.HintOpacity = GetPrivateProfileIntA(MF_SECTION, "HintOpacity", 45, g_IniPath);
     g_Cfg.HintTimeoutMul = GetPrivateProfileIntA(MF_SECTION, "HintTimeoutMul", 2, g_IniPath);
-
+    /* 电力键归 [VecText] (挨着 CreditPx/CreditDY), 不在 [MsgFont]。 */
+    g_Cfg.PowerBottom = GetPrivateProfileIntA(VT_SECTION, "PowerBottom", 1, g_IniPath);
+    g_Cfg.PowerX = GetPrivateProfileIntA(VT_SECTION, "PowerX", 0, g_IniPath);
+    g_Cfg.PowerPad = GetPrivateProfileIntA(VT_SECTION, "PowerPad", 6, g_IniPath);
+    g_Cfg.PowerMode = GetPrivateProfileIntA(VT_SECTION, "PowerMode", 0, g_IniPath);
     g_Cfg.Enable = g_Cfg.Enable ? 1 : 0;
     g_Cfg.LogMessages = g_Cfg.LogMessages ? 1 : 0;
     g_Cfg.ShowHotZone = g_Cfg.ShowHotZone ? 1 : 0;
@@ -257,6 +267,12 @@ static void LoadConfig(void)
     if (g_Cfg.HintOpacity > 100) g_Cfg.HintOpacity = 100;
     if (g_Cfg.HintTimeoutMul < 1) g_Cfg.HintTimeoutMul = 1;
     if (g_Cfg.HintTimeoutMul > 10) g_Cfg.HintTimeoutMul = 10;
+    g_Cfg.PowerBottom = g_Cfg.PowerBottom ? 1 : 0;
+    if (g_Cfg.PowerX < 0) g_Cfg.PowerX = 0;
+    if (g_Cfg.PowerX > 4096) g_Cfg.PowerX = 4096;
+    if (g_Cfg.PowerPad < 0) g_Cfg.PowerPad = 0;
+    if (g_Cfg.PowerPad > 200) g_Cfg.PowerPad = 200;
+    g_Cfg.PowerMode = g_Cfg.PowerMode ? 1 : 0;
 
     g_SW.Enable = GetPrivateProfileIntA(SWPANEL_SECTION, "Enable", 1, g_IniPath);
     g_SW.FontPx = GetPrivateProfileIntA(SWPANEL_SECTION, "FontPx", 16, g_IniPath);
@@ -1432,6 +1448,464 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_GreenHook(void* regs)
     return 0;
 }
 
+/* ---------------- 底部电量 ----------------
+ * 定案: 同一像素, 四路同画——
+ * (1) 消息帧 (render 内), (2) prepare (每循环, render 跳过也跑),
+ * (3) BlitSidebar 入口 (每次条带呈现前先恢复, 呈出的帧必带字),
+ * (4) UpdatePrimarySurface 入口 (非条带呈现路, 在被呈现面上直接画)。
+ * sb 一份 (168 侧栏坐标, 喂条带上屏) + 屏一份 (ViewBounds 右沿+偏移,
+ * 直接落屏, 无呈现也立显)。各路像素完全相同, 覆盖即不可见, 无闪。
+ * 上屏链反汇编实证见 VecText 笔记"底部电量"节。
+ * 总开关: [VecText] PowerBottom=0 即关 (缺省 1 开)。
+ * 内容 "闪电+负载/电力" (PowerMode=1 则"闪电+余量纯数字"): 侧栏内居中
+ * (PowerX>0 则侧栏绝对 x), y 锚底边。
+ * 数值: CurrentPlayer(0xA83D4C)+0x53A4=PowerOutput/+0x53A8=PowerDrain
+ * (UpdatePower 0x508C30 反汇编实证, VecText 笔记 v88 节)。
+ * 颜色按游戏比例 (Phobos PowerDelta 默认 0.75/1.0): d*4<o*3 绿, d<=o 黄,
+ * 否则红。字号/字体/粗体精确对标资金: CreditPx>0 (用户自定义, 如 16)
+ * 即资金真字号 (同 GDI 管线, 面取 VecText_FontFace); CreditPx=0 时退原字行高 (无+4)。
+ * 返回: 1=画出, 0=关闭/跳过, -1=GDI失败, -2=Lock失败。 */
+#define ADDR_PLAYERP 0xA83D4Cu
+#define HOUSE_POWER_OUT 0x53A4
+#define HOUSE_POWER_DRAIN 0x53A8
+/* 闪电 10x16 二值点阵 ('X'=墨): Segoe UI Emoji U+26A1 剪影阈值烘焙,
+ * 不透明直写 (幂等, 不叠加不闪); 文本仍走 Blend16。 */
+static const char* kPwrBolt[16] = {
+    "......X...",
+    ".....XX...",
+    ".....XX...",
+    "....XXX...",
+    "...XXXX...",
+    "..XXXXX...",
+    "..XXXXX...",
+    ".XXXXXX...",
+    "XXXXXXXXXX",
+    "...XXXXXX.",
+    "...XXXXX..",
+    "...XXXX...",
+    "...XXXX...",
+    "...XXX....",
+    "...XX.....",
+    "...X......",
+};
+#define PWR_BOLT_W 10
+#define PWR_BOLT_H 16
+#define PWR_COV_W 128
+#define PWR_COV_H 48
+/* 底电字形缓存 (值/字号不变即复用, 变了才重光栅+拷 DIB)。 */
+static struct {
+    int drain, output, fontPx, bold, mode, w, adv;
+    unsigned char cov[PWR_COV_W * PWR_COV_H];
+} g_PwrCache = { -1, -1, -1, -1, -1, 0, 0 };
+/* 读值+配字号+备字形: 1=缓存有效, 0=跳过(无玩家/值非法), -1=GDI失败/超大。
+ * 无锁无面, 锁内可调。 */
+static int PwrCacheEnsure(void)
+{
+    void* house;
+    int output, drain, bitLineH, credPx, fontPx, adv, w, i, n;
+    wchar_t line[32];
+    char b1[16], b2[16];
+    house = *(void**)(size_t)ADDR_PLAYERP;
+    if (!house || !IsPlausiblePtr(house)) return 0;
+    output = *(int*)((char*)house + HOUSE_POWER_OUT);
+    drain = *(int*)((char*)house + HOUSE_POWER_DRAIN);
+    if (output < 0 || drain < 0 || output > 2000000 || drain > 2000000)
+        return 0;
+    {
+        void* font = *(void**)ADDR_BITFONT_INSTANCE;
+        bitLineH = font ? *(int*)((char*)font + FONT_OFF_HEIGHT) : 14;
+        if (bitLineH < 6 || bitLineH > 64) bitLineH = 14;
+    }
+    credPx = VecText_CreditPx();
+    fontPx = credPx > 0 ? credPx : bitLineH;
+    if (fontPx < 8) fontPx = 8;
+    if (fontPx > 64) fontPx = 64;
+    if (output == g_PwrCache.output && drain == g_PwrCache.drain &&
+        fontPx == g_PwrCache.fontPx && VecText_Bold() == g_PwrCache.bold &&
+        g_Cfg.PowerMode == g_PwrCache.mode && g_PwrCache.w > 0)
+        return 1;
+    /* 与资金同字体: 面/字号/粗体全取 VecText (slot 3 独立, 字形与资金一致)。 */
+    if (!GdiEnsure(fontPx, VecText_Bold(), 3, VecText_FontFace())) return -1;
+    adv = g_G->adv > 0 ? g_G->adv : fontPx;
+    n = 0;
+    if (g_Cfg.PowerMode == 1)
+    {
+        /* 余量纯数字: 输出-负载, 够用正数/不够负数 (颜色仍走三色)。 */
+        int delta = output - drain;
+        if (delta < 0) { line[n++] = (wchar_t)'-'; delta = -delta; }
+        UtoA((unsigned)delta, b1);
+        for (i = 0; b1[i] && n < 30; i++) line[n++] = (wchar_t)(unsigned char)b1[i];
+    }
+    else
+    {
+        UtoA((unsigned)drain, b1);
+        for (i = 0; b1[i] && n < 30; i++) line[n++] = (wchar_t)(unsigned char)b1[i];
+        line[n++] = (wchar_t)'/';
+        UtoA((unsigned)output, b2);
+        for (i = 0; b2[i] && n < 30; i++) line[n++] = (wchar_t)(unsigned char)b2[i];
+    }
+    w = RenderLine(line, n);
+    if (w <= 0 || w + 2 > PWR_COV_W || adv > PWR_COV_H) return -1;
+    {
+        int yy, xx;
+        for (yy = 0; yy < adv; yy++)
+        {
+            unsigned char* srow = g_G->bits + yy * g_G->pitch;
+            unsigned char* drow = g_PwrCache.cov + yy * PWR_COV_W;
+            for (xx = 0; xx < w + 2; xx++) drow[xx] = srow[xx * 4 + 2];
+        }
+    }
+    g_PwrCache.output = output; g_PwrCache.drain = drain;
+    g_PwrCache.fontPx = fontPx; g_PwrCache.bold = VecText_Bold();
+    g_PwrCache.mode = g_Cfg.PowerMode;
+    g_PwrCache.w = w; g_PwrCache.adv = adv;
+    return 1;
+}
+/* 缓存字落面 (调用方保证面已锁定): 纯内存写, 锁内安全。 */
+static void PwrBlitCache(unsigned char* dstBase, int pitch, int W, int H,
+                         int dx, int dy, unsigned char fr, unsigned char fg,
+                         unsigned char fb, unsigned alpha)
+{
+    int w = g_PwrCache.w, adv = g_PwrCache.adv, y, x;
+    for (y = 0; y < adv; y++)
+    {
+        int sy = dy + y;
+        unsigned char* srow;
+        unsigned short* drow;
+        if (sy < 0 || sy >= H) continue;
+        srow = g_PwrCache.cov + y * PWR_COV_W;
+        drow = (unsigned short*)(dstBase + sy * pitch);
+        for (x = 0; x < w + 2; x++)
+        {
+            int sx = dx + x;
+            unsigned a;
+            if (sx < 0 || sx >= W) continue;
+            if (!srow[x]) continue;
+            a = (srow[x] * alpha + 50u) / 100u;
+            if (a > 255u) a = 255u;
+            drow[sx] = Blend16(drow[sx], fr, fg, fb, a);
+        }
+    }
+}
+/* 闪电落面 (调用方保证面已锁定): 纯内存写, 锁内安全。
+ * 二值不透明 (幂等, 无叠加闪烁); 颜色经 Blend16(a=255, 恒等于直写),
+ * 与文本逐位同色 (手写 col16 曾把绿通道 <<2 写错致偏青, 且不分 565/555, 已删)。 */
+static void PwrBoltPx(unsigned char* dstBase, int pitch, int W, int H,
+                      int x0, int by, unsigned char fr, unsigned char fg,
+                      unsigned char fb)
+{
+    int r, c;
+    for (r = 0; r < PWR_BOLT_H; r++)
+    {
+        int sy = by + r;
+        unsigned short* row16;
+        if (sy < 0 || sy >= H) continue;
+        row16 = (unsigned short*)(dstBase + sy * pitch);
+        for (c = 0; c < PWR_BOLT_W; c++)
+        {
+            int sx = x0 + c;
+            if (kPwrBolt[r][c] != 'X') continue;
+            if (sx < 0 || sx >= W) continue;
+            row16[sx] = Blend16(row16[sx], fr, fg, fb, 255);
+        }
+    }
+}
+/* 底电配色 (值->RGB): 与缓存值同口径, 调用方先 Ensure。 */
+static void PwrColor(unsigned char* fr, unsigned char* fg, unsigned char* fb)
+{
+    *fr = 255; *fg = 0; *fb = 0;                       /* 红: 入不敷出 */
+    if (g_PwrCache.output > 0 &&
+        g_PwrCache.drain * 4 < g_PwrCache.output * 3)
+    { *fr = 0; *fg = 255; *fb = 0; }                   /* 绿: 充足 */
+    else if (g_PwrCache.drain <= g_PwrCache.output)
+    { *fr = 255; *fg = 255; *fb = 0; }                 /* 黄: 危险 */
+}
+/* 底电版式 (strip 相对坐标): x0 居中 (PowerX>0 则绝对), y0 锚底边。
+ * 调用方先 PwrCacheEnsure (用 g_PwrCache.w/adv)。 */
+static void PwrLayout(int W, int H, int* x0, int* y0)
+{
+    int sx = g_Cfg.PowerX;
+    if (sx <= 0)
+    {
+        sx = (W - (PWR_BOLT_W + 4 + g_PwrCache.w)) / 2;
+        if (sx < 0) sx = 0;
+    }
+    *x0 = sx;
+    *y0 = H - g_Cfg.PowerPad - g_PwrCache.adv;
+    if (*y0 < 0) *y0 = 0;
+}
+/* 底电屏坐标直画 (几何门内才画): surf 为屏尺寸面 (Primary/Hidden/被呈现面)。
+ * 返回 1=画出, 0=跳过。 */
+static int MsgPowerDrawScreen(void* surf)
+{
+    void* pri = surf;
+    int priW, priH, priPitch;
+    RectangleStruct* vb;
+    int vx, stripW, sx0, x0, y0, tx, by;
+    unsigned char fr, fg, fb;
+    unsigned char* vt;
+    LockFn lockFn;
+    UnlockFn unlockFn;
+    unsigned char* locked;
+    int cr;
+    if (!g_Cfg.PowerBottom) return 0;
+    if (!pri || !IsPlausiblePtr(pri)) return 0;
+    /* 先过玩家/数值门 (无面操作): loading 等半初始化态直接跳过,
+     * 后面的 SurfGet/虚表调用碰不到半成品面。 */
+    cr = PwrCacheEnsure();
+    if (cr <= 0) return 0;
+    priW = SurfGet(pri, VT_GET_WIDTH);
+    priH = SurfGet(pri, VT_GET_HEIGHT);
+    priPitch = SurfGet(pri, VT_GET_PITCH);
+    if (priW < 800 || priW > 4096 || priH < 400 || priPitch <= 0) return 0;
+    vb = (RectangleStruct*)ADDR_DSURFACE_VIEWBOUNDS;
+    if (!vb || vb->Width < 200 || vb->Width >= priW) return 0;
+    vx = vb->X + vb->Width;
+    if (vx < 100 || vx >= priW) return 0;
+    stripW = priW - vx;
+    if (stripW < 60 || stripW > 400) return 0;
+    PwrColor(&fr, &fg, &fb);
+    PwrLayout(stripW, priH, &sx0, &y0);
+    x0 = vx + sx0;
+    if (x0 + PWR_BOLT_W + 4 + g_PwrCache.w > priW) return 0;
+    vt = *(unsigned char**)pri;
+    if (!vt || !IsPlausiblePtr(vt)) return 0;
+    lockFn = (LockFn)(*(void**)(vt + VT_LOCK));
+    unlockFn = (UnlockFn)(*(void**)(vt + VT_UNLOCK));
+    /* 函数指针验合法 (半成品面虚表是垃圾则跳过)。 */
+    if (!lockFn || !unlockFn ||
+        !IsPlausiblePtr((const void*)lockFn) ||
+        !IsPlausiblePtr((const void*)unlockFn)) return 0;
+    locked = (unsigned char*)lockFn(pri, NULL, 0, 0);
+    if (!locked || !IsPlausiblePtr(locked)) return 0;
+    tx = x0 + PWR_BOLT_W + 4;
+    by = y0 + (g_PwrCache.adv - PWR_BOLT_H) / 2;
+    if (by < 0) by = 0;
+    PwrBoltPx(locked, priPitch, priW, priH, x0, by, fr, fg, fb);
+    /* 电力文本无阴影 (用户要求)。 */
+    PwrBlitCache(locked, priPitch, priW, priH, tx, y0, fr, fg, fb, 100);
+    unlockFn(pri, NULL);
+    {
+        static int s_priLogged = 0;
+        if (!s_priLogged)
+        {
+            char pb[96], t1[16], t2[16], t3[16], t4[16];
+            unsigned q = 0;
+            s_priLogged = 1;
+            q = AppendCStr(pb, q, "mpwrp: pri=", sizeof(pb));
+            UtoA((unsigned)priW, t1);
+            q = AppendCStr(pb, q, t1, sizeof(pb));
+            q = AppendCh(pb, q, 'x', sizeof(pb));
+            UtoA((unsigned)priH, t2);
+            q = AppendCStr(pb, q, t2, sizeof(pb));
+            q = AppendCStr(pb, q, " vx=", sizeof(pb));
+            UtoA((unsigned)vx, t3);
+            q = AppendCStr(pb, q, t3, sizeof(pb));
+            q = AppendCStr(pb, q, " xy=", sizeof(pb));
+            UtoA((unsigned)x0, t4);
+            q = AppendCStr(pb, q, t4, sizeof(pb));
+            q = AppendCh(pb, q, ',', sizeof(pb));
+            UtoA((unsigned)y0, t1);
+            q = AppendCStr(pb, q, t1, sizeof(pb));
+            LogLine(pb);
+        }
+    }
+    return 1;
+}
+/* layer: 0=消息帧 (数字'1'), 1=每循环 (数字'3')。 */
+static int MsgPowerDrawSb(void)
+{
+    void* sb;
+    int sbW, sbH, sbPitch;
+    int x0, y0, tx, by;
+    unsigned char fr, fg, fb;
+    unsigned char* vt;
+    LockFn lockFn;
+    UnlockFn unlockFn;
+    unsigned char* locked;
+    int cr;
+    if (!g_Cfg.PowerBottom) return 0;
+    sb = *(void**)ADDR_DSURFACE_SIDEBAR;
+    if (!sb || !IsPlausiblePtr(sb)) return 0;
+    /* 先过玩家/数值门 (无面操作): 半初始化态直接跳过。 */
+    cr = PwrCacheEnsure();
+    if (cr <= 0) return (cr < 0) ? -1 : 0;
+    sbW = SurfGet(sb, VT_GET_WIDTH);
+    sbH = SurfGet(sb, VT_GET_HEIGHT);
+    sbPitch = SurfGet(sb, VT_GET_PITCH);
+    if (sbW < 60 || sbW > 400 || sbH < 400 || sbPitch <= 0) return 0;
+    PwrColor(&fr, &fg, &fb);
+    PwrLayout(sbW, sbH, &x0, &y0);
+    vt = *(unsigned char**)sb;
+    if (!vt || !IsPlausiblePtr(vt)) return -2;
+    lockFn = (LockFn)(*(void**)(vt + VT_LOCK));
+    unlockFn = (UnlockFn)(*(void**)(vt + VT_UNLOCK));
+    /* 函数指针验合法 (半成品面虚表是垃圾则跳过)。 */
+    if (!lockFn || !unlockFn ||
+        !IsPlausiblePtr((const void*)lockFn) ||
+        !IsPlausiblePtr((const void*)unlockFn)) return -2;
+    locked = (unsigned char*)lockFn(sb, NULL, 0, 0);
+    if (!locked || !IsPlausiblePtr(locked)) return -2;
+    tx = x0 + PWR_BOLT_W + 4;
+    by = y0 + (g_PwrCache.adv - PWR_BOLT_H) / 2;
+    if (by < 0) by = 0;
+    PwrBoltPx(locked, sbPitch, sbW, sbH, x0, by, fr, fg, fb);
+    /* 电力文本无阴影 (用户要求)。 */
+    PwrBlitCache(locked, sbPitch, sbW, sbH, tx, y0, fr, fg, fb, 100);
+    unlockFn(sb, NULL);
+    {
+        static int s_pwrLogged = 0;
+        if (!s_pwrLogged)
+        {
+            char pb[128], t1[16], t2[16], t3[16], t4[16];
+            unsigned q = 0;
+            s_pwrLogged = 1;
+            q = AppendCStr(pb, q, "mpwr: sb=", sizeof(pb));
+            UtoA((unsigned)sbW, t1);
+            q = AppendCStr(pb, q, t1, sizeof(pb));
+            q = AppendCh(pb, q, 'x', sizeof(pb));
+            UtoA((unsigned)sbH, t2);
+            q = AppendCStr(pb, q, t2, sizeof(pb));
+            q = AppendCStr(pb, q, " xy=", sizeof(pb));
+            UtoA((unsigned)x0, t3);
+            q = AppendCStr(pb, q, t3, sizeof(pb));
+            q = AppendCh(pb, q, ',', sizeof(pb));
+            UtoA((unsigned)y0, t4);
+            q = AppendCStr(pb, q, t4, sizeof(pb));
+            q = AppendCStr(pb, q, " d/o=", sizeof(pb));
+            UtoA((unsigned)g_PwrCache.drain, t1);
+            q = AppendCStr(pb, q, t1, sizeof(pb));
+            q = AppendCh(pb, q, '/', sizeof(pb));
+            UtoA((unsigned)g_PwrCache.output, t2);
+            q = AppendCStr(pb, q, t2, sizeof(pb));
+            q = AppendCStr(pb, q, " mode=", sizeof(pb));
+            UtoA((unsigned)g_Cfg.PowerMode, t3);
+            q = AppendCStr(pb, q, t3, sizeof(pb));
+            q = AppendCStr(pb, q, " rgb=", sizeof(pb));
+            UtoA((unsigned)fr, t1);
+            q = AppendCStr(pb, q, t1, sizeof(pb));
+            q = AppendCh(pb, q, ',', sizeof(pb));
+            UtoA((unsigned)fg, t2);
+            q = AppendCStr(pb, q, t2, sizeof(pb));
+            q = AppendCh(pb, q, ',', sizeof(pb));
+            UtoA((unsigned)fb, t3);
+            q = AppendCStr(pb, q, t3, sizeof(pb));
+            LogLine(pb);
+        }
+    }
+    return 1;
+}
+/* ---------------- 底电"始终绘制": 帧准备钩 ----------------
+ * 0x4F42F0 (prepare, 每循环必跑, render 条件跳过时它也跑):
+ * 首 5B 恰一条指令 (mov eax,[Tactical=0x887324]), 跳板拷 5B + 跳回
+ * 0x4F42F5, 入口 PatchAt 跳到 MsgFont_PrepareEntry (安装见 VecText)。
+ * Entry 为 naked: pushal/pushfd → 调 PowerDrawBoth → popfd/popal →
+ * 尾跳跳板 (非 call! call 会多压一层返回地址, 原函数体 [esp+4] 取 arg
+ * 即错位)。栈形全程 [ret][arg], 原 ret 4 收尾, 与引擎一致。
+ * 循环体内事件 (重画盖住/上屏) 跑在 prepare 之前, 故每迭代先恢复;
+ * render 跳过 (静置/滚完) 时照画——之前所有"帧内"修法缺的就是这一块。 */
+#define ADDR_PREPARE       0x4F42F0u
+#define ADDR_PREPARE_BACK  0x4F42F5u
+void* g_PrepareTramp = NULL;
+static void PowerDrawBoth(void)
+{
+    void* pri;
+    EnsureInit();
+    if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
+    MsgPowerDrawSb();
+    pri = *(void**)ADDR_DSURFACE_PRIMARY;
+    if (pri) MsgPowerDrawScreen(pri);
+}
+/* naked 入口铁律: 操作数只许 "m" (内存直接寻址), 禁止 "r"!
+ * "r" 让编译器在 pushal 之前用 ecx/edx 传操作数地址, 恰好盖掉入口活寄存器
+ * (prepare/blitsb 的 ecx=this, update 的 edx=surface) → 跳板/原函数拿到
+ * 垃圾 → 启动即崩。"m" 不占寄存器, 绝对安全。 */
+static void* g_CallPrepare = (void*)PowerDrawBoth;
+__attribute__((naked)) void MsgFont_PrepareEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "pushfl\n\t"
+        "call *%0\n\t"
+        "popfl\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallPrepare), "m" (g_PrepareTramp)
+        : "memory", "cc");
+}
+/* ---------------- 底电最后期合成: 上屏入口钩 ----------------
+ * SidebarClass::BlitSidebar=0x6A70E0 (全二进制唯一的条带上屏点):
+ * 首 6B 恰三条指令 (sub esp,0x38/push ebx/push ebp), 跳板拷 6B + 跳回
+ * 0x6A70E6, 入口 PatchAt 跳到 MsgFont_BlitSbEntry (安装见 VecText)。
+ * 引擎事件 (重画盖住+上屏) 会把屏上条带整体盖掉 (含屏直画部分),
+ * 与层/时机无关。故在呈现入口先恢复: 每次上屏前字已在侧栏面里,
+ * 呈出的每一帧都带字, 结构上不再有"被盖帧"。
+ * Entry 同 prepare 钩形 (naked + 尾跳跳板, 栈形 [ret][force], 原 ret 4)。
+ * 不碰光标/脏旗, 无拖影。 */
+#define ADDR_BLITSB        0x6A70E0u
+#define ADDR_BLITSB_BACK   0x6A70E6u
+void* g_BlitSbTramp = NULL;
+static void BlitSbEntryDraw(void)
+{
+    EnsureInit();
+    if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
+    MsgPowerDrawSb();
+}
+static void* g_CallBlitSb = (void*)BlitSbEntryDraw;
+__attribute__((naked)) void MsgFont_BlitSbEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "pushfl\n\t"
+        "call *%0\n\t"
+        "popfl\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallBlitSb), "m" (g_BlitSbTramp)
+        : "memory", "cc");
+}
+/* ---------------- 底电呈现入口钩 ----------------
+ * GScreenClass::UpdatePrimarySurface=0x4F4780 (非条带呈现路, YRpp 实证
+ * DoBlit/UpdatePrimarySurface, 调用者 34 处: 对话框/过场/模态循环等):
+ * 首 7B 恰两条指令 (sub esp,0x5C/mov eax,[esp+0x60]), 跳板拷 7B
+ * + 跳回 0x4F4787, 入口 PatchAt 跳到 MsgFont_UpdateEntry (安装见 VecText)。
+ * __fastcall (ecx=mouseCaptured, edx=surface, 栈 rect): Entry 取 edx,
+ * 只在白名单面 (Hidden/Primary) 上屏坐标直画 (几何门二次确认;
+ * Composite 等一律跳过)。尾跳跳板, 栈形全程不变
+ * (原 add esp,0xC0 + ret 收尾, 非 ret N)。纯像素绘制, 不碰光标/脏旗。 */
+#define ADDR_UPDATE        0x4F4780u
+#define ADDR_UPDATE_BACK   0x4F4787u
+#define ADDR_DSURFACE_HIDDEN 0x0088730Cu
+void* g_UpdateTramp = NULL;
+static void DrawPresentArg(void* surf)
+{
+    void* hid, *pri;
+    EnsureInit();
+    if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
+    if (!surf || !IsPlausiblePtr(surf)) return;
+    hid = *(void**)ADDR_DSURFACE_HIDDEN;
+    pri = *(void**)ADDR_DSURFACE_PRIMARY;
+    if (surf != hid && surf != pri) return;
+    MsgPowerDrawScreen(surf);
+}
+static void* g_CallUpdate = (void*)DrawPresentArg;
+__attribute__((naked)) void MsgFont_UpdateEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "pushfl\n\t"
+        "push %%edx\n\t"
+        "call *%0\n\t"
+        "add $4, %%esp\n\t"
+        "popfl\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallUpdate), "m" (g_UpdateTramp)
+        : "memory", "cc");
+}
 extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* regs)
 {
     void* surf;
@@ -1723,6 +2197,17 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
         rc = DrawSWPanel(surf, bitLineH, surfW, surfH, surfPitch);
         if (rc < 0) { StatTick(tick, rc == -1 ? 2 : 4); return 0; }
         if (rc == 1) drew = 1;
+    }
+
+    /* 底部电量: sb+屏同画 (见上; 总开关 PowerBottom=0 即关)。 */
+    {
+        int pwr = MsgPowerDrawSb();
+        void* pri;
+        int b = 0;
+        if (pwr < 0) { StatTick(tick, pwr == -1 ? 2 : 4); return 0; }
+        pri = *(void**)ADDR_DSURFACE_PRIMARY;
+        if (pri) b = MsgPowerDrawScreen(pri);
+        if (pwr == 1 || b == 1) drew = 1;
     }
 
     if (!drew && !g_Cfg.ShowHotZone) { StatTick(tick, 1); return 0; }
