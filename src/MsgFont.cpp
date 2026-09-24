@@ -1494,16 +1494,16 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_GreenHook(void* regs)
 }
 
 /* ---------------- 底部电量 ----------------
- * 定案: 同一像素, 四路同画——
+ * 定案: 只画侧栏面, 随条带上屏——
  * (1) 消息帧 (render 内), (2) prepare (每循环, render 跳过也跑),
- * (3) BlitSidebar 入口 (每次条带呈现前先恢复, 呈出的帧必带字),
- * (4) UpdatePrimarySurface 入口 (非条带呈现路, 在被呈现面上直接画)。
- * sb 一份 (168 侧栏坐标, 喂条带上屏) + 屏一份 (ViewBounds 右沿+偏移,
- * 直接落屏, 无呈现也立显)。各路像素完全相同, 覆盖即不可见, 无闪。
+ * (3) BlitSidebar 入口 (每次条带呈现前先恢复, 呈出的帧必带字)。
+ * 不再往 Primary/Hidden/Composite 直画: 直画层级盖过鼠标,
+ * 且侧栏不呈现时仍冒字。侧栏面一份 (168 侧栏坐标, 喂条带上屏),
+ * 层级天然在鼠标之下, 侧栏不画即不显示。
  * 上屏链反汇编实证见 VecText 笔记"底部电量"节。
  * 总开关: [VecText] PowerBottom=0 即关 (缺省 1 开)。
  * 内容 "闪电+负载/电力" (PowerMode=1 则"闪电+余量纯数字"): 侧栏内居中
- * (PowerX>0 则侧栏绝对 x), y 锚底边。
+ * (PowerX>0 则侧栏绝对 x), y 锚底边 (y0=H-PowerPad-adv, 0 即贴底)。
  * 数值: CurrentPlayer(0xA83D4C)+0x53A4=PowerOutput/+0x53A8=PowerDrain
  * (UpdatePower 0x508C30 反汇编实证, VecText 笔记 v88 节)。
  * 颜色按游戏比例 (Phobos PowerDelta 默认 0.75/1.0): d*4<o*3 绿, d<=o 黄,
@@ -1665,10 +1665,9 @@ static void PwrColor(unsigned char* fr, unsigned char* fg, unsigned char* fb)
     else if (g_PwrCache.drain <= g_PwrCache.output)
     { *fr = 255; *fg = 255; *fb = 0; }                 /* 黄: 危险 */
 }
-/* 底电版式 (侧栏面相对坐标): x0 居中 (PowerX>0 则绝对), y0 锚底边
- * 上方、翻页按钮之上 (PWR_LIFT 预留翻页键高度, 与 PowerPad 叠加)。
- * 只服务侧栏面, 不再有屏坐标系。调用方先 PwrCacheEnsure。 */
-#define PWR_LIFT 30
+/* 底电版式 (侧栏面相对坐标): x0 居中 (PowerX>0 则绝对), y0 锚底边。
+ * 只服务侧栏面, 不再有屏坐标系。调用方先 PwrCacheEnsure。
+ * y0 = H - PowerPad - adv, PowerPad=0 即贴底, 由配置全权控制。 */
 static void PwrLayout(int W, int H, int* x0, int* y0)
 {
     int sx = g_Cfg.PowerX;
@@ -1678,12 +1677,13 @@ static void PwrLayout(int W, int H, int* x0, int* y0)
         if (sx < 0) sx = 0;
     }
     *x0 = sx;
-    *y0 = H - g_Cfg.PowerPad - PWR_LIFT - g_PwrCache.adv;
+    *y0 = H - g_Cfg.PowerPad - g_PwrCache.adv;
     if (*y0 < 0) *y0 = 0;
 }
-/* 底电屏坐标直画 (几何门内才画): surf 为屏尺寸面 (Primary/Hidden/被呈现面)。
- * 返回 1=画出, 0=跳过。 */
-static int MsgPowerDrawScreen(void* surf)
+/* 底电屏坐标直画已退役: 只画侧栏面才能保证层级在鼠标之下、
+ * 且侧栏不呈现时不残留。Primary/Hidden 直画会盖过鼠标、菜单也冒字,
+ * 故不再调用 (函数保留备查, 不再参与绘制)。 */
+static int __attribute__((unused)) MsgPowerDrawScreen(void* surf)
 {
     void* pri = surf;
     int priW, priH, priPitch;
@@ -1856,12 +1856,11 @@ static int MsgPowerDrawSb(void)
 void* g_PrepareTramp = NULL;
 static void PowerDrawBoth(void)
 {
-    void* pri;
     EnsureInit();
     if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
+    /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;
+     * 侧栏不呈现时 BlitSidebar 不跑, 字不会冒出来。 */
     MsgPowerDrawSb();
-    pri = *(void**)ADDR_DSURFACE_PRIMARY;
-    if (pri) MsgPowerDrawScreen(pri);
 }
 /* naked 入口铁律: 操作数只许 "m" (内存直接寻址), 禁止 "r"!
  * "r" 让编译器在 pushal 之前用 ecx/edx 传操作数地址, 恰好盖掉入口活寄存器
@@ -1913,29 +1912,21 @@ __attribute__((naked)) void MsgFont_BlitSbEntry(void)
         : "m" (g_CallBlitSb), "m" (g_BlitSbTramp)
         : "memory", "cc");
 }
-/* ---------------- 底电呈现入口钩 ----------------
- * GScreenClass::UpdatePrimarySurface=0x4F4780 (非条带呈现路, YRpp 实证
- * DoBlit/UpdatePrimarySurface, 调用者 34 处: 对话框/过场/模态循环等):
- * 首 7B 恰两条指令 (sub esp,0x5C/mov eax,[esp+0x60]), 跳板拷 7B
- * + 跳回 0x4F4787, 入口 PatchAt 跳到 MsgFont_UpdateEntry (安装见 VecText)。
- * __fastcall (ecx=mouseCaptured, edx=surface, 栈 rect): Entry 取 edx,
- * 只在白名单面 (Hidden/Primary) 上屏坐标直画 (几何门二次确认;
- * Composite 等一律跳过)。尾跳跳板, 栈形全程不变
- * (原 add esp,0xC0 + ret 收尾, 非 ret N)。纯像素绘制, 不碰光标/脏旗。 */
+/* ---------------- 呈现入口钩 (已退役为空操作) ----------------
+ * GScreenClass::UpdatePrimarySurface=0x4F4780 钩子保留安装 (进出栈平衡),
+ * 但不再绘制: 往呈现面直画层级盖过鼠标、侧栏不呈现时仍冒字,
+ * 故只画侧栏面、随条带上屏。 */
 #define ADDR_UPDATE        0x4F4780u
 #define ADDR_UPDATE_BACK   0x4F4787u
 #define ADDR_DSURFACE_HIDDEN 0x0088730Cu
 void* g_UpdateTramp = NULL;
 static void DrawPresentArg(void* surf)
 {
-    void* hid, *pri;
+    (void)surf;
+    /* 退役: 不再往呈现面直画 (盖鼠标 + 侧栏隐藏仍冒字), 保持空操作。
+     * 钩子保留安装 (进出栈平衡), 但不再绘制。 */
     EnsureInit();
-    if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
-    if (!surf || !IsPlausiblePtr(surf)) return;
-    hid = *(void**)ADDR_DSURFACE_HIDDEN;
-    pri = *(void**)ADDR_DSURFACE_PRIMARY;
-    if (surf != hid && surf != pri) return;
-    MsgPowerDrawScreen(surf);
+    return;
 }
 static void* g_CallUpdate = (void*)DrawPresentArg;
 __attribute__((naked)) void MsgFont_UpdateEntry(void)
@@ -2254,15 +2245,12 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
         if (rc == 1) drew = 1;
     }
 
-    /* 底部电量: sb+屏同画 (见上; 总开关 PowerBottom=0 即关)。 */
+    /* 底部电量: 只画侧栏面 (总开关 PowerBottom=0 即关)。
+     * 随 BlitSidebar 条带上屏, 层级在鼠标之下, 侧栏不画即不显示。 */
     {
         int pwr = MsgPowerDrawSb();
-        void* pri;
-        int b = 0;
         if (pwr < 0) { StatTick(tick, pwr == -1 ? 2 : 4); return 0; }
-        pri = *(void**)ADDR_DSURFACE_PRIMARY;
-        if (pri) b = MsgPowerDrawScreen(pri);
-        if (pwr == 1 || b == 1) drew = 1;
+        if (pwr == 1) drew = 1;
     }
 
     if (!drew && !g_Cfg.ShowHotZone) { StatTick(tick, 1); return 0; }
