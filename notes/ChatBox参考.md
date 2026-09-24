@@ -12,6 +12,16 @@
 - `0x533F50`（5 字节）：悬停消息框时跳过侧栏滚动。
 - `0x692419`（7 字节）：命中消息框时吞掉穿透点击。
 
+单人聊天框（Phobos `AllowChatBoxInSinglePlayer` 同原理，已在 `MsgFont.cpp`
+用 `ChatBoxSP` 实现，`0`=走原版）：
+对话框函数按 `[SessionClass 0xA8B238]==0/5` 判单人并跳过聊天框四处逻辑，
+开启时跳过 session 检查（其余旗标检查保留）：
+
+- `0x55E477`（5 字节，`mov eax,[sess]`）→ `0x55E48D`。
+- `0x55E62F`（6 字节，`cmp [sess],ebx`）→ `0x55E637`。
+- `0x55E693`（6 字节，`cmp [sess],ebx`）→ `0x55E69B`。
+- `0x55E746`（5 字节，`mov eax,[sess]`）→ `0x55E77B`。
+
 `AddMessage` 入口栈布局（`ESP` 指向返回地址）：
 
 - `+0x00` 返回地址；`+0x04` 来源名；`+0x08` ID；`+0x0C` 正文。

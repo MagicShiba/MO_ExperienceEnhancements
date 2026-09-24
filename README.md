@@ -18,7 +18,7 @@
 - `notes/`：文档与最小外部参照,记录探索过程。
 - `test/`：一次性探针与实验，用完即删。
 - `build/`：中间文件。
-- 参考资料文件夹:`motest\AutoLoadDev\references`
+- 参考资料文件夹:`motest\AutoLoadDev\references` 内部包含phobos和yrpp,优先从此处查找资料
 
 复用（不复制）：
 

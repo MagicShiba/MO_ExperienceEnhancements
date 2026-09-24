@@ -18,7 +18,7 @@
 #include "GdiText.h"
 #include "VecText.h"
 
-#define MF_VERSION   "0.2.42"
+#define MF_VERSION   "0.2.45"
 #define MF_SECTION   "MsgFont"
 
 /* ---------------- 地址 ---------------- */
@@ -85,6 +85,7 @@ typedef struct {
     int CampBottom;    /* 1 = 底部显示 (底边固定, 文本向上增长), 0 = 顶部显示 */
     int CampBottomMargin; /* 底部模式时距底边像素 */
     int CampCentered;  /* 1 = 水平居中, 0 = 左对齐 (PosX) */
+    int CampAnim;      /* 1 = 打字机逐字 (原版 Animate 同速率), 0 = 整行即时 */
     int LogMessages;
     int ShowHotZone;   /* 1 = 画出悬停生效范围 (调试悬停用) */
     int ScrollStep;    /* 滚轮步长(行) */
@@ -104,6 +105,7 @@ typedef struct {
     int PowerX;      /* 0=侧栏内居中 (默认); >0=侧栏绝对 x */
     int PowerPad;    /* 底部电量距底边像素 (默认 6) */
     int PowerMode;   /* 0=负载/电力 (默认); 1=余量纯数字 (够用正/不够负) */
+    int ChatBoxSP;   /* 1=单人模式也建聊天框 (Phobos AllowChatBoxInSinglePlayer 同原理) */
 } MsgFontConfig;
 
 static MsgFontConfig g_Cfg;
@@ -201,6 +203,7 @@ static void LoadConfig(void)
     g_Cfg.CampBottom = GetPrivateProfileIntA(MF_SECTION, "CampBottom", 0, g_IniPath);
     g_Cfg.CampBottomMargin = GetPrivateProfileIntA(MF_SECTION, "CampBottomMargin", 8, g_IniPath);
     g_Cfg.CampCentered = GetPrivateProfileIntA(MF_SECTION, "CampCentered", 0, g_IniPath);
+    g_Cfg.CampAnim = GetPrivateProfileIntA(MF_SECTION, "CampAnim", 1, g_IniPath);
     g_Cfg.LogMessages = GetPrivateProfileIntA(MF_SECTION, "LogMessages", 0, g_IniPath);
     g_Cfg.ShowHotZone = GetPrivateProfileIntA(MF_SECTION, "ShowHotZone", 1, g_IniPath);
     g_Cfg.ScrollStep  = GetPrivateProfileIntA(MF_SECTION, "ScrollStep", 3, g_IniPath);
@@ -223,6 +226,7 @@ static void LoadConfig(void)
     g_Cfg.PowerX = GetPrivateProfileIntA(VT_SECTION, "PowerX", 0, g_IniPath);
     g_Cfg.PowerPad = GetPrivateProfileIntA(VT_SECTION, "PowerPad", 6, g_IniPath);
     g_Cfg.PowerMode = GetPrivateProfileIntA(VT_SECTION, "PowerMode", 0, g_IniPath);
+    g_Cfg.ChatBoxSP = GetPrivateProfileIntA(MF_SECTION, "ChatBoxSP", 1, g_IniPath);
     g_Cfg.Enable = g_Cfg.Enable ? 1 : 0;
     g_Cfg.LogMessages = g_Cfg.LogMessages ? 1 : 0;
     g_Cfg.ShowHotZone = g_Cfg.ShowHotZone ? 1 : 0;
@@ -247,6 +251,7 @@ static void LoadConfig(void)
     if (g_Cfg.CampBottomMargin < 0) g_Cfg.CampBottomMargin = 0;
     if (g_Cfg.CampBottomMargin > 2000) g_Cfg.CampBottomMargin = 2000;
     g_Cfg.CampCentered = g_Cfg.CampCentered ? 1 : 0;
+    g_Cfg.CampAnim = g_Cfg.CampAnim ? 1 : 0;
     if (g_Cfg.TopGapLines < 0) g_Cfg.TopGapLines = 0;
     if (g_Cfg.TopGapLines > 10) g_Cfg.TopGapLines = 10;
     if (g_Cfg.ScrollStep < 1) g_Cfg.ScrollStep = 1;
@@ -273,6 +278,7 @@ static void LoadConfig(void)
     if (g_Cfg.PowerPad < 0) g_Cfg.PowerPad = 0;
     if (g_Cfg.PowerPad > 200) g_Cfg.PowerPad = 200;
     g_Cfg.PowerMode = g_Cfg.PowerMode ? 1 : 0;
+    g_Cfg.ChatBoxSP = g_Cfg.ChatBoxSP ? 1 : 0;
 
     g_SW.Enable = GetPrivateProfileIntA(SWPANEL_SECTION, "Enable", 1, g_IniPath);
     g_SW.FontPx = GetPrivateProfileIntA(SWPANEL_SECTION, "FontPx", 16, g_IniPath);
@@ -644,6 +650,9 @@ static TextLine g_LineBuf[MAX_PICKED][MAX_LPP];
 static int      g_LineCnt[MAX_PICKED];
 static int      g_Picked[MAX_PICKED];
 static int      g_RowBase[MAX_PICKED];
+static int      g_LineOff[MAX_PICKED][MAX_LPP]; /* 行在合成串中的字符偏移 (打字机用) */
+static int      g_BodyLen[MAX_PICKED];          /* 合成串总字符数 */
+static int      g_Reveal[MAX_PICKED];           /* 本帧已揭示字符数 (DrawBox 填写) */
 static wchar_t  g_Compose[MAX_PICKED][MAX_NAME_W + MAX_TEXT_W + 4];
 
 extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_AddMessageHook(void* regs){
@@ -757,6 +766,8 @@ typedef struct {
     int slot;        /* GDI 槽位 (战役=0, 提示=1) */
     const wchar_t* face; /* 字体名 (g_CampFace/g_HintFace) */
     MsgRing* ring;   /* 专属消息环 (双流分离存储) */
+    int fullBoard;   /* 1=整块底板 (悬停/展开, Phobos hover 态), 0=包裹文本 */
+    int anim;        /* 1=打字机逐字 (只战役框), 0=整行即时 */
 } BoxSpec;
 
 static int g_Skip = 0;          /* 0 = 跟随最新 */
@@ -945,7 +956,7 @@ static int PickLines(MsgRing* R, int wantSp, int ignoreTimeout, unsigned tmoMul,
         ChatMsg* m = MsgAt(R, i);
         const wchar_t* body;
         const wchar_t* seg;
-        int cnt = 0;
+        int cnt = 0, off = 0;
         if (m->sp != wantSp) continue;
         if (!ignoreTimeout && !MsgVisibleMul(m, tmoMul)) continue;
         if (m->name[0])
@@ -961,21 +972,27 @@ static int PickLines(MsgRing* R, int wantSp, int ignoreTimeout, unsigned tmoMul,
         }
             else body = m->text;
             if (!TextHasContent(body) && !m->name[0]) continue;
+        {
+            int bl = 0;
+            while (body[bl]) bl++;
+            g_BodyLen[picked] = bl;
+        }
         seg = body;
         while (*seg && cnt < MAX_LPP && rows < rowBudget)
         {
             int segLen = 0;
             int fit;
             while (seg[segLen] && seg[segLen] != L'\n') segLen++;
-            if (segLen == 0) { seg++; continue; }
+            if (segLen == 0) { seg++; off++; continue; }  /* 跳过的换行也占揭示位 */
             fit = CharsFit(seg, segLen, textW);
             if (fit <= 0) fit = 1;
             if (fit > segLen) fit = segLen;
             g_LineBuf[picked][cnt].start = seg;
             g_LineBuf[picked][cnt].len = fit;
+            g_LineOff[picked][cnt] = off;
             cnt++; rows++;
-            seg += fit;
-            if (*seg == L'\n') seg++;
+            seg += fit; off += fit;
+            if (*seg == L'\n') { seg++; off++; }
         }
         if (cnt <= 0) continue;
         g_LineCnt[picked] = cnt;
@@ -1018,6 +1035,22 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
 
     totalAll = PickLines(B->ring, B->wantSp, B->ignoreTimeout, B->tmoMul, textW, B->rowBudget, &picked);
     if (picked <= 0 || totalAll <= 0) return 0;
+    /* 打字机揭示位: 原版速率 1 字/16ms (AnimPos += (time-timing)>>4) 与首帧 1 字;
+     * 时钟与 born 同系 (游戏时钟, 暂停即停); 关 anim 整串即时 (提示框/原版 sp=1 同)。 */
+    {
+        unsigned nowC = ClockNow();
+        for (k = 0; k < picked; k++)
+        {
+            if (!B->anim) { g_Reveal[k] = g_BodyLen[k]; continue; }
+            {
+                ChatMsg* m = MsgAt(B->ring, g_Picked[k]);
+                int el = (int)(nowC - m->born);
+                int rr = (el <= 0) ? 1 : el;
+                if (rr > g_BodyLen[k]) rr = g_BodyLen[k];
+                g_Reveal[k] = rr;
+            }
+        }
+    }
     limit = B->limit;
     if (limit > totalAll) limit = totalAll;
 
@@ -1047,10 +1080,11 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
     rect.Height = totalRows * adv + 4;
     board.R = 0; board.G = 0; board.B = 0;
     /* 底板透明度叠渐隐 (fade=100 与原来一致); 0 不画底板
-     * (战役框同时省阴影; 提示框阴影照画, 见下) */
+     * (战役框同时省阴影; 提示框阴影照画, 见下)。
+     * 整块只在悬停/展开时铺 (Phobos hover 态); 平时逐行包裹已揭示文本。 */
     {
         boardOp = B->opacity * B->fade / 100;
-        if (boardOp > 0)
+        if (boardOp > 0 && B->fullBoard)
             FillRectTransVt(surf, &rect, &board, boardOp);
     }
 
@@ -1077,11 +1111,22 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
         for (r = 0; r < g_LineCnt[k]; r++)
         {
             int globalRow = g_RowBase[k] + r;
-            int ly, w;
+            int ly, w, vis;
             if (globalRow < rowBegin || globalRow >= rowEnd) continue;
             ly = y + (globalRow - rowBegin) * adv;
-            w = RenderLine(g_LineBuf[k][r].start, g_LineBuf[k][r].len);
+            /* 本行揭示字数: 未揭示的行留空占位 (版式稳定, 文字长进格子) */
+            vis = g_Reveal[k] - g_LineOff[k][r];
+            if (vis <= 0) { drawn++; continue; }
+            if (vis > g_LineBuf[k][r].len) vis = g_LineBuf[k][r].len;
+            w = RenderLine(g_LineBuf[k][r].start, vis);
             if (w <= 0) { drawn++; continue; }
+            /* 包裹模式: 黑底只包已揭示的墨水 (与整块同边距: 左右 3, 上下 2) */
+            if (!B->fullBoard && boardOp > 0)
+            {
+                RectangleStruct wr;
+                wr.X = x - 3; wr.Y = ly - 2; wr.Width = w + 6; wr.Height = adv + 4;
+                FillRectTransVt(surf, &wr, &board, boardOp);
+            }
             /* 阴影 (战役框底板透明度 0 时跳过; 提示框 0 也画; ShadowSize>1 加厚) */
             if (g_Cfg.Shadow && g_Cfg.ShadowOpacity > 0 &&
                 (boardOp > 0 || B->shadowNoBoard))
@@ -1620,8 +1665,10 @@ static void PwrColor(unsigned char* fr, unsigned char* fg, unsigned char* fb)
     else if (g_PwrCache.drain <= g_PwrCache.output)
     { *fr = 255; *fg = 255; *fb = 0; }                 /* 黄: 危险 */
 }
-/* 底电版式 (strip 相对坐标): x0 居中 (PowerX>0 则绝对), y0 锚底边。
- * 调用方先 PwrCacheEnsure (用 g_PwrCache.w/adv)。 */
+/* 底电版式 (侧栏面相对坐标): x0 居中 (PowerX>0 则绝对), y0 锚底边
+ * 上方、翻页按钮之上 (PWR_LIFT 预留翻页键高度, 与 PowerPad 叠加)。
+ * 只服务侧栏面, 不再有屏坐标系。调用方先 PwrCacheEnsure。 */
+#define PWR_LIFT 30
 static void PwrLayout(int W, int H, int* x0, int* y0)
 {
     int sx = g_Cfg.PowerX;
@@ -1631,7 +1678,7 @@ static void PwrLayout(int W, int H, int* x0, int* y0)
         if (sx < 0) sx = 0;
     }
     *x0 = sx;
-    *y0 = H - g_Cfg.PowerPad - g_PwrCache.adv;
+    *y0 = H - g_Cfg.PowerPad - PWR_LIFT - g_PwrCache.adv;
     if (*y0 < 0) *y0 = 0;
 }
 /* 底电屏坐标直画 (几何门内才画): surf 为屏尺寸面 (Primary/Hidden/被呈现面)。
@@ -2054,21 +2101,27 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
             s_lastMs = nowMs;
             if (s_fade < target) { s_fade += step; if (s_fade > target) s_fade = target; }
             else if (s_fade > target) { s_fade -= step; if (s_fade < target) s_fade = target; }
+            /* 活消息即时满亮 (治时差): 新消息与引擎提示音同帧出现 (原版首字同帧),
+             * 不再爬 500ms 斜坡; 淡出与悬停淡入仍走斜坡。 */
+            if (liveCamp) s_fade = 100;
             showCamp = (s_fade > 0);
             camp.fade = s_fade;
         }
         {
-            /* 展开锁存: 悬停即展开; 淡出中保持 (历史可见淡出), 否则淡出的
-             * 是空盒、看起来像瞬灭; fade 到 0 才收回。活消息独占时仍只看
-             * 活的 (不受锁存污染)。 */
+            /* 展开锁存: 悬停即展开; 淡出中保持上帧 (hover 离开后历史可见淡出,
+             * 否则淡出的是空盒、看起来像瞬灭); fade 到 0 才收回。活消息独占
+             * 时仍只看活的。注意: 锁存只保持、不新设——末条消息过期时上帧
+             * 是收拢态, 保持收拢直接消失 (原版行为); 若新设展开, 会闪出整块
+             * 历史再整体消失。 */
             static int s_expand = 0;
             if (hoverCamp) s_expand = 1;
             else if (liveCamp) s_expand = 0;
             else if (camp.fade == 0) s_expand = 0;
             else if (!HasCampHistory()) s_expand = 0;
-            else s_expand = 1;
+            /* else: 保持上帧 s_expand (淡出中), 不新设 */
             camp.bar = s_expand;   /* 滚动条悬停/淡出即显示 (alpha 随斜坡, 不闪) */
             camp.ignoreTimeout = s_expand;
+            camp.fullBoard = s_expand;   /* 悬停/展开铺整块 (Phobos hover 态), 平时包裹 */
         }
         {
             static int s_lastHover = -1;
@@ -2133,6 +2186,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
     camp.opacity = g_Cfg.BoardOpacity; camp.shadowNoBoard = 0;
     camp.fontPx = g_Cfg.FontHeight; camp.bold = g_Cfg.Bold;
     camp.pSkip = &g_Skip;
+    camp.anim = g_Cfg.CampAnim;
     camp.ring = &g_CampRing;
     camp.schemeColor = 1;
     camp.tmoMul = 1;
@@ -2151,6 +2205,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
     hint.fade = 100;   /* 提示框不渐隐, 行为不变 */
     hint.fontPx = g_Cfg.HintFontHeight; hint.bold = g_Cfg.HintBold;
     hint.pSkip = NULL; hint.bar = 0;
+    hint.fullBoard = 1; hint.anim = 0;   /* 提示框行为不变: 整块底板+整行即时 */
     hint.ring = &g_HintRing;
     hint.schemeColor = g_Cfg.HintColorFollow;
     hint.tmoMul = (unsigned)g_Cfg.HintTimeoutMul;
@@ -2280,6 +2335,52 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_SidebarHook(void* regs)
     if (!g_Cfg.Enable || !g_CampValid) return 0;
     if (!MouseXY(&mx, &my) || !MouseInCampRect(mx, my)) return 0;
     return ADDR_SKIP_SCROLL_SIDEBAR;
+}
+
+/* 单人聊天框 (Phobos AllowChatBoxInSinglePlayer 同原理, 见 notes/ChatBox参考.md):
+ * 对话框函数按 [SessionClass 0xA8B238]==0/5 判定单人并跳过聊天框四处逻辑。
+ * 开启时跳过 session 检查 (保留其余旗标检查), 返回 0 走原版。
+ *   0x55E477 (5B, mov eax,[sess]) → 0x55E48D (绕过 je, 进 0xA8BC79 检查)
+ *   0x55E62F (6B, cmp [sess],ebx) → 0x55E637 (跳过 je, 进 push/call)
+ *   0x55E693 (6B, cmp [sess],ebx) → 0x55E69B (跳过 je, 进 cmp esi,0x1b)
+ *   0x55E746 (5B, mov eax,[sess]) → 0x55E77B (绕过 je, 进 CurrentPlayer 分支) */
+#define ADDR_CHATSP_1      0x0055E48Du
+#define ADDR_CHATSP_2      0x0055E637u
+#define ADDR_CHATSP_3      0x0055E69Bu
+#define ADDR_CHATSP_4      0x0055E77Bu
+
+extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_ChatSp1(void* regs)
+{
+    static int s_logged = 0;
+    (void)regs;
+    EnsureInit();
+    if (!g_Cfg.ChatBoxSP) return 0;
+    if (!s_logged) { s_logged = 1; LogLine("chatsp: singleplayer chatbox on"); }
+    return ADDR_CHATSP_1;
+}
+
+extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_ChatSp2(void* regs)
+{
+    (void)regs;
+    EnsureInit();
+    if (!g_Cfg.ChatBoxSP) return 0;
+    return ADDR_CHATSP_2;
+}
+
+extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_ChatSp3(void* regs)
+{
+    (void)regs;
+    EnsureInit();
+    if (!g_Cfg.ChatBoxSP) return 0;
+    return ADDR_CHATSP_3;
+}
+
+extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_ChatSp4(void* regs)
+{
+    (void)regs;
+    EnsureInit();
+    if (!g_Cfg.ChatBoxSP) return 0;
+    return ADDR_CHATSP_4;
 }
 
 extern "C" BOOL __stdcall DllMain(HINSTANCE h, DWORD reason, LPVOID res)
