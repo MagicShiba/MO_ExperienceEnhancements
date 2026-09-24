@@ -499,6 +499,10 @@ static int g_TipOw = 0;
 static int g_TipY = -9999;
 /* 当帧提示首字是否已扫描 (Print 入口清零, Blit 首字置位) */
 static int g_BlitTipSeen = 0;
+/* 提示边框色粘存 (玩家色一局不变): 顶行采样成功即更新;
+ * 出界裁剪后顶行全黑采不到时沿用, 不再回落纯红 (图 3 的病)。 */
+static unsigned g_TipBcCache = 0;
+static int g_TipBcOK = 0;
 /* 世界悬浮提示活跨 (任意 0x4A5FF2 CJK 浮框, 电力/建筑名): Blit 层用它把
  * 悬浮文本排除出超武区接管。否则提示飘到右侧带时被 SuperPx 重绘且按引擎
  * 窄 adv 步进, 字被压窄左移、整串变短 -> 右侧留大空隙 (偏移与压缩根因)。 */
@@ -561,10 +565,13 @@ int __fastcall VecPrintEntry(void* t, void* e,
 {
     unsigned caller = (unsigned)__builtin_return_address(0);
     int r, toolTake = 0;
-    /* 电力提示落笔 x 记录 (Simple 盒 R 自校验用, 只读 First 字) */
+    /* 电力提示落笔 x 记录 (Simple 盒 R 自校验用, 只读 First 字)。
+     * 只认世界悬浮 Print (caller=0x4A5FF2 内层, 见定案): 菜单/列表
+     * (如选择任务存档名"电力…") 走别的调用者, 在此直接排除,
+     * 否则 Blit 层 TipBox 会在菜单里画额外方框 (图 4 的病)。 */
     {
         const wchar_t* ps = (const wchar_t*)a3;
-        if (ps && IsPlausiblePtr((void*)ps) &&
+        if (caller == 0x004A5FF2u && ps && IsPlausiblePtr((void*)ps) &&
             (((unsigned)ps[0] & 0xFFFFu) == 0x7535u))
         {
             int tl = 0, ci;
@@ -658,6 +665,7 @@ int __fastcall VecPrintEntry(void* t, void* e,
         const wchar_t* qs = (const wchar_t*)a3;
         int ql = 0;
         if (qs && IsPlausiblePtr((void*)qs) &&
+            caller == 0x004A5FF2u &&
             (g_TipTot == 0 || ((unsigned)qs[0] & 0xFFFFu) != 0x7535u) &&
             g_TipY > -9000 && a5 >= g_TipY - 24 && a5 <= g_TipY + 24 &&
             a4 >= g_LastTipX - 64 && a4 <= g_LastTipX + 400)
@@ -1544,67 +1552,25 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                 int oldHW = (g_TipOw > 0 ? g_TipOw : 118) / 2 + 4;
                 int oldL = cx - oldHW, oldR = cx + oldHW - 1;
                 int newL = anchor - 4, newR = g_LastTipX + g_TipTot + 4;
-                int yT = y - 2, yB = y + 18, ym = y + 9;
+                int yT = y - 2, yB = y + 18;
                 int xx, yy;
                 /* 边缘钳制: 只画屏内部分。oldL/oldR 随 ow 自适应
                  * (118->±63 实测; 长串按 ow+8 估, 截图校准)。 */
                 int L0 = newL < 0 ? 0 : newL;
                 int R0 = newR >= pp ? pp - 1 : newR;
-                int mL = oldL + 2 < L0 ? L0 : oldL + 2;
-                int mRb = oldR - 2 > R0 ? R0 : oldR - 2;
-                int sL1 = L0, sL2 = oldL - 1 > R0 ? R0 : oldL - 1;
-                int sR1 = oldR + 1 < L0 ? L0 : oldR + 1, sR2 = R0;
-                int fL1 = L0, fL2 = oldL > R0 ? R0 : oldL;
-                int fR1 = oldR < L0 ? L0 : oldR, fR2 = R0;
                 int cL = oldL < L0 ? L0 : oldL;
                 int cR = oldR > R0 ? R0 : oldR;
                 /* 真裁剪 (无模式切换): 盒与字永远同宽同锚
                  * ([anchor-4, tipx+tot+4]), 作为一个整体进出屏幕;
-                 * 填充/采样天然钳在屏内 (L0/R0), 出屏侧不画边框。
+                 * 出屏侧不画边框。
                  * v67 序号证 Print:Simple_=1:1, 无额外绘制;
                  * 此前"突然缩短"是出界回落在 tipx≈4 处跳变, 已删。 */
                 if (L0 <= R0 && yT >= 0 && yB <= 4096)
                 {
-                    long mR = 0, mG = 0, mB = 0, bR = 0, bG = 0, bB = 0;
-                    long mN = 0, bN = 0;
-                    long rR, rG, rB;
                     unsigned bc = 0xF800u;
                     unsigned bestR = 0;
-                    for (xx = mL; xx <= mRb; xx++)
-                    {
-                        unsigned c = bb[ym * pp + xx];
-                        mR += (c >> 11) & 31u; mG += (c >> 5) & 63u;
-                        mB += c & 31u; mN++;
-                    }
-                    /* 地面采样只取真盒外像素: 出屏侧钳入段落在真盒内
-                     * (盒 tone), 会把比例拉偏、接缝露馅, 故跳过,
-                     * 用另一侧邻地 ( tones 一致, 同一材质)。 */
-                    if (newL >= 0)
-                    for (xx = sL1; xx <= sL2; xx++)
-                    {
-                        unsigned c = bb[ym * pp + xx];
-                        bR += (c >> 11) & 31u; bG += (c >> 5) & 63u;
-                        bB += c & 31u; bN++;
-                    }
-                    if (newR < pp)
-                    for (xx = sR1; xx <= sR2; xx++)
-                    {
-                        unsigned c = bb[ym * pp + xx];
-                        bR += (c >> 11) & 31u; bG += (c >> 5) & 63u;
-                        bB += c & 31u; bN++;
-                    }
-                    rR = (bR > 0 && mN > 0 && bN > 0) ?
-                        (mR * bN * 1000 / (bR * mN)) : 600;
-                    rG = (bG > 0 && mN > 0 && bN > 0) ?
-                        (mG * bN * 1000 / (bG * mN)) : 600;
-                    rB = (bB > 0 && mN > 0 && bN > 0) ?
-                        (mB * bN * 1000 / (bB * mN)) : 600;
-                    if (rR < 150) rR = 150;
-                    if (rR > 950) rR = 950;
-                    if (rG < 150) rG = 150;
-                    if (rG > 950) rG = 950;
-                    if (rB < 150) rB = 150;
-                    if (rB > 950) rB = 950;
+                    /* 边框色沿用顶行采样 (引擎窄盒顶边=玩家色);
+                     * 出界后顶行剩下全黑、采不到 (bestR==0) 就用粘存。 */
                     for (xx = cL; xx <= cR; xx++)
                     {
                         unsigned c = bb[yT * pp + xx];
@@ -1614,36 +1580,18 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                             bestR = R; bc = c;
                         }
                     }
+                    if (bestR > 0)
+                    {
+                        g_TipBcCache = bc; g_TipBcOK = 1;
+                    }
+                    else if (g_TipBcOK) bc = g_TipBcCache;
+                    /* 底一律填不透黑 (图 1 定案): 出界后映射填充会漏出
+                     * 引擎半透明底 (图 2 的病); 实色填充与边框同范围,
+                     * 字随后画上, 不盖字。 */
                     for (yy = yT + 1; yy <= yB - 1; yy++)
                     {
-                        for (xx = fL1 + 1; xx <= fL2; xx++)
-                        {
-                            unsigned c = bb[yy * pp + xx];
-                            unsigned R = ((c >> 11) & 31u) * (unsigned)rR
-                                / 1000u;
-                            unsigned G = ((c >> 5) & 63u) * (unsigned)rG
-                                / 1000u;
-                            unsigned B = (c & 31u) * (unsigned)rB / 1000u;
-                            if (R > 31u) R = 31u;
-                            if (G > 63u) G = 63u;
-                            if (B > 31u) B = 31u;
-                            bb[yy * pp + xx] = (unsigned short)
-                                ((R << 11) | (G << 5) | B);
-                        }
-                        for (xx = fR1; xx < fR2; xx++)
-                        {
-                            unsigned c = bb[yy * pp + xx];
-                            unsigned R = ((c >> 11) & 31u) * (unsigned)rR
-                                / 1000u;
-                            unsigned G = ((c >> 5) & 63u) * (unsigned)rG
-                                / 1000u;
-                            unsigned B = (c & 31u) * (unsigned)rB / 1000u;
-                            if (R > 31u) R = 31u;
-                            if (G > 63u) G = 63u;
-                            if (B > 31u) B = 31u;
-                            bb[yy * pp + xx] = (unsigned short)
-                                ((R << 11) | (G << 5) | B);
-                        }
+                        for (xx = L0; xx <= R0; xx++)
+                            bb[yy * pp + xx] = 0;
                     }
                     for (xx = L0; xx <= R0; xx++)
                     {
@@ -2149,7 +2097,7 @@ void VecText_Install(void)
     UtoA((unsigned)g_VT.ToolBox, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " bp=", sizeof(buf));
     UtoA(0u, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " v=86", sizeof(buf));   /* 发版自增, 日志对版本 */
+    p = AppendCStr(buf, p, " v=87", sizeof(buf));   /* 发版自增, 日志对版本 */
     LogLine(buf);
     if (!g_VT.Enable) { LogLine("vtext: disabled"); return; }
     if (!BytesSame((unsigned char*)ADDR_BLIT, kWantBlit, 7))
