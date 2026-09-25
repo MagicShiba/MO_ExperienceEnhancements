@@ -8,9 +8,7 @@
  * 任何异常 (度量失败/面信息非法/字形超大) 都走跳板调原版, 绝不花屏。
  *
  * 场景区分按路径, 不按坐标/内容 (坐标门曾误收右侧提示, 见笔记 v80 起):
- *   顶栏条带 (y<32 数字吃 CreditPx/DY); 超武收集只认侧栏发起者 0x004A6345;
- *   Blit 超武门只认 DrawText 路径, 提示 DrawText 子树 (0x479041 小矩形)
- *   与 Print 直系一律豁免。函数白名单已删 (粒度分不开导致串扰)。
+ *   顶栏条带 (y<32 数字吃 CreditPx/DY); 超武收集只认侧栏发起者 0x004A6345。
  * 坐标归一 (VecNormC): 引擎笔位/裁剪只低 16 位有效; 空裁剪哨兵退主面边界。
  *
  * BitFont 对象实测布局 (Lock 0x4348F0 反汇编实证):
@@ -61,10 +59,8 @@ typedef struct {
     int FontPx;     /* 全局字号: 0=自动校准; >0 固定像素, 墨水与字宽等比缩放 */
     int CreditPx;   /* 顶栏条带数字单独字号 (0=跟随全局; >0 覆盖, 仅换墨水字宽不动) */
     int CreditDY;   /* 顶栏数字垂直偏移 (像素, 负=上移) */
-    int SuperPx;    /* Blit 层漏网重绘字号 (0=关闭; 列表整体接管另由 [SWPanel] 开关) */
     int MenuTake;   /* 1=菜单按钮整体替换 (禁用原字形, 全墨水自定义绘制) */
     int DigitTrack; /* 数字字距微调像素 (负=收紧, 正=放松, 只影响 0-9 步进) */
-    int ToolBox;    /* 0=关, 1=悬浮提示背景盒跟字走 (取样实色底才拓盒), 2=探测 */
     int TipBox;     /* 1=电力提示定制盒 (按列调映射补齐, 与引擎同 tone) */
     int BriefBox;   /* 1=简报正文盒加高 (界面适配字体), 0=保持原版盒子 */
     int BriefClip;  /* 1=简报裁剪底边跟盒子走 (面板子面切，需配合 BriefBox) */
@@ -186,38 +182,16 @@ static void VecBriefBox(int* aX, int* aY, int* aW, int* aH)
     LogLine(buf);
 }
 
-/* ---------------- 超武列表接管 (SuperPx) ----------------
- * 整体区域接管, 不分路径: 名 (Print) 与计时器 (DrawText) 都画在右侧
- * 面板区, 凡 Blit 落在这个区的一律隐藏原字形, 按 SuperPx 自定义重绘
- * (同锁同裁剪, 笔位/背景/后续全是引擎的)。
- * 区域 = 主面 (pitch 1024~4096) 且 x>=0.83 屏宽且 y>=32。
- * 顶栏 (y<32)、简报 (x~652)、菜单 (居中) 天然排除。
- * SuperPx=0 (默认) 全不碰。 */
+/* ---------------- Blit 层超武区接管已删除 ----------------
+ * SuperPx 经游戏内验证无可见作用 (置 0 对比无变化): 列表行经 Print->Simple_
+ * 已被 SWPanel 整块收集+隐藏, DrawText 系叠字未观测到漏网。整机移除
+ * (VecSWRegion/深度计数/swForce/失败诊断), 右侧区文字走通用 Render 路径。 */
 static int VecPickPx(void* t);
 static int VecRender(void* t, wchar_t wch, int adv, int h, int x, int y,
                      int colorW, int px, int yOff);
-/* 原版格高 (idata Lines): FontPx/SuperPx 等比缩放字宽时的分母 (定义提前,
+/* 原版格高 (idata Lines): FontPx 等比缩放字宽时的分母 (定义提前,
  * 接管渲染要用; 后面不再重复定义) */
 static int g_FontOrigH = 19;
-/* 超武区接管失败计数 (诊断用, 上限 8 行日志) */
-static int g_SWFailN = 0;
-
-/* 超武区整体接管判定 (Blit 层, 无状态, 不分路径):
- * 右侧面板区 (主面 pitch 1024~4096, x>=0.83 屏宽, y>=32) 的字一律命中。
- * 名 (Print) 与计时器 (DrawText) 都落在这个区, 到这就接管。
- * 顶栏 (y<32)、简报 (x~652)、菜单 (居中) 天然排除。
- * SuperPx=0 全不碰。 */
-static int VecSWRegion(void* t, int x, int y)
-{
-    int pitchW;
-    if (g_VT.SuperPx <= 0) return 0;
-    if (!t || !IsPlausiblePtr(t)) return 0;
-    pitchW = *(int*)((char*)t + 0x10);
-    if (pitchW < 1024 || pitchW > 4096) return 0;
-    if (y < 32) return 0;
-    if (x * 100 < pitchW * 83) return 0;
-    return 1;
-}
 
 /* ---------------- 超武列表整体接管 ----------------
  * 收集点在 Simple_Text_Print_Wide 入口 (Print 唯一调用者, 反汇编实证):
@@ -343,14 +317,6 @@ static int VecSWCapture(void* surf, int kind, const wchar_t* s, int x, int y)
  * 原字形一次不画 (灾难失败才回落原版保底可读)。 */
 static int g_MenuDepth = 0;
 #define MENU_MAXCH 64
-/* DrawText 全深度 (不限 brief/menu, 进转发即加): Blit 层超武门只认
- * DrawText 路径。列表计时器/叠字经 DrawText 系 Blit; 悬浮提示与 Print
- * 系名单都走 Print 直系 Blit。按路径一刀切, 不靠坐标/内容猜。 */
-static int g_DTAllDepth = 0;
-/* 提示 DrawText 子树深 (v85): 0x00479041 小矩形 (悬浮提示盒, 如 93x21)
- * 转发期间才加。Blit 层凭它豁免 swForce (正确字号 + 失败回落可见)。
- * 计时器 DrawText 出自别的调用者, 不受影响。 */
-static int g_TipDrawDepth = 0;
 static wchar_t g_MenuStr[MENU_MAXCH + 1];
 static int g_MenuAdv[MENU_MAXCH];
 static int g_MenuN = 0;
@@ -368,76 +334,20 @@ static int VecMenuMatch(unsigned caller, int w, int h, int flags)
     return 0;
 }
 
-/* ---------------- 悬浮提示背景盒自适应 ----------------
- * 定案: 世界悬浮框经 Print (caller=0x4A5FF2 内层), 如 (776,571) "电力 = …"、
- * 建筑名标签。引擎盒要么固定尺寸、要么按自有窄字宽算, 我们的宽字撑出去,
- * 故盒跟字走 (GetDim 钩够不着固定盒)。
- * Print 入口收串+坐标 (超武带除外; 不认 outer, 发起者链不稳定),
- * 首个 Blit 建全串字形算总宽 (GDI 自然步进),
- * 取样确认是实色暗底才拓盒 (花面无盒不碰), 再自有笔位画字。
- * 原字形一次不画。分段多色 (如红字负载) 各段独立收/拓/画,
- * 同行相邻段无缝衔接 (500ms 内同行即连续, 左垫省略防吃掉上段尾巴)。 */
-static int g_ToolDepth = 0;
-#define TOOL_MAXCH 64
-static wchar_t g_ToolStr[TOOL_MAXCH + 1];
-static int g_ToolAdv[TOOL_MAXCH];
-static int g_ToolN = 0;
-static int g_ToolX = 0, g_ToolY = 0;
-static int g_ToolIdx = 0;
-static int g_ToolPenX = 0;
-static int g_ToolBuilt = 0;   /* 0=未建, 1=已建, -1=失败走引擎笔位 */
-static int g_ToolLastX1 = -9999, g_ToolLastY = -9999;
-static unsigned g_ToolLastTick = 0;
-static int g_ToolInk0 = 0, g_ToolInkEnd = 0;   /* 首/尾墨水相对 x 偏移 */
-static unsigned g_ToolGateTick = 0;   /* 取样门上次判决时刻 */
-static int g_ToolGateOK = 0;
-static unsigned g_ToolGateColor = 0;
+/* ---------------- 悬浮提示背景盒自适应已删除 ----------------
+ * ToolBox=0 关闭定案 (三条原因见 notes/VecText顶栏与简报.md), 1/2 已退役,
+ * 代码整机移除 (收串/取样拓盒/自有笔位)。悬浮提示走通用 Render 路径,
+ * 电力提示出界修复由 TipBox 接管。 */
 
-static int VecToolMatch(unsigned caller, const wchar_t* s, int x, int y)
-{
-    unsigned c0;
-    if (!g_VT.ToolBox) return 0;
-    if (caller != 0x004A5FF2u) return 0;
-    /* 超武带归 SW (那边收表+跳过, 不抢) */
-    if (x >= 1300 && x <= 1752 && y >= 32 && y <= 1080) return 0;
-    if (!s || !IsPlausiblePtr((void*)s)) return 0;
-    c0 = (unsigned)s[0] & 0xFFFFu;
-    if (!((c0 >= 0x2E80u && c0 < 0xA000u) ||
-          (c0 >= 0xFF00u && c0 < 0xFFF0u))) return 0;
-    /* 不认 outer: 发起者链不稳定 (同串跨局 outer 会变), 认"盒"不认"路":
-     * 取样门 (实色暗底) 自己会排除无盒绘制, 花面一笔不碰。 */
-    return 1;
-}
-
-
-/* 面内实色填充 (调用方保证 y1<=B; x 钳到行宽内) */
-static void VecFillBox(unsigned short* buf, int pitchW,
-                       int x0, int y0, int x1, int y1, unsigned color)
-{
-    int yy, xx;
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 >= pitchW) x1 = pitchW - 1;
-    if (x1 < x0 || y1 < y0) return;
-    for (yy = y0; yy <= y1; yy++)
-    {
-        unsigned short* row = buf + yy * pitchW;
-        for (xx = x0; xx <= x1; xx++) row[xx] = (unsigned short)color;
-    }
-}
 
 int __fastcall VecDrawTextEntry(void* t, void* e,
     int a1, int a2, int a3, int a4, int a5,
     int a6, int a7, int a8, int a9, int a10)
 {
     unsigned caller = (unsigned)__builtin_return_address(0);
-    int brief, r, menuTake = 0, tipTake = 0;
+    int brief, r, menuTake = 0;
     brief = VecIsBriefCaller(caller);
     menuTake = VecMenuMatch(caller, a6, a7, a8);
-    /* 提示盒 DrawText (v85 取证: c=0x00479041, 矩形≈提示串大小):
-     * 小矩形才认 (大矩形是简报/面板, 不碰), 只立深度标志。 */
-    tipTake = (caller == 0x00479041u && a6 > 0 && a6 <= 400 &&
-               a7 > 0 && a7 <= 60);
     if (menuTake)
     {
         /* 收串+矩形 (只收首层): 给 Blit 层自有版式用 */
@@ -472,11 +382,7 @@ int __fastcall VecDrawTextEntry(void* t, void* e,
             g_DTBody = (caller == 0x00621144u && a6 >= 400 && a7 >= 100);
         }
     }
-    g_DTAllDepth++;
-    if (tipTake) g_TipDrawDepth++;
     r = g_OrigDrawText(t, NULL, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
-    if (tipTake) g_TipDrawDepth--;
-    g_DTAllDepth--;
     if (menuTake) g_MenuDepth--;
     if (brief)
     {
@@ -503,11 +409,6 @@ static int g_BlitTipSeen = 0;
  * 出界裁剪后顶行全黑采不到时沿用, 不再回落纯红 (图 3 的病)。 */
 static unsigned g_TipBcCache = 0;
 static int g_TipBcOK = 0;
-/* 世界悬浮提示活跨 (任意 0x4A5FF2 CJK 浮框, 电力/建筑名): Blit 层用它把
- * 悬浮文本排除出超武区接管。否则提示飘到右侧带时被 SuperPx 重绘且按引擎
- * 窄 adv 步进, 字被压窄左移、整串变短 -> 右侧留大空隙 (偏移与压缩根因)。 */
-static int g_WtActive = 0;
-static int g_WtX = 0, g_WtY = -9999, g_WtTot = 0;
 /* 多槽宽度表 (单槽会被同帧其它串冲掉, 见 vfixq ow=30 教训):
  * ring 32 项, 按指针/首字+长度命中, 跨帧也有效。 */
 #define DIMCACHE_N 32
@@ -564,7 +465,7 @@ int __fastcall VecPrintEntry(void* t, void* e,
     int a1, int a2, int a3, int a4, int a5, int a6, int a7)
 {
     unsigned caller = (unsigned)__builtin_return_address(0);
-    int r, toolTake = 0;
+    int r;
     /* 电力提示落笔 x 记录 (Simple 盒 R 自校验用, 只读 First 字)。
      * 只认世界悬浮 Print (caller=0x4A5FF2 内层, 见定案): 菜单/列表
      * (如选择任务存档名"电力…") 走别的调用者, 在此直接排除,
@@ -712,20 +613,6 @@ int __fastcall VecPrintEntry(void* t, void* e,
             }
         }
     }
-    /* 悬浮提示收串: CJK Print (超武带除外), 首层才收; 不认 outer */
-    if (g_ToolDepth == 0 &&
-        VecToolMatch(caller, (const wchar_t*)a3, a4, a5))
-    {
-        const wchar_t* ms = (const wchar_t*)a3;
-        int mn = 0;
-        while (mn < TOOL_MAXCH && ms[mn]) { g_ToolStr[mn] = ms[mn]; mn++; }
-        g_ToolStr[mn] = 0;
-        g_ToolN = mn;
-        g_ToolX = a4; g_ToolY = a5;
-        g_ToolIdx = 0; g_ToolBuilt = 0;
-        toolTake = 1;
-        g_ToolDepth++;
-    }
     /* 超武列表整体隐藏+收集: 只收冒号计时器 ("00:00"), 命中即收表
      * 并跳过原调用; 门不全 (面板关/异面) 走原版。
      * CJK 名串不在此收: Print 层名与悬浮提示不可区分 (同经 0x4A5FF2、
@@ -739,33 +626,8 @@ int __fastcall VecPrintEntry(void* t, void* e,
             VecSWCapture((void*)a2, 1, s, a4, a5))
             return 1;
     }
-    if (!g_OrigPrint) { if (toolTake) g_ToolDepth--; return 0; }
-    /* 世界悬浮提示活跨 (CJK 浮框): 记落笔+全串宽, Blit 层据此把提示排
-     * 除出超武区接管 (见 g_Wt 注释)。只在本 Print 的同步 Blit 期间有效,
-     * 转发返回即清 (无泄漏)。表宽查不到 (首帧) 不激活, 下一帧起生效。 */
-    g_WtActive = 0;
-    {
-        const wchar_t* ws = (const wchar_t*)a3;
-        if (caller == 0x004A5FF2u && ws && IsPlausiblePtr((void*)ws))
-        {
-            unsigned c0 = (unsigned)ws[0] & 0xFFFFu;
-            if ((c0 >= 0x2E80u && c0 < 0xA000u) ||
-                (c0 >= 0xFF00u && c0 < 0xFFF0u))
-            {
-                int wl = 0, nw;
-                while (wl < 64 && ws[wl]) wl++;
-                nw = VecDimLookup(ws, wl);
-                if (nw > 0)
-                {
-                    g_WtActive = 1;
-                    g_WtX = a4; g_WtY = a5; g_WtTot = nw;
-                }
-            }
-        }
-    }
+    if (!g_OrigPrint) return 0;
     r = g_OrigPrint(t, NULL, a1, a2, a3, a4, a5, a6, a7);
-    g_WtActive = 0;
-    if (toolTake) g_ToolDepth--;
     return r;
 }
 
@@ -1459,19 +1321,6 @@ static int VecMenuRender(void* t, wchar_t wch, int adv, int h, int x, int y,
  * 整体接管改为: Print 入口隐藏+收集, 消息帧统一整块重绘 (见 MsgFont 超武面板)。
  * 逐行背景/自锁/虚表 (旧 VecSWRowDraw/VecSWBandFill/VecSWVt/VecSWDoLog) 不再需要。 */
 
-/* 提示步进: GDI 自然步进 (含边距), 无则墨水右缘, 空白按引擎格。
- * 数字另吃 DigitTrack。自有版式无引擎约束, 不取 max。 */
-static int VecToolStep(VCEnt* e, int adv)
-{
-    int st;
-    if (!e) return (adv > 0) ? adv : 8;
-    st = (e->gdiW > 0) ? e->gdiW : e->fullW;
-    if (!st) return (adv > 0) ? adv : 8;
-    if (e->wch >= 0x30 && e->wch <= 0x39) st += g_VT.DigitTrack;
-    if (st < 1) st = 1;
-    return st;
-}
-
 int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y, int color)
 {
     wchar_t wc = (wchar_t)((unsigned)wch & 0xFFFFu);
@@ -1494,8 +1343,8 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
     /* TAB 走原版特殊公式, 缺字/度量失败也走原版 (保留 0x5555 兜底行为) */
     if (!t || !IsPlausiblePtr(t) || wc == 9)
         return g_OrigBlit(t, NULL, wch, x, y, color);
-    /* 坐标归一 (脏高位清掉, 见 VecNormC): 以下 inTip 跨度、接管区、
-     * ToolBox 取样与 VecRender 全用真坐标。 */
+    /* 坐标归一 (脏高位清掉, 见 VecNormC): 以下 inTip 跨度
+     * 与 VecRender 全用真坐标。 */
     x = VecNormC(x);
     y = VecNormC(y);
     eff = (color == -1) ? (int)(*(unsigned short*)((char*)t + 0x24)) : color;
@@ -1507,12 +1356,6 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                  tx >= g_LastTipX - g_TipTot - 16 &&
                  tx <= g_LastTipX + g_TipTot + 8 &&
                  y >= g_TipY - 8 && y <= g_TipY + 8);
-    /* 世界悬浮提示 (电力/建筑名) 跨度: 提示字必须排除超武区接管。
-     * 否则提示飘到右侧带时被换成 SuperPx 字体, 且返回引擎窄 adv,
-     * 字被压窄左移、整串变短, 盒 (按全宽画) 右侧留大空隙。 */
-    int inWt = (g_WtActive && g_WtTot > 0 &&
-                tx >= g_WtX - 16 && tx <= g_WtX + g_WtTot + 8 &&
-                y >= g_WtY - 8 && y <= g_WtY + 8);
     {
         /* 位置门 (颜色盲): 本 Print 的首个 Blit 落在当帧提示跨度内。
          * 边缘出屏字会被引擎跳过 (不调 Blit), 首 Blit 未必是串首,
@@ -1612,169 +1455,6 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
         }
     }
     int ox = x;
-    if (g_ToolDepth > 0)
-    {
-        /* 悬浮提示自有版式+背景盒自适应: 首 Blit 建全串字形算总宽,
-         * 取样是实色暗底才拓盒 (花面无盒不碰), 之后自有笔位画字,
-         * 原字形一次不画。串序对不上/建失败回落引擎笔位画自定义字形,
-         * 再失败走原版 (保底可读)。 */
-        px = VecPickPx(t);
-        if (px >= 0 && g_ToolN > 0 && g_ToolBuilt == 0)
-        {
-            int i, tot = 0, ok = 1, oh = 0;
-            int ink0 = 0, inkEnd = 0, seenInk = 0;
-            for (i = 0; i < g_ToolN; i++)
-            {
-                int ca, chh = 0, st;
-                VCEnt* ge;
-                ca = VecMeasure(t, g_ToolStr[i], &chh);
-                if (ca < 0) ca = 8;
-                g_ToolAdv[i] = ca;
-                ge = VecGlyph(t, g_ToolStr[i], ca, h, px);
-                if (!ge) { ok = 0; break; }
-                st = VecToolStep(ge, ca);
-                if (ge->inkW > 0)
-                {
-                    if (!seenInk) { ink0 = tot; seenInk = 1; }
-                    inkEnd = tot + st;
-                }
-                tot += st;
-                if (i == 0) oh = ge->outh;
-            }
-            g_ToolInk0 = ink0;
-            g_ToolInkEnd = seenInk ? inkEnd : 0;
-            if (ok && oh > 0)
-            {
-                unsigned short* bb = *(unsigned short**)((char*)t + 0x0C);
-                int pp = *(int*)((char*)t + 0x10);
-                int Tp = VecNormC(*(int*)((char*)t + 0x34));
-                int B = VecNormC(*(int*)((char*)t + 0x3C));
-                int dy = y + (h - oh) / 2;
-                int lo = Tp, hi = B - oh + 1, ym, k, flat = 1;
-                unsigned first = 0;
-                if (B > 4096) B = 4096;
-                if (hi >= lo)
-                {
-                    if (dy < lo) dy = lo;
-                    if (dy > hi) dy = hi;
-                }
-                ym = dy + oh / 2;
-                {
-                    unsigned nowG = GetTickCount();
-                    int dytG = (int)nowG - (int)g_ToolLastTick;
-                    int contig = (dytG >= 0 && dytG < 500 &&
-                        y - g_ToolLastY >= -4 && y - g_ToolLastY <= 4 &&
-                        g_ToolX - g_ToolLastX1 >= -8 &&
-                        g_ToolX - g_ToolLastX1 <= 64);
-                    int inkBytes = g_ToolInkEnd - g_ToolInk0;
-                    int surfOK = (bb && IsPlausiblePtr(bb) && pp >= 64 &&
-                                  pp <= 4096 && ym >= 0 && ym <= B);
-                    /* 相邻段沿用门判决: 后帧取样会撞上自己上一帧的字
-                     * (自盲, 门永远不过); 8 秒以上重取样,
-                     * 防提示挪到花面还照填 */
-                    if (contig && surfOK && g_ToolGateOK && inkBytes > 0 &&
-                        nowG - g_ToolGateTick < 8000u)
-                    {
-                        flat = 1;
-                        first = g_ToolGateColor;
-                    }
-                    else if (surfOK && inkBytes > 0)
-                    {
-                        for (k = 0; k < 4; k++)
-                        {
-                            int sx = g_ToolX + g_ToolInk0 + 2 + k * 4;
-                            unsigned c;
-                            if (sx < 0 || sx >= pp) { flat = 0; break; }
-                            c = bb[ym * pp + sx];
-                            if (k == 0) first = c;
-                            else if (c != first) { flat = 0; break; }
-                        }
-                        if (flat)
-                        {
-                            unsigned r5 = (first >> 11) & 31u;
-                            unsigned g6 = (first >> 5) & 63u;
-                            unsigned b5 = first & 31u;
-                            if (r5 > 1u || g6 > 2u || b5 > 1u) flat = 0;
-                        }
-                        g_ToolGateOK = flat;
-                        g_ToolGateColor = first;
-                        g_ToolGateTick = nowG;
-                    }
-                    else flat = 0;
-                    if (flat)
-                    {
-                        /* 填充只包墨水 (前导/尾随空格不算,
-                         * 防盖住行首图标); 相邻段从上段尾巴起笔, 无缝 */
-                        int x0 = g_ToolX + g_ToolInk0 - 4;
-                        int x1 = g_ToolX + g_ToolInkEnd + 4;
-                        int y0 = dy - 2, y1 = dy + oh + 2;
-                        if (contig && x0 < g_ToolLastX1) x0 = g_ToolLastX1;
-                        if (y1 > B) y1 = B;
-                        if (g_VT.ToolBox == 1)
-                        {
-                            VecFillBox(bb, pp, x0, y0, x1, y1,
-                                       (unsigned short)first);
-                        }
-                        else
-                        {
-                            /* 探测模式 (ToolBox=2): 只量数不落笔。
-                             * 沿中线向两侧扫实色连通域, 得盒宽假设 run;
-                             * 与字总宽 tot 对比, 看字是否溢出盒。 */
-                            int sxL = g_ToolX + g_ToolInk0 + 2;
-                            int sxR = g_ToolX + g_ToolInkEnd + 2;
-                            int lx = sxL, rx;
-                            while (lx > 0 && sxL - lx < 600 &&
-                                bb[ym * pp + lx - 1] ==
-                                (unsigned short)first) lx--;
-                            if (sxR < 0 || sxR >= pp ||
-                                bb[ym * pp + sxR] !=
-                                (unsigned short)first)
-                                rx = -1;
-                            else
-                            {
-                                rx = sxR;
-                                while (rx < pp - 1 && rx - sxR < 600 &&
-                                    bb[ym * pp + rx + 1] ==
-                                    (unsigned short)first) rx++;
-                            }
-                        }
-                    }
-                }
-                g_ToolPenX = g_ToolX;
-                /* 探测模式 (ToolBox=2) 只量数: 不自有笔位,
-                 * 全串引擎笔位正常渲染, 视觉与平时无异。 */
-                g_ToolBuilt = (g_VT.ToolBox == 2) ? -1 : 1;
-            }
-            else g_ToolBuilt = -1;
-        }
-        if (g_ToolBuilt == 1 && g_ToolIdx < g_ToolN &&
-            wc == g_ToolStr[g_ToolIdx])
-        {
-            VCEnt* te;
-            int step;
-            yOff = g_VT.VShift;
-            r = VecRender(t, wc, g_ToolAdv[g_ToolIdx], h, g_ToolPenX,
-                          y, eff, px, yOff);
-            if (r != VC_FAIL)
-            {
-                te = VecGlyph(t, wc, g_ToolAdv[g_ToolIdx], h, px);
-                step = VecToolStep(te, g_ToolAdv[g_ToolIdx]);
-                g_ToolPenX += step;
-                g_ToolIdx++;
-                g_ToolLastX1 = g_ToolPenX;
-                g_ToolLastY = y;
-                g_ToolLastTick = GetTickCount();
-                return x + adv;   /* 引擎账本照旧, 笔位我们自己走 */
-            }
-        }
-        if (px >= 0)
-        {
-            yOff = g_VT.VShift;
-            r = VecRender(t, wc, adv, h, x, y, eff, px, yOff);
-            if (r != VC_FAIL) return r - (x - ox);
-        }
-        return g_OrigBlit(t, NULL, wch, ox, y, color);
-    }
     if (g_MenuDepth > 0)
     {
         /* 菜单整行自有版式: 首 Blit 建全串字形、算总宽、矩形内居中起笔,
@@ -1841,43 +1521,19 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
              * 默认 0/0 全不碰。超武列表等不在条带内, 不受影响。 */
             int cred = (wc >= 0x30 && wc <= 0x39 && y >= -8 && y < 32 &&
                 (g_VT.CreditPx > 0 || g_VT.CreditDY != 0));
-            int effPx = g_VT.FontPx;
-            int swForce = 0;
             if (cred && g_VT.CreditPx > 0)
             {
                 px = g_VT.CreditPx;
                 if (px < 8) px = 8;
                 if (px > 40) px = 40;
             }
-            /* 超武区整体隐藏+重绘: 落在区域内即按 SuperPx 画, 原字形不再画
-             * (同锁同裁剪, 笔位/背景/后续全是引擎的)。
-             * 列表不是顶栏, CreditDY 不掺和。 */
-            swForce = VecSWRegion(t, x, y);
-            /* 超武门只认 DrawText 路径 (列表计时器/叠字系), 以下一律豁免:
-             * Print 直系 (悬浮提示/漏网名单)、提示 DrawText 子树
-             * (0x479041 小矩形)。落进右侧带也不许 SuperPx 接管, 否则窄
-             * adv 压短整串、失败时一笔不画 (靠右缩短/消失的根因)。
-             * inTip/inWt 保留作叠甲。 */
-            if (swForce && (g_DTAllDepth <= 0 || g_TipDrawDepth > 0 ||
-                            inTip || inWt)) swForce = 0;
-            if (swForce)
-            {
-                px = g_VT.SuperPx;
-                if (px < 8) px = 8;
-                if (px > 40) px = 40;
-                effPx = px;
-                cred = 0;
-            }
-            /* 字号 (全局/接管): 墨水与字宽等比缩放, 版式才对。
+            /* 字号 (全局): 墨水与字宽等比缩放, 版式才对。
              * 条带数字除外 (只换墨水字宽不动, 不碰已调好的顶栏)。
              * 行距/换行仍是引擎的, 字号偏离原版太多可能溢出盒子蹭行。 */
-            if (!cred && effPx > 0 && g_FontOrigH >= 8 &&
+            if (!cred && g_VT.FontPx > 0 && g_FontOrigH >= 8 &&
                 g_FontOrigH <= 40)
             {
-                /* 注意用 effPx (全局或接管), 不是 g_VT.FontPx:
-                 * FontPx=0 时接管链 effPx=SuperPx, 错用 FontPx 会把 adv
-                 * 压成 1 (整串字挤成细条)。 */
-                adv = (adv * effPx + g_FontOrigH / 2) / g_FontOrigH;
+                adv = (adv * g_VT.FontPx + g_FontOrigH / 2) / g_FontOrigH;
                 if (adv < 1) adv = 1;
             }
             yOff = g_VT.VShift + (cred ? g_VT.CreditDY : 0);
@@ -1908,24 +1564,6 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                     fz = AppendCStr(ff, fz, fb1, sizeof(ff));
                     LogLine(ff);
                 }
-            }
-            if (swForce)
-            {
-                /* 接管区 VecRender 失败也不回落原版 (否则原字冒出来):
-                 * 只走笔位, 记一行诊断 (上限 8)。 */
-                if (r == VC_FAIL && g_SWFailN < 8)
-                {
-                    char f1[16], fbuf[64];
-                    unsigned q = 0;
-                    g_SWFailN++;
-                    q = AppendCStr(fbuf, q, "vswfail: wc=", sizeof(fbuf));
-                    q += HtoA((unsigned)wc & 0xFFFFu, fbuf + q);
-                    q = AppendCStr(fbuf, q, " xy=", sizeof(fbuf));
-                    UtoA((unsigned)x, f1);
-                    q = AppendCStr(fbuf, q, f1, sizeof(fbuf));
-                    LogLine(fbuf);
-                }
-                return x + adv;
             }
             if (r != VC_FAIL) return r - (x - ox);
         }
@@ -2047,10 +1685,8 @@ void VecText_Install(void)
     g_VT.FontPx = GetPrivateProfileIntA(VT_SECTION, "FontPx", 0, g_IniPath);
     g_VT.CreditPx = GetPrivateProfileIntA(VT_SECTION, "CreditPx", 0, g_IniPath);
     g_VT.CreditDY = GetPrivateProfileIntA(VT_SECTION, "CreditDY", 0, g_IniPath);
-    g_VT.SuperPx = GetPrivateProfileIntA(VT_SECTION, "SuperPx", 0, g_IniPath);
     g_VT.MenuTake = GetPrivateProfileIntA(VT_SECTION, "MenuTake", 1, g_IniPath);
     g_VT.DigitTrack = GetPrivateProfileIntA(VT_SECTION, "DigitTrack", 0, g_IniPath);
-    g_VT.ToolBox = GetPrivateProfileIntA(VT_SECTION, "ToolBox", 1, g_IniPath);
     g_VT.TipBox = GetPrivateProfileIntA(VT_SECTION, "TipBox", 1, g_IniPath);
     g_VT.BriefBox = GetPrivateProfileIntA(VT_SECTION, "BriefBox", 1, g_IniPath);
     g_VT.BriefClip = GetPrivateProfileIntA(VT_SECTION, "BriefClip", 1, g_IniPath);
@@ -2065,13 +1701,9 @@ void VecText_Install(void)
     if (g_VT.CreditPx > 40) g_VT.CreditPx = 40;
     if (g_VT.CreditDY < -8) g_VT.CreditDY = -8;
     if (g_VT.CreditDY > 8) g_VT.CreditDY = 8;
-    if (g_VT.SuperPx < 0) g_VT.SuperPx = 0;
-    if (g_VT.SuperPx > 40) g_VT.SuperPx = 40;
     g_VT.MenuTake = g_VT.MenuTake ? 1 : 0;
     if (g_VT.DigitTrack < -8) g_VT.DigitTrack = -8;
     if (g_VT.DigitTrack > 8) g_VT.DigitTrack = 8;
-    if (g_VT.ToolBox < 0) g_VT.ToolBox = 0;
-    if (g_VT.ToolBox > 2) g_VT.ToolBox = 2;
     g_VT.TipBox = g_VT.TipBox ? 1 : 0;
     g_VT.BriefBox = g_VT.BriefBox ? 1 : 0;
     g_VT.BriefClip = g_VT.BriefClip ? 1 : 0;
@@ -2098,8 +1730,6 @@ void VecText_Install(void)
         if (dy < 0) { p = AppendCh(buf, p, '-', sizeof(buf)); dy = -dy; }
         UtoA((unsigned)dy, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     }
-    p = AppendCStr(buf, p, " swpx=", sizeof(buf));
-    UtoA((unsigned)g_VT.SuperPx, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " mt=", sizeof(buf));
     UtoA((unsigned)g_VT.MenuTake, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " dt=", sizeof(buf));
@@ -2108,11 +1738,9 @@ void VecText_Install(void)
         if (dtr < 0) { p = AppendCh(buf, p, '-', sizeof(buf)); dtr = -dtr; }
         UtoA((unsigned)dtr, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     }
-    p = AppendCStr(buf, p, " tb=", sizeof(buf));
-    UtoA((unsigned)g_VT.ToolBox, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " bp=", sizeof(buf));
     UtoA(0u, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " v=97", sizeof(buf));   /* 发版自增, 日志对版本 */
+    p = AppendCStr(buf, p, " v=99", sizeof(buf));   /* 发版自增, 日志对版本 */
     LogLine(buf);
     if (!g_VT.Enable) { LogLine("vtext: disabled"); return; }
     if (!BytesSame((unsigned char*)ADDR_BLIT, kWantBlit, 7))

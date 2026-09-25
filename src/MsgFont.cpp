@@ -1,10 +1,14 @@
 /*
- * MsgFont.cpp - 心灵终结消息队列矢量字体 (v1: 只替换显示, 无交互)。
+ * MsgFont.cpp - 心灵终结消息队列矢量字体 (显示替换 + 悬停/滚动/单人聊天框)。
  *
- * 钩子 (见 notes/ChatBox参考.md):
- *   0x5D3BA0 (6B) AddMessage 入口: 只读捕获 name/text/cs/timeout/frame。
- *   0x5D49A0 (6B) Draw 入口: 只画绿框触发区+标签 (零消息也跑), 返回 0 跑原版。
- *   0x5D4A94 (7B) Draw 内部画消息列表处: 画完自制消息框后返回 0x5D4A9B。
+ * 钩子 (Syringe, 见 dist/MsgFont.dll.inj):
+ *   消息: 0x5D3BA0 AddMessage 捕获; 0x5D49A0 Draw 绿框+标签;
+ *         0x5D4A94 Draw 内部 (自制消息框画完回 0x5D4A9B)。
+ *   交互: 0x777998 滚轮翻历史; 0x533F50 悬停时跳过侧栏滚动;
+ *         0x55E477/62F/693/746 单人聊天框 (跳过 session 检查)。
+ *   T 键建筑全选见 TypeSelect.cpp。
+ *   飞行器路径点见 AirWay.cpp (运行时虚表槽 0x7E2908, lazy 补丁;
+ *   Syringe 0x41BA90 总入口观察; DIAG 虚表 +0x200/+0x1EC 槽观察; 只读轮询)。
  * 任何一步失败 (Lock 不上、GDI 未就绪) 都返回 0 走原版绘制, 绝不花屏。
  *
  * 渲染: Microsoft YaHei 经 GDI 光栅化到 32 位内存 DIB (灰度抗锯齿取覆盖率),
@@ -17,8 +21,10 @@
 #include <windows.h>
 #include "GdiText.h"
 #include "VecText.h"
+#include "AirWay.h"
+#include "BuildQueue.h"
 
-#define MF_VERSION   "0.2.45"
+#define MF_VERSION   "0.2.96d"
 #define MF_SECTION   "MsgFont"
 
 /* ---------------- 地址 ---------------- */
@@ -777,11 +783,15 @@ static int s_prevCampTotal = 0;
 #define ADDR_WWMOUSE_INSTANCE 0x00887640u
 #define OFF_WWMOUSE_XY1       0x1C
 
-/* 游戏窗口客户区尺寸 (鼠标是窗口像素, 画布是游戏分辨率像素,
- * cnc-ddraw 拉伸呈现, 必须映射; 否则命中判定整体偏右下) */
+/* 游戏窗口客户区尺寸 + 鼠标映射基准 (游戏坐标系宽高)。
+ * WWMouse 给的是窗口/客户区像素; 窗口与游戏分辨率不一致
+ * (拉伸呈现) 时必须换算, 否则命中判定整体偏移。
+ * 基准必须用整帧宽度 (Primary), 不能用 Composite: 1920x1080 下
+ * Composite 只有 1752 宽 (右侧 168 是独立侧栏面), 拿它当分母会把
+ * 鼠标 x 整体缩小 1752/1920, 触发区看起来向右偏。 */
 static HWND g_GameWnd = NULL;
 static int g_WinW = 0, g_WinH = 0;
-static int g_SurfW = 0, g_SurfH = 0;
+static int g_GameW = 0, g_GameH = 0;
 
 static int __stdcall EnumGameWnd(HWND h, LPARAM lp)
 {
@@ -832,10 +842,10 @@ static int MouseXY(int* x, int* y)
     if (!m || !IsPlausiblePtr(m)) return 0;
     mx = *(int*)((char*)m + OFF_WWMOUSE_XY1 + 0);
     my = *(int*)((char*)m + OFF_WWMOUSE_XY1 + 4);
-    if (g_WinW > 100 && g_WinH > 100 && g_SurfW > 100 && g_SurfH > 100)
+    if (g_WinW > 100 && g_WinH > 100 && g_GameW > 100 && g_GameH > 100)
     {
-        int sx = mx * g_SurfW / g_WinW;
-        int sy = my * g_SurfH / g_WinH;
+        int sx = mx * g_GameW / g_WinW;
+        int sy = my * g_GameH / g_WinH;
         if (!s_mapLogged)
         {
             char mb[160], m1[16], m2[16], m3[16], m4[16];
@@ -1856,6 +1866,8 @@ static int MsgPowerDrawSb(void)
 void* g_PrepareTramp = NULL;
 static void PowerDrawBoth(void)
 {
+    AirWay_Poll();   /* 每循环必跑的只读飞机轮询 (AirWay, 开关关时直接返回) */
+    BuildQueue_Poll(); /* 每循环必跑的建筑本地排队 (BuildQueue, 开关关/队列空时直接返回) */
     EnsureInit();
     if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
     /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;
@@ -1984,7 +1996,14 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
     surfH = SurfGet(surf, VT_GET_HEIGHT);
     surfPitch = SurfGet(surf, VT_GET_PITCH);
     if (surfW <= 0 || surfH <= 0 || surfPitch <= 0) { StatTick(tick, 3); return 0; }
-    g_SurfW = surfW; g_SurfH = surfH;
+    {   /* 鼠标映射基准取整帧 Primary (见 g_GameW 注释); 读不到就清零,
+         * MouseXY 回退到原始坐标 (恒等, 不强行套 Composite 宽度)。 */
+        void* prim = *(void**)ADDR_DSURFACE_PRIMARY;
+        int pw = SurfGet(prim, VT_GET_WIDTH);
+        int ph = SurfGet(prim, VT_GET_HEIGHT);
+        if (pw > 100 && ph > 100) { g_GameW = pw; g_GameH = ph; }
+        else { g_GameW = 0; g_GameH = 0; }
+    }
     RefreshWinSize(tick);
 
     /* 焦点追踪: 窗口化切走时引擎停渲染、逻辑照跑; 切回来旧消息同时过期绿框重现,
@@ -2269,6 +2288,12 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
         p = AppendCStr(buf, p, " pitch=", sizeof(buf));
         UtoA((unsigned)surfPitch, b3);
         p = AppendCStr(buf, p, b3, sizeof(buf));
+        p = AppendCStr(buf, p, " game=", sizeof(buf));
+        UtoA((unsigned)(g_GameW < 0 ? 0 : g_GameW), b1);
+        p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCh(buf, p, 'x', sizeof(buf));
+        UtoA((unsigned)(g_GameH < 0 ? 0 : g_GameH), b2);
+        p = AppendCStr(buf, p, b2, sizeof(buf));
         LogLine(buf);
     }
     /* 显示态悬停范围可视化 (调试): 有框才描白框 */
@@ -2378,6 +2403,7 @@ extern "C" BOOL __stdcall DllMain(HINSTANCE h, DWORD reason, LPVOID res)
     {
         DisableThreadLibraryCalls(h);
         VecText_Install();
+        AirWay_Install();
     }
     return TRUE;
 }
