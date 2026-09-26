@@ -17,9 +17,9 @@
  *   走与 UI 完全相同的直接调用 (节点取自各单位自己 token[0], 天然
  *   在 token 内, 不怕跨单位重复节点)。
  *   最后 PlanCommit (0x2B) 执行。
- *   序列: 删旧圈 NodeDelete×4 (上次角, 有上次才发) → 首单位 Mega×4
- *   建节点 → 跟随者 Connect×4/人挂接 → 全员→首角 close-Connect 合环
- *   (联机同步) → 直接关 → 验 loop>0 → Commit。事件按序进 OutList,
+ *   序列: 首单位 Mega×4 建节点 → 跟随者 Connect×4/人挂接 → 合环
+ *   (全员 Mega(吸收)+全员 Connect, 节点已存在) → 直接关 → 验 loop>0
+ *   → Commit。闭环加新点由原生拦截 (消息+丢弃)。事件按序进 OutList,
  *   执行保序; 各阶段就绪即走, 无固定等待。
  *   TargetCell: 0x6E6B20 (ID=X+1000*Y, RTTI=11);
  *   TargetUnit: 0x6E6AB0 (ID=Fetch_ID, RTTI=Abstract=52)。
@@ -96,6 +96,21 @@
  *   读 token (防删执行中途读半截状态); 掉 delcur (全空 abort 时成员已
  *   断, 删即崩, 残留交下次触发链式清理); 掉 phase4 (postcap 实证 token
  *   常驻, 15 帧纯开销且 FIFO 已保序, 回到执行完即放行)。
+ *   v21: 不再执着删旧重建——有闭环圈时直接拦截 (原生行为: 已成环再加
+ *   路径点直接拦截+提示), 什么都不发什么都不碰, 比删更简单且无崩溃类。
+ *   删机制仅保留给未闭环重建 (失败残留/手动半道)。合环补全员 close-Mega
+ *   (原生合环=全员 Mega(吸收)+全员 Connect, 之前缺 Mega, 疑为中线成因)。
+ *   v22: v21 拦截从未生效——检查跑在快照拷贝之前, 读的是上轮残留。
+ *   重排触发器 (快照→自检→pre→分区→鼠标→建圈)。另拦截升级为分区:
+ *   已闭环/已提交巡逻单位排除 (不劫持其它圈), 只给新鲜单位建圈;
+ *   全被排除才 blocked。commit 消费 loop 标记故拦截另记提交记忆
+ *   (指针+ID, fail-open)。
+ *   v23 (用户定): 不再自己删路径/拦添加——闭环加新点交给原生拦截
+ *   (Mega 执行侧对闭环 token 消息+丢弃, 即"无法在已经进入循环的部队
+ *   上增加新指令", 第一局实证)。拿掉整套 detach/NodeDelete/拦截/提交记忆:
+ *   快照全员直建, 新鲜成环, 闭环加新原生吸收提示, 未闭环残留按原生语义
+ *   延长 (不再制造孤儿 token, 手动拉走正常消圈)。只保留存活校验与分阶段
+ *   门控。联机安全 (全标准事件+只读)。
  *
  * 联机: 只发标准事件, 各端同一份原版代码执行, 不影响联机。
  * 本地只读 + 标准事件入队, 不写模拟内存。
@@ -130,7 +145,6 @@
 #define EVT_MEGAMISSION 0x04u
 #define EVT_PLANCONNECT 0x2Au
 #define EVT_PLANCOMMIT  0x2Bu
-#define EVT_PLANNODEDELETE 0x2Cu
 #define OFF_PLANFLAG  0x1Du   /* MegaMission.IsPlanningEvent (ctor 清零, 发送侧置 1) */
 #define MISSION_MOVE  2
 
@@ -160,11 +174,6 @@ typedef void* __attribute__((thiscall)) (*Fn_MegaMissionCtor)(void* ev, int hous
  * Target1(单位)@7(ID@7+RTTI@11), Target2(格)@12(ID@12+RTTI@16)。 */
 typedef void* __attribute__((thiscall)) (*Fn_PlanConnectCtor)(void* ev, int houseIdx, int evtType,
     int srcID, unsigned srcRttiW, int dstID, unsigned dstRttiW);
-/* PlanNodeDelete ctor (0x4C65E0, ECX=ev111, ret 0x10):
- * house, type(0x2C), tgtID, tgtRTTI(dword 取低字节)。
- * 布局: Type@0, House@2, Frame@3, Target(格)@7(ID@7+RTTI@11)。 */
-typedef void* __attribute__((thiscall)) (*Fn_PlanNodeDeleteCtor)(void* ev, int houseIdx, int evtType,
-    int tgtID, unsigned tgtRttiW);
 typedef void* __attribute__((thiscall)) (*Fn_PlanCommitCtor)(void* ev, int houseIdx, int evtType);
 /* UI 关闭函数 0x639740: fastcall ECX=单位, EDX=节点 (无栈参, 本地闭环,
  * 不发事件不碰全局模式, 与手点关闭同函数)。调用前必须保证 token 非空
@@ -179,7 +188,6 @@ typedef void (__attribute__((cdecl)) *Fn_SndCb)(void);
 #define FN_TGT_OBJ    ((Fn_TargetFromObj)(void*)0x6E6AB0u)
 #define FN_MEGA       ((Fn_MegaMissionCtor)(void*)0x4C6860u)
 #define FN_PLANCONNECT ((Fn_PlanConnectCtor)(void*)0x4C6780u)
-#define FN_PLANNODEDEL ((Fn_PlanNodeDeleteCtor)(void*)0x4C65E0u)
 #define FN_PLANCOMMIT ((Fn_PlanCommitCtor)(void*)0x4C66C0u)
 #define FN_CLICKCOORDS ((Fn_ClickCoords)(void*)0x692300u)
 #define FN_PLANCLOSE  ((Fn_PlanClose)(void*)0x639740u)
@@ -298,7 +306,6 @@ static int PC_Enqueue(char ev[EVT_SIZE])
 
 static int g_PcDumpMega = 0;
 static int g_PcDumpConn = 0;
-static int g_PcDumpDel = 0;
 
 static int PC_FireMega(int houseIdx, int srcID, unsigned char srcRtti,
                        int dstID, unsigned char dstRtti)
@@ -319,17 +326,6 @@ static int PC_FireCommit(int houseIdx)
     unsigned i;
     for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
     FN_PLANCOMMIT(ev, houseIdx, EVT_PLANCOMMIT);
-    return PC_Enqueue(ev);
-}
-
-/* PlanNodeDelete (删角格节点, 执行侧从 token 解链再删, 无则忽略)。 */
-static int PC_FireNodeDelete(int houseIdx, int dstID, unsigned char dstRtti)
-{
-    char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
-    FN_PLANNODEDEL(ev, houseIdx, EVT_PLANNODEDELETE, dstID, (unsigned)dstRtti);
-    if (!g_PcDumpDel) { g_PcDumpDel = 1; PC_DumpEv("pc: delev ", ev); }
     return PC_Enqueue(ev);
 }
 
@@ -366,7 +362,7 @@ static int PC_CellValid(int cx, int cy)
 #define PC_PEND_CAP 2048   /* 4+4+4*256, 静态 */
 #define PC_DRAIN_PER_POLL 128
 /* 触发即突发, OutList (上限 0x80) 满则 drip 跨帧续发。Mega 恒首单位 4 个;
- * Connect 按格找节点, 跨帧不影响挂接; NodeDelete 无则忽略。 */
+ * Connect 按格找节点, 跨帧不影响挂接。 */
 
 #define ADDR_NODES_COUNT 0xAC4B40u /* 规划节点数 (执行侧搜索上界, 只读验证) */
 #define ADDR_FRAME 0xA8ED84u       /* 当前帧 (事件 Frame 戳源; 排空后看它推进) */
@@ -374,8 +370,7 @@ static int PC_CellValid(int cx, int cy)
 #define ADDR_IDCOUNT 0xB0E844u     /* Fetch_ID 索引计数 */
 #define PC_WAIT_FRAMES 30          /* 真失败兜底: 30 逻辑帧还不满才关已有 */
 #define PC_WAIT_POLLCAP 3000       /* 冻结防挂: 帧不动时 polls 到此放行 */
-#define PC_DEL_FRAMES 4            /* 删旧圈等待回落上限 (正常 1~2 帧) */
-#define PC_CLOSEC_FRAMES 6         /* close-Connect 落地上限 (之后直接关兜底) */
+#define PC_CLOSEC_FRAMES 6         /* close 落地上限 (之后直接关兜底) */
 
 typedef struct { void* unit; short x, y; char conn; int id; } PCPend;
 
@@ -390,13 +385,8 @@ static int g_PcWaitFrame = 0;     /* 排空时帧快照 */
 static int g_PcWaitPolls = 0;     /* 冻结防挂计数 (帧不动时累积) */
 static int g_PcWaitFrames = 0;    /* 已推进逻辑帧数 (主标尺) */
 static int g_PcWaitLogFr = 0;     /* wait 进度日志节流 */
-static int g_PcPhase = 0;         /* 0=删旧圈 1=等首单位挂满 2=等全满 3=等合环落地 */
+static int g_PcPhase = 0;         /* 1=等首单位挂满 2=等全满 3=等合环落地 */
 static int g_PcIdxOk = 0;         /* ID 索引机制自检通过 (存活校验总开关) */
-static int g_PcPrevCorX[4], g_PcPrevCorY[4]; /* 上次 4 角 (删旧圈用) */
-static void* g_PcPrevUnits[PC_CLOSE_CAP];   /* 上次成员 (删前存活 gate) */
-static int g_PcPrevIDs[PC_CLOSE_CAP];
-static int g_PcPrevCount = 0;
-static int g_PcPrevValid = 0;
 static int g_PcNodes0 = -1;      /* 触发时节点数快照 (验证只建一套圈) */
 static int g_PcCorX[4], g_PcCorY[4]; /* 角格 */
 static void* g_PcCloseUnits[PC_CLOSE_CAP]; /* 闭环用单位快照 */
@@ -539,26 +529,11 @@ static int PC_LeaderFull(void)
     return PC_TokenNodeCountAt(0) >= 4 ? 1 : 0;
 }
 
-/* 建待发。分阶段 (v17/v18): 删旧(上次 4 角 NodeDelete) → MegaPass
- * (首单位 4 角, 建节点) → ConnPass (其余同角 Connect, 挂已有节点) →
- * CloseConnPass (全员→首角 Connect, 玩家式合环, 联机同步)。
- * 同突发混发时 Connect 可能先于建节点执行而被丢弃, 故必须分开。
- * conn: 0=Mega(需单位) 1=Connect(需单位) 2=NodeDelete(不需单位)。 */
-static void PC_BuildDelPass(void)
-{
-    int k;
-    g_PcPendCount = 0;
-    for (k = 0; k < 4; k++)
-    {
-        if (g_PcPendCount >= PC_PEND_CAP) break;
-        g_PcPend[g_PcPendCount].unit = 0;
-        g_PcPend[g_PcPendCount].x = (short)g_PcPrevCorX[k];
-        g_PcPend[g_PcPendCount].y = (short)g_PcPrevCorY[k];
-        g_PcPend[g_PcPendCount].conn = 2;
-        g_PcPend[g_PcPendCount].id = 0;
-        g_PcPendCount++;
-    }
-}
+/* 建待发。分阶段: MegaPass (首单位 4 角, 建节点) → ConnPass (其余同角
+ * Connect, 挂已有节点) → ClosePass (全员 Mega(吸收)+全员 Connect 合环,
+ * 节点早已存在, 同突发无 race; 联机同步闭环状态)。
+ * 建节点与挂接分开发 (同突发混发时 Connect 可能先于建节点执行而被丢弃)。
+ * conn: 0=Mega(需单位) 1=Connect(需单位)。 */
 static void PC_BuildMegaPass(void)
 {
     int k;
@@ -595,11 +570,22 @@ static void PC_BuildConnPass(void)
     }
 }
 
-/* 全员→首角 Connect (玩家式合环, 联机同步闭环状态)。 */
-static void PC_BuildCloseConnPass(void)
+/* 合环 (玩家式: 全员 Mega(首角, 建好即吸收无重复) 紧接全员 Connect,
+ * 节点早已存在, 同突发无 race; 联机同步闭环状态)。 */
+static void PC_BuildClosePass(void)
 {
     int u;
     g_PcPendCount = 0;
+    for (u = 0; u < g_PcCloseCount; u++)
+    {
+        if (g_PcPendCount >= PC_PEND_CAP) break;
+        g_PcPend[g_PcPendCount].unit = g_PcCloseUnits[u];
+        g_PcPend[g_PcPendCount].x = (short)g_PcCorX[0];
+        g_PcPend[g_PcPendCount].y = (short)g_PcCorY[0];
+        g_PcPend[g_PcPendCount].conn = 0;
+        g_PcPend[g_PcPendCount].id = g_PcCloseIDs[u];
+        g_PcPendCount++;
+    }
     for (u = 0; u < g_PcCloseCount; u++)
     {
         if (g_PcPendCount >= PC_PEND_CAP) break;
@@ -649,27 +635,18 @@ static int PC_Drain(void)
         cs.X = e->x; cs.Y = e->y;
         FN_TGT_CELL(dstB, &cs);
         dstID = *(int*)(dstB + 0); dstR = (unsigned char)dstB[4];
-        if (e->conn == 2)
+        /* 先验活 (纯读索引): 战死即丢弃, 不碰悬空指针 */
+        if (!PC_PtrAlive(e->unit, e->id)) { PC_ShiftDown(); continue; }
+        if (!PC_IsFoot(e->unit)) { PC_ShiftDown(); continue; }
+        if (!FN_TGT_OBJ(srcB, e->unit)) { PC_ShiftDown(); continue; }
+        srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
+        if (e->conn == 1)
         {
-            /* 删旧圈: 不需单位 */
-            if (!PC_FireNodeDelete(houseIdx, dstID, dstR))
+            if (!PC_FireConnect(houseIdx, srcID, srcR, dstID, dstR))
                 return 0; /* 满: 下轮继续 */
         }
-        else
-        {
-            /* 先验活 (纯读索引): 战死即丢弃, 不碰悬空指针 */
-            if (!PC_PtrAlive(e->unit, e->id)) { PC_ShiftDown(); continue; }
-            if (!PC_IsFoot(e->unit)) { PC_ShiftDown(); continue; }
-            if (!FN_TGT_OBJ(srcB, e->unit)) { PC_ShiftDown(); continue; }
-            srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
-            if (e->conn == 1)
-            {
-                if (!PC_FireConnect(houseIdx, srcID, srcR, dstID, dstR))
-                    return 0; /* 满: 下轮继续 */
-            }
-            else if (!PC_FireMega(houseIdx, srcID, srcR, dstID, dstR))
-                return 0; /* 满: 下轮继续 */
-        }
+        else if (!PC_FireMega(houseIdx, srcID, srcR, dstID, dstR))
+            return 0; /* 满: 下轮继续 */
         PC_ShiftDown();
         sent++;
     }
@@ -683,6 +660,51 @@ static int PC_Drain(void)
         PC_Trace("pc: drained", houseIdx, sent, g_PcWaitFrame);
     }
     return (g_PcPendCount <= 0) ? 1 : 0;
+}
+
+/* 成员一致性诊断 (中线定位): 首单位 token 前 4 节点指针 vs 其余单位。
+ * 全同源同序 → token 内容干净 (中线另有成因); 有分叉 → 定位到单位/位置。
+ * a=同源单位数 b=分叉单位数 c=首个分叉下标 d=全快照最大节点数。 */
+static void PC_MembersCheck(void)
+{
+    int i, sameN = 0, diffN = 0, diffIdx = -1, maxN = 0;
+    void* ref[4] = { 0, 0, 0, 0 };
+    int refN = 0;
+    if (g_PcCloseCount <= 1) return;
+    if (PC_TokenNodeCountAt(0) >= 4)
+    {
+        void* t = *(void**)((char*)g_PcCloseUnits[0] + OFF_TECH_TOKEN);
+        void** arr = *(void***)((char*)t + OFF_TOK_NODES);
+        for (refN = 0; refN < 4; refN++) ref[refN] = arr[refN];
+    }
+    for (i = 1; i < g_PcCloseCount; i++)
+    {
+        int n = PC_TokenNodeCountAt(i);
+        if (n > maxN) maxN = n;
+        if (refN >= 4 && n >= 4)
+        {
+            void* t = *(void**)((char*)g_PcCloseUnits[i] + OFF_TECH_TOKEN);
+            void** arr = *(void***)((char*)t + OFF_TOK_NODES);
+            int k, same = 1;
+            for (k = 0; k < 4; k++)
+            {
+                if (arr[k] != ref[k]) { same = 0; break; }
+            }
+            if (same) sameN++;
+            else { diffN++; if (diffIdx < 0) diffIdx = i; }
+        }
+        else
+        {
+            diffN++;
+            if (diffIdx < 0) diffIdx = i;
+        }
+    }
+    {
+        int n0 = PC_TokenNodeCountAt(0);
+        if (n0 > maxN) maxN = n0;
+    }
+    PC_Trace("pc: members", sameN, diffN, diffIdx);
+    PC_Trace("pc: membersN", maxN, refN, 0);
 }
 
 /* 直接闭环: 对快照内每个 token 真实可用的单位, 取其 token[0]
@@ -706,30 +728,6 @@ static int PC_CloseAll(void)
         closed++;
     }
     return (closed << 16) | (skipped & 0xFFFF);
-}
-
-/* 新规划顶掉旧绑定: 解绑选中单位残留 token。只清单位侧回指, token
- * 对象本身不动 (遍历代码仍见有效 Owner, 不引入空悬挂), 交由引擎管理。
- * 调用时机铁律: 只能在无 NodeDelete 在途时调 (删执行逐成员取 token 无
- * 空检查, 断后删即崩, v20 血案)。即: 无旧圈触发时立即调; 有旧圈时等
- * delok 后调。不影响联机。 */
-static void PC_DetachAll(void)
-{
-    int i, detached = 0;
-    for (i = 0; i < g_PcCloseCount; i++)
-    {
-        void* u = g_PcCloseUnits[i];
-        void* t;
-        if (!PC_AliveAt(i)) continue;
-        if (!PC_IsFoot(u)) continue;
-        t = *(void**)((char*)u + OFF_TECH_TOKEN);
-        if (t && IsPlausiblePtr(t))
-        {
-            *(void**)((char*)u + OFF_TECH_TOKEN) = 0;
-            detached++;
-        }
-    }
-    if (detached) PC_Trace("pc: fresh", detached, 0, 0);
 }
 
 /* ---------------- 触发 ---------------- */
@@ -764,6 +762,51 @@ static void PC_Trigger(void)
     }
     if (nu <= 0) { PC_Trace("pc: no foot selected", selN, 0, 0); return; }
 
+    /* 快照拷贝 (拦截/分区在此之后读当前选择, 不再是上轮残留) */
+    g_PcCloseCount = 0;
+    for (i = 0; i < nu && i < PC_CLOSE_CAP; i++)
+    {
+        char tb[8];
+        unsigned ti;
+        g_PcCloseUnits[i] = s_units[i];
+        /* 快照 Fetch_ID (存活校验用; 选中单位必活, 此处 vcall 安全) */
+        for (ti = 0; ti < 8; ti++) tb[ti] = 0;
+        g_PcCloseIDs[i] = FN_TGT_OBJ(tb, s_units[i]) ? *(int*)(tb + 0) : 0;
+    }
+    g_PcCloseCount = (nu < PC_CLOSE_CAP) ? nu : PC_CLOSE_CAP;
+    /* ID 索引自检: 已知存活的首单位必须能查到, 否则本轮跳过存活校验
+     * (fail-open, 功能不变, 记 noidx)。 */
+    g_PcIdxOk = 0;
+    {
+        void* base = *(void**)ADDR_IDBASE;
+        int cnt = *(int*)ADDR_IDCOUNT;
+        if (base && IsPlausiblePtr(base) && cnt > 0 && cnt <= 200000 &&
+            g_PcCloseIDs[0] > 0 &&
+            PC_PtrAliveRaw(g_PcCloseUnits[0], g_PcCloseIDs[0]))
+            g_PcIdxOk = 1;
+        else
+            PC_Trace("pc: noidx", g_PcCloseIDs[0], cnt, 0);
+    }
+
+    /* pre 诊断: 首存活单位 token 真相 (指针/loop/节点数) */
+    {
+        int j;
+        for (j = 0; j < g_PcCloseCount; j++)
+        {
+            if (PC_AliveAt(j) && PC_IsFoot(g_PcCloseUnits[j]))
+            {
+                void* t = *(void**)((char*)g_PcCloseUnits[j] + OFF_TECH_TOKEN);
+                if (t && IsPlausiblePtr(t))
+                    PC_Trace("pc: pre", (int)(size_t)t,
+                        *(int*)((char*)t + OFF_TOK_LOOPN),
+                        *(int*)((char*)t + OFF_TOK_NCOUNT));
+                else
+                    PC_Trace("pc: pre", 0, -1, -1);
+                break;
+            }
+        }
+    }
+
     if (!GtMouseGameXY(&mx, &my)) { PC_Trace("pc: no mouse", 0, 0, 0); return; }
     pt.X = mx; pt.Y = my;
     center.X = center.Y = 0;
@@ -796,81 +839,18 @@ static void PC_Trigger(void)
     g_PcWaitExec = 0;
     g_PcDumpMega = 0;
     g_PcDumpConn = 0;
-    g_PcDumpDel = 0;
-    g_PcCloseCount = 0;
-    for (i = 0; i < nu && i < PC_CLOSE_CAP; i++)
-    {
-        char tb[8];
-        unsigned ti;
-        g_PcCloseUnits[i] = s_units[i];
-        /* 快照 Fetch_ID (存活校验用; 选中单位必活, 此处 vcall 安全) */
-        for (ti = 0; ti < 8; ti++) tb[ti] = 0;
-        g_PcCloseIDs[i] = FN_TGT_OBJ(tb, s_units[i]) ? *(int*)(tb + 0) : 0;
-    }
-    g_PcCloseCount = (nu < PC_CLOSE_CAP) ? nu : PC_CLOSE_CAP;
-    /* ID 索引自检: 已知存活的首单位必须能查到, 否则本轮跳过存活校验
-     * (fail-open, 功能不变, 记 noidx)。 */
-    g_PcIdxOk = 0;
-    {
-        void* base = *(void**)ADDR_IDBASE;
-        int cnt = *(int*)ADDR_IDCOUNT;
-        if (base && IsPlausiblePtr(base) && cnt > 0 && cnt <= 200000 &&
-            g_PcCloseIDs[0] > 0 &&
-            PC_PtrAliveRaw(g_PcCloseUnits[0], g_PcCloseIDs[0]))
-            g_PcIdxOk = 1;
-        else
-            PC_Trace("pc: noidx", g_PcCloseIDs[0], cnt, 0);
-    }
     {
         int nc = *(int*)ADDR_NODES_COUNT;
         g_PcNodes0 = (nc >= 0 && nc < 200000) ? nc : -1;
     }
     for (i = 0; i < 4; i++) { g_PcCorX[i] = corX[i]; g_PcCorY[i] = corY[i]; }
-    /* 阶段: 有旧圈 → 先删 (成员链接态, 删执行安全), delok 后 detach 再建;
-     * 无旧圈 → 立即 detach (无删在途, 安全) 后建新圈。闭环不用第 5 Mega
-     * (帧戳对不上会建重复), 改玩家式 close-Connect + 直接调关闭函数。
-     * 删前 gate: 上次成员必须全活 (战死成员悬空, 删执行同样会崩;
-     * 有死亡 → 跳过删, 宁漏删 (下次人齐再触发会清) 不崩溃)。 */
-    if (g_PcPrevValid)
-    {
-        int k, allAlive = 1;
-        for (k = 0; k < g_PcPrevCount; k++)
-        {
-            if (!PC_PtrAliveRaw(g_PcPrevUnits[k], g_PcPrevIDs[k]))
-            { allAlive = 0; break; }
-        }
-        if (allAlive)
-        {
-            g_PcPhase = 0;
-            PC_BuildDelPass();
-            PC_Trace("pc: del", g_PcNodes0, 0, 0);
-        }
-        else
-        {
-            PC_Trace("pc: delskip_dead", g_PcPrevCount, 0, 0);
-            PC_DetachAll();
-            g_PcPhase = 1;
-            PC_BuildMegaPass();
-        }
-    }
-    else
-    {
-        PC_DetachAll();
-        g_PcPhase = 1;
-        PC_BuildMegaPass();
-    }
-    for (i = 0; i < 4; i++)
-    { g_PcPrevCorX[i] = corX[i]; g_PcPrevCorY[i] = corY[i]; }
-    g_PcPrevValid = 1;
-    g_PcPrevCount = 0;
-    for (i = 0; i < g_PcCloseCount; i++)
-    {
-        g_PcPrevUnits[i] = g_PcCloseUnits[i];
-        g_PcPrevIDs[i] = g_PcCloseIDs[i];
-    }
-    g_PcPrevCount = g_PcCloseCount;
+    /* 快照全员直建 (无 detach/删/拦): 新鲜成环; 闭环加新原生吸收提示;
+     * 未闭环残留按原生语义延长。闭环不用第 5 Mega (帧戳对不上会建重复),
+     * 改玩家式合环 (Mega+Connect) + 直接调关闭函数。 */
+    g_PcPhase = 1;
+    PC_BuildMegaPass();
     g_PcCommitPend = 1;
-    PC_Trace("pc: fire", nu, cx, cy);
+    PC_Trace("pc: fire", g_PcCloseCount, cx, cy);
     PC_Drain();
 }
 
@@ -890,6 +870,7 @@ static void PC_CloseCommit(void)
         PC_Trace("pc: nodes", grew, nc, 0);
     }
     PC_Trace("pc: closed", (cr >> 16) & 0xFFFF, cr & 0xFFFF, 0);
+    PC_MembersCheck();
     loop = PC_LoopCount();
     PC_Trace("pc: loop", loop, 0, 0);
     cur = *(void**)ADDR_CURPLAYER;
@@ -918,41 +899,27 @@ void PatrolCircle_Poll(void)
         PC_Drain(); /* drip 续发 */
     else if (g_PcWaitExec)
     {
-        /* 五阶段就绪门控 (主标尺=逻辑帧):
-         * 阶段 0 (删旧圈): 节点数回落 → detach → 发 Mega 建新圈
-         * (4 帧无回落也走)。删阶段不读 token (删执行中途状态半截)。
+        /* 三阶段就绪门控 (主标尺=逻辑帧):
          * 阶段 1: 首单位挂满 → 发跟随者 Connect (单选则直接闭环)。
-         * 阶段 2: 全员挂满 → 发 close-Connect (多选; 单选直接闭环)。
+         * 阶段 2: 全员挂满 → 发合环 (全员 Mega+Connect, 多选;
+         * 单选直接闭环)。
          * 阶段 3: 首单位 loop 落地 (合环执行到) → 直接关+提交。
+         * 闭环加新点由原生拦截 (Mega 执行侧消息+丢弃)。
          * 帧每推进记一行 wait; 各阶段超限 → 兜底 (关已有/跳过);
          * 帧长期不动 → polls 放行防挂。 */
         int live = 0, ready = 0;
         int nc, grew, fr;
         int cap;
-        if (g_PcPhase > 0)
-            PC_TokenStats(&live, &ready);
+        PC_TokenStats(&live, &ready);
         nc = *(int*)ADDR_NODES_COUNT;
         grew = (g_PcNodes0 >= 0 && nc >= 0 && nc < 200000) ? nc - g_PcNodes0 : -999;
         g_PcWaitPolls++;
         fr = *(int*)ADDR_FRAME;
         cap = (g_PcWaitFrames > PC_WAIT_FRAMES || g_PcWaitPolls > PC_WAIT_POLLCAP) ? 1 : 0;
-        if (g_PcPhase > 0 && !live)
+        if (!live)
         {
             PC_Trace("pc: wait abort", 0, 0, 0);
             PC_ClearPend();
-        }
-        else if (g_PcPhase <= 0 &&
-                 ((g_PcNodes0 >= 0 && nc < g_PcNodes0) || g_PcWaitFrames >= PC_DEL_FRAMES))
-        {
-            /* 删旧圈落地 (或无旧可删) → 先 detach (删已执行完, 安全),
-             * 再建新圈。detach 后的 token 读一律回空, 门控安全。 */
-            PC_Trace("pc: delok", grew, nc, 0);
-            PC_DetachAll();
-            g_PcPhase = 1;
-            g_PcWaitFrames = 0;
-            g_PcWaitPolls = 0;
-            PC_BuildMegaPass();
-            PC_Drain();
         }
         else if (g_PcPhase == 1 && PC_LeaderFull())
         {
@@ -984,7 +951,7 @@ void PatrolCircle_Poll(void)
                 g_PcPhase = 3;
                 g_PcWaitFrames = 0;
                 g_PcWaitPolls = 0;
-                PC_BuildCloseConnPass();
+                PC_BuildClosePass();
                 PC_Drain();
             }
         }
