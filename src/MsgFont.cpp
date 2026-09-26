@@ -23,6 +23,7 @@
 #include "VecText.h"
 #include "AirWay.h"
 #include "BuildQueue.h"
+#include "PatrolCircle.h"
 
 #define MF_VERSION   "0.2.113d"
 #define MF_SECTION   "MsgFont"
@@ -865,6 +866,12 @@ static int MouseXY(int* x, int* y)
     }
     else { *x = mx; *y = my; }
     return 1;
+}
+
+/* 跨模块鼠标取数 (PatrolCircle 用, 与上面 MouseXY 同口径)。 */
+int GtMouseGameXY(int* x, int* y)
+{
+    return MouseXY(x, y);
 }
 
 /* 战役框上一帧矩形 (滚轮命中 + 悬停判定用) */
@@ -1868,6 +1875,7 @@ static void PowerDrawBoth(void)
 {
     AirWay_Poll();   /* 每循环必跑的只读飞机轮询 (AirWay, 开关关时直接返回) */
     BuildQueue_Poll(); /* 每循环必跑的建筑本地排队 (BuildQueue, 开关关/队列空时直接返回) */
+    PatrolCircle_Poll(); /* Z+中键一键巡逻圈 (开关关/无触发时直接返回) */
     EnsureInit();
     if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
     /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;

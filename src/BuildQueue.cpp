@@ -262,6 +262,27 @@ static void BQ_EvWatch(void)
         int heap = *(int*)(e + 11);
         BQ_Trace("bq: ev", (int)e[0], (int)e[2], heap,
                  (int)*(unsigned*)ADDR_OUT_COUNT);
+        /* 规划事件全字节抓包 (照抄原生手动序列用):
+         * 0x4 Mega / 0x2A Connect / 0x2B Commit / 0x2C NodeDelete。
+         * 手动规划单次点击事件数少 (<=8 单位可抓全; 大编队分批会超 8
+         * 被跳过, 抓包时请用小小编队)。我方 PatrolCircle 事件也会留痕
+         * (与 pc: megev/conev 关联区分)。 */
+        if (e[0] == 0x04 || e[0] == 0x2A || e[0] == 0x2B || e[0] == 0x2C)
+        {
+            char buf[256], hx[4];
+            unsigned q = 0, i;
+            q = AppendCStr(buf, q, "bq: plan ", sizeof(buf));
+            for (i = 0; i < EVT_SIZE && q + 2 < sizeof(buf); i++)
+            {
+                unsigned char b = e[i];
+                hx[0] = "0123456789ABCDEF"[b >> 4];
+                hx[1] = "0123456789ABCDEF"[b & 15];
+                hx[2] = 0;
+                q = AppendCStr(buf, q, hx, sizeof(buf));
+            }
+            (void)q;
+            LogLine(buf);
+        }
         cur = (cur + 1u) & 0x7Fu;
         guard++;
     }

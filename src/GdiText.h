@@ -28,6 +28,8 @@ extern char g_LogPath[MAX_PATH_LEN];
 void BuildPaths(void);
 void GtEnsureLog(void);   /* 幂等: 建路径+打开日志, 失败则 g_Log=NULL */
 void LogLine(const char* body);
+/* 鼠标游戏坐标 (WWMouse+窗口映射, 供 PatrolCircle 等输入模块用), 返回 1=有效 */
+int GtMouseGameXY(int* x, int* y);
 /* 详细日志总开关: 0=只记关键事件 (默认, 日志小); 1=逐字/逐帧普查 */
 extern int g_LogDetail;
 
