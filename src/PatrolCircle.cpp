@@ -1,9 +1,11 @@
 /* PatrolCircle.cpp - Z+中键一键巡逻圈 (选中单位直接巡逻)。
  *
- * 触发: 按住 Z (PlanningMode 键) 的同时点鼠标中键 (可配 TriggerVK:
- * 4=中键默认, 5=侧键1, 6=侧键2), 当前选中单位以点击格为中心布 4x4
- * 方环 (±2 角) 并开始巡逻。配置全在 MsgFont.ini [PatrolCircle]。
- * 全程不碰光标 (幽灵点击已退役)。
+ * 触发: 按住 Z (PlanningMode 键) 的同时按鼠标中键 (可配 TriggerVK:
+ * 4=中键默认, 5=侧键1, 6=侧键2) 锚定起点, 划线后松开以终点定圈:
+ * 起终连线为中线, 四周各外扩 Size/2 (端点沿方向也外扩 Size/2) 成矩环;
+ * 点按 (起终两格内) 则以松开格为中心布 4x4 方环 (±2 角) 并开始巡逻。
+ * 配置全在 MsgFont.ini [PatrolCircle]。全程不碰光标。
+ * 注意: 中键按住拖时游戏可能平移镜头, 起终格按各自时刻镜头映射。
  *
  * 原理 (原生序列实证: 幽灵点击抓到的 bq:ev + 反汇编交叉确认):
  *   新角点击 → MegaMission (Type 4, ctor 0x4C6860, Whom=单位,
@@ -28,89 +30,19 @@
  *   中心格经 Display::ProcessClickCoords 0x692300; 角校验经
  *   MapCells=[0x87F7E8+0x13C]/MaxCells=[0x87F7E8+0x140]。
  *
- * 教训:
- *   v1 只发 Connect: 无节点可链, 全丢弃。v2 只发 Mega×5: 建节点但
- *   第 5 Mega 因子事件帧戳对不上而建重复, 不闭环。v3 Mega(首单位)+
- *   Connect(全单位): Connect 在空 token 上挂不上, 退化单单位。
- *   v4/v5 幽灵点击: 链路正确但第 5 点像素未对齐中心则不闭环, 且
- *   commit 抢跑会消费空路径 (后加 loop 门控修好, 环已能成)。
- *   v6 观测式幽灵点击: hover 门控 + loop 门控, 环稳定建成, 但要动光标。
- *   v7 纯事件复刻 (Mega 全单位 + Connect 全单位 + 门控 commit):
- *   编码与原生逐字节一致但 loop 恒 0——Connect 执行关不上环。
- *   v8 = Mega 建节点 + 直接调 UI 关闭函数 + Commit (无光标动作)。
- *   v9: 待发一次突发 (同逻辑帧同帧戳), 多单位挂同一套共享节点
- *   (跨帧分批会建重复=每个单位一套圈); 节点增长数记日志验证 (=4)。
- *   v10: 日志证实第一遍只建节点不挂 token (新格), 第二遍同位置才
- *   挂 token——改两遍发送 (自适应: 第一遍后 token 齐则跳过第二遍)。
- *   v11: 野指针/旧空 token 误报就绪致门控抢跑 (mega 执行前 close 跑完)
- *   ——token 深度校验 (数组+计数+首节点) 后才算就绪/闭环。
- *   v12: 跨触发 token 残留致新事件往旧圈追加 (越试圈越多)——触发时
- *   解绑选中单位旧 token (fresh start, 只清单位侧回指)。
- *   v13: 多选只建一套共享圈——之前全单位 Mega, 执行侧 0x638CE0 对无
- *   token 单位必回 -1 (自建新节点), 故人手一套圈 (nodes=单位数×4)。
- *   原生协议 (反汇编实证): 首单位 Mega 建节点 + 其余单位 PlanConnect
- *   (0x2A, 构造 0x4C6780, 单位→格) 挂到已存在节点上; 执行侧 0x637EFE
- *   按格找节点 → 无 token 则建 token → 挂 token → 调关闭函数, 全程不
- *   建新节点。改后: 角 k 发 Mega(首单位) + Connect(其余, 同角),
- *   节点增长恒=4。单选路径与之前逐字节一致, 零回归。
- *   v14: 去延时去上限——排空后等一个逻辑帧即闭环提交 (无 ExecMs 超时/
- *   无第二遍; 帧计不动时 poll 数兜底防 busy 卡死); 去 MaxUnits, 选中
- *   多少跟多少 (OutList 满则 drip 跨帧续发, Connect 按格找节点跨帧可挂;
- *   Mega 恒首单位 4 个)。
- *   v15: v14 等一帧是错的——日志实证排空后 1 帧时 nodes=0/tokens=0
- *   (引擎延迟数帧才执行, close 空跑致 noloop; 事件随后执行故画面有线
- *   但环未闭)。改就绪门控: 全员 token 挂满 (n>=4) 当即闭环提交, 不等
- *   固定时间; 仅真失败时 poll 上限兜底关已有。conev 编码已对
- *   (与 megev 同格同帧戳, 日志 hex 核对过), 不动。
- *   v16: v15 的 poll 计数是错的——PowerDrawBoth 一逻辑帧调几十次,
- *   45 polls 在同一帧内跑完 (日志: cap 前连一行 wait 都没有),
- *   引擎执行 (数逻辑帧延迟) 永远等不到。改按逻辑帧计数:
- *   全满即闭环; 30 逻辑帧还不满才兜底; polls 只做冻结防挂
- *   (暂停/菜单帧不动时放行不清 busy)。
- *   v17: Connect 与 Mega 同突发时挂不上 (执行顺序: Connect 先跑则格
- *   上无节点直接丢弃, 永不重试; 日志: nodes=4 但 followers 30 帧
- *   ready=0)。改分阶段: 先发首单位 Mega → 首单位挂满 (节点已存在)
- *   再发跟随者 Connect → 全满闭环提交。各阶段就绪即走, 无固定等待。
- *   v18: 旧圈清不掉根因——commit 不删节点 (总数 4→40 实锤), 节点靠
- *   token 引用渲染; v12 的 fresh-detach 把单位侧砍断, 孤儿 token 抱旧
- *   节点永久渲染。修: 保留 detach (防跨触发追加/ stale token), 触发时
- *   先发 PlanNodeDelete (0x2C, 构造 0x4C65E0) 删上次 4 角 (执行侧从
- *   token 解链再删节点, 原生机制), 删完 (节点数回落) 再建新圈。
- *   闭环改玩家式: 全满后发 close-Connect (全员→首角, 原生手动即 8 连
- *   Connect 后 Commit), 等首单位 loop 落地再直接关+提交 (联机同步闭环
- *   状态, 单选仍走老路)。全标准事件, 联机安全。
- *   v19: 已有闭环圈时连续按崩溃。两处 hardening (全标准事件, 不碰模拟):
- *   (1) 快照跨帧防野指针——选中单位在 op 期间战死则快照悬空, 下轮询
- *   vcall 即崩。用引擎 ID 索引 (0xB0E840 基址/0xB0E844 计数, 8 字节
- *   {ID,ptr}, 升序) 纯读二分验证 (指针==索引指针才算活), 先验活再碰
- *   对象; 索引机制自检失败则 fail-open (跳过校验, 功能不变)。
- *   (2) commit 消费确认——CloseCommit 只把 commit 发进 OutList, 执行
- *   在数帧后; 此时立即接受下一次触发, 新删旧事件与未执行完的旧事件
- *   交错 (原生对此直接拦截+提示)。改 phase4: 忙到首单位 token 指针
- *   变化 (被消费) 或 15 帧, 再放行。
- *   v20: v19 仍崩, 日志定位——4×NodeDelete 进队后执行时崩。根因:
- *   NodeDelete 执行逐成员调 0x705D20 取 token 且无空检查, 而触发时已
- *   detach (成员 token 全空) → 空解引用。v18 删旧能活 purely 因为上次
- *   角无节点 (搜索无命中直接返回)。修: 删→detach→建 (删时成员必须链
- *   接, 与原生右键删节点配置一致); delok/无旧圈时才 detach; 删阶段不
- *   读 token (防删执行中途读半截状态); 掉 delcur (全空 abort 时成员已
- *   断, 删即崩, 残留交下次触发链式清理); 掉 phase4 (postcap 实证 token
- *   常驻, 15 帧纯开销且 FIFO 已保序, 回到执行完即放行)。
- *   v21: 不再执着删旧重建——有闭环圈时直接拦截 (原生行为: 已成环再加
- *   路径点直接拦截+提示), 什么都不发什么都不碰, 比删更简单且无崩溃类。
- *   删机制仅保留给未闭环重建 (失败残留/手动半道)。合环补全员 close-Mega
- *   (原生合环=全员 Mega(吸收)+全员 Connect, 之前缺 Mega, 疑为中线成因)。
- *   v22: v21 拦截从未生效——检查跑在快照拷贝之前, 读的是上轮残留。
- *   重排触发器 (快照→自检→pre→分区→鼠标→建圈)。另拦截升级为分区:
- *   已闭环/已提交巡逻单位排除 (不劫持其它圈), 只给新鲜单位建圈;
- *   全被排除才 blocked。commit 消费 loop 标记故拦截另记提交记忆
- *   (指针+ID, fail-open)。
- *   v23 (用户定): 不再自己删路径/拦添加——闭环加新点交给原生拦截
- *   (Mega 执行侧对闭环 token 消息+丢弃, 即"无法在已经进入循环的部队
- *   上增加新指令", 第一局实证)。拿掉整套 detach/NodeDelete/拦截/提交记忆:
- *   快照全员直建, 新鲜成环, 闭环加新原生吸收提示, 未闭环残留按原生语义
- *   延长 (不再制造孤儿 token, 手动拉走正常消圈)。只保留存活校验与分阶段
- *   门控。联机安全 (全标准事件+只读)。
+ * 约束 (勿踩):
+ *   只发 Connect 无节点可链 (全丢弃); 全单位 Mega 跨帧分批会建重复
+ *   (人手一套圈); Connect 在空 token 上挂不上, 且执行侧关不上环——
+ *   故首单位 Mega 建节点 + 其余 Connect 挂接, 建与挂分阶段发 (同突发
+ *   Connect 先跑会被丢弃), 闭环直接调 UI 关闭函数 (与手点同函数,
+ *   节点取自各单位自己 token[0]), 最后 Commit。
+ * 行为:
+ *   不限单位 (OutList 满则 drip 跨帧续发, Mega 恒首单位 4 个);
+ *   各阶段就绪即走无固定等待 (帧不动时 poll 数兜底防 busy 卡死);
+ *   token 就绪须深度校验 (数组+计数+首节点, 防门控抢跑);
+ *   快照跨帧须先经 Fetch_ID 索引验活 (自检失败则 fail-open);
+ *   不删路径不拦添加——闭环加新点由原生拦截 (消息+丢弃),
+ *   未闭环残留按原生语义延长。
  *
  * 联机: 只发标准事件, 各端同一份原版代码执行, 不影响联机。
  * 本地只读 + 标准事件入队, 不写模拟内存。
@@ -120,6 +52,7 @@
  */
 
 #include <windows.h>
+#include <math.h>
 #include "GdiText.h"
 
 #define PC_SECTION "PatrolCircle"
@@ -175,7 +108,7 @@ typedef void* __attribute__((thiscall)) (*Fn_MegaMissionCtor)(void* ev, int hous
 typedef void* __attribute__((thiscall)) (*Fn_PlanConnectCtor)(void* ev, int houseIdx, int evtType,
     int srcID, unsigned srcRttiW, int dstID, unsigned dstRttiW);
 typedef void* __attribute__((thiscall)) (*Fn_PlanCommitCtor)(void* ev, int houseIdx, int evtType);
-/* UI 关闭函数 0x639740: fastcall ECX=单位, EDX=节点 (无栈参, 本地闭环,
+/* UI 关闭函数 0x639740: fastcall ECX=单位, EDX=节点 (本地闭环,
  * 不发事件不碰全局模式, 与手点关闭同函数)。调用前必须保证 token 非空
  * 且节点在其 token 内 (取 token[0] 即满足)。 */
 typedef void __attribute__((fastcall)) (*Fn_PlanClose)(void* unit, void* node);
@@ -214,7 +147,6 @@ static void PC_EnsureInit(void)
     g_PcZVK = GetPrivateProfileIntA(PC_SECTION, "ZVK", 90, g_IniPath);
     g_PcSize = GetPrivateProfileIntA(PC_SECTION, "Size", 4, g_IniPath);
     g_PcCommit = GetPrivateProfileIntA(PC_SECTION, "Commit", 1, g_IniPath) ? 1 : 0;
-    /* v14: MaxUnits/GhostExecMs 已删除 (不限单位, 不等超时), ini 残留键忽略。 */
     if (g_PcTriggerVK < 1 || g_PcTriggerVK > 255) g_PcTriggerVK = 4;
     if (g_PcZVK < 1 || g_PcZVK > 255) g_PcZVK = 90;
     if (g_PcSize < 2) g_PcSize = 2;
@@ -261,24 +193,6 @@ static void PC_Trace(const char* head, int a, int b, int c)
     LogLine(buf);
 }
 
-/* 首 30 字节 hex (编码核对, 与原生 bq:ev 交叉验证用)。 */
-static void PC_DumpEv(const char* tag, const char* ev)
-{
-    char buf[128], hx[4];
-    unsigned q = 0, i;
-    q = AppendCStr(buf, q, tag, sizeof(buf));
-    for (i = 0; i < 30; i++)
-    {
-        unsigned char b = (unsigned char)ev[i];
-        hx[0] = "0123456789ABCDEF"[b >> 4];
-        hx[1] = "0123456789ABCDEF"[b & 15];
-        hx[2] = 0;
-        q = AppendCStr(buf, q, hx, sizeof(buf));
-    }
-    (void)q;
-    LogLine(buf);
-}
-
 /* OutList 手工入队 (与 0x6521C0 同义, BuildQueue 同式)。满返回 0。 */
 static int PC_Enqueue(char ev[EVT_SIZE])
 {
@@ -304,9 +218,6 @@ static int PC_Enqueue(char ev[EVT_SIZE])
     return 1;
 }
 
-static int g_PcDumpMega = 0;
-static int g_PcDumpConn = 0;
-
 static int PC_FireMega(int houseIdx, int srcID, unsigned char srcRtti,
                        int dstID, unsigned char dstRtti)
 {
@@ -316,7 +227,6 @@ static int PC_FireMega(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = 1;
-    if (!g_PcDumpMega) { g_PcDumpMega = 1; PC_DumpEv("pc: megev ", ev); }
     return PC_Enqueue(ev);
 }
 
@@ -338,7 +248,6 @@ static int PC_FireConnect(int houseIdx, int srcID, unsigned char srcRtti,
     for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
     FN_PLANCONNECT(ev, houseIdx, EVT_PLANCONNECT,
                    srcID, (unsigned)srcRtti, dstID, (unsigned)dstRtti);
-    if (!g_PcDumpConn) { g_PcDumpConn = 1; PC_DumpEv("pc: conev ", ev); }
     return PC_Enqueue(ev);
 }
 
@@ -364,7 +273,6 @@ static int PC_CellValid(int cx, int cy)
 /* 触发即突发, OutList (上限 0x80) 满则 drip 跨帧续发。Mega 恒首单位 4 个;
  * Connect 按格找节点, 跨帧不影响挂接。 */
 
-#define ADDR_NODES_COUNT 0xAC4B40u /* 规划节点数 (执行侧搜索上界, 只读验证) */
 #define ADDR_FRAME 0xA8ED84u       /* 当前帧 (事件 Frame 戳源; 排空后看它推进) */
 #define ADDR_IDBASE 0xB0E840u      /* Fetch_ID 索引基址 (纯读存活校验) */
 #define ADDR_IDCOUNT 0xB0E844u     /* Fetch_ID 索引计数 */
@@ -381,13 +289,11 @@ static void* g_PcHouse = 0;
 static int g_PcHouseIdx = 0;
 static int g_PcPrevTrig = 0;
 static int g_PcWaitExec = 0;      /* 排空后等 token 落地再闭环 */
-static int g_PcWaitFrame = 0;     /* 排空时帧快照 */
 static int g_PcWaitPolls = 0;     /* 冻结防挂计数 (帧不动时累积) */
 static int g_PcWaitFrames = 0;    /* 已推进逻辑帧数 (主标尺) */
 static int g_PcWaitLogFr = 0;     /* wait 进度日志节流 */
 static int g_PcPhase = 0;         /* 1=等首单位挂满 2=等全满 3=等合环落地 */
 static int g_PcIdxOk = 0;         /* ID 索引机制自检通过 (存活校验总开关) */
-static int g_PcNodes0 = -1;      /* 触发时节点数快照 (验证只建一套圈) */
 static int g_PcCorX[4], g_PcCorY[4]; /* 角格 */
 static void* g_PcCloseUnits[PC_CLOSE_CAP]; /* 闭环用单位快照 */
 static int g_PcCloseIDs[PC_CLOSE_CAP];     /* 快照 Fetch_ID (存活校验) */
@@ -418,8 +324,8 @@ static void PC_ShiftDown(void)
 
 /* 单位存活校验 (纯读, 永不碰对象本身): Fetch_ID 在引擎索引
  * (0xB0E840 基址/0xB0E844 计数, 8 字节 {ID,ptr} 升序) 里二分,
- * 索引指针==快照指针才算活。快照跨帧, 单位战死即悬空, 先验活再碰。
- * g_PcIdxOk=0 (自检未通过) 时 fail-open 全回活 (功能不变)。 */
+ * 索引指针==快照指针才算活。快照跨帧, 单位战死即悬空, 先验活再碰
+ * 对象; g_PcIdxOk=0 (自检未通过) 时 fail-open 全回活 (功能不变)。 */
 static int PC_PtrAliveRaw(void* u, int id)
 {
     void* base;
@@ -457,7 +363,7 @@ static int PC_AliveAt(int i)
 }
 
 /* token 是否真实可用: 野指针/旧空 token 都会误报就绪, 必须深查
- * (数组有效 + 节点数合法 + 首节点有效), 否则门控抢跑 (v10 血案:
+ * (数组有效 + 节点数合法 + 首节点有效), 否则门控抢跑:
  * ready 瞬间满足 → close 在 mega 执行前跑完 → skip → noloop)。
  * 入参为快照下标 (内部先验活, 战死单位一律不就绪)。 */
 static int PC_TokenReadyAt(int i)
@@ -653,58 +559,12 @@ static int PC_Drain(void)
     if (g_PcPendCount <= 0)
     {
         g_PcWaitExec = 1;
-        g_PcWaitFrame = *(int*)ADDR_FRAME;
         g_PcWaitPolls = 0;
         g_PcWaitFrames = 0;
-        g_PcWaitLogFr = g_PcWaitFrame;
-        PC_Trace("pc: drained", houseIdx, sent, g_PcWaitFrame);
+        g_PcWaitLogFr = *(int*)ADDR_FRAME;
+        PC_Trace("pc: drained", houseIdx, sent, 0);
     }
     return (g_PcPendCount <= 0) ? 1 : 0;
-}
-
-/* 成员一致性诊断 (中线定位): 首单位 token 前 4 节点指针 vs 其余单位。
- * 全同源同序 → token 内容干净 (中线另有成因); 有分叉 → 定位到单位/位置。
- * a=同源单位数 b=分叉单位数 c=首个分叉下标 d=全快照最大节点数。 */
-static void PC_MembersCheck(void)
-{
-    int i, sameN = 0, diffN = 0, diffIdx = -1, maxN = 0;
-    void* ref[4] = { 0, 0, 0, 0 };
-    int refN = 0;
-    if (g_PcCloseCount <= 1) return;
-    if (PC_TokenNodeCountAt(0) >= 4)
-    {
-        void* t = *(void**)((char*)g_PcCloseUnits[0] + OFF_TECH_TOKEN);
-        void** arr = *(void***)((char*)t + OFF_TOK_NODES);
-        for (refN = 0; refN < 4; refN++) ref[refN] = arr[refN];
-    }
-    for (i = 1; i < g_PcCloseCount; i++)
-    {
-        int n = PC_TokenNodeCountAt(i);
-        if (n > maxN) maxN = n;
-        if (refN >= 4 && n >= 4)
-        {
-            void* t = *(void**)((char*)g_PcCloseUnits[i] + OFF_TECH_TOKEN);
-            void** arr = *(void***)((char*)t + OFF_TOK_NODES);
-            int k, same = 1;
-            for (k = 0; k < 4; k++)
-            {
-                if (arr[k] != ref[k]) { same = 0; break; }
-            }
-            if (same) sameN++;
-            else { diffN++; if (diffIdx < 0) diffIdx = i; }
-        }
-        else
-        {
-            diffN++;
-            if (diffIdx < 0) diffIdx = i;
-        }
-    }
-    {
-        int n0 = PC_TokenNodeCountAt(0);
-        if (n0 > maxN) maxN = n0;
-    }
-    PC_Trace("pc: members", sameN, diffN, diffIdx);
-    PC_Trace("pc: membersN", maxN, refN, 0);
 }
 
 /* 直接闭环: 对快照内每个 token 真实可用的单位, 取其 token[0]
@@ -730,21 +590,91 @@ static int PC_CloseAll(void)
     return (closed << 16) | (skipped & 0xFFFF);
 }
 
-/* ---------------- 触发 ---------------- */
+/* 中键划线锚定: 按下记起点格, 松开取终点格定圈。 */
+static int g_PcArmed = 0;
+static int g_PcAx = 0, g_PcAy = 0;
 
-static void PC_Trigger(void)
+/* 鼠标屏坐标 → 格 (ProcessClickCoords + 地图校验)。 */
+static int PC_MouseCell(int* cx, int* cy)
 {
-    void* cur;
-    void** items;
-    int selN, i, nu = 0;
     int mx, my;
     Point2D pt;
     CellStruct center;
     CoordStruct crd;
     void* tgtObj = 0;
     unsigned char b5 = 0, b6 = 0;
-    int ok;
-    int half, cx, cy;
+    center.X = center.Y = 0;
+    crd.X = crd.Y = crd.Z = 0;
+    if (!GtMouseGameXY(&mx, &my)) return 0;
+    pt.X = mx; pt.Y = my;
+    if (!FN_CLICKCOORDS((void*)ADDR_DISPLAY, &pt, &center, &crd,
+                        &tgtObj, &b5, &b6))
+        return 0;
+    *cx = (int)center.X; *cy = (int)center.Y;
+    return PC_CellValid(*cx, *cy);
+}
+
+static int PC_Rnd(double v)
+{
+    return (int)(v + (v >= 0 ? 0.5 : -0.5));
+}
+
+/* 角计算: 起终 Chebyshev 距<2 视为点按 → 以终点为中心方形 (返回 1);
+ * 否则起终连线为中线, 侧向外扩 half, 端点沿方向各延伸 half, 得矩环
+ * 4 角绕序 (返回 2)。角出界返回 0 (已记 corner off map)。 */
+static int PC_BuildCorners(int ax, int ay, int bx, int by, int half,
+                           int corX[4], int corY[4])
+{
+    int dx = bx - ax, dy = by - ay;
+    int adx = dx >= 0 ? dx : -dx, ady = dy >= 0 ? dy : -dy;
+    int i;
+    if (adx < 2 && ady < 2)
+    {
+        corX[0] = bx - half; corY[0] = by - half;
+        corX[1] = bx + half; corY[1] = by - half;
+        corX[2] = bx + half; corY[2] = by + half;
+        corX[3] = bx - half; corY[3] = by + half;
+        for (i = 0; i < 4; i++)
+        {
+            if (!PC_CellValid(corX[i], corY[i]))
+            {
+                PC_Trace("pc: corner off map", corX[i], corY[i], i);
+                return 0;
+            }
+        }
+        return 1;
+    }
+    {
+        double L = sqrt((double)dx * dx + (double)dy * dy);
+        double ux = dx / L, uy = dy / L;   /* 中线单位方向 */
+        double ox = -uy * half, oy = ux * half; /* 侧向外扩 */
+        double ex = ux * half, ey = uy * half;  /* 端点延伸 */
+        double Ax = ax - ex, Ay = ay - ey;
+        double Bx = bx + ex, By = by + ey;
+        corX[0] = PC_Rnd(Ax + ox); corY[0] = PC_Rnd(Ay + oy);
+        corX[1] = PC_Rnd(Bx + ox); corY[1] = PC_Rnd(By + oy);
+        corX[2] = PC_Rnd(Bx - ox); corY[2] = PC_Rnd(By - oy);
+        corX[3] = PC_Rnd(Ax - ox); corY[3] = PC_Rnd(Ay - oy);
+        for (i = 0; i < 4; i++)
+        {
+            if (!PC_CellValid(corX[i], corY[i]))
+            {
+                PC_Trace("pc: corner off map", corX[i], corY[i], i);
+                return 0;
+            }
+        }
+        return 2;
+    }
+}
+
+/* ---------------- 触发 ---------------- */
+
+static void PC_TriggerAt(int ax, int ay, int bx, int by)
+{
+    void* cur;
+    void** items;
+    int selN, i, nu = 0;
+    int half, cx, cy, mode;
     int corX[4], corY[4];
     int houseIdx;
     static void* s_units[PC_CLOSE_CAP];
@@ -762,7 +692,7 @@ static void PC_Trigger(void)
     }
     if (nu <= 0) { PC_Trace("pc: no foot selected", selN, 0, 0); return; }
 
-    /* 快照拷贝 (拦截/分区在此之后读当前选择, 不再是上轮残留) */
+    /* 快照当前选择 (单位指针 + Fetch_ID, 跨帧先验活) */
     g_PcCloseCount = 0;
     for (i = 0; i < nu && i < PC_CLOSE_CAP; i++)
     {
@@ -788,48 +718,16 @@ static void PC_Trigger(void)
             PC_Trace("pc: noidx", g_PcCloseIDs[0], cnt, 0);
     }
 
-    /* pre 诊断: 首存活单位 token 真相 (指针/loop/节点数) */
-    {
-        int j;
-        for (j = 0; j < g_PcCloseCount; j++)
-        {
-            if (PC_AliveAt(j) && PC_IsFoot(g_PcCloseUnits[j]))
-            {
-                void* t = *(void**)((char*)g_PcCloseUnits[j] + OFF_TECH_TOKEN);
-                if (t && IsPlausiblePtr(t))
-                    PC_Trace("pc: pre", (int)(size_t)t,
-                        *(int*)((char*)t + OFF_TOK_LOOPN),
-                        *(int*)((char*)t + OFF_TOK_NCOUNT));
-                else
-                    PC_Trace("pc: pre", 0, -1, -1);
-                break;
-            }
-        }
-    }
-
-    if (!GtMouseGameXY(&mx, &my)) { PC_Trace("pc: no mouse", 0, 0, 0); return; }
-    pt.X = mx; pt.Y = my;
-    center.X = center.Y = 0;
-    crd.X = crd.Y = crd.Z = 0;
-    ok = FN_CLICKCOORDS((void*)ADDR_DISPLAY, &pt, &center, &crd, &tgtObj, &b5, &b6);
-    if (!ok) { PC_Trace("pc: off map", mx, my, 0); return; }
-    cx = (int)center.X; cy = (int)center.Y;
-    if (!PC_CellValid(cx, cy)) { PC_Trace("pc: bad center", cx, cy, 0); return; }
-
     half = g_PcSize / 2;
     if (half < 1) half = 1;
-    corX[0] = cx - half; corY[0] = cy - half;
-    corX[1] = cx + half; corY[1] = cy - half;
-    corX[2] = cx + half; corY[2] = cy + half;
-    corX[3] = cx - half; corY[3] = cy + half;
-    for (i = 0; i < 4; i++)
+    mode = PC_BuildCorners(ax, ay, bx, by, half, corX, corY);
+    if (!mode) return; /* 角出界已记日志 */
+    if (mode == 2)
     {
-        if (!PC_CellValid(corX[i], corY[i]))
-        {
-            PC_Trace("pc: corner off map", corX[i], corY[i], i);
-            return;
-        }
+        PC_Trace("pc: drag", ax, ay, bx);
+        cx = (ax + bx) / 2; cy = (ay + by) / 2;
     }
+    else { cx = bx; cy = by; }
 
     houseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
     g_PcHouse = cur;
@@ -837,12 +735,6 @@ static void PC_Trigger(void)
     g_PcPendCount = 0;
     g_PcCommitPend = 0;
     g_PcWaitExec = 0;
-    g_PcDumpMega = 0;
-    g_PcDumpConn = 0;
-    {
-        int nc = *(int*)ADDR_NODES_COUNT;
-        g_PcNodes0 = (nc >= 0 && nc < 200000) ? nc : -1;
-    }
     for (i = 0; i < 4; i++) { g_PcCorX[i] = corX[i]; g_PcCorY[i] = corY[i]; }
     /* 快照全员直建 (无 detach/删/拦): 新鲜成环; 闭环加新原生吸收提示;
      * 未闭环残留按原生语义延长。闭环不用第 5 Mega (帧戳对不上会建重复),
@@ -850,7 +742,10 @@ static void PC_Trigger(void)
     g_PcPhase = 1;
     PC_BuildMegaPass();
     g_PcCommitPend = 1;
-    PC_Trace("pc: fire", g_PcCloseCount, cx, cy);
+    if (mode == 2)
+        PC_Trace("pc: fire", g_PcCloseCount, bx, by);
+    else
+        PC_Trace("pc: fire", g_PcCloseCount, cx, cy);
     PC_Drain();
 }
 
@@ -863,14 +758,7 @@ static void PC_CloseCommit(void)
     void* cur;
     int hi;
     cr = PC_CloseAll();
-    {
-        int nc = *(int*)ADDR_NODES_COUNT;
-        int grew = (g_PcNodes0 >= 0 && nc >= 0 && nc < 200000) ?
-            nc - g_PcNodes0 : -999;
-        PC_Trace("pc: nodes", grew, nc, 0);
-    }
     PC_Trace("pc: closed", (cr >> 16) & 0xFFFF, cr & 0xFFFF, 0);
-    PC_MembersCheck();
     loop = PC_LoopCount();
     PC_Trace("pc: loop", loop, 0, 0);
     cur = *(void**)ADDR_CURPLAYER;
@@ -908,11 +796,9 @@ void PatrolCircle_Poll(void)
          * 帧每推进记一行 wait; 各阶段超限 → 兜底 (关已有/跳过);
          * 帧长期不动 → polls 放行防挂。 */
         int live = 0, ready = 0;
-        int nc, grew, fr;
+        int fr;
         int cap;
         PC_TokenStats(&live, &ready);
-        nc = *(int*)ADDR_NODES_COUNT;
-        grew = (g_PcNodes0 >= 0 && nc >= 0 && nc < 200000) ? nc - g_PcNodes0 : -999;
         g_PcWaitPolls++;
         fr = *(int*)ADDR_FRAME;
         cap = (g_PcWaitFrames > PC_WAIT_FRAMES || g_PcWaitPolls > PC_WAIT_POLLCAP) ? 1 : 0;
@@ -925,12 +811,12 @@ void PatrolCircle_Poll(void)
         {
             if (g_PcCloseCount <= 1)
             {
-                PC_Trace("pc: tokens", ready, live, grew);
+                PC_Trace("pc: tokens", ready, live, 0);
                 PC_CloseCommit();
             }
             else
             {
-                PC_Trace("pc: conn", ready, live, grew);
+                PC_Trace("pc: conn", ready, live, 0);
                 g_PcPhase = 2;
                 g_PcWaitFrames = 0;
                 g_PcWaitPolls = 0;
@@ -942,12 +828,12 @@ void PatrolCircle_Poll(void)
         {
             if (g_PcCloseCount <= 1)
             {
-                PC_Trace("pc: tokens", ready, live, grew);
+                PC_Trace("pc: tokens", ready, live, 0);
                 PC_CloseCommit();
             }
             else
             {
-                PC_Trace("pc: cconn", ready, live, grew);
+                PC_Trace("pc: cconn", ready, live, 0);
                 g_PcPhase = 3;
                 g_PcWaitFrames = 0;
                 g_PcWaitPolls = 0;
@@ -957,7 +843,7 @@ void PatrolCircle_Poll(void)
         }
         else if (g_PcPhase >= 3 && PC_LoopCount() > 0)
         {
-            PC_Trace("pc: tokens", ready, live, grew);
+            PC_Trace("pc: tokens", ready, live, 0);
             PC_CloseCommit();
         }
         else
@@ -967,29 +853,48 @@ void PatrolCircle_Poll(void)
                 g_PcWaitLogFr = fr;
                 g_PcWaitFrames++;
                 PC_Trace((g_PcPhase >= 3) ? "pc: cwait" : "pc: wait",
-                         ready, live, grew);
+                         ready, live, 0);
             }
             if ((g_PcPhase >= 3 && g_PcWaitFrames > PC_CLOSEC_FRAMES) || cap)
             {
-                PC_Trace("pc: cap", ready, live, grew);
+                PC_Trace("pc: cap", ready, live, 0);
                 if (ready > 0)
                     PC_CloseCommit(); /* 有几个算几个 */
                 else
-                    /* 全空: 不删 (成员已断, 删执行无空检查会崩;
-                     * 残留交下次触发链式清理, 那时成员链接态安全)。 */
+                    /* 全空: 直接放行。 */
                     PC_ClearPend();
             }
         }
     }
-    if (!g_PcEnable) { g_PcPrevTrig = trigDown; return; }
+    if (!g_PcEnable) { g_PcArmed = 0; g_PcPrevTrig = trigDown; return; }
     if (g_PcPendCount > 0 || g_PcWaitExec || g_PcCommitPend)
     { g_PcPrevTrig = trigDown; return; }
     if (trigDown && !g_PcPrevTrig)
     {
+        /* 按下: 锚定起点格 (需 Z), 等松开再定圈 */
         if (!g_PcRequireZ || (GetAsyncKeyState(g_PcZVK) & 0x8000))
-            PC_Trigger();
+        {
+            int ax, ay;
+            if (PC_MouseCell(&ax, &ay))
+            {
+                g_PcArmed = 1; g_PcAx = ax; g_PcAy = ay;
+                PC_Trace("pc: anchor", ax, ay, 0);
+            }
+            else PC_Trace("pc: off map", 0, 0, 0);
+        }
         else
             PC_Trace("pc: need Z", 0, 0, 0);
+    }
+    else if (!trigDown && g_PcPrevTrig && g_PcArmed)
+    {
+        /* 松开: 终点=当前格; 起终划线外扩建圈 (松开在图外则按点按处理) */
+        int bx, by;
+        int ax = g_PcAx, ay = g_PcAy;
+        g_PcArmed = 0;
+        if (PC_MouseCell(&bx, &by))
+            PC_TriggerAt(ax, ay, bx, by);
+        else
+            PC_TriggerAt(ax, ay, ax, ay);
     }
     g_PcPrevTrig = trigDown;
 }
