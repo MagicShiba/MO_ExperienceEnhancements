@@ -24,7 +24,7 @@
 #include "AirWay.h"
 #include "BuildQueue.h"
 
-#define MF_VERSION   "0.2.96d"
+#define MF_VERSION   "0.2.113d"
 #define MF_SECTION   "MsgFont"
 
 /* ---------------- 地址 ---------------- */
