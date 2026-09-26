@@ -7,6 +7,7 @@
  *   交互: 0x777998 滚轮翻历史; 0x533F50 悬停时跳过侧栏滚动;
  *         0x55E477/62F/693/746 单人聊天框 (跳过 session 检查)。
  *   T 键建筑全选见 TypeSelect.cpp。
+ *   中键散开见 AirSpread.cpp (裸中键, 渲染期橡皮线)。
  *   飞行器路径点见 AirWay.cpp (运行时虚表槽 0x7E2908, lazy 补丁;
  *   Syringe 0x41BA90 总入口观察; DIAG 虚表 +0x200/+0x1EC 槽观察; 只读轮询)。
  * 任何一步失败 (Lock 不上、GDI 未就绪) 都返回 0 走原版绘制, 绝不花屏。
@@ -24,6 +25,7 @@
 #include "AirWay.h"
 #include "BuildQueue.h"
 #include "PatrolCircle.h"
+#include "AirSpread.h"
 
 #define MF_VERSION   "0.2.113d"
 #define MF_SECTION   "MsgFont"
@@ -1876,6 +1878,7 @@ static void PowerDrawBoth(void)
     AirWay_Poll();   /* 每循环必跑的只读飞机轮询 (AirWay, 开关关时直接返回) */
     BuildQueue_Poll(); /* 每循环必跑的建筑本地排队 (BuildQueue, 开关关/队列空时直接返回) */
     PatrolCircle_Poll(); /* Z+中键一键巡逻圈 (开关关/无触发时直接返回) */
+    AirSpread_Poll(); /* 裸中键划线散开 v1 (按住Z时让路巡逻圈, 只记不下令) */
     EnsureInit();
     if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
     /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;
@@ -2270,6 +2273,11 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
         rc = DrawSWPanel(surf, bitLineH, surfW, surfH, surfPitch);
         if (rc < 0) { StatTick(tick, rc == -1 ? 2 : 4); return 0; }
         if (rc == 1) drew = 1;
+    }
+
+    /* 中键散开橡皮线 (armed 时才画, 自锁面, 不影响其它绘制)。 */
+    {
+        AirSpread_Draw(surf, surfW, surfH, surfPitch);
     }
 
     /* 底部电量: 只画侧栏面 (总开关 PowerBottom=0 即关)。
