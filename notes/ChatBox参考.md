@@ -12,7 +12,7 @@
 - `0x533F50`（5 字节）：悬停消息框时跳过侧栏滚动。
 - `0x692419`（7 字节）：命中消息框时吞掉穿透点击。
 
-单人聊天框（Phobos `AllowChatBoxInSinglePlayer` 同原理，已在 `MsgFont.cpp`
+单人聊天框（Phobos `AllowChatBoxInSinglePlayer` 同原理，已在 `MOExperience.cpp`
 用 `ChatBoxSP` 实现，`0`=走原版）：
 对话框函数按 `[SessionClass 0xA8B238]==0/5` 判单人并跳过聊天框四处逻辑，
 开启时跳过 session 检查（其余旗标检查保留）：
@@ -41,7 +41,7 @@
 
 # 战役框显隐（淡入淡出 + 悬停展开）
 
-调用链：`MsgFont_MessageDrawHook` 每帧算悬停/活消息 → `camp.fade`（0–100）
+调用链：`MOExperience_MessageDrawHook` 每帧算悬停/活消息 → `camp.fade`（0–100）
 → `if (showCamp) DrawBox`；`DrawBox` 内底板/阴影/文字/滚动条透明度等比缩放，
 `fade=100` 与原来逐像素一致。
 
@@ -67,7 +67,7 @@
 - 斜坡：全程 500ms，步进按流逝毫秒算（`dt*100/500`），与帧率无关；
   长暂停（`dt>500`）直接追上目标。
 
-## 配置（[MsgFont]，改后重启）
+## 配置（[MOExperience]，改后重启）
 
 - `HoverMinOpacity=5`：悬停最低透明度 0~100（找触发区用）；0=沿用渐隐。
   启动横幅 `HovMinOp=` 回显。

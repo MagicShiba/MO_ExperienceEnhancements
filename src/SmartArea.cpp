@@ -1,11 +1,13 @@
-/* SmartArea.cpp - Shift+中键范围智能下令 (Ctrl+中键模糊攻击的自适应版)。
+/* SmartArea.cpp - 组合中键范围智能下令 (Ctrl+中键模糊攻击的自适应版)。
  *
- * 触发: 按住组合键 (Hotkey, 默认 Shift+Middle) 点按/划线, 先松中键
- * 再松组合键执行 (与模糊同手势)。按住显示生效块菱形框。
+ * 触发: Hotkey (默认 Shift+Middle, 主键须是 Middle, 可配单键如 X1)
+ * 点按/划线, 松开即执行 (与模糊同手势)。按住显示生效块菱形框。
  * 点按=单块, 划线=沿轨迹各节点逐块由近及远挑目标 (上限 64 节点)。
  * 松开格直接点中的对象排首位。
  * Shift 处理 (只读, 不接管不写键态): 决策问 MouseOver, Shift 按住时
- * 对部分目标回 ToggleSelect(8, 加选语义), 真光标被盖住。
+ * 对部分目标回 ToggleSelect(8, 加选语义), 真光标被盖住——不管 Hotkey
+ * 配没配 Shift, 物理 Shift 按住都盖光标, 故待命看物理脏键
+ * (SA_DirtyHeld: 配置修饰/附加键, 或物理 Shift, 任一按住即脏)。
  * 方法与裸中键同一套 (DecideAction/MouseOver 同函数), 差的是输入。
  * 故 fallback 规则表 (光标无令时, 与左键语义对齐):
  * 本家目标: 步兵对自家载具按进入 (运输机收人, 非运输忽略),
@@ -14,7 +16,8 @@
  * 载具/飞机一律攻击; 步兵对非建筑攻击;
  * 步兵对建筑: 工程师 (ENGINEER/S/Y/F, rulesmo 实查) 按占领
  * (敌建筑占领/中立进驻, 步兵进民房原生即 Mission8),
- * 非工程师留待命, 组合键松开后重判 (真光标, 攻击或进驻都行)。
+ * 非工程师留待命, 脏键松开后重判 (真光标, 攻击或进驻都行;
+ * 无修饰单键不脏即不等, 单 X1 点按当场全判)。
  * 进驻均分: 步兵对建筑按 Capture/Sabotage 的不管 SquadSize,
  * 按建筑轮转均分 (第0轮)。
  * 规划线 (按住时): 预览=快照+分配 (与终判同一套输入同一套规则,
@@ -22,19 +25,21 @@
  * 预览截断前 64 单位/前 96 目标 (终判全量), 限 128 线,
  * 换格或 400ms 刷一次, 80ms 节流; 松手即消。
  * 端点坐标走 OU_GetCoords (vtbl+0x48, 范围校验), 投影与方框同系。
- * 松中键当场执行, Shift 可一直按住连点; 待命框保持, 超 300 轮丢弃。
+ * 松开当场执行, Shift 可一直按住连点; 待命框保持 (等脏键全松),
+ * 超 300 轮丢弃。关或热键坏则不认领, 组合中键回落裸中键。
  * 决策: 攻击/进入/进驻/占领才下单, 移动/未知一律跳过 (本功能不下
  * 移动令, 分不到目标的单位原地待命)。选不进同一代表, 混编各按自己光标。
  * 分组 (SquadSize, 默认 4, 与模糊同义): 每目标先分 Squad 个,
  * 剩下的找最近可处理目标加入 (全员有事做, 不添油)。
  * 下令: 标准 0x04 MegaMission (攻击 Target=对象, 进入类 Destination=对象,
  * IsPlanningEvent=0, 与手点同形), OutList 满 drip 跨帧续发。
- * 仲裁: 须无 Ctrl/Z (含 Ctrl 归模糊, 含 Z 归巡逻/砍树); 关或热键坏则
- * 不认领, 组合中键回落裸中键 (AirSpread 问 ClaimsMiddle 决定让路)。
- * 原生 Shift (多选/排路点) 只在左/右键上, 中键无原生功能, 无冲突。
+ * 仲裁: 须无 Ctrl (含 Ctrl 归模糊); Z 不禁 (用户习惯按住 Z,
+ * 巡逻圈见本组合认领会自己让路, Z+裸中键仍归巡逻)。
+ * 原生 Shift (多选/排路点) 只在左/右键上, 中键无原生功能, 无冲突;
+ * 但物理 Shift 盖光标, 待命逻辑按物理键等 (见上)。
  *
  * 联机: 只发标准事件, 本地只读 + 标准事件入队, 不写模拟内存。
- * 构建见 构建.bat (同一 DLL)。轮询挂 PowerDrawBoth (见 MsgFont.cpp)。
+ * 构建见 构建.bat (同一 DLL)。轮询挂 PowerDrawBoth (见 MOExperience.cpp)。
  * 日志: 仅启动行。
  */
 
@@ -87,7 +92,8 @@ static void SA_EnsureInit(void)
     if (!g_SaEnable) LogLine("smartarea: OFF");
 }
 
-/* 认领中键: 开且组合全按住 (含主键), 且无 Ctrl/Z (它俩归别家)。
+/* 认领中键: 开且组合全按住 (含主键), 且无 Ctrl (归模糊);
+ * Z 不禁 (用户习惯按住 Z, 巡逻圈见认领会自己让路)。
  * 注意: 松开瞬间主键已抬起, 认领必掉; 松开判定另用 SA_ComboHeld
  * (不含主键, 与模糊同式), 否则松开边永远不执行。 */
 int SmartArea_ClaimsMiddle(void)
@@ -96,18 +102,33 @@ int SmartArea_ClaimsMiddle(void)
     if (!g_SaEnable) return 0;
     if (!OU_KeyDown(g_SaHk.vk)) return 0;
     if (!OU_ModsDown(g_SaHk.mods) || !OU_ExtraDown(&g_SaHk)) return 0;
-    if (OU_KeyDown(VK_CONTROL) || OU_KeyDown('Z')) return 0;
+    if (OU_KeyDown(VK_CONTROL)) return 0;
     return 1;
 }
 
-/* 组合保持 (松开边用): 开且修饰/附加键按住、无 Ctrl/Z, 不看主键。 */
+/* 组合保持 (松开边用): 开且修饰/附加键按住、无 Ctrl, 不看主键 (Z 不禁)。 */
 static int SA_ComboHeld(void)
 {
     SA_EnsureInit();
     if (!g_SaEnable) return 0;
     if (!OU_ModsDown(g_SaHk.mods) || !OU_ExtraDown(&g_SaHk)) return 0;
-    if (OU_KeyDown(VK_CONTROL) || OU_KeyDown('Z')) return 0;
+    if (OU_KeyDown(VK_CONTROL)) return 0;
     return 1;
+}
+
+/* 脏键保持 (待命用): 配置的修饰/附加键真被按住, 或物理 Shift 按住。
+ * 注意与 ComboHeld 的区别: ModsDown(0)/ExtraDown(空) 恒真 (空真),
+ * 快捷键无修饰 (如单 X1) 时 ComboHeld 恒成立, 不能拿它判断"松手";
+ * 物理 Shift 污染光标 (ToggleSelect), 不管配没配置都必须等它松开。
+ * Ctrl/Z 不在这里 (仲裁键, 出现即整单丢弃, 不待命)。 */
+static int SA_DirtyHeld(void)
+{
+    SA_EnsureInit();
+    if (!g_SaEnable) return 0;
+    if (g_SaHk.mods && OU_ModsDown(g_SaHk.mods)) return 1;
+    if (g_SaHk.nExtra > 0 && OU_ExtraDown(&g_SaHk)) return 1;
+    if (OU_KeyDown(VK_SHIFT)) return 1;
+    return 0;
 }
 
 /* ---------------- 决策 ---------------- */
@@ -125,7 +146,7 @@ static int SA_IsTargetType(void* p)
             w == ABS_AIRCRAFT || w == ABS_BUILDING) ? 1 : 0;
 }
 
-/* ---------------- 类型自校准 (AirSpread 同式, 工程师判定用) ---------------- */
+/* ---------------- 类型自校准 (SmartOrder 同式, 工程师判定用) ---------------- */
 
 #define SA_TYPARRAY 0xA8EB00u
 #define SA_OFF_VEC_ITEMS 4u
@@ -263,14 +284,18 @@ static int SA_IsEngineer(void* u)
     return 0;
 }
 
-/* Action(光标) → Mission: 与 AirSpread 同表 (攻击1/进入7/占领8/进驻17);
+/* Action(光标) → Mission: 与 SmartOrder 同表 (攻击1/进入7/占领8/进驻17);
  * 移动/未知回 -1 (本功能不下移动令)。
  * 选择类 (Select7/ToggleSelect8, 如坦克悬停自家建筑) 无对应订单, 跳过:
  * 左键等价动作是选中, 下令侧只能待命。 */
+/* 敌意类光标 (左键点上去就是打, 含 Damage28/Eaten10/Detonate55/56):
+ * 一律按攻击 (Damage28 实测: 悬停某类建筑回 28, 不映射则跳过)。
+ * 例外见 AssignOne 工程师修正 (工程师对非本家建筑转占领, 没枪佯攻无用)。 */
 static int SA_MissionFor(int targetWhat, int action)
 {
     if (action == ACTION_ATTACK || action == 62 || action == 63 ||
-        action == 64 || action == 71 || action == 53)
+        action == 64 || action == 71 || action == 53 ||
+        action == 10 || action == 28 || action == 55 || action == 56)
         return MISSION_ATTACK;
     if (action == ACTION_ENTER)
         return (targetWhat == ABS_BUILDING) ? MISSION_SABOTAGE : MISSION_ENTER;
@@ -330,7 +355,7 @@ static int SA_Fallback(void* u, void* t, int act, void* house)
     return SA_IsEngineer(u) ? MISSION_CAPTURE : -1;
 }
 
-/* ---------------- 下令 (与 AirSpread/FuzzyAttack 同形) ---------------- */
+/* ---------------- 下令 (与 SmartOrder/FuzzyAttack 同形) ---------------- */
 
 static int SA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
                          int tgtID, unsigned char tgtRtti)
@@ -414,17 +439,6 @@ static void SA_Drain(void)
         }
         SA_ShiftDown();
         sent++;
-    }
-    /* TMP: 发出数 (定完删) */
-    if (sent > 0 || g_SaPendCount <= 0)
-    {
-        char db[48], d1[16];
-        unsigned dq = 0;
-        dq = AppendCStr(db, dq, "sa: s ", sizeof(db));
-        UtoA((unsigned)sent, d1);
-        dq = AppendCStr(db, dq, d1, sizeof(db));
-        (void)dq;
-        LogLine(db);
     }
 }
 
@@ -532,25 +546,6 @@ static void SA_NodePush(int cx, int cy)
 
 static void SA_BoxReset(void);
 static void SA_Drain(void);
-
-/* TMP 诊断 (fallback 验证, 定完删) */
-static void SA_Tmp(const char* tag, int v1, int v2, int v3)
-{
-    char buf[96], b1[16], b2[16], b3[16];
-    unsigned q = 0;
-    q = AppendCStr(buf, q, tag, sizeof(buf));
-    q = AppendCStr(buf, q, " ", sizeof(buf));
-    UtoA((unsigned)v1, b1);
-    q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCStr(buf, q, " ", sizeof(buf));
-    UtoA((unsigned)v2, b2);
-    q = AppendCStr(buf, q, b2, sizeof(buf));
-    q = AppendCStr(buf, q, " ", sizeof(buf));
-    UtoA((unsigned)v3, b3);
-    q = AppendCStr(buf, q, b3, sizeof(buf));
-    (void)q;
-    LogLine(buf);
-}
 
 /* 快照: 单位 + 目标存静态 (找目标与修饰键无关, 决策见 DecideFire)。
  * 返回 1=有可处理快照。 */
@@ -682,7 +677,7 @@ static int s_PrevUx[SA_PREV_CAP], s_PrevUy[SA_PREV_CAP];
 static int s_PrevTx[SA_PREV_CAP], s_PrevTy[SA_PREV_CAP];
 static int s_PrevN = 0;
 static int s_PrevRefPx = 0, s_PrevRefPy = 0, s_PrevRefCx = 0, s_PrevRefCy = 0;
-static int s_PrevVLogged = 0;   /* 本轮已记 sa: v (TMP) */
+
 
 /* leptons → 屏像素 (预览参考点换算, 忽略高度, 与方框同系)。 */
 static void SA_ProjLep(int lx, int ly, int* px, int* py)
@@ -707,10 +702,9 @@ static void SA_PrevStore(void* u, void* t)
     s_PrevN++;
 }
 
-/* 装令: 任务就绪则入队 (take 计数可空, fallback 计数可空)。
- * 回 1=装上 (发令或记线)。 */
-static int SA_QueueOne(int i, int j, int ms,
-                       int* takeOrNull, int* nFbA, int* nFbCE, int isFb)
+/* 装令: 任务就绪则入队 (发令) 或记线 (预览), take 计数可空。
+ * 回 1=装上。 */
+static int SA_QueueOne(int i, int j, int ms, int* takeOrNull)
 {
     if (ms < 0) return 0;
     if (s_SaSinkPairs)
@@ -731,34 +725,37 @@ static int SA_QueueOne(int i, int j, int ms,
     g_SaPendCount++;
     s_SnapBusy[i] = 1;
     if (takeOrNull) (*takeOrNull)++;
-    if (isFb)
-    {
-        if (nFbA && ms == MISSION_ATTACK) (*nFbA)++;
-        if (nFbCE && ms != MISSION_ATTACK) (*nFbCE)++;
-    }
     return 1;
 }
 
 /* 装令 (首/次轮通用): 最终任务入队。回 1=装上。 */
-static int SA_AssignOne(int i, int j, void* house,
-                        int* takeOrNull, int* nFbA, int* nFbCE)
+static int SA_AssignOne(int i, int j, void* house, int* takeOrNull)
 {
-    int act = -1, ms, fb;
+    int act = -1, ms;
     ms = SA_UnitMission(s_SnapUnits[i], s_SnapTgts[j], &act);
-    fb = (ms < 0);
-    if (fb)
+    if (ms < 0)
     {
         ms = SA_Fallback(s_SnapUnits[i], s_SnapTgts[j], act, house);
         if (ms < 0) return 0;
     }
-    return SA_QueueOne(i, j, ms, takeOrNull, nFbA, nFbCE, fb);
+    /* 工程师修正: Damage28 光标映射是攻击, 但工程师没枪, 佯攻等于哑火;
+     * 工程师对非本家建筑应占领。其它单位/目标不动。 */
+    if (ms == MISSION_ATTACK && act == 28 &&
+        OU_WhatAmI(s_SnapUnits[i]) == ABS_INFANTRY &&
+        OU_WhatAmI(s_SnapTgts[j]) == ABS_BUILDING &&
+        house && g_SaOwnerOff >= 0 && SA_IsEngineer(s_SnapUnits[i]))
+    {
+        void* oh = *(void**)((char*)s_SnapTgts[j] + (unsigned)g_SaOwnerOff);
+        if (oh && IsPlausiblePtr(oh) && oh != house)
+            ms = MISSION_CAPTURE;
+    }
+    return SA_QueueOne(i, j, ms, takeOrNull);
 }
 
 /* 三轮分配 (终判与预览共用, sink 见 s_SaSinkPairs):
  * 第0轮进驻均分 (步兵×建筑→Capture/Sabotage, 轮转建筑均分, 不管 Squad);
- * 首轮每目标取 Squad 个; 次轮剩下找最近可处理目标加入。
- * nFbA/nFbCE 可空 (预览不计数)。 */
-static void SA_Distribute(void* house, int* nFbA, int* nFbCE)
+ * 首轮每目标取 Squad 个; 次轮剩下找最近可处理目标加入。 */
+static void SA_Distribute(void* house)
 {
     int i, j, nu, nt;
     nu = s_SnapNu;
@@ -782,7 +779,7 @@ static void SA_Distribute(void* house, int* nFbA, int* nFbCE)
                     j = bidx[(rot + k) % nb];
                     ms = SA_MissionFinal(s_SnapUnits[i], s_SnapTgts[j], house, 0);
                     if (ms != MISSION_CAPTURE && ms != MISSION_SABOTAGE) continue;
-                    if (SA_QueueOne(i, j, ms, 0, nFbA, nFbCE, 1)) { rot++; break; }
+                    if (SA_QueueOne(i, j, ms, 0)) { rot++; break; }
                 }
             }
         }
@@ -795,7 +792,7 @@ static void SA_Distribute(void* house, int* nFbA, int* nFbCE)
         {
             if (s_SnapBusy[i]) continue;
             if (!OU_PtrAlive(s_SnapUnits[i], s_SnapUids[i], g_SaIdxOk)) continue;
-            SA_AssignOne(i, j, house, &take, nFbA, nFbCE);
+            SA_AssignOne(i, j, house, &take);
         }
     }
     /* 次轮: 剩下的找最近可处理目标加入 (无事可做则待命, 不下移动令)。 */
@@ -805,7 +802,7 @@ static void SA_Distribute(void* house, int* nFbA, int* nFbCE)
         if (!OU_PtrAlive(s_SnapUnits[i], s_SnapUids[i], g_SaIdxOk)) continue;
         for (j = 0; j < nt; j++)
         {
-            if (SA_AssignOne(i, j, house, 0, nFbA, nFbCE)) break;
+            if (SA_AssignOne(i, j, house, 0)) break;
         }
     }
 }
@@ -816,7 +813,7 @@ static void SA_Distribute(void* house, int* nFbA, int* nFbCE)
 static void SA_DecideFire(void)
 {
     void* cur;
-    int i, nu, nt, nFbA = 0, nFbCE = 0, leftover = 0;
+    int i, nu, nt, leftover = 0;
 
     nu = s_SnapNu;
     nt = s_SnapNt;
@@ -826,13 +823,7 @@ static void SA_DecideFire(void)
     if (!cur || !IsPlausiblePtr(cur))
     { g_SaHaveSnapshot = 0; SA_BoxReset(); return; }
     g_SaPendCount = 0;
-    /* TMP: 首目标×首单位最终任务 (shift/act/ms), 定完删 */
-    {
-        int da = -1;
-        int dm = SA_MissionFinal(s_SnapUnits[0], s_SnapTgts[0], cur, &da);
-        SA_Tmp("sa: d", OU_KeyDown(VK_SHIFT), da, dm);
-    }
-    SA_Distribute(cur, &nFbA, &nFbCE);
+    SA_Distribute(cur);
     for (i = 0; i < nu; i++)
     {
         if (!s_SnapBusy[i] &&
@@ -841,12 +832,12 @@ static void SA_DecideFire(void)
     }
     g_SaHouse = cur;
     g_SaHouseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
-    SA_Tmp("sa: p", g_SaPendCount, nu, nt);
-    SA_Tmp("sa: f", nFbA, nFbCE, leftover);
     SA_Drain();
-    if (leftover && SA_ComboHeld())
+    if (leftover && SA_DirtyHeld())
     {
-        /* 组合键还按着: 留待命 (框保持), 松手重判剩下的。 */
+        /* 脏键还按着 (配置修饰/附加键, 或物理 Shift): 留待命 (框保持),
+         * 等干净再重判剩下的。无修饰单键 (如 X1) 且 Shift 没按:
+         * 脏恒假, 直接清 (重判结果不变, 不空转)。 */
         g_SaHaveSnapshot = 1;
         g_SaSnapAge = 0;
     }
@@ -885,14 +876,8 @@ static void SA_Preview(void)
     if (s_SnapNt > SA_PREV_TGTS) s_SnapNt = SA_PREV_TGTS;
     s_PrevN = 0;
     s_SaSinkPairs = 1;
-    SA_Distribute(cur, 0, 0);
+    SA_Distribute(cur);
     s_SaSinkPairs = 0;
-    /* TMP: 本轮首记对数, 定完删 */
-    if (!s_PrevVLogged && s_PrevN > 0)
-    {
-        s_PrevVLogged = 1;
-        SA_Tmp("sa: v", s_PrevN, s_SnapNu, s_SnapNt);
-    }
 }
 
 /* ---------------- 轮询 (按住采样, 松中键当场快照决策下令) ---------------- */
@@ -920,7 +905,6 @@ void SmartArea_Poll(void)
         g_SaHaveSnapshot = 0;
         s_SaSinkPairs = 0;
         s_PrevN = 0;
-        s_PrevVLogged = 0;
         if (OU_MouseCell(&ax, &ay)) SA_NodePush(ax, ay);
         SA_BoxReset();
     }
@@ -934,17 +918,18 @@ void SmartArea_Poll(void)
         SA_Preview();
     }
     else if (!trigDown && g_SaPrevTrig && g_SaShiftSeen &&
-             !OU_KeyDown(VK_CONTROL) && !OU_KeyDown('Z'))
+             !OU_KeyDown(VK_CONTROL))
     {
-        /* 松中键: 当场快照+决策+下令 (光标无令走 fallback 规则表;
+        /* 松开: 当场快照+决策+下令 (光标无令走 fallback 规则表;
          * 分不到的留待命, 松手重判); 规划线立刻消失。
-         * Ctrl/Z 半路加入则丢弃。 */
+         * Ctrl 半路加入则丢弃 (归模糊); Z 不禁。 */
         s_PrevN = 0;
         if (SA_Snapshot())
             SA_DecideFire();
     }
     g_SaPrevTrig = trigDown;
-    /* 待命且组合键已松 (无 Ctrl/Z): 重判剩下的 (此时真光标)。
+    /* 待命且脏键已松 (配置修饰/附加键与物理 Shift 全抬起, 无 Ctrl;
+     * Z 不禁): 重判剩下的 (此时真光标)。无修饰单键 (如 X1) 不脏即不等。
      * 超 300 轮还没松则丢弃, 防 stale 惊吓。 */
     if (g_SaHaveSnapshot && !trigDown)
     {
@@ -953,8 +938,7 @@ void SmartArea_Poll(void)
             g_SaHaveSnapshot = 0;
             SA_BoxReset();
         }
-        else if (!OU_KeyDown(VK_CONTROL) && !OU_KeyDown('Z') &&
-                 !OU_ModsDown(g_SaHk.mods))
+        else if (!OU_KeyDown(VK_CONTROL) && !SA_DirtyHeld())
             SA_DecideFire();
     }
 }

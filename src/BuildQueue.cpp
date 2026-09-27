@@ -101,7 +101,7 @@
  * state==1 则置 2 发 SUSPEND 后跳 0x6AB28f 退出 (暂停),
  * state!=1 才进 0x6AB18d 取消分支 (IsQueued→0x2E/0x10)。
  *
- * 钩子经 dist/MsgFont.dll.inj 由 Syringe 挂载 (返回 0=跑原指令, 非0=跳往)。
+ * 钩子经 dist/MOExperience.dll.inj 由 Syringe 挂载 (返回 0=跑原指令, 非0=跳往)。
  */
 
 #include <windows.h>

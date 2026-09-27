@@ -29,8 +29,8 @@
  * 联机: 只发标准事件, 各端同一份原版代码执行, 不影响联机。
  * 本地只读 + 标准事件入队, 不写模拟内存。
  *
- * 构建见 构建.bat (32 位 mingw, 无 CRT, 与 MsgFont 同一 DLL)。
- * 轮询挂 PowerDrawBoth (见 MsgFont.cpp), 开关关时直接返回。
+ * 构建见 构建.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
+ * 轮询挂 PowerDrawBoth (见 MOExperience.cpp), 开关关时直接返回。
  */
 
 #include <windows.h>
@@ -307,7 +307,6 @@ static int s_FaPrevUx[FA_PREV_CAP], s_FaPrevUy[FA_PREV_CAP];
 static int s_FaPrevTx[FA_PREV_CAP], s_FaPrevTy[FA_PREV_CAP];
 static int s_FaPrevN = 0;
 static int s_FaPrevRefPx = 0, s_FaPrevRefPy = 0, s_FaPrevRefCx = 0, s_FaPrevRefCy = 0;
-static int s_FaVLogged = 0;   /* 本轮已记 fa: v (TMP, 定完删) */
 
 /* leptons → 屏像素 (预览参考点换算, 忽略高度, 与框同系)。 */
 static void FA_ProjLep(int lx, int ly, int* px, int* py)
@@ -345,8 +344,6 @@ static void FA_Preview(void)
     static void* s_pu[FA_UNIT_CAP];
     static void* s_pf[FA_ENEMY_CAP];
     static int s_pfid[FA_ENEMY_CAP];
-    char vb[48], v1[16];
-    unsigned vq = 0;
 
     now = GetTickCount();
     if (!OU_MouseCell(&cx, &cy) || !GtMouseGameXY(&rpx, &rpy)) return;
@@ -387,16 +384,6 @@ static void FA_Preview(void)
             for (k = 0; k < take && pos < nu; k++, pos++)
                 FA_PrevStore(s_pu[pos], s_pf[j]);
         }
-    }
-    /* TMP: 本轮首记对数, 定完删 */
-    if (!s_FaVLogged && s_FaPrevN > 0)
-    {
-        s_FaVLogged = 1;
-        vq = AppendCStr(vb, vq, "fa: v ", sizeof(vb));
-        UtoA((unsigned)s_FaPrevN, v1);
-        vq = AppendCStr(vb, vq, v1, sizeof(vb));
-        (void)vq;
-        LogLine(vb);
     }
 }
 
@@ -520,7 +507,6 @@ void FuzzyAttack_Poll(void)
     {
         FA_BoxReset();            /* 按下: 采样器清零 (无动作, 松开才执行) */
         s_FaPrevN = 0;
-        s_FaVLogged = 0;
     }
     if (trigDown && combo)
     {

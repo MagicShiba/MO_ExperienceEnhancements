@@ -1,13 +1,13 @@
 /*
- * MsgFont.cpp - 心灵终结消息队列矢量字体 (显示替换 + 悬停/滚动/单人聊天框)。
+ * MOExperience.cpp - 心灵终结消息队列矢量字体 (显示替换 + 悬停/滚动/单人聊天框)。
  *
- * 钩子 (Syringe, 见 dist/MsgFont.dll.inj):
+ * 钩子 (Syringe, 见 dist/MOExperience.dll.inj):
  *   消息: 0x5D3BA0 AddMessage 捕获; 0x5D49A0 Draw 绿框+标签;
  *         0x5D4A94 Draw 内部 (自制消息框画完回 0x5D4A9B)。
  *   交互: 0x777998 滚轮翻历史; 0x533F50 悬停时跳过侧栏滚动;
  *         0x55E477/62F/693/746 单人聊天框 (跳过 session 检查)。
  *   T 键建筑全选见 TypeSelect.cpp。
- *   中键智能下令见 AirSpread.cpp (裸中键点按自适应/划线散开, 渲染期橡皮线)。
+ *   中键智能下令见 SmartOrder.cpp (裸中键点按自适应/划线散开, 渲染期橡皮线)。
  *   飞行器路径点见 AirWay.cpp (运行时虚表槽 0x7E2908, lazy 补丁;
  *   Syringe 0x41BA90 总入口观察; DIAG 虚表 +0x200/+0x1EC 槽观察; 只读轮询)。
  * 任何一步失败 (Lock 不上、GDI 未就绪) 都返回 0 走原版绘制, 绝不花屏。
@@ -25,15 +25,15 @@
 #include "AirWay.h"
 #include "BuildQueue.h"
 #include "PatrolCircle.h"
-#include "AirSpread.h"
+#include "SmartOrder.h"
 #include "TreeChop.h"
 #include "FuzzyAttack.h"
 #include "SmartArea.h"
 #include "MindSelect.h"
 #include "OrderUtil.h"
 
-#define MF_VERSION   "0.2.129d"
-#define MF_SECTION   "MsgFont"
+#define MOE_VERSION   "0.2.135d"
+#define MOE_SECTION   "MOExperience"
 
 /* ---------------- 地址 ---------------- */
 
@@ -120,9 +120,9 @@ typedef struct {
     int PowerPad;    /* 底部电量距底边像素 (默认 6) */
     int PowerMode;   /* 0=负载/电力 (默认); 1=余量纯数字 (够用正/不够负) */
     int ChatBoxSP;   /* 1=单人模式也建聊天框 (Phobos AllowChatBoxInSinglePlayer 同原理) */
-} MsgFontConfig;
+} MOExperienceConfig;
 
-static MsgFontConfig g_Cfg;
+static MOExperienceConfig g_Cfg;
 
 /* ---------------- 超武面板 (右下整块重绘, 跟战役框同一管线) ----------------
  * 原版列表由 Print 入口整体隐藏+收集 (见 VecText, 不管内容细节不逐条画),
@@ -191,54 +191,54 @@ static wchar_t g_HintFace[FONT_FACE_MAX];
 
 static void LoadConfig(void)
 {
-    g_Cfg.Enable      = GetPrivateProfileIntA(MF_SECTION, "Enable", 1, g_IniPath);
-    g_Cfg.FontHeight  = GetPrivateProfileIntA(MF_SECTION, "FontHeight", 0, g_IniPath);
-    g_Cfg.Bold        = GetPrivateProfileIntA(MF_SECTION, "Bold", 0, g_IniPath);
-    OU_ReadString(MF_SECTION, "FontFace", "msyh.ttc",
+    g_Cfg.Enable      = GetPrivateProfileIntA(MOE_SECTION, "Enable", 1, g_IniPath);
+    g_Cfg.FontHeight  = GetPrivateProfileIntA(MOE_SECTION, "FontHeight", 0, g_IniPath);
+    g_Cfg.Bold        = GetPrivateProfileIntA(MOE_SECTION, "Bold", 0, g_IniPath);
+    OU_ReadString(MOE_SECTION, "FontFace", "msyh.ttc",
                   g_Cfg.FontFace, sizeof(g_Cfg.FontFace));
-    g_Cfg.Shadow      = GetPrivateProfileIntA(MF_SECTION, "Shadow", 1, g_IniPath);
-    g_Cfg.ShadowDX    = GetPrivateProfileIntA(MF_SECTION, "ShadowDX", 1, g_IniPath);
-    g_Cfg.ShadowDY    = GetPrivateProfileIntA(MF_SECTION, "ShadowDY", 1, g_IniPath);
-    g_Cfg.ShadowOpacity = GetPrivateProfileIntA(MF_SECTION, "ShadowOpacity", 60, g_IniPath);
-    g_Cfg.MaxLines    = GetPrivateProfileIntA(MF_SECTION, "MaxLines", 8, g_IniPath);
-    g_Cfg.BoardOpacity= GetPrivateProfileIntA(MF_SECTION, "BoardOpacity", 45, g_IniPath);
-    g_Cfg.HoverMinOpacity = GetPrivateProfileIntA(MF_SECTION, "HoverMinOpacity", 5, g_IniPath);
-    g_Cfg.PosX        = GetPrivateProfileIntA(MF_SECTION, "PosX", 8, g_IniPath);
-    g_Cfg.PosY        = GetPrivateProfileIntA(MF_SECTION, "PosY", 8, g_IniPath);
-    g_Cfg.TopGapLines = GetPrivateProfileIntA(MF_SECTION, "TopGapLines", 1, g_IniPath);
+    g_Cfg.Shadow      = GetPrivateProfileIntA(MOE_SECTION, "Shadow", 1, g_IniPath);
+    g_Cfg.ShadowDX    = GetPrivateProfileIntA(MOE_SECTION, "ShadowDX", 1, g_IniPath);
+    g_Cfg.ShadowDY    = GetPrivateProfileIntA(MOE_SECTION, "ShadowDY", 1, g_IniPath);
+    g_Cfg.ShadowOpacity = GetPrivateProfileIntA(MOE_SECTION, "ShadowOpacity", 60, g_IniPath);
+    g_Cfg.MaxLines    = GetPrivateProfileIntA(MOE_SECTION, "MaxLines", 8, g_IniPath);
+    g_Cfg.BoardOpacity= GetPrivateProfileIntA(MOE_SECTION, "BoardOpacity", 45, g_IniPath);
+    g_Cfg.HoverMinOpacity = GetPrivateProfileIntA(MOE_SECTION, "HoverMinOpacity", 5, g_IniPath);
+    g_Cfg.PosX        = GetPrivateProfileIntA(MOE_SECTION, "PosX", 8, g_IniPath);
+    g_Cfg.PosY        = GetPrivateProfileIntA(MOE_SECTION, "PosY", 8, g_IniPath);
+    g_Cfg.TopGapLines = GetPrivateProfileIntA(MOE_SECTION, "TopGapLines", 1, g_IniPath);
     {   /* MaxWidth: 整数=像素, 0=自动; 0~1小数=按屏宽百分比 */
         char wb[32];
         int pm = 0;
-        OU_ReadString(MF_SECTION, "MaxWidth", "0", wb, sizeof(wb));
+        OU_ReadString(MOE_SECTION, "MaxWidth", "0", wb, sizeof(wb));
         g_Cfg.MaxWidth = ParseWidth(wb, &pm);
         g_Cfg.MaxWidthPm = pm;
     }
-    g_Cfg.CampBottom = GetPrivateProfileIntA(MF_SECTION, "CampBottom", 0, g_IniPath);
-    g_Cfg.CampBottomMargin = GetPrivateProfileIntA(MF_SECTION, "CampBottomMargin", 8, g_IniPath);
-    g_Cfg.CampCentered = GetPrivateProfileIntA(MF_SECTION, "CampCentered", 0, g_IniPath);
-    g_Cfg.CampAnim = GetPrivateProfileIntA(MF_SECTION, "CampAnim", 1, g_IniPath);
-    g_Cfg.LogMessages = GetPrivateProfileIntA(MF_SECTION, "LogMessages", 0, g_IniPath);
-    g_Cfg.ShowHotZone = GetPrivateProfileIntA(MF_SECTION, "ShowHotZone", 1, g_IniPath);
-    g_Cfg.ScrollStep  = GetPrivateProfileIntA(MF_SECTION, "ScrollStep", 3, g_IniPath);
-    g_Cfg.ShadowSize  = GetPrivateProfileIntA(MF_SECTION, "ShadowSize", 1, g_IniPath);
-    g_Cfg.HintShow    = GetPrivateProfileIntA(MF_SECTION, "HintShow", 1, g_IniPath);
-    g_Cfg.HintPosX    = GetPrivateProfileIntA(MF_SECTION, "HintPosX", 8, g_IniPath);
-    g_Cfg.HintBottom  = GetPrivateProfileIntA(MF_SECTION, "HintBottom", 8, g_IniPath);
-    g_Cfg.HintFontHeight = GetPrivateProfileIntA(MF_SECTION, "HintFontHeight", 14, g_IniPath);
-    g_Cfg.HintBold    = GetPrivateProfileIntA(MF_SECTION, "HintBold", 0, g_IniPath);
-    OU_ReadString(MF_SECTION, "HintFontFace", "msyh.ttc",
+    g_Cfg.CampBottom = GetPrivateProfileIntA(MOE_SECTION, "CampBottom", 0, g_IniPath);
+    g_Cfg.CampBottomMargin = GetPrivateProfileIntA(MOE_SECTION, "CampBottomMargin", 8, g_IniPath);
+    g_Cfg.CampCentered = GetPrivateProfileIntA(MOE_SECTION, "CampCentered", 0, g_IniPath);
+    g_Cfg.CampAnim = GetPrivateProfileIntA(MOE_SECTION, "CampAnim", 1, g_IniPath);
+    g_Cfg.LogMessages = GetPrivateProfileIntA(MOE_SECTION, "LogMessages", 0, g_IniPath);
+    g_Cfg.ShowHotZone = GetPrivateProfileIntA(MOE_SECTION, "ShowHotZone", 1, g_IniPath);
+    g_Cfg.ScrollStep  = GetPrivateProfileIntA(MOE_SECTION, "ScrollStep", 3, g_IniPath);
+    g_Cfg.ShadowSize  = GetPrivateProfileIntA(MOE_SECTION, "ShadowSize", 1, g_IniPath);
+    g_Cfg.HintShow    = GetPrivateProfileIntA(MOE_SECTION, "HintShow", 1, g_IniPath);
+    g_Cfg.HintPosX    = GetPrivateProfileIntA(MOE_SECTION, "HintPosX", 8, g_IniPath);
+    g_Cfg.HintBottom  = GetPrivateProfileIntA(MOE_SECTION, "HintBottom", 8, g_IniPath);
+    g_Cfg.HintFontHeight = GetPrivateProfileIntA(MOE_SECTION, "HintFontHeight", 14, g_IniPath);
+    g_Cfg.HintBold    = GetPrivateProfileIntA(MOE_SECTION, "HintBold", 0, g_IniPath);
+    OU_ReadString(MOE_SECTION, "HintFontFace", "msyh.ttc",
                   g_Cfg.HintFontFace, sizeof(g_Cfg.HintFontFace));
-    g_Cfg.HintColorFollow = GetPrivateProfileIntA(MF_SECTION, "HintColorFollow", 0, g_IniPath);
-    g_Cfg.HintMaxLines= GetPrivateProfileIntA(MF_SECTION, "HintMaxLines", 3, g_IniPath);
-    g_Cfg.HintMaxWidth= GetPrivateProfileIntA(MF_SECTION, "HintMaxWidth", 320, g_IniPath);
-    g_Cfg.HintOpacity = GetPrivateProfileIntA(MF_SECTION, "HintOpacity", 45, g_IniPath);
-    g_Cfg.HintTimeoutMul = GetPrivateProfileIntA(MF_SECTION, "HintTimeoutMul", 2, g_IniPath);
-    /* 电力键归 [VecText] (挨着 CreditPx/CreditDY), 不在 [MsgFont]。 */
+    g_Cfg.HintColorFollow = GetPrivateProfileIntA(MOE_SECTION, "HintColorFollow", 0, g_IniPath);
+    g_Cfg.HintMaxLines= GetPrivateProfileIntA(MOE_SECTION, "HintMaxLines", 3, g_IniPath);
+    g_Cfg.HintMaxWidth= GetPrivateProfileIntA(MOE_SECTION, "HintMaxWidth", 320, g_IniPath);
+    g_Cfg.HintOpacity = GetPrivateProfileIntA(MOE_SECTION, "HintOpacity", 45, g_IniPath);
+    g_Cfg.HintTimeoutMul = GetPrivateProfileIntA(MOE_SECTION, "HintTimeoutMul", 2, g_IniPath);
+    /* 电力键归 [VecText] (挨着 CreditPx/CreditDY), 不在 [MOExperience]。 */
     g_Cfg.PowerBottom = GetPrivateProfileIntA(VT_SECTION, "PowerBottom", 1, g_IniPath);
     g_Cfg.PowerX = GetPrivateProfileIntA(VT_SECTION, "PowerX", 0, g_IniPath);
     g_Cfg.PowerPad = GetPrivateProfileIntA(VT_SECTION, "PowerPad", 6, g_IniPath);
     g_Cfg.PowerMode = GetPrivateProfileIntA(VT_SECTION, "PowerMode", 0, g_IniPath);
-    g_Cfg.ChatBoxSP = GetPrivateProfileIntA(MF_SECTION, "ChatBoxSP", 1, g_IniPath);
+    g_Cfg.ChatBoxSP = GetPrivateProfileIntA(MOE_SECTION, "ChatBoxSP", 1, g_IniPath);
     g_Cfg.Enable = g_Cfg.Enable ? 1 : 0;
     g_Cfg.LogMessages = g_Cfg.LogMessages ? 1 : 0;
     g_Cfg.ShowHotZone = g_Cfg.ShowHotZone ? 1 : 0;
@@ -337,7 +337,7 @@ static void EnsureInit(void)
     if (!g_Log) return;
     LoadConfig();
     LogLine("==================================================");
-    LogLine("MsgFont " MF_VERSION " start");
+    LogLine("MOExperience " MOE_VERSION " start");
     p = 0;
     p = AppendCStr(buf, p, "config: MaxLines=", sizeof(buf));
     p += UtoA((unsigned)g_Cfg.MaxLines, buf + p);
@@ -666,7 +666,7 @@ static int      g_BodyLen[MAX_PICKED];          /* 合成串总字符数 */
 static int      g_Reveal[MAX_PICKED];           /* 本帧已揭示字符数 (DrawBox 填写) */
 static wchar_t  g_Compose[MAX_PICKED][MAX_NAME_W + MAX_TEXT_W + 4];
 
-extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_AddMessageHook(void* regs){
+extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_AddMessageHook(void* regs){
     unsigned char* esp;
     const wchar_t* argName;
     const wchar_t* argMsg;
@@ -1450,7 +1450,7 @@ static int DrawSWPanel(void* surf, int bitLineH, int surfW, int surfH,
 }
 
 /* 老钩的前向声明 (定义在后, 入口钩在引擎链表为空时直接调用它) */
-extern "C" DWORD __cdecl MsgFont_MessageDrawHook(void* regs);
+extern "C" DWORD __cdecl MOExperience_MessageDrawHook(void* regs);
 
 /* 引擎消息链表是否非空: 反汇编实证 (0x5D4A8D):
  *   mov ecx,[esi]; test ecx,ecx; je return —— this[0] 为空直接返回,
@@ -1475,7 +1475,7 @@ static int EngineListAlive(void* regs)
  * 1=画出, 0=隐藏但触发判定仍然有效。返回 0 跑原版。
  * 附加职责: 引擎链表为空 (this[0]==NULL) 时老钩走不到, 在此直接调
  * 老钩的完整渲染, 悬停随时能展历史, 不再依赖新消息到来。 */
-extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_GreenHook(void* regs)
+extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_GreenHook(void* regs)
 {
     void* surf;
     (void)regs;
@@ -1509,7 +1509,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_GreenHook(void* regs)
     {
         static int s_logged = 0;
         if (!s_logged) { s_logged = 1; LogLine("green: engine list empty, render from entry"); }
-        MsgFont_MessageDrawHook(regs);
+        MOExperience_MessageDrawHook(regs);
     }
     return 0;
 }
@@ -1866,7 +1866,7 @@ static int MsgPowerDrawSb(void)
 /* ---------------- 底电"始终绘制": 帧准备钩 ----------------
  * 0x4F42F0 (prepare, 每循环必跑, render 条件跳过时它也跑):
  * 首 5B 恰一条指令 (mov eax,[Tactical=0x887324]), 跳板拷 5B + 跳回
- * 0x4F42F5, 入口 PatchAt 跳到 MsgFont_PrepareEntry (安装见 VecText)。
+ * 0x4F42F5, 入口 PatchAt 跳到 MOExperience_PrepareEntry (安装见 VecText)。
  * Entry 为 naked: pushal/pushfd → 调 PowerDrawBoth → popfd/popal →
  * 尾跳跳板 (非 call! call 会多压一层返回地址, 原函数体 [esp+4] 取 arg
  * 即错位)。栈形全程 [ret][arg], 原 ret 4 收尾, 与引擎一致。
@@ -1880,7 +1880,7 @@ static void PowerDrawBoth(void)
     AirWay_Poll();   /* 每循环必跑的只读飞机轮询 (AirWay, 开关关时直接返回) */
     BuildQueue_Poll(); /* 每循环必跑的建筑本地排队 (BuildQueue, 开关关/队列空时直接返回) */
     PatrolCircle_Poll(); /* Z+中键一键巡逻圈 (开关关/无触发时直接返回) */
-    AirSpread_Poll(); /* 裸中键智能下令 (点按自适应/划线散开; Z 让路巡逻, Ctrl 让路模糊, 组合中键让路区域自适应) */
+    SmartOrder_Poll(); /* 裸中键智能下令 (点按自适应/划线散开; Z 让路巡逻, Ctrl 让路模糊, 组合中键让路区域自适应) */
     TreeChop_Poll(); /* Ctrl+Z+中键快速砍树 (开关关/无触发时直接返回) */
     FuzzyAttack_Poll(); /* Ctrl+中键模糊攻击 (开关关/无触发时直接返回) */
     SmartArea_Poll(); /* Shift+中键范围智能下令 (开关关/无触发时直接返回) */
@@ -1896,7 +1896,7 @@ static void PowerDrawBoth(void)
  * (prepare/blitsb 的 ecx=this, update 的 edx=surface) → 跳板/原函数拿到
  * 垃圾 → 启动即崩。"m" 不占寄存器, 绝对安全。 */
 static void* g_CallPrepare = (void*)PowerDrawBoth;
-__attribute__((naked)) void MsgFont_PrepareEntry(void)
+__attribute__((naked)) void MOExperience_PrepareEntry(void)
 {
     __asm__ volatile (
         "pushal\n\t"
@@ -1912,7 +1912,7 @@ __attribute__((naked)) void MsgFont_PrepareEntry(void)
 /* ---------------- 底电最后期合成: 上屏入口钩 ----------------
  * SidebarClass::BlitSidebar=0x6A70E0 (全二进制唯一的条带上屏点):
  * 首 6B 恰三条指令 (sub esp,0x38/push ebx/push ebp), 跳板拷 6B + 跳回
- * 0x6A70E6, 入口 PatchAt 跳到 MsgFont_BlitSbEntry (安装见 VecText)。
+ * 0x6A70E6, 入口 PatchAt 跳到 MOExperience_BlitSbEntry (安装见 VecText)。
  * 引擎事件 (重画盖住+上屏) 会把屏上条带整体盖掉 (含屏直画部分),
  * 与层/时机无关。故在呈现入口先恢复: 每次上屏前字已在侧栏面里,
  * 呈出的每一帧都带字, 结构上不再有"被盖帧"。
@@ -1928,7 +1928,7 @@ static void BlitSbEntryDraw(void)
     MsgPowerDrawSb();
 }
 static void* g_CallBlitSb = (void*)BlitSbEntryDraw;
-__attribute__((naked)) void MsgFont_BlitSbEntry(void)
+__attribute__((naked)) void MOExperience_BlitSbEntry(void)
 {
     __asm__ volatile (
         "pushal\n\t"
@@ -1958,7 +1958,7 @@ static void DrawPresentArg(void* surf)
     return;
 }
 static void* g_CallUpdate = (void*)DrawPresentArg;
-__attribute__((naked)) void MsgFont_UpdateEntry(void)
+__attribute__((naked)) void MOExperience_UpdateEntry(void)
 {
     __asm__ volatile (
         "pushal\n\t"
@@ -1973,7 +1973,7 @@ __attribute__((naked)) void MsgFont_UpdateEntry(void)
         : "m" (g_CallUpdate), "m" (g_UpdateTramp)
         : "memory", "cc");
 }
-extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* regs)
+extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void* regs)
 {
     void* surf;
     unsigned tick;
@@ -2283,7 +2283,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
 
     /* 橡皮线/范围框 (armed/按住时才画, 自锁面, 不影响其它绘制)。 */
     {
-        AirSpread_Draw(surf, surfW, surfH, surfPitch);
+        SmartOrder_Draw(surf, surfW, surfH, surfPitch);
         PatrolCircle_Draw(surf, surfW, surfH, surfPitch);
         FuzzyAttack_Draw(surf, surfW, surfH, surfPitch);
         SmartArea_Draw(surf, surfW, surfH, surfPitch);
@@ -2333,7 +2333,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
 
 /* 滚轮 (0x777998, 6B): 进入时 ECX = 原始 WParam (shr 尚未执行),
  * bit31=1 为下滚 (回最新), 否则上滚 (翻历史)。只在战役框内生效。 */
-extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_WheelHook(void* regs)
+extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_WheelHook(void* regs)
 {
     unsigned wparam;
     int mx, my;
@@ -2366,7 +2366,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_WheelHook(void* regs)
 /* 侧栏滚动 (0x533F50, 5B): 悬停战役框时跳过, 滚轮只滚消息。 */
 #define ADDR_SKIP_SCROLL_SIDEBAR 0x00533FC3u
 
-extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_SidebarHook(void* regs)
+extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_SidebarHook(void* regs)
 {
     int mx, my;
     (void)regs;
@@ -2388,7 +2388,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_SidebarHook(void* regs)
 #define ADDR_CHATSP_3      0x0055E69Bu
 #define ADDR_CHATSP_4      0x0055E77Bu
 
-extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_ChatSp1(void* regs)
+extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_ChatSp1(void* regs)
 {
     static int s_logged = 0;
     (void)regs;
@@ -2398,7 +2398,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_ChatSp1(void* regs)
     return ADDR_CHATSP_1;
 }
 
-extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_ChatSp2(void* regs)
+extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_ChatSp2(void* regs)
 {
     (void)regs;
     EnsureInit();
@@ -2406,7 +2406,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_ChatSp2(void* regs)
     return ADDR_CHATSP_2;
 }
 
-extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_ChatSp3(void* regs)
+extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_ChatSp3(void* regs)
 {
     (void)regs;
     EnsureInit();
@@ -2414,7 +2414,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_ChatSp3(void* regs)
     return ADDR_CHATSP_3;
 }
 
-extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_ChatSp4(void* regs)
+extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_ChatSp4(void* regs)
 {
     (void)regs;
     EnsureInit();

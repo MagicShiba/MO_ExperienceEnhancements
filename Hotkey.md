@@ -1,6 +1,6 @@
 # 快捷键写法 (Hotkey)
 
-适用: `MsgFont.ini` 里 `[PatrolCircle]`、`[AirSpread]`、`[TreeChop]`、
+适用: `MOExperience.ini` 里 `[PatrolCircle]`、`[SmartOrder]`、`[TreeChop]`、
 `[FuzzyAttack]`、`[MindSelect]` 的 `Hotkey` 项。
 
 ## 规则
@@ -62,9 +62,9 @@
 
 | 功能 | 默认 `Hotkey` | 说明 |
 |---|---|---|
-| 巡逻圈 `[PatrolCircle]` | `Z+Middle` | 按住 Z 划中键画圈 |
-| 智能下令 `[AirSpread]` | `Middle` | 裸中键点按自适应(移动/攻击/进入/进驻)/划线散开; 按住 Z 让路巡逻, 按住 Ctrl 让路模糊, 组合中键让路区域自适应 |
+| 巡逻圈 `[PatrolCircle]` | `Z+Middle` | 按住 Z 划中键画圈; 范围智能组合认领时让路 |
+| 智能下令 `[SmartOrder]` | `Middle` | 裸中键点按自适应(移动/攻击/进入/进驻)/划线散开; 按住 Z 让路巡逻, 按住 Ctrl 让路模糊, 组合中键让路区域自适应 |
 | 砍树 `[TreeChop]` | `Ctrl+Z+Middle` | 三键齐按 |
 | 模糊攻击 `[FuzzyAttack]` | `Ctrl+Middle` | 按住 Z 时让路巡逻/砍树; Ctrl+Shift+中键也归模糊; 按住时红色规划线连到分到的敌, 松手即消 |
-| 范围智能 `[SmartArea]` | `Shift+Middle` | 点按/划线扫块(轨迹各节点)挑目标, 按住时绿色细线从单位连到分到的目标(预览, 松手即消), 按各自光标下对象令(不移动); 光标无令时按规则表: 非本家载具/飞机/步兵(非建筑)强攻、工程师对建筑占领(多楼轮转均分, 不管 SquadSize)、步兵对自家载具进入、本家其余跳过、非工程师步兵对建筑待命松手重判; 松中键即执行, Shift 可连点; 含 Ctrl/Z 时被别家抢走 |
+| 范围智能 `[SmartArea]` | `Shift+Middle`（主键须是 `Middle`，可改单键如 `X1`） | 点按/划线扫块(轨迹各节点)挑目标, 按住时绿色细线连到分到的目标(松手即消), 按各自光标下对象令(不移动); 光标无令时按规则表: 非本家载具/飞机/步兵(非建筑)强攻、工程师对建筑占领(多楼轮转均分, 不管 SquadSize)、步兵对自家载具进入、本家其余跳过、非工程师步兵对建筑待命; 松开即执行; 待命等脏键全松后重判（配置的修饰/附加键，或物理 Shift——单 X1 时按住 Shift 点照样待命，松 Shift 即判）; 含 Ctrl 时归模糊，Z 不禁 |
 | 心控收敛 `[MindSelect]` | `Shift+P` | 结尾只剩心控单位 |

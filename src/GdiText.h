@@ -1,5 +1,5 @@
-/* GdiText.h - MsgFont.dll 内共享的无 CRT 工具 / 日志 / 字体解析 /
- * GDI 光栅 / 16 位混合管线 (MsgFont.cpp 与 VecText.cpp 共用)。
+/* GdiText.h - MOExperience.dll 内共享的无 CRT 工具 / 日志 / 字体解析 /
+ * GDI 光栅 / 16 位混合管线 (MOExperience.cpp 与 VecText.cpp 共用)。
  * 构建见 构建.bat (32 位 mingw, 无 CRT, 单 DLL 多源文件)。
  */
 #pragma once

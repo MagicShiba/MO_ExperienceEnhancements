@@ -8,10 +8,10 @@
  * (且节点>=4) 则走曲线闭环: 节点按 LoopStep 稀疏抽路点 (比散开稀疏),
  * 全员 Mega 建点 + 合环 Connect + Commit。
  * 起终距离远则保持原行为 (直线矩环/点按方环)。
- * 配置全在 MsgFont.ini [PatrolCircle]。全程不碰光标。
+ * 配置全在 MOExperience.ini [PatrolCircle]。全程不碰光标。
  * 与砍树互斥: Ctrl 按住时让路 TreeChop (见 TreeChop.cpp)。
- * 拖动期间渲染期画白橡皮线 (锚点→当前鼠标, 与 AirSpread 同风格),
- * 挂 MsgFont_MessageDrawHook (见 MsgFont.cpp)。
+ * 拖动期间渲染期画白橡皮线 (锚点→当前鼠标, 与 SmartOrder 同风格),
+ * 挂 MOExperience_MessageDrawHook (见 MOExperience.cpp)。
  * 注意: 中键按住拖时游戏可能平移镜头, 起终格按各自时刻镜头映射。
  *
  * 原理 (原生序列实证: OutList 抓包 pev + YRpp EventClass.h 交叉确认):
@@ -49,14 +49,15 @@
  * 联机: 只发标准事件, 各端同一份原版代码执行, 不影响联机。
  * 本地只读 + 标准事件入队, 不写模拟内存。
  *
- * 构建见 构建.bat (32 位 mingw, 无 CRT, 与 MsgFont 同一 DLL)。
- * 轮询挂 PowerDrawBoth (见 MsgFont.cpp), 开关关时直接返回。
+ * 构建见 构建.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
+ * 轮询挂 PowerDrawBoth (见 MOExperience.cpp), 开关关时直接返回。
  */
 
 #include <windows.h>
 #include <math.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "SmartArea.h"
 
 #define PC_SECTION "PatrolCircle"
 
@@ -767,9 +768,10 @@ void PatrolCircle_Poll(void)
     if (trigDown && !g_PcPrevTrig)
     {
         /* 按下: 锚定起点格 (Hotkey 附加键如 Z 必须按住, 且不能按 Ctrl——
-         * Ctrl+Z+中键归砍树), 节点[0]=锚点, 等松开再定圈 */
+         * Ctrl+Z+中键归砍树; SmartArea 组合认领时也让路, Z 照常用),
+         * 节点[0]=锚点, 等松开再定圈 */
         if (OU_ModsDown(g_PcHk.mods) && OU_ExtraDown(&g_PcHk) &&
-            !OU_KeyDown(VK_CONTROL))
+            !OU_KeyDown(VK_CONTROL) && !SmartArea_ClaimsMiddle())
         {
             int ax, ay;
             if (OU_MouseCell(&ax, &ay))
@@ -812,7 +814,7 @@ void PatrolCircle_Poll(void)
     g_PcPrevTrig = trigDown;
 }
 
-/* ---------------- 渲染期橡皮线 (3px 白线, 与 AirSpread 同风格) ---------------- */
+/* ---------------- 渲染期橡皮线 (3px 白线, 与 SmartOrder 同风格) ---------------- */
 
 static unsigned char* s_PcLocked = 0;
 static int s_PcW = 0, s_PcH = 0, s_PcPitch = 0;
@@ -880,7 +882,7 @@ void PatrolCircle_Draw(void* surf, int w, int h, int pitch)
     if (!locked || !IsPlausiblePtr(locked)) return;
     s_PcLocked = locked; s_PcW = w; s_PcH = h; s_PcPitch = pitch;
     /* 节点折线 (采样时刻实测像素) + 橡皮尾巴 (末节点→当前鼠标)。
-     * 与 AirSpread 同 caveat: 中键拖动平移镜头, 节点像素跨镜头帧会漂;
+     * 与 SmartOrder 同 caveat: 中键拖动平移镜头, 节点像素跨镜头帧会漂;
      * 落点格按松开时刻重算, 不受影响。 */
     {
         int i, ex, ey;

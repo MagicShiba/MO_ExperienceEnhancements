@@ -1,4 +1,4 @@
-/* OrderUtil.h - 下单/选中模块共享工具 (PatrolCircle/AirSpread/TreeChop/FuzzyAttack/MindSelect)。
+/* OrderUtil.h - 下单/选中模块共享工具 (PatrolCircle/SmartOrder/TreeChop/FuzzyAttack/MindSelect)。
  * 引擎只读查询 + OutList 标准事件入队, 不写模拟内存 (联机安全)。
  * 实现见 OrderUtil.cpp。构建见 构建.bat (同一 DLL)。 */
 #pragma once

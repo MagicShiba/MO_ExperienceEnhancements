@@ -36,7 +36,7 @@ Ares 同流钩子（查 `Ares.dll.inj` 实证，同函数内）：`0x6AB0B0` Loa
 H1 只跳原生地址并摆出与原生一致的寄存器（EDI=0/ESI=`[esp+0x10]`），
 H2 只在开关开时跳原生跳过处；Shift+右键清模拟仍走 `0x6ABxxx` 原生分支。
 
-钩子（`dist/MsgFont.dll.inj`，永远跳转，**禁止在含 rel 字节上 return 0**）：
+钩子（`dist/MOExperience.dll.inj`，永远跳转，**禁止在含 rel 字节上 return 0**）：
 铁律（Syringe `HandleException` 源码实证：跳板原样拷贝被偷字节，
 `E8/Jcc` 的 rel 不修正；Phobos 全库同样从不在 rel 字节上 return 0）：
 偷了 rel 的钩子永远跳转；E8 构造调用一律亲调 `EventCtor`（返回值回填
@@ -72,7 +72,7 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈，`0x6A9C86` 的 `[ESP+0x3
   左键记数用“当前或近期按下”（防单帧竞态/提前松开），右键清空只认当前。
 - 建筑页/防御页天然分开：条目按 house+heap 匹配（heap=ArrayIndex 类型唯一，
   同型必同 BuildCat/同工厂），清空只清本家本型。
-- 诊断 trace（`MsgFont.log`，点击级）：`bq: qd/qf/qn`（左键记入），
+- 诊断 trace（`MOExperience.log`，点击级）：`bq: qd/qf/qn`（左键记入），
   `bq: h0`（右键到暂停检查，a=state b=heap），`bq: h1`（到切换门，
   a=flag b=ebxHeap），`bq: cp`（右键，a=heap b=剩本地 c=shift
   d=1弹一/2清空/3暂停剥离/0走原生），`bq: sw`（压住切换清产），

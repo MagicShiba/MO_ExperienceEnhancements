@@ -1,5 +1,5 @@
 /* GdiText.cpp - 见 GdiText.h。
- * 全部由 MsgFont.cpp 原样移出 (行为不变), 外加:
+ * 全部由 MOExperience.cpp 原样移出 (行为不变), 外加:
  *   GtEnsureLog (幂等日志打开), GtUnpack16 (16 位像素拆 RGB),
  *   GtRenderGlyph (单字形光栅), Calibrate 首行幂等守卫,
  *   ResolveFontFace 多一个 fallback 参数。
@@ -85,9 +85,9 @@ void BuildPaths(void)
     exe[i] = 0;
 
     k = AppendCStr(g_LogPath, 0, exe, MAX_PATH_LEN);
-    AppendCStr(g_LogPath, k, "\\MsgFont.log", MAX_PATH_LEN);
+    AppendCStr(g_LogPath, k, "\\MOExperience.log", MAX_PATH_LEN);
     k = AppendCStr(g_IniPath, 0, exe, MAX_PATH_LEN);
-    AppendCStr(g_IniPath, k, "\\MsgFont.ini", MAX_PATH_LEN);
+    AppendCStr(g_IniPath, k, "\\MOExperience.ini", MAX_PATH_LEN);
 }
 
 void GtEnsureLog(void)

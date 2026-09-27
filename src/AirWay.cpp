@@ -10,7 +10,7 @@
  * 不影响联机 (对方只是自己发不出这种命令)。
  * Ares 共存: 若 Ares 也改写同槽, 日志 old 值会暴露 (last writer wins)。
  *
- * 构建见 构建.bat (32 位 mingw, 无 CRT, 与 MsgFont 同一 DLL)。
+ * 构建见 构建.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
  */
 
 #include <windows.h>

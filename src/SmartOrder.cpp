@@ -1,4 +1,4 @@
-/* AirSpread.cpp - 中键智能下令 (点按自适应/划线散开, 原散开升级)。
+/* SmartOrder.cpp - 中键智能下令 (点按自适应/划线散开, 原散开升级)。
  *
  * 决策 (只读, 联机安全): 终点有对象时调 DecideAction 0x692610
  * (与左键下单前同一函数, 全范围无事件构造/OutList 引用),
@@ -21,77 +21,77 @@
  * 联机: 只发标准事件, 各端同一份原版代码执行。本地只读 + 标准事件入队,
  * 不写模拟内存。
  *
- * 构建见 构建.bat (32 位 mingw, 无 CRT, 与 MsgFont 同一 DLL)。
- * 轮询挂 PowerDrawBoth, 橡皮线挂 MsgFont_MessageDrawHook (见 MsgFont.cpp)。
+ * 构建见 构建.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
+ * 轮询挂 PowerDrawBoth, 橡皮线挂 MOExperience_MessageDrawHook (见 MOExperience.cpp)。
  * 日志: 仅启动行；诊断临时加行，用完即删。
  */
 
 #include <windows.h>
 #include <math.h>
 #include "GdiText.h"
-#include "AirSpread.h"
+#include "SmartOrder.h"
 #include "OrderUtil.h"
 #include "SmartArea.h"
 
-#define AS_SECTION "AirSpread"
+#define SO_SECTION "SmartOrder"
 
 /* ---------------- 散开私有地址 (共享部分见 OrderUtil.h) ---------------- */
 
 #define ADDR_TYPARRAY 0xA8EB00u
 #define OFF_VEC_ITEMS 4u
 #define OFF_VEC_COUNT 16u
-#define AS_CAP 256
-#define AS_PEND_CAP 512
-#define AS_DRAIN_PER_POLL 128
+#define SO_CAP 256
+#define SO_PEND_CAP 512
+#define SO_DRAIN_PER_POLL 128
 #define FN_TGT_CELL ((Fn_TargetFromCell)(void*)0x6E6B20u)
 
 typedef void* __attribute__((thiscall)) (*Fn_TargetFromCell)(void* tgt, const CellStruct* cell);
-typedef void* (__fastcall *AS_LockFn)(void*, void*, int, int);
-typedef int (__fastcall *AS_UnlockFn)(void*, void*);
+typedef void* (__fastcall *SO_LockFn)(void*, void*, int, int);
+typedef int (__fastcall *SO_UnlockFn)(void*, void*);
 
-#define VT_AS_LOCK   0x5C
-#define VT_AS_UNLOCK 0x60
+#define VT_SO_LOCK   0x5C
+#define VT_SO_UNLOCK 0x60
 
 /* ---------------- 配置 ---------------- */
 
-static int g_AsInit = 0;
-static int g_AsEnable = 1;
-static OU_Hotkey g_AsHk;      /* Hotkey=Middle (裸中键, Z/Ctrl/组合中键按住时让路) */
-static int g_AsNodeStep = 2;    /* 拖线采样步长 (格, 切比雪夫距离) */
+static int g_SoInit = 0;
+static int g_SoEnable = 1;
+static OU_Hotkey g_SoHk;      /* Hotkey=Middle (裸中键, Z/Ctrl/组合中键按住时让路) */
+static int g_SoNodeStep = 2;    /* 拖线采样步长 (格, 切比雪夫距离) */
 
 /* 分类判据 (参考 RACommands, MO rulesmo 实测 + 内存 dump 双确认):
  * Aircraft 恒飞; 步兵/车辆 MZ==Fly(9), ST==Winged(4) 兜底。
  * MO 的飞行步兵/悬停直升机 MZ=Fly、ST=Hover(3), 故判据以 MZ==9 为主。 */
-#define AS_OFF_MZ 1460   /* dump 实证 (JUMPJET=9=Fly, MAMM=2=Destroyer) */
-#define AS_OFF_ST 1596   /* 未定死: 当前读垃圾, 命中概率极低, 仅作无害兜底 */
-#define AS_MZ_FLY 9
-#define AS_ST_WINGED 4
+#define SO_OFF_MZ 1460   /* dump 实证 (JUMPJET=9=Fly, MAMM=2=Destroyer) */
+#define SO_OFF_ST 1596   /* 未定死: 当前读垃圾, 命中概率极低, 仅作无害兜底 */
+#define SO_MZ_FLY 9
+#define SO_ST_WINGED 4
 
-static void AS_EnsureInit(void)
+static void SO_EnsureInit(void)
 {
-    if (g_AsInit) return;
-    g_AsInit = 1;
+    if (g_SoInit) return;
+    g_SoInit = 1;
     BuildPaths();
     GtEnsureLog();
-    g_AsEnable = GetPrivateProfileIntA(AS_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    OU_ParseHotkey("Middle", &g_AsHk);            /* 默认 (必成功) */
-    OU_ReadHotkey(AS_SECTION, "Hotkey", &g_AsHk); /* 有则覆盖, 坏串留默认 */
-    if (g_AsHk.disabled) g_AsEnable = 0;
-    g_AsNodeStep = GetPrivateProfileIntA(AS_SECTION, "NodeStep", 2, g_IniPath);
-    if (g_AsNodeStep < 1) g_AsNodeStep = 1;
-    if (g_AsNodeStep > 8) g_AsNodeStep = 8;
-    LogLine("airspread: ON (middle smart)");
-    if (!g_AsEnable) LogLine("airspread: OFF");
+    g_SoEnable = GetPrivateProfileIntA(SO_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
+    OU_ParseHotkey("Middle", &g_SoHk);            /* 默认 (必成功) */
+    OU_ReadHotkey(SO_SECTION, "Hotkey", &g_SoHk); /* 有则覆盖, 坏串留默认 */
+    if (g_SoHk.disabled) g_SoEnable = 0;
+    g_SoNodeStep = GetPrivateProfileIntA(SO_SECTION, "NodeStep", 2, g_IniPath);
+    if (g_SoNodeStep < 1) g_SoNodeStep = 1;
+    if (g_SoNodeStep > 8) g_SoNodeStep = 8;
+    LogLine("smartorder: ON (middle smart)");
+    if (!g_SoEnable) LogLine("smartorder: OFF");
 }
 
 /* ---------------- 小工具 (通用部分见 OrderUtil.h) ---------------- */
 
 /* ---------------- 类型自校准 ---------------- */
 
-static int g_AsTypeOff[3] = { -1, -1, -1 }; /* 按类别 pin: 0=Unit 1=Aircraft 2=Infantry */
-static int g_AsIdOff = -1;                  /* 类型内 ID 字符串偏移 pin */
+static int g_SoTypeOff[3] = { -1, -1, -1 }; /* 按类别 pin: 0=Unit 1=Aircraft 2=Infantry */
+static int g_SoIdOff = -1;                  /* 类型内 ID 字符串偏移 pin */
 
-static int AS_ClassSlot(int w)
+static int SO_ClassSlot(int w)
 {
     if (w == ABS_UNIT) return 0;
     if (w == ABS_AIRCRAFT) return 1;
@@ -99,7 +99,7 @@ static int AS_ClassSlot(int w)
     return -1;
 }
 
-static int AS_StrOk(const char* s)
+static int SO_StrOk(const char* s)
 {
     int n = 0;
     if (!s) return 0;
@@ -115,16 +115,16 @@ static int AS_StrOk(const char* s)
 }
 
 /* 类型指针 p 的 ID 是否可读; 可读则拷入 out (24 字节) 并 pin 偏移。 */
-static int AS_TypeID(void* p, char* out)
+static int SO_TypeID(void* p, char* out)
 {
     static const unsigned cands[3] = { 0x20u, 0x24u, 0x28u };
     int i;
     if (!p || !IsPlausiblePtr(p)) return 0;
-    if (g_AsIdOff >= 0)
+    if (g_SoIdOff >= 0)
     {
-        const char* s = (const char*)p + (unsigned)g_AsIdOff;
+        const char* s = (const char*)p + (unsigned)g_SoIdOff;
         int k;
-        if (!AS_StrOk(s)) { g_AsIdOff = -1; }
+        if (!SO_StrOk(s)) { g_SoIdOff = -1; }
         else
         {
             for (k = 0; k < 24; k++) out[k] = s[k];
@@ -135,8 +135,8 @@ static int AS_TypeID(void* p, char* out)
     {
         const char* s = (const char*)p + cands[i];
         int k;
-        if (!AS_StrOk(s)) continue;
-        g_AsIdOff = (int)cands[i];
+        if (!SO_StrOk(s)) continue;
+        g_SoIdOff = (int)cands[i];
         for (k = 0; k < 24; k++) out[k] = s[k];
         return 1;
     }
@@ -144,7 +144,7 @@ static int AS_TypeID(void* p, char* out)
 }
 
 /* 类型数组元素数 (守卫后返回, 否则 0)。 */
-static int AS_TypeCount(void*** itemsOut)
+static int SO_TypeCount(void*** itemsOut)
 {
     void** items;
     int cnt;
@@ -157,11 +157,11 @@ static int AS_TypeCount(void*** itemsOut)
     return cnt;
 }
 
-static int AS_InTypeSet(void* p)
+static int SO_InTypeSet(void* p)
 {
     void** items = 0;
     int cnt, i;
-    cnt = AS_TypeCount(&items);
+    cnt = SO_TypeCount(&items);
     if (!cnt) return 0;
     for (i = 0; i < cnt; i++)
         if (items[i] == p) return 1;
@@ -169,28 +169,28 @@ static int AS_InTypeSet(void* p)
 }
 
 /* 单位取 Type 指针 (pin 命中则快路, 否则全扫; 跨单位一致即自证)。 */
-static void* AS_TypeOf(void* u, int w)
+static void* SO_TypeOf(void* u, int w)
 {
-    int slot = AS_ClassSlot(w);
+    int slot = SO_ClassSlot(w);
     unsigned off;
     char idb[24];
     int k;
     if (slot < 0) return 0;
-    if (g_AsTypeOff[slot] >= 0)
+    if (g_SoTypeOff[slot] >= 0)
     {
-        void* p = *(void**)((char*)u + (unsigned)g_AsTypeOff[slot]);
-        if (p && IsPlausiblePtr(p) && AS_InTypeSet(p) && AS_TypeID(p, idb))
+        void* p = *(void**)((char*)u + (unsigned)g_SoTypeOff[slot]);
+        if (p && IsPlausiblePtr(p) && SO_InTypeSet(p) && SO_TypeID(p, idb))
             return p;
-        g_AsTypeOff[slot] = -1;
+        g_SoTypeOff[slot] = -1;
     }
     for (off = 0x40u; off < 0x900u; off += 4u)
     {
         void* p = *(void**)((char*)u + off);
         if (!p || !IsPlausiblePtr(p)) continue;
-        if (!AS_InTypeSet(p)) continue;
+        if (!SO_InTypeSet(p)) continue;
         for (k = 0; k < 24; k++) idb[k] = 0;
-        if (!AS_TypeID(p, idb)) continue;
-        g_AsTypeOff[slot] = (int)off;
+        if (!SO_TypeID(p, idb)) continue;
+        g_SoTypeOff[slot] = (int)off;
         return p;
     }
     return 0;
@@ -198,45 +198,45 @@ static void* AS_TypeOf(void* u, int w)
 
 /* ---------------- 快照与触发 ---------------- */
 
-typedef struct { void* unit; int id; int w; int fly; } ASUnit;
+typedef struct { void* unit; int id; int w; int fly; } SOUnit;
 
-static ASUnit g_AsUnits[AS_CAP];
-static int g_AsCount = 0;
-static int g_AsIdxOk = 0;
-static int g_AsArmed = 0;
-static int g_AsAx = 0, g_AsAy = 0;
-static int g_AsPx = 0, g_AsPy = 0;
-static int g_AsPrevTrig = 0;
+static SOUnit g_SoUnits[SO_CAP];
+static int g_SoCount = 0;
+static int g_SoIdxOk = 0;
+static int g_SoArmed = 0;
+static int g_SoAx = 0, g_SoAy = 0;
+static int g_SoPx = 0, g_SoPy = 0;
+static int g_SoPrevTrig = 0;
 
 /* 拖线采样节点 (弧形槽位源, 上限 64, 稀疏记录)。
  * 格用于落点计算; 屏坐标用于画线 (采样时刻实测像素, 不估算——
  * 等距视角下格差到像素没有各轴独立系数, 估算必错)。 */
-#define AS_NODE_CAP 64
-static int g_AsNx[AS_NODE_CAP], g_AsNy[AS_NODE_CAP];
-static int g_AsNPx[AS_NODE_CAP], g_AsNPy[AS_NODE_CAP];
-static int g_AsNodeCount = 0;
+#define SO_NODE_CAP 64
+static int g_SoNx[SO_NODE_CAP], g_SoNy[SO_NODE_CAP];
+static int g_SoNPx[SO_NODE_CAP], g_SoNPy[SO_NODE_CAP];
+static int g_SoNodeCount = 0;
 
-static void AS_NodePush(int cx, int cy, int px, int py)
+static void SO_NodePush(int cx, int cy, int px, int py)
 {
     int lx, ly, dx, dy, adx, ady;
-    if (g_AsNodeCount <= 0)
+    if (g_SoNodeCount <= 0)
     {
-        g_AsNx[0] = cx; g_AsNy[0] = cy;
-        g_AsNPx[0] = px; g_AsNPy[0] = py;
-        g_AsNodeCount = 1;
+        g_SoNx[0] = cx; g_SoNy[0] = cy;
+        g_SoNPx[0] = px; g_SoNPy[0] = py;
+        g_SoNodeCount = 1;
         return;
     }
-    if (g_AsNodeCount >= AS_NODE_CAP) return;
-    lx = g_AsNx[g_AsNodeCount - 1]; ly = g_AsNy[g_AsNodeCount - 1];
+    if (g_SoNodeCount >= SO_NODE_CAP) return;
+    lx = g_SoNx[g_SoNodeCount - 1]; ly = g_SoNy[g_SoNodeCount - 1];
     dx = cx - lx; dy = cy - ly;
     adx = dx >= 0 ? dx : -dx; ady = dy >= 0 ? dy : -dy;
-    if (adx < g_AsNodeStep && ady < g_AsNodeStep) return; /* 太密不记 */
-    g_AsNx[g_AsNodeCount] = cx; g_AsNy[g_AsNodeCount] = cy;
-    g_AsNPx[g_AsNodeCount] = px; g_AsNPy[g_AsNodeCount] = py;
-    g_AsNodeCount++;
+    if (adx < g_SoNodeStep && ady < g_SoNodeStep) return; /* 太密不记 */
+    g_SoNx[g_SoNodeCount] = cx; g_SoNy[g_SoNodeCount] = cy;
+    g_SoNPx[g_SoNodeCount] = px; g_SoNPy[g_SoNodeCount] = py;
+    g_SoNodeCount++;
 }
 
-static void AS_Press(void)
+static void SO_Press(void)
 {
     void** items;
     int selN, i, nu = 0;
@@ -244,7 +244,7 @@ static void AS_Press(void)
     selN = *(int*)ADDR_SELOBJ_COUNT;
     items = *(void***)ADDR_SELOBJ_ITEMS;
     if (selN <= 0 || !items || !IsPlausiblePtr(items)) return;
-    for (i = 0; i < selN && nu < AS_CAP; i++)
+    for (i = 0; i < selN && nu < SO_CAP; i++)
     {
         void* o = items[i];
         char tb[8];
@@ -252,57 +252,57 @@ static void AS_Press(void)
         int w = OU_WhatAmI(o);
         if (w != ABS_UNIT && w != ABS_AIRCRAFT && w != ABS_INFANTRY) continue;
         for (ti = 0; ti < 8; ti++) tb[ti] = 0;
-        g_AsUnits[nu].unit = o;
-        g_AsUnits[nu].id = FN_TGT_OBJ(tb, o) ? *(int*)(tb + 0) : 0;
-        g_AsUnits[nu].w = w;
+        g_SoUnits[nu].unit = o;
+        g_SoUnits[nu].id = FN_TGT_OBJ(tb, o) ? *(int*)(tb + 0) : 0;
+        g_SoUnits[nu].w = w;
         nu++;
     }
     if (nu <= 0) return;
     /* ID 索引自检 (PatrolCircle 同式, 失败则 fail-open)。 */
-    g_AsIdxOk = 0;
+    g_SoIdxOk = 0;
     {
         void* base = *(void**)ADDR_IDBASE;
         int cnt = *(int*)ADDR_IDCOUNT;
         if (base && IsPlausiblePtr(base) && cnt > 0 && cnt <= 20000 &&
-            g_AsUnits[0].id > 0 &&
-            OU_PtrAliveRaw(g_AsUnits[0].unit, g_AsUnits[0].id))
-            g_AsIdxOk = 1;
+            g_SoUnits[0].id > 0 &&
+            OU_PtrAliveRaw(g_SoUnits[0].unit, g_SoUnits[0].id))
+            g_SoIdxOk = 1;
     }
     /* 分类: Aircraft 恒飞; 步兵/车辆按运动类型 (MZ==Fly, ST==Winged 兜底)。 */
     for (i = 0; i < nu; i++)
     {
-        ASUnit* u = &g_AsUnits[i];
+        SOUnit* u = &g_SoUnits[i];
         int mz, st;
         void* tp = 0;
         u->fly = 0;
         if (u->w == ABS_AIRCRAFT) u->fly = 1;
         else
         {
-            tp = AS_TypeOf(u->unit, u->w);
+            tp = SO_TypeOf(u->unit, u->w);
             if (tp)
             {
-                mz = *(int*)((char*)tp + AS_OFF_MZ);
-                st = *(int*)((char*)tp + AS_OFF_ST);
-                if (mz == AS_MZ_FLY || st == AS_ST_WINGED) u->fly = 1;
+                mz = *(int*)((char*)tp + SO_OFF_MZ);
+                st = *(int*)((char*)tp + SO_OFF_ST);
+                if (mz == SO_MZ_FLY || st == SO_ST_WINGED) u->fly = 1;
             }
         }
     }
     if (!OU_MouseCellPx(&ax, &ay, &mx, &my)) return;
-    g_AsArmed = 1;
-    g_AsAx = ax; g_AsAy = ay;
-    g_AsPx = mx; g_AsPy = my;
-    g_AsCount = nu;
-    g_AsNodeCount = 0;
-    AS_NodePush(ax, ay, mx, my); /* 首节点=锚点 (格+实测像素) */
+    g_SoArmed = 1;
+    g_SoAx = ax; g_SoAy = ay;
+    g_SoPx = mx; g_SoPy = my;
+    g_SoCount = nu;
+    g_SoNodeCount = 0;
+    SO_NodePush(ax, ay, mx, my); /* 首节点=锚点 (格+实测像素) */
 }
 
-static int AS_Rnd(double v)
+static int SO_Rnd(double v)
 {
     return (int)(v + (v >= 0 ? 0.5 : -0.5));
 }
 
 /* 落点校验: 首选格无效则方形环由近及远找有效格 (半径 5), 找不到则丢弃。 */
-static int AS_NearValid(int x, int y, int* ox, int* oy)
+static int SO_NearValid(int x, int y, int* ox, int* oy)
 {
     int r, dx, dy;
     if (OU_CellValid(x, y)) { *ox = x; *oy = y; return 1; }
@@ -324,16 +324,16 @@ static int AS_NearValid(int x, int y, int* ox, int* oy)
 
 /* ---------------- 标准移动事件 (普通 MegaMission, flag=0) ---------------- */
 
-typedef struct { void* unit; int id; short x, y; } ASPend;
+typedef struct { void* unit; int id; short x, y; } SOPend;
 
-static ASPend g_AsPend[AS_PEND_CAP];
-static int g_AsPendCount = 0;
-static void* g_AsHouse = 0;
-static int g_AsHouseIdx = 0;
+static SOPend g_SoPend[SO_PEND_CAP];
+static int g_SoPendCount = 0;
+static void* g_SoHouse = 0;
+static int g_SoHouseIdx = 0;
 
 /* 普通移动令: Mission=Move, Target=空, Destination=格, IsPlanningEvent=0
  * (与手点右键移动同形, 非巡逻)。 */
-static int AS_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
+static int SO_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
                        int dstID, unsigned char dstRtti)
 {
     char ev[EVT_SIZE];
@@ -351,12 +351,12 @@ static int AS_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
  * Target=空, Destination=目标对象 (AutoLoad §11 真实点击布局)。
  * 全部 IsPlanningEvent=0 直接下令。 */
 
-typedef struct { void* unit; int uid; void* tgt; int tid; int mission; } ASObj;
+typedef struct { void* unit; int uid; void* tgt; int tid; int mission; } SOObj;
 
-static ASObj g_AsObj[AS_PEND_CAP];
-static int g_AsObjCount = 0;
+static SOObj g_SoObj[SO_PEND_CAP];
+static int g_SoObjCount = 0;
 
-static int AS_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
+static int SO_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
                          int tgtID, unsigned char tgtRtti)
 {
     char ev[EVT_SIZE];
@@ -368,7 +368,7 @@ static int AS_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
     return OU_Enqueue(ev);
 }
 
-static int AS_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
+static int SO_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
                        int dstID, unsigned char dstRtti, int mission)
 {
     char ev[EVT_SIZE];
@@ -383,12 +383,14 @@ static int AS_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
 /* Action(光标) → Mission(订单): gamemd 0x4D74E0 跳转表实证
  * (Enter3→7 载具, Capture9→8, Sabotage16→17;
  * 建筑上的 Enter/GuardArea 一律按进驻 17, 与原生驻军同形)。
+ * 敌意类 (Eaten10/Damage28/Detonate55/56, 左键点上去就是打) 一律按攻击。
  * 未知/不可转发 (Select/Repair/Harvest/超武等) 回 -1 (调用方按无操作处理,
  * 绝不猜着下单); Move 回 MISSION_MOVE。 */
-static int AS_MissionFor(int targetWhat, int action)
+static int SO_MissionFor(int targetWhat, int action)
 {
     if (action == ACTION_ATTACK || action == 62 || action == 63 ||
-        action == 64 || action == 71 || action == 53)
+        action == 64 || action == 71 || action == 53 ||
+        action == 10 || action == 28 || action == 55 || action == 56)
         return MISSION_ATTACK;
     if (action == ACTION_ENTER)
         return (targetWhat == ABS_BUILDING) ? MISSION_SABOTAGE : MISSION_ENTER;
@@ -403,75 +405,75 @@ static int AS_MissionFor(int targetWhat, int action)
     return -1;
 }
 
-static void AS_ShiftDown(void)
+static void SO_ShiftDown(void)
 {
     int k;
-    for (k = 0; k + 1 < g_AsPendCount; k++)
+    for (k = 0; k + 1 < g_SoPendCount; k++)
     {
-        g_AsPend[k].unit = g_AsPend[k + 1].unit;
-        g_AsPend[k].x = g_AsPend[k + 1].x;
-        g_AsPend[k].y = g_AsPend[k + 1].y;
-        g_AsPend[k].id = g_AsPend[k + 1].id;
+        g_SoPend[k].unit = g_SoPend[k + 1].unit;
+        g_SoPend[k].x = g_SoPend[k + 1].x;
+        g_SoPend[k].y = g_SoPend[k + 1].y;
+        g_SoPend[k].id = g_SoPend[k + 1].id;
     }
-    g_AsPendCount--;
+    g_SoPendCount--;
 }
 
-static void AS_ObjShiftDown(void)
+static void SO_ObjShiftDown(void)
 {
     int k;
-    for (k = 0; k + 1 < g_AsObjCount; k++)
+    for (k = 0; k + 1 < g_SoObjCount; k++)
     {
-        g_AsObj[k].unit = g_AsObj[k + 1].unit;
-        g_AsObj[k].uid = g_AsObj[k + 1].uid;
-        g_AsObj[k].tgt = g_AsObj[k + 1].tgt;
-        g_AsObj[k].tid = g_AsObj[k + 1].tid;
-        g_AsObj[k].mission = g_AsObj[k + 1].mission;
+        g_SoObj[k].unit = g_SoObj[k + 1].unit;
+        g_SoObj[k].uid = g_SoObj[k + 1].uid;
+        g_SoObj[k].tgt = g_SoObj[k + 1].tgt;
+        g_SoObj[k].tid = g_SoObj[k + 1].tid;
+        g_SoObj[k].mission = g_SoObj[k + 1].mission;
     }
-    g_AsObjCount--;
+    g_SoObjCount--;
 }
 
 /* 排空: 每事件先验活再发; house 变化则清空 (读档/换边防串令)。
  * 先排对象令 (攻击/进入/进驻), 再排移动令。 */
-static void AS_Drain(void)
+static void SO_Drain(void)
 {
     void* cur = *(void**)ADDR_CURPLAYER;
     int houseIdx, sent = 0;
-    if (!cur || cur != g_AsHouse) { g_AsPendCount = 0; g_AsObjCount = 0; return; }
+    if (!cur || cur != g_SoHouse) { g_SoPendCount = 0; g_SoObjCount = 0; return; }
     houseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
-    if (houseIdx != g_AsHouseIdx) { g_AsPendCount = 0; g_AsObjCount = 0; return; }
-    while (g_AsObjCount > 0 && sent < AS_DRAIN_PER_POLL)
+    if (houseIdx != g_SoHouseIdx) { g_SoPendCount = 0; g_SoObjCount = 0; return; }
+    while (g_SoObjCount > 0 && sent < SO_DRAIN_PER_POLL)
     {
-        ASObj* e = &g_AsObj[0];
+        SOObj* e = &g_SoObj[0];
         char srcB[8], tgtB[8];
         unsigned i;
         int srcID, tgtID;
         unsigned char srcR, tgtR;
         for (i = 0; i < 8; i++) srcB[i] = tgtB[i] = 0;
-        if (!OU_PtrAlive(e->unit, e->uid, g_AsIdxOk)) { AS_ObjShiftDown(); continue; }
+        if (!OU_PtrAlive(e->unit, e->uid, g_SoIdxOk)) { SO_ObjShiftDown(); continue; }
         if (OU_WhatAmI(e->unit) != ABS_UNIT &&
             OU_WhatAmI(e->unit) != ABS_AIRCRAFT &&
-            OU_WhatAmI(e->unit) != ABS_INFANTRY) { AS_ObjShiftDown(); continue; }
-        if (!OU_PtrAlive(e->tgt, e->tid, g_AsIdxOk)) { AS_ObjShiftDown(); continue; }
-        if (!FN_TGT_OBJ(tgtB, e->tgt)) { AS_ObjShiftDown(); continue; }
-        if (!FN_TGT_OBJ(srcB, e->unit)) { AS_ObjShiftDown(); continue; }
+            OU_WhatAmI(e->unit) != ABS_INFANTRY) { SO_ObjShiftDown(); continue; }
+        if (!OU_PtrAlive(e->tgt, e->tid, g_SoIdxOk)) { SO_ObjShiftDown(); continue; }
+        if (!FN_TGT_OBJ(tgtB, e->tgt)) { SO_ObjShiftDown(); continue; }
+        if (!FN_TGT_OBJ(srcB, e->unit)) { SO_ObjShiftDown(); continue; }
         srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
         tgtID = *(int*)(tgtB + 0); tgtR = (unsigned char)tgtB[4];
         if (e->mission == MISSION_ATTACK)
         {
-            if (!AS_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR))
+            if (!SO_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR))
                 return;
         }
         else
         {
-            if (!AS_FireDest(houseIdx, srcID, srcR, tgtID, tgtR, e->mission))
+            if (!SO_FireDest(houseIdx, srcID, srcR, tgtID, tgtR, e->mission))
                 return;
         }
-        AS_ObjShiftDown();
+        SO_ObjShiftDown();
         sent++;
     }
-    while (g_AsPendCount > 0 && sent < AS_DRAIN_PER_POLL)
+    while (g_SoPendCount > 0 && sent < SO_DRAIN_PER_POLL)
     {
-        ASPend* e = &g_AsPend[0];
+        SOPend* e = &g_SoPend[0];
         char srcB[8], dstB[8];
         CellStruct cs;
         int srcID, dstID;
@@ -481,15 +483,15 @@ static void AS_Drain(void)
         cs.X = e->x; cs.Y = e->y;
         FN_TGT_CELL(dstB, &cs);
         dstID = *(int*)(dstB + 0); dstR = (unsigned char)dstB[4];
-        if (!OU_PtrAlive(e->unit, e->id, g_AsIdxOk)) { AS_ShiftDown(); continue; }
+        if (!OU_PtrAlive(e->unit, e->id, g_SoIdxOk)) { SO_ShiftDown(); continue; }
         if (OU_WhatAmI(e->unit) != ABS_UNIT &&
             OU_WhatAmI(e->unit) != ABS_AIRCRAFT &&
-            OU_WhatAmI(e->unit) != ABS_INFANTRY) { AS_ShiftDown(); continue; }
-        if (!FN_TGT_OBJ(srcB, e->unit)) { AS_ShiftDown(); continue; }
+            OU_WhatAmI(e->unit) != ABS_INFANTRY) { SO_ShiftDown(); continue; }
+        if (!FN_TGT_OBJ(srcB, e->unit)) { SO_ShiftDown(); continue; }
         srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
-        if (!AS_FireMove(houseIdx, srcID, srcR, dstID, dstR))
+        if (!SO_FireMove(houseIdx, srcID, srcR, dstID, dstR))
             return; /* OutList 满: 下轮继续 */
-        AS_ShiftDown();
+        SO_ShiftDown();
         sent++;
     }
 }
@@ -499,7 +501,7 @@ static void AS_Drain(void)
 typedef void* __attribute__((thiscall)) (*Fn_FindObjType)(void* cell, int abs, int alt);
 #define FN_FINDOBJTYPE ((Fn_FindObjType)(void*)0x47C4D0u)
 
-static void* AS_CellBuilding(int cx, int cy)
+static void* SO_CellBuilding(int cx, int cy)
 {
     void** cells;
     int maxc, idx;
@@ -521,22 +523,22 @@ static void* AS_CellBuilding(int cx, int cy)
 
 /* 护航目标 (SmartPoint 移动子集散开时=原目标, 其余散开=NULL):
  * 落点与之是同一建筑且判定为攻击时保持移动 (不把护驻军打回来)。 */
-static void* g_AsProtTgt = 0;
+static void* g_SoProtTgt = 0;
 
-static void AS_Queue(int ui, int cx, int cy)
+static void SO_Queue(int ui, int cx, int cy)
 {
     int ox, oy;
-    ASUnit* u;
+    SOUnit* u;
     void* slotObj;
-    if (ui < 0 || ui >= g_AsCount) return;
-    u = &g_AsUnits[ui];
-    if (!AS_NearValid(cx, cy, &ox, &oy)) return;
+    if (ui < 0 || ui >= g_SoCount) return;
+    u = &g_SoUnits[ui];
+    if (!SO_NearValid(cx, cy, &ox, &oy)) return;
     /* 落点转换: 地面单位落点格上有建筑时, 按直接下令处理
      * (进驻/攻击/占领), 而不是走过去再转攻击。
      * 空军不管地面建筑; 护航目标同建筑的攻击保持移动。 */
-    if (u->fly == 0 && g_AsHouse)
+    if (u->fly == 0 && g_SoHouse)
     {
-        slotObj = AS_CellBuilding(ox, oy);
+        slotObj = SO_CellBuilding(ox, oy);
         if (slotObj)
         {
             char tb[8];
@@ -547,50 +549,50 @@ static void AS_Queue(int ui, int cx, int cy)
             {
                 tid = *(int*)(tb + 0);
                 act = OU_MouseOverObject(u->unit, slotObj);
-                ms = (act < 0) ? -1 : AS_MissionFor(ABS_BUILDING, act);
+                ms = (act < 0) ? -1 : SO_MissionFor(ABS_BUILDING, act);
                 if ((ms == MISSION_ATTACK || ms == MISSION_ENTER ||
                      ms == MISSION_SABOTAGE || ms == MISSION_CAPTURE) &&
-                    !(slotObj == g_AsProtTgt && ms == MISSION_ATTACK) &&
-                    g_AsObjCount < AS_PEND_CAP)
+                    !(slotObj == g_SoProtTgt && ms == MISSION_ATTACK) &&
+                    g_SoObjCount < SO_PEND_CAP)
                 {
-                    g_AsObj[g_AsObjCount].unit = u->unit;
-                    g_AsObj[g_AsObjCount].uid = u->id;
-                    g_AsObj[g_AsObjCount].tgt = slotObj;
-                    g_AsObj[g_AsObjCount].tid = tid;
-                    g_AsObj[g_AsObjCount].mission = ms;
-                    g_AsObjCount++;
+                    g_SoObj[g_SoObjCount].unit = u->unit;
+                    g_SoObj[g_SoObjCount].uid = u->id;
+                    g_SoObj[g_SoObjCount].tgt = slotObj;
+                    g_SoObj[g_SoObjCount].tid = tid;
+                    g_SoObj[g_SoObjCount].mission = ms;
+                    g_SoObjCount++;
                     return;
                 }
             }
         }
     }
-    if (g_AsPendCount >= AS_PEND_CAP) return;
-    g_AsPend[g_AsPendCount].unit = u->unit;
-    g_AsPend[g_AsPendCount].id = u->id;
-    g_AsPend[g_AsPendCount].x = (short)ox;
-    g_AsPend[g_AsPendCount].y = (short)oy;
-    g_AsPendCount++;
+    if (g_SoPendCount >= SO_PEND_CAP) return;
+    g_SoPend[g_SoPendCount].unit = u->unit;
+    g_SoPend[g_SoPendCount].id = u->id;
+    g_SoPend[g_SoPendCount].x = (short)ox;
+    g_SoPend[g_SoPendCount].y = (short)oy;
+    g_SoPendCount++;
 }
 
 /* 一组按轨迹弧长重采样 (sqrt 是 gcc 内建, 无需 libm, PatrolCircle 同式)。 */
-static void AS_ArcGroup(int* idx, int n)
+static void SO_ArcGroup(int* idx, int n)
 {
-    static double scum[AS_NODE_CAP];
-    int nc = g_AsNodeCount;
+    static double scum[SO_NODE_CAP];
+    int nc = g_SoNodeCount;
     int j, k, seg;
     double L;
     if (n <= 0) return;
-    if (nc > AS_NODE_CAP) nc = AS_NODE_CAP;
-    if (nc < 2) { for (k = 0; k < n; k++) AS_Queue(idx[k], g_AsNx[0], g_AsNy[0]); return; }
+    if (nc > SO_NODE_CAP) nc = SO_NODE_CAP;
+    if (nc < 2) { for (k = 0; k < n; k++) SO_Queue(idx[k], g_SoNx[0], g_SoNy[0]); return; }
     scum[0] = 0.0;
     for (j = 1; j < nc; j++)
     {
-        double dx = (double)(g_AsNx[j] - g_AsNx[j - 1]);
-        double dy = (double)(g_AsNy[j] - g_AsNy[j - 1]);
+        double dx = (double)(g_SoNx[j] - g_SoNx[j - 1]);
+        double dy = (double)(g_SoNy[j] - g_SoNy[j - 1]);
         scum[j] = scum[j - 1] + sqrt(dx * dx + dy * dy);
     }
     L = scum[nc - 1];
-    if (L < 0.5) { for (k = 0; k < n; k++) AS_Queue(idx[k], g_AsNx[0], g_AsNy[0]); return; }
+    if (L < 0.5) { for (k = 0; k < n; k++) SO_Queue(idx[k], g_SoNx[0], g_SoNy[0]); return; }
     seg = 0;
     for (k = 0; k < n; k++)
     {
@@ -599,9 +601,9 @@ static void AS_ArcGroup(int* idx, int n)
         while (seg + 1 < nc - 1 && scum[seg + 1] < s) seg++;
         segLen = scum[seg + 1] - scum[seg];
         t = (segLen > 0.0001) ? (s - scum[seg]) / segLen : 0.0;
-        fx = (double)g_AsNx[seg] + (double)(g_AsNx[seg + 1] - g_AsNx[seg]) * t;
-        fy = (double)g_AsNy[seg] + (double)(g_AsNy[seg + 1] - g_AsNy[seg]) * t;
-        AS_Queue(idx[k], AS_Rnd(fx), AS_Rnd(fy));
+        fx = (double)g_SoNx[seg] + (double)(g_SoNx[seg + 1] - g_SoNx[seg]) * t;
+        fy = (double)g_SoNy[seg] + (double)(g_SoNy[seg + 1] - g_SoNy[seg]) * t;
+        SO_Queue(idx[k], SO_Rnd(fx), SO_Rnd(fy));
     }
 }
 
@@ -614,10 +616,10 @@ static void AS_ArcGroup(int* idx, int n)
  * 攻击改移动 (不摧毁建筑; 纯坦克则照常攻击, 与左键一致)。
  * 返回 0=全移动请调用方散开, 1=对象令已下, 2=无操作 (禁散开,
  * 终点有对象时绝不往对象格散开, 防走到脸上再自动开火)。 */
-static int AS_SmartPoint(int bx, int by, void* tgt)
+static int SO_SmartPoint(int bx, int by, void* tgt)
 {
     int i, tgtWhat, tgtTid = 0;
-    static int missions[AS_CAP];
+    static int missions[SO_CAP];
     int nAtk = 0, nEnt = 0, nGar = 0, nCap = 0, nMov = 0;
     int gAct = -1, gMiss = -1;
     int fbMode = 0; /* 全局不可用时的逐单位回落 */
@@ -634,7 +636,7 @@ static int AS_SmartPoint(int bx, int by, void* tgt)
     /* 全局决策: 游戏自己定 (只读 DecideAction)。 */
     gAct = OU_DecideAction(bx, by, tgt);
     if (gAct < 0) return 0;
-    gMiss = AS_MissionFor(tgtWhat, gAct);
+    gMiss = SO_MissionFor(tgtWhat, gAct);
     if (gMiss == MISSION_MOVE) return 0; /* 移动: 调用方散开 */
     if (gMiss < 0)
     {
@@ -642,18 +644,18 @@ static int AS_SmartPoint(int bx, int by, void* tgt)
          * 有单位能攻击/进入/进驻/占领就下单 (防全局误判吞令);
          * 否则无操作 (绝不往对象上散开)。 */
         fbMode = 1;
-        for (i = 0; i < g_AsCount; i++)
+        for (i = 0; i < g_SoCount; i++)
         {
-            ASUnit* u = &g_AsUnits[i];
+            SOUnit* u = &g_SoUnits[i];
             int act, ms;
             missions[i] = -1;
             if (u->fly != 1 && u->fly != 0) continue;
             if (u->w != ABS_UNIT && u->w != ABS_AIRCRAFT && u->w != ABS_INFANTRY)
                 continue;
-            if (!OU_PtrAlive(u->unit, u->id, g_AsIdxOk)) continue;
+            if (!OU_PtrAlive(u->unit, u->id, g_SoIdxOk)) continue;
             act = OU_MouseOverObject(u->unit, tgt);
             if (act < 0) ms = -1;
-            else ms = AS_MissionFor(tgtWhat, act);
+            else ms = SO_MissionFor(tgtWhat, act);
             if (ms == MISSION_ATTACK || ms == MISSION_ENTER ||
                 ms == MISSION_SABOTAGE || ms == MISSION_CAPTURE)
                 missions[i] = ms;
@@ -665,18 +667,18 @@ static int AS_SmartPoint(int bx, int by, void* tgt)
     {
     /* 逐单位能力过滤 (只读 MouseOver): 与全局同任务才下单,
      * 本会移动的跟随移动, 其它分歧按无操作 (与原生 fail 分支同效果)。 */
-    for (i = 0; i < g_AsCount; i++)
+    for (i = 0; i < g_SoCount; i++)
     {
-        ASUnit* u = &g_AsUnits[i];
+        SOUnit* u = &g_SoUnits[i];
         int act, ms;
         missions[i] = -1;
         if (u->fly != 1 && u->fly != 0) continue;
         if (u->w != ABS_UNIT && u->w != ABS_AIRCRAFT && u->w != ABS_INFANTRY)
             continue;
-        if (!OU_PtrAlive(u->unit, u->id, g_AsIdxOk)) continue;
+        if (!OU_PtrAlive(u->unit, u->id, g_SoIdxOk)) continue;
         act = OU_MouseOverObject(u->unit, tgt);
         if (act < 0) ms = -1;
-        else ms = AS_MissionFor(tgtWhat, act);
+        else ms = SO_MissionFor(tgtWhat, act);
         if (ms == gMiss) missions[i] = ms;
         else if (ms == MISSION_MOVE) missions[i] = MISSION_MOVE;
         else missions[i] = -1;
@@ -686,7 +688,7 @@ static int AS_SmartPoint(int bx, int by, void* tgt)
     if (tgtWhat == ABS_BUILDING)
     {
         int hasGar = 0;
-        for (i = 0; i < g_AsCount; i++)
+        for (i = 0; i < g_SoCount; i++)
         {
             if (missions[i] == MISSION_SABOTAGE || missions[i] == MISSION_CAPTURE ||
                 missions[i] == MISSION_ENTER) { hasGar = 1; break; }
@@ -694,16 +696,16 @@ static int AS_SmartPoint(int bx, int by, void* tgt)
         if (hasGar)
         {
             if (gMiss == MISSION_ATTACK) gMiss = MISSION_SABOTAGE;
-            for (i = 0; i < g_AsCount; i++)
+            for (i = 0; i < g_SoCount; i++)
             {
                 if (missions[i] == MISSION_ATTACK)
                     missions[i] = MISSION_MOVE;
             }
         }
     }
-    for (i = 0; i < g_AsCount; i++)
+    for (i = 0; i < g_SoCount; i++)
     {
-        if (g_AsUnits[i].fly != 1 && g_AsUnits[i].fly != 0) continue;
+        if (g_SoUnits[i].fly != 1 && g_SoUnits[i].fly != 0) continue;
         if (missions[i] == MISSION_ATTACK) nAtk++;
         else if (missions[i] == MISSION_ENTER) nEnt++;
         else if (missions[i] == MISSION_SABOTAGE) nGar++;
@@ -715,26 +717,26 @@ static int AS_SmartPoint(int bx, int by, void* tgt)
     if (nAtk + nEnt + nGar + nCap <= 0)
         return 2; /* 无对象令: 无操作, 禁往对象散开 */
     /* 对象令入队 (攻击 Target=敌, 进入类 Destination=目标)。 */
-    for (i = 0; i < g_AsCount; i++)
+    for (i = 0; i < g_SoCount; i++)
     {
         int ms = missions[i];
         if (ms == MISSION_MOVE || ms < 0) continue;
-        if (g_AsUnits[i].fly != 1 && g_AsUnits[i].fly != 0) continue;
-        if (g_AsObjCount >= AS_PEND_CAP) break;
-        g_AsObj[g_AsObjCount].unit = g_AsUnits[i].unit;
-        g_AsObj[g_AsObjCount].uid = g_AsUnits[i].id;
-        g_AsObj[g_AsObjCount].tgt = tgt;
-        g_AsObj[g_AsObjCount].tid = tgtTid;
-        g_AsObj[g_AsObjCount].mission = ms;
-        g_AsObjCount++;
+        if (g_SoUnits[i].fly != 1 && g_SoUnits[i].fly != 0) continue;
+        if (g_SoObjCount >= SO_PEND_CAP) break;
+        g_SoObj[g_SoObjCount].unit = g_SoUnits[i].unit;
+        g_SoObj[g_SoObjCount].uid = g_SoUnits[i].id;
+        g_SoObj[g_SoObjCount].tgt = tgt;
+        g_SoObj[g_SoObjCount].tid = tgtTid;
+        g_SoObj[g_SoObjCount].mission = ms;
+        g_SoObjCount++;
     }
     /* 移动子集绕目标散开 (配额与原点按一致: 步兵3/格, 飞机/车辆1/格)。
      * 建筑目标跳过中心格 (本格极可能是建筑本体, 不往上派移动令,
      * 防引擎转移动为攻击); 环从 r=1 起。
-     * 子集落点转换时护航目标不转回攻击 (见 g_AsProtTgt)。 */
+     * 子集落点转换时护航目标不转回攻击 (见 g_SoProtTgt)。 */
     if (nMov > 0)
     {
-        g_AsProtTgt = tgt;
+        g_SoProtTgt = tgt;
         static int qcx[512], qcy[512];
         static int quA[512], quI[512], quV[512];
         int qn = 0, r, k;
@@ -761,9 +763,9 @@ static int AS_SmartPoint(int bx, int by, void* tgt)
                 if (OU_CellValid(bx - r, by + dy))
                 { qcx[qn] = bx - r; qcy[qn] = by + dy; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
         }
-        for (k = 0; k < g_AsCount; k++)
+        for (k = 0; k < g_SoCount; k++)
         {
-            ASUnit* u = &g_AsUnits[k];
+            SOUnit* u = &g_SoUnits[k];
             int cap, c;
             if (missions[k] != MISSION_MOVE) continue;
             if (u->fly != 1 && u->fly != 0) continue;
@@ -773,43 +775,43 @@ static int AS_SmartPoint(int bx, int by, void* tgt)
                 if (u->w == ABS_INFANTRY) { cap = 3; if (quI[c] >= cap) continue; quI[c]++; }
                 else if (u->w == ABS_AIRCRAFT) { cap = 1; if (quA[c] >= cap) continue; quA[c]++; }
                 else { cap = 1; if (quV[c] >= cap) continue; quV[c]++; }
-                AS_Queue(k, qcx[c], qcy[c]);
+                SO_Queue(k, qcx[c], qcy[c]);
                 break;
             }
             (void)cap;
         }
     }
-    AS_Drain();
+    SO_Drain();
     return 1;
 }
 
-static void AS_Release(void)
+static void SO_Release(void)
 {
     int bx, by, mx, my;
     int i;
-    static int airList[AS_CAP], gndList[AS_CAP];
+    static int airList[SO_CAP], gndList[SO_CAP];
     int airN = 0, gndN = 0;
     void* tgt = 0;
-    g_AsArmed = 0;
+    g_SoArmed = 0;
     if (OU_MouseCellTarget(&bx, &by, &tgt, &mx, &my))
     {
         /* 松开格收尾 (与末节点不同则补记, 尾段不丢)。 */
-        if (g_AsNodeCount > 0 &&
-            (bx != g_AsNx[g_AsNodeCount - 1] || by != g_AsNy[g_AsNodeCount - 1]) &&
-            g_AsNodeCount < AS_NODE_CAP && OU_CellValid(bx, by))
+        if (g_SoNodeCount > 0 &&
+            (bx != g_SoNx[g_SoNodeCount - 1] || by != g_SoNy[g_SoNodeCount - 1]) &&
+            g_SoNodeCount < SO_NODE_CAP && OU_CellValid(bx, by))
         {
-            g_AsNx[g_AsNodeCount] = bx; g_AsNy[g_AsNodeCount] = by;
-            g_AsNPx[g_AsNodeCount] = mx; g_AsNPy[g_AsNodeCount] = my;
-            g_AsNodeCount++;
+            g_SoNx[g_SoNodeCount] = bx; g_SoNy[g_SoNodeCount] = by;
+            g_SoNPx[g_SoNodeCount] = mx; g_SoNPy[g_SoNodeCount] = my;
+            g_SoNodeCount++;
         }
     }
-    else if (g_AsNodeCount > 0) { bx = g_AsNx[g_AsNodeCount - 1]; by = g_AsNy[g_AsNodeCount - 1]; }
+    else if (g_SoNodeCount > 0) { bx = g_SoNx[g_SoNodeCount - 1]; by = g_SoNy[g_SoNodeCount - 1]; }
     else return;
     /* 存活过滤: 淘汰死单位 (fly=-1); 分组: fly==1 空军, fly==0 地面。 */
-    for (i = 0; i < g_AsCount; i++)
+    for (i = 0; i < g_SoCount; i++)
     {
-        ASUnit* u = &g_AsUnits[i];
-        if (!OU_PtrAlive(u->unit, u->id, g_AsIdxOk)) { u->fly = -1; continue; }
+        SOUnit* u = &g_SoUnits[i];
+        if (!OU_PtrAlive(u->unit, u->id, g_SoIdxOk)) { u->fly = -1; continue; }
         if (u->fly == 1) airList[airN++] = i;
         else if (u->fly == 0) gndList[gndN++] = i;
     }
@@ -817,12 +819,12 @@ static void AS_Release(void)
     {
         void* cur = *(void**)ADDR_CURPLAYER;
         if (!cur || !IsPlausiblePtr(cur)) return;
-        g_AsHouse = cur;
-        g_AsHouseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
+        g_SoHouse = cur;
+        g_SoHouseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
     }
-    g_AsPendCount = 0;
-    g_AsObjCount = 0;
-    g_AsProtTgt = 0;
+    g_SoPendCount = 0;
+    g_SoObjCount = 0;
+    g_SoProtTgt = 0;
     if (tgt)
     {
         /* 终点点中对象: 先走智能自适应 (攻击/进入/进驻/占领)。
@@ -830,10 +832,10 @@ static void AS_Release(void)
          * (SmartPoint 内部已排空, 绝不能以队列余量判断,
          * 否则已发的单会被弧形移动覆盖)。r==0 全移动:
          * 点按走点散开, 划线走弧形 (保阵型)。 */
-        int r = AS_SmartPoint(bx, by, tgt);
+        int r = SO_SmartPoint(bx, by, tgt);
         if (r) return;
     }
-    if (g_AsNodeCount <= 1)
+    if (g_SoNodeCount <= 1)
     {
         /* 点按: 像左键点移动一样到目的地, 按配额分开。
          * 步兵 3/格, 飞机 1/格, 车辆 1/格 (三类计数独立)。
@@ -868,9 +870,9 @@ static void AS_Release(void)
                 { qcx[qn] = bx - r; qcy[qn] = by + dy; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
             }
         }
-        for (i = 0; i < g_AsCount; i++)
+        for (i = 0; i < g_SoCount; i++)
         {
-            ASUnit* u = &g_AsUnits[i];
+            SOUnit* u = &g_SoUnits[i];
             int cap, c;
             if (u->fly != 1 && u->fly != 0) continue;
             if (u->w != ABS_UNIT && u->w != ABS_AIRCRAFT && u->w != ABS_INFANTRY) continue;
@@ -879,56 +881,56 @@ static void AS_Release(void)
                 if (u->w == ABS_INFANTRY) { cap = 3; if (quI[c] >= cap) continue; quI[c]++; }
                 else if (u->w == ABS_AIRCRAFT) { cap = 1; if (quA[c] >= cap) continue; quA[c]++; }
                 else { cap = 1; if (quV[c] >= cap) continue; quV[c]++; }
-                AS_Queue(i, qcx[c], qcy[c]);
+                SO_Queue(i, qcx[c], qcy[c]);
                 break;
             }
             (void)cap;
         }
-        AS_Drain();
+        SO_Drain();
         return;
     }
     /* 划线: 空军/地面分组, 各按轨迹弧长重采样为本组槽位数 (弧形怎么画就怎么排)。 */
-    AS_ArcGroup(airList, airN);
-    AS_ArcGroup(gndList, gndN);
-    AS_Drain();
+    SO_ArcGroup(airList, airN);
+    SO_ArcGroup(gndList, gndN);
+    SO_Drain();
 }
 
-void AirSpread_Poll(void)
+void SmartOrder_Poll(void)
 {
     int trigDown;
-    AS_EnsureInit();
-    trigDown = OU_KeyDown(g_AsHk.vk);
-    if (!g_AsEnable) { g_AsArmed = 0; g_AsPrevTrig = trigDown; return; }
-    if (g_AsPendCount > 0 || g_AsObjCount > 0) { AS_Drain(); g_AsPrevTrig = trigDown; return; }
-    if (trigDown && g_AsArmed)
+    SO_EnsureInit();
+    trigDown = OU_KeyDown(g_SoHk.vk);
+    if (!g_SoEnable) { g_SoArmed = 0; g_SoPrevTrig = trigDown; return; }
+    if (g_SoPendCount > 0 || g_SoObjCount > 0) { SO_Drain(); g_SoPrevTrig = trigDown; return; }
+    if (trigDown && g_SoArmed)
     {
         /* 按住途中加了 Hotkey 附加键/修饰键、Z/Ctrl 或组合中键即改主意了:
          * 散开取消待命 (松开不执行), 执行权交巡逻/砍树/模糊/区域自适应
          * (它们按松开瞬间组合键判定; 区域自适应关则不认领, 照旧散开)。 */
-        if (!OU_ModsDown(g_AsHk.mods) || !OU_ExtraDown(&g_AsHk) ||
+        if (!OU_ModsDown(g_SoHk.mods) || !OU_ExtraDown(&g_SoHk) ||
             OU_KeyDown('Z') || OU_KeyDown(VK_CONTROL) ||
             SmartArea_ClaimsMiddle())
-            g_AsArmed = 0;
+            g_SoArmed = 0;
     }
-    if (trigDown && g_AsArmed)
+    if (trigDown && g_SoArmed)
     {
         /* 按住拖动: 采样轨迹节点 (格+实测像素, 稀疏记录, 弧形槽位源)。 */
         int cx, cy, px, py;
         if (OU_MouseCellPx(&cx, &cy, &px, &py))
-            AS_NodePush(cx, cy, px, py);
+            SO_NodePush(cx, cy, px, py);
     }
-    if (trigDown && !g_AsPrevTrig)
+    if (trigDown && !g_SoPrevTrig)
     {
         /* 按下: Z 按住时归 PatrolCircle, Ctrl 按住时归 FuzzyAttack,
          * 组合中键按住时归 SmartArea, 这里只认 Hotkey 裸键 (互斥见上面)。 */
-        if (OU_ModsDown(g_AsHk.mods) && OU_ExtraDown(&g_AsHk) &&
+        if (OU_ModsDown(g_SoHk.mods) && OU_ExtraDown(&g_SoHk) &&
             !OU_KeyDown('Z') && !OU_KeyDown(VK_CONTROL) &&
             !SmartArea_ClaimsMiddle())
-            AS_Press();
+            SO_Press();
     }
-    else if (!trigDown && g_AsPrevTrig && g_AsArmed)
-        AS_Release();
-    g_AsPrevTrig = trigDown;
+    else if (!trigDown && g_SoPrevTrig && g_SoArmed)
+        SO_Release();
+    g_SoPrevTrig = trigDown;
 }
 
 /* ---------------- 渲染期橡皮线 (3px 高亮) ---------------- */
@@ -936,7 +938,7 @@ void AirSpread_Poll(void)
 static unsigned char* s_AsLocked = 0;
 static int s_AsW = 0, s_AsH = 0, s_AsPitch = 0;
 
-static void AS_Plot(int x, int y, unsigned a)
+static void SO_Plot(int x, int y, unsigned a)
 {
     unsigned short* dstRow;
     if (x < 0 || y < 0 || x >= s_AsW || y >= s_AsH) return;
@@ -945,7 +947,7 @@ static void AS_Plot(int x, int y, unsigned a)
 }
 
 /* 3px 线 (Bresenham + 上下各 1px, 零依赖)。 */
-static void AS_Line(int x0, int y0, int x1, int y1, unsigned a)
+static void SO_Line(int x0, int y0, int x1, int y1, unsigned a)
 {
     int dx, dy, sx, sy, err, e2, x, y, n;
     dx = x1 - x0; dy = y1 - y0;
@@ -956,9 +958,9 @@ static void AS_Line(int x0, int y0, int x1, int y1, unsigned a)
     x = x0; y = y0;
     for (n = 0; n < 4096; n++)
     {
-        AS_Plot(x, y, a);
-        AS_Plot(x, y - 1, a);
-        AS_Plot(x, y + 1, a);
+        SO_Plot(x, y, a);
+        SO_Plot(x, y - 1, a);
+        SO_Plot(x, y + 1, a);
         if (x == x1 && y == y1) break;
         e2 = err * 2;
         if (e2 > -dy) { err -= dy; x += sx; }
@@ -967,32 +969,32 @@ static void AS_Line(int x0, int y0, int x1, int y1, unsigned a)
 }
 
 /* 实心方块标记 (半边 m)。 */
-static void AS_Mark(int cx, int cy, int m, unsigned a)
+static void SO_Mark(int cx, int cy, int m, unsigned a)
 {
     int k, j;
     for (k = -m; k <= m; k++)
         for (j = -m; j <= m; j++)
-            AS_Plot(cx + k, cy + j, a);
+            SO_Plot(cx + k, cy + j, a);
 }
 
-void AirSpread_Draw(void* surf, int w, int h, int pitch)
+void SmartOrder_Draw(void* surf, int w, int h, int pitch)
 {
     unsigned char* vt;
-    AS_LockFn lockFn;
-    AS_UnlockFn unlockFn;
+    SO_LockFn lockFn;
+    SO_UnlockFn unlockFn;
     unsigned char* locked;
     int x0, y0, x1, y1;
     extern int g_Calibrated;
-    if (!g_AsEnable || !g_AsArmed) return;
+    if (!g_SoEnable || !g_SoArmed) return;
     if (!g_Calibrated) return;
     if (!surf || !IsPlausiblePtr(surf)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;
     if (!GtMouseGameXY(&x1, &y1)) return;
-    x0 = g_AsPx; y0 = g_AsPy;
+    x0 = g_SoPx; y0 = g_SoPy;
     vt = *(unsigned char**)surf;
     if (!vt || !IsPlausiblePtr(vt)) return;
-    lockFn = (AS_LockFn)(*(void**)(vt + VT_AS_LOCK));
-    unlockFn = (AS_UnlockFn)(*(void**)(vt + VT_AS_UNLOCK));
+    lockFn = (SO_LockFn)(*(void**)(vt + VT_SO_LOCK));
+    unlockFn = (SO_UnlockFn)(*(void**)(vt + VT_SO_UNLOCK));
     if (!lockFn || !unlockFn) return;
     locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
     if (!locked || !IsPlausiblePtr(locked)) return;
@@ -1002,19 +1004,19 @@ void AirSpread_Draw(void* surf, int w, int h, int pitch)
      * 整体漂, 这是引擎行为, 与 PatrolCircle 同 caveat。 */
     {
         int i, ex, ey;
-        int nc = g_AsNodeCount;
-        if (nc > AS_NODE_CAP) nc = AS_NODE_CAP;
+        int nc = g_SoNodeCount;
+        if (nc > SO_NODE_CAP) nc = SO_NODE_CAP;
         ex = x0; ey = y0;
         for (i = 0; i < nc; i++)
         {
-            int nx = g_AsNPx[i], ny = g_AsNPy[i];
-            if (i > 0) AS_Line(ex, ey, nx, ny, 230);
-            AS_Mark(nx, ny, 1, 230);
+            int nx = g_SoNPx[i], ny = g_SoNPy[i];
+            if (i > 0) SO_Line(ex, ey, nx, ny, 230);
+            SO_Mark(nx, ny, 1, 230);
             ex = nx; ey = ny;
         }
-        AS_Line(ex, ey, x1, y1, 230);
-        AS_Mark(x0, y0, 3, 255); /* 锚点 7x7 */
-        AS_Mark(x1, y1, 2, 255); /* 当前 5x5 */
+        SO_Line(ex, ey, x1, y1, 230);
+        SO_Mark(x0, y0, 3, 255); /* 锚点 7x7 */
+        SO_Mark(x1, y1, 2, 255); /* 当前 5x5 */
     }
     s_AsLocked = 0;
     unlockFn(surf, NULL);
