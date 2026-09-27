@@ -2,11 +2,13 @@
  * 目标太小点不中时用)。
  *
  * 触发: 按住 Ctrl (避开 Z) 的同时按住鼠标中键 (Hotkey, 默认 Ctrl+Middle),
- * 显示生效格块菱形框, 松开才在当前格执行: 以鼠标格为基准扫
- * Range x Range (默认 4x4, 可配 2~16) 找敌方对象, 选中单位分组
- * 强制攻击 (MegaMission Mission=Attack=1, Target=敌对象,
+ * 显示生效格块菱形框 + 红色规划细线 (单位→分到的敌, 与松手分组同规则,
+ * 预览限 128 线, 换格或 400ms 刷一次, 松手即消), 松开才在当前格执行:
+ * 以鼠标格为基准扫 Range x Range (默认 4x4, 可配 2~16) 找敌方对象,
+ * 选中单位分组强制攻击 (MegaMission Mission=Attack=1, Target=敌对象,
  * 直接下令 IsPlanningEvent=0)。
  * 点中敌人则它在 0 环必在首位; 点空地则扫附近敌人。
+ * 端点坐标走 OU_GetCoords (vtbl+0x48, 范围校验), 投影与框同系。
  * 与巡逻圈/砍树/散开全互斥: 要 Ctrl 且不能按 Z
  * (Z+中键=巡逻, Ctrl+Z+中键=砍树, 裸中键=散开)。
  *
@@ -298,6 +300,106 @@ static void FA_Drain(void)
     }
 }
 
+/* ---------------- 规划线预览 (按住时跑, 与松手分组同规则) ---------------- */
+
+#define FA_PREV_CAP 128
+static int s_FaPrevUx[FA_PREV_CAP], s_FaPrevUy[FA_PREV_CAP];
+static int s_FaPrevTx[FA_PREV_CAP], s_FaPrevTy[FA_PREV_CAP];
+static int s_FaPrevN = 0;
+static int s_FaPrevRefPx = 0, s_FaPrevRefPy = 0, s_FaPrevRefCx = 0, s_FaPrevRefCy = 0;
+static int s_FaVLogged = 0;   /* 本轮已记 fa: v (TMP, 定完删) */
+
+/* leptons → 屏像素 (预览参考点换算, 忽略高度, 与框同系)。 */
+static void FA_ProjLep(int lx, int ly, int* px, int* py)
+{
+    int dx = lx - (s_FaPrevRefCx * 256 + 128);
+    int dy = ly - (s_FaPrevRefCy * 256 + 128);
+    *px = s_FaPrevRefPx + (dx * 30 - dy * 30) / 256;
+    *py = s_FaPrevRefPy + (dx * 15 + dy * 15) / 256;
+}
+
+static void FA_PrevStore(void* u, void* t)
+{
+    CoordStruct a, b;
+    int ux, uy, tx, ty;
+    if (s_FaPrevN >= FA_PREV_CAP) return;
+    if (!OU_GetCoords(u, &a) || !OU_GetCoords(t, &b)) return;
+    FA_ProjLep(a.X, a.Y, &ux, &uy);
+    FA_ProjLep(b.X, b.Y, &tx, &ty);
+    s_FaPrevUx[s_FaPrevN] = ux; s_FaPrevUy[s_FaPrevN] = uy;
+    s_FaPrevTx[s_FaPrevN] = tx; s_FaPrevTy[s_FaPrevN] = ty;
+    s_FaPrevN++;
+}
+
+/* 预览: 当前块找敌、与 FA_Press 同式分组, 只存线不下令。
+ * 节流: 换格且距上次>80ms, 或超 400ms 刷一次。 */
+static void FA_Preview(void)
+{
+    void* cur;
+    void** items;
+    int selN, i, nu = 0, ne = 0, nUsed, pos;
+    int cx, cy, rpx, rpy;
+    unsigned now;
+    static unsigned s_LastMs = 0;
+    static int s_LastCx = -9999, s_LastCy = -9999;
+    static void* s_pu[FA_UNIT_CAP];
+    static void* s_pf[FA_ENEMY_CAP];
+    static int s_pfid[FA_ENEMY_CAP];
+    char vb[48], v1[16];
+    unsigned vq = 0;
+
+    now = GetTickCount();
+    if (!OU_MouseCell(&cx, &cy) || !GtMouseGameXY(&rpx, &rpy)) return;
+    if (now - s_LastMs < 80) return;
+    if (cx == s_LastCx && cy == s_LastCy && now - s_LastMs < 400) return;
+    s_LastMs = now;
+    s_LastCx = cx; s_LastCy = cy;
+    s_FaPrevRefPx = rpx; s_FaPrevRefPy = rpy;
+    s_FaPrevRefCx = cx; s_FaPrevRefCy = cy;
+    cur = *(void**)ADDR_CURPLAYER;
+    if (!cur || !IsPlausiblePtr(cur)) { s_FaPrevN = 0; return; }
+    selN = *(int*)ADDR_SELOBJ_COUNT;
+    items = *(void***)ADDR_SELOBJ_ITEMS;
+    if (selN <= 0 || !items || !IsPlausiblePtr(items)) { s_FaPrevN = 0; return; }
+    for (i = 0; i < selN && nu < FA_UNIT_CAP; i++)
+        if (FA_IsAttacker(items[i])) s_pu[nu++] = items[i];
+    if (nu <= 0) { s_FaPrevN = 0; return; }
+    if (!FA_CalOwner(s_pu[0], nu > 1 ? s_pu[1] : 0, cur))
+    { s_FaPrevN = 0; return; }
+    ne = FA_FindEnemies(cx, cy, cur, s_pf, s_pfid);
+    if (ne <= 0) { s_FaPrevN = 0; return; }
+    if (nu <= g_FaSquad)
+        nUsed = 1;
+    else
+    {
+        nUsed = nu / g_FaSquad;
+        if (nUsed < 1) nUsed = 1;
+        if (nUsed > ne) nUsed = ne;
+    }
+    s_FaPrevN = 0;
+    pos = 0;
+    {
+        int base = nu / nUsed, rem = nu % nUsed, j;
+        for (j = 0; j < nUsed && pos < nu; j++)
+        {
+            int take = base + (j < rem ? 1 : 0);
+            int k;
+            for (k = 0; k < take && pos < nu; k++, pos++)
+                FA_PrevStore(s_pu[pos], s_pf[j]);
+        }
+    }
+    /* TMP: 本轮首记对数, 定完删 */
+    if (!s_FaVLogged && s_FaPrevN > 0)
+    {
+        s_FaVLogged = 1;
+        vq = AppendCStr(vb, vq, "fa: v ", sizeof(vb));
+        UtoA((unsigned)s_FaPrevN, v1);
+        vq = AppendCStr(vb, vq, v1, sizeof(vb));
+        (void)vq;
+        LogLine(vb);
+    }
+}
+
 /* ---------------- 触发 ---------------- */
 
 static void FA_Press(void)
@@ -415,11 +517,21 @@ void FuzzyAttack_Poll(void)
     { FA_Drain(); g_FaPrevTrig = trigDown; return; } /* drip 续发 */
     if (!g_FaEnable) { g_FaPrevTrig = trigDown; return; }
     if (trigDown && !g_FaPrevTrig)
+    {
         FA_BoxReset();            /* 按下: 采样器清零 (无动作, 松开才执行) */
+        s_FaPrevN = 0;
+        s_FaVLogged = 0;
+    }
     if (trigDown && combo)
+    {
         FA_BoxSample();           /* 按住: 采样画框 (+像素质校准) */
+        FA_Preview();             /* 按住: 规划线预览 (红色, 松手即消) */
+    }
     else if (!trigDown && g_FaPrevTrig && combo)
+    {
+        s_FaPrevN = 0;
         FA_Press();               /* 松开: 当前格执行 */
+    }
     g_FaPrevTrig = trigDown;
 }
 
@@ -489,6 +601,32 @@ static void FA_Mark(int cx, int cy, int m, unsigned a)
             FA_Plot(cx + k, cy + j, a);
 }
 
+/* 细线 (Bresenham 单像素, 规划线用, 自带裁剪)。 */
+static void FA_ThinLine(int x0, int y0, int x1, int y1,
+                        unsigned r, unsigned g, unsigned b, unsigned a)
+{
+    int dx, dy, sx, sy, err, e2, x, y, n;
+    unsigned short* dstRow;
+    dx = x1 - x0; dy = y1 - y0;
+    sx = (dx >= 0) ? 1 : -1;
+    sy = (dy >= 0) ? 1 : -1;
+    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
+    err = dx - dy;
+    x = x0; y = y0;
+    for (n = 0; n < 4096; n++)
+    {
+        if (x >= 0 && y >= 0 && x < s_FaW && y < s_FaH)
+        {
+            dstRow = (unsigned short*)(s_FaLocked + y * s_FaPitch);
+            dstRow[x] = Blend16(dstRow[x], r, g, b, a);
+        }
+        if (x == x1 && y == y1) break;
+        e2 = err * 2;
+        if (e2 > -dy) { err -= dy; x += sx; }
+        if (e2 < dx) { err += dx; y += sy; }
+    }
+}
+
 /* 格块角 → 像素 (参考点 + 固定等距差)。 */
 static void FA_BoxCorner(int ccx, int ccy, int* px, int* py)
 {
@@ -536,6 +674,13 @@ void FuzzyAttack_Draw(void* surf, int w, int h, int pitch)
     FA_Mark(x1, y1, 1, 230);
     FA_Mark(x2, y2, 1, 230);
     FA_Mark(x3, y3, 1, 230);
+    /* 规划线 (红色细线, 单位→分到的敌, 只在按住时存在)。 */
+    {
+        int k;
+        for (k = 0; k < s_FaPrevN; k++)
+            FA_ThinLine(s_FaPrevUx[k], s_FaPrevUy[k],
+                        s_FaPrevTx[k], s_FaPrevTy[k], 255, 0, 0, 255);
+    }
     s_FaLocked = 0;
     unlockFn(surf, NULL);
 }

@@ -128,6 +128,33 @@ int OU_MouseOverObject(void* self, void* target)
     return fn(self, target, 0);
 }
 
+typedef CoordStruct* __attribute__((thiscall)) (*Fn_GetCoords)(void* self, CoordStruct* out);
+
+#define OU_LEP_PER_CELL 256
+#define OU_MAP_CELLS 512
+
+/* vtbl+0x48 取坐标 + 范围校验 (地图 512 格内, |z| < 8192)。 */
+int OU_GetCoords(void* p, CoordStruct* out)
+{
+    void** vt;
+    Fn_GetCoords fn;
+    CoordStruct cs;
+    if (!p || !IsPlausiblePtr(p) || !out) return 0;
+    vt = *(void***)p;
+    if (!vt || !IsPlausiblePtr(vt)) return 0;
+    fn = (Fn_GetCoords)vt[0x48 / 4];
+    if (!fn || !IsPlausiblePtr((const void*)fn)) return 0;
+    cs.X = cs.Y = cs.Z = 0;
+    fn(p, &cs);
+    if (cs.X < 0 || cs.Y < 0 ||
+        cs.X >= OU_MAP_CELLS * OU_LEP_PER_CELL ||
+        cs.Y >= OU_MAP_CELLS * OU_LEP_PER_CELL)
+        return 0;
+    if (cs.Z < -8192 || cs.Z > 8192) return 0;
+    *out = cs;
+    return 1;
+}
+
 typedef int __attribute__((thiscall)) (*Fn_DecideAction)(void* disp, void* cell, void* obj, int unk);
 #define FN_DECID ((Fn_DecideAction)(void*)0x692610u)
 

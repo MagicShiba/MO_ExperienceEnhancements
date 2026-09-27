@@ -80,6 +80,11 @@ int OU_MouseCellTarget(int* cx, int* cy, void** tgtOut, int* px, int* py);
  * 经 vtbl+0x74 (MouseOverObject) 调用, 与 DecideAction 内部同入口;
  * 只读不下单, 不写模拟内存。失败回 -1。 */
 int OU_MouseOverObject(void* self, void* target);
+/* 对象中心坐标 (只读, 联机安全): vtbl+0x48 (Techno MouseOver 头部
+ * 0x4DDED0 内同槽调用, 取出后做格查询, 实证是取坐标)。
+ * 成功写 *out (leptons, 1 格=256) 回 1; 槽坏/越界回 0。
+ * 注意: 地址系反汇编推断, 调用方必须另做合理性兜底 (本函数已做范围校验)。 */
+int OU_GetCoords(void* p, CoordStruct* out);
 /* 全局自适应决策 (只读, 联机安全): DisplayClass::DecideAction (0x692610),
  * 与左右键下单前引擎调的同一函数 (按选中代表综合判定, 只回 Action 不下单)。
  * 全函数反汇编实证: 无事件构造/OutList 引用, 纯读。

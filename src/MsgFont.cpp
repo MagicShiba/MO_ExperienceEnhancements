@@ -32,7 +32,7 @@
 #include "MindSelect.h"
 #include "OrderUtil.h"
 
-#define MF_VERSION   "0.2.122d"
+#define MF_VERSION   "0.2.129d"
 #define MF_SECTION   "MsgFont"
 
 /* ---------------- 地址 ---------------- */
