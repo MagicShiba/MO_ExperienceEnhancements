@@ -7,7 +7,7 @@
  *   交互: 0x777998 滚轮翻历史; 0x533F50 悬停时跳过侧栏滚动;
  *         0x55E477/62F/693/746 单人聊天框 (跳过 session 检查)。
  *   T 键建筑全选见 TypeSelect.cpp。
- *   中键散开见 AirSpread.cpp (裸中键, 渲染期橡皮线)。
+ *   中键智能下令见 AirSpread.cpp (裸中键点按自适应/划线散开, 渲染期橡皮线)。
  *   飞行器路径点见 AirWay.cpp (运行时虚表槽 0x7E2908, lazy 补丁;
  *   Syringe 0x41BA90 总入口观察; DIAG 虚表 +0x200/+0x1EC 槽观察; 只读轮询)。
  * 任何一步失败 (Lock 不上、GDI 未就绪) 都返回 0 走原版绘制, 绝不花屏。
@@ -1879,7 +1879,7 @@ static void PowerDrawBoth(void)
     AirWay_Poll();   /* 每循环必跑的只读飞机轮询 (AirWay, 开关关时直接返回) */
     BuildQueue_Poll(); /* 每循环必跑的建筑本地排队 (BuildQueue, 开关关/队列空时直接返回) */
     PatrolCircle_Poll(); /* Z+中键一键巡逻圈 (开关关/无触发时直接返回) */
-    AirSpread_Poll(); /* 裸中键划线散开 (Z 让路巡逻圈, Ctrl 让路模糊攻击) */
+    AirSpread_Poll(); /* 裸中键智能下令 (点按自适应/划线散开; Z 让路巡逻, Ctrl 让路模糊) */
     TreeChop_Poll(); /* Ctrl+Z+中键快速砍树 (开关关/无触发时直接返回) */
     FuzzyAttack_Poll(); /* Ctrl+中键模糊攻击 (开关关/无触发时直接返回) */
     MindSelect_Poll(); /* Shift+P 一步选中被心控单位 (开关关/无组合键时直接返回) */

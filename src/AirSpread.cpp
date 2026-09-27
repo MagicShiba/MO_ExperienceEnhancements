@@ -1,20 +1,29 @@
-/* AirSpread.cpp - 中键散开 v3。
+/* AirSpread.cpp - 中键智能下令 (点按自适应/划线散开, 原散开升级)。
  *
- * 点按 (无拖线): 像左键点移动一样到达目的地, 只是按配额分开:
- * 步兵 3/格, 飞机/车辆 1/格 (以目标格为中心螺旋向外找格)。
- * 划线: 拖动轨迹采样为稀疏节点 (NodeStep 格一步, 上限 64),
- * 空军组/地面组各按弧长重采样为本组槽位数, 每单位一道标准移动令。
- * 弧形怎么画, 单位就怎么排。左键下令原样不动。
- * 下令: 标准 0x04 MegaMission 普通移动 (IsPlanningEvent=0, 与手点右键同形),
- * 每单位目标格显式, OutList 满则 drip 跨帧续发; 发前验活, house 变化则清空。
- * 落点: 插值格无效则半径 5 环搜有效格, 找不到则丢弃该单位 (记 dst -1)。
+ * 决策 (只读, 联机安全): 终点有对象时调 DecideAction 0x692610
+ * (与左键下单前同一函数, 全范围无事件构造/OutList 引用),
+ * 逐单位用 MouseOverObject (vtbl+0x74) 做能力过滤;
+ * 不调 ObjectClickedAction/ClickedMission (写本地状态)。
+ * 终点是空地时不决策, 直接散开。
+ * 映射 (0x4D74E0 跳转表): 攻击→Mission1, 进载具→Enter7,
+ * 进驻/占领→Capture8 (步兵进民房原生即此); 未知动作无操作。
+ * 护驻军: 建筑可进驻但全局判攻击时, 进驻单位照进驻、攻击改移动。
+ * 落点转换: 散开落点压到建筑上时按直接下令 (进驻/攻击), 空军除外;
+ * 护航不转回攻击; 移动散开跳过建筑中心格。
+ * 散开: 点按螺旋配额 (步兵 3/格, 飞机/车辆 1/格);
+ * 划线按轨迹弧长重采样, 空军/地面分组, 弧形怎么画就怎么排。
+ * 下令: 标准 0x04 MegaMission (IsPlanningEvent=0, 与手点同形),
+ * 目标显式, OutList 满 drip 跨帧续发; 发前验活, house 变化清空。
+ * 落点无效则半径 5 环搜, 找不到丢弃该单位。
  * 分类: Aircraft 恒飞; 步兵/车辆 MZ==Fly(9), ST==Winged(4) 兜底。
+ * 左键下令原样不动。
  *
  * 联机: 只发标准事件, 各端同一份原版代码执行。本地只读 + 标准事件入队,
- * 不写模拟内存。下令端本地算、广播显式结果 (RACommands 同路线)。
+ * 不写模拟内存。
  *
  * 构建见 构建.bat (32 位 mingw, 无 CRT, 与 MsgFont 同一 DLL)。
  * 轮询挂 PowerDrawBoth, 橡皮线挂 MsgFont_MessageDrawHook (见 MsgFont.cpp)。
+ * 日志: 仅启动行；诊断临时加行，用完即删。
  */
 
 #include <windows.h>
@@ -70,7 +79,7 @@ static void AS_EnsureInit(void)
     g_AsNodeStep = GetPrivateProfileIntA(AS_SECTION, "NodeStep", 2, g_IniPath);
     if (g_AsNodeStep < 1) g_AsNodeStep = 1;
     if (g_AsNodeStep > 8) g_AsNodeStep = 8;
-    LogLine("airspread: ON (middle spread)");
+    LogLine("airspread: ON (middle smart)");
     if (!g_AsEnable) LogLine("airspread: OFF");
 }
 
@@ -188,7 +197,7 @@ static void* AS_TypeOf(void* u, int w)
 
 /* ---------------- 快照与触发 ---------------- */
 
-typedef struct { void* unit; int id; int w; int fly; char type[24]; } ASUnit;
+typedef struct { void* unit; int id; int w; int fly; } ASUnit;
 
 static ASUnit g_AsUnits[AS_CAP];
 static int g_AsCount = 0;
@@ -226,39 +235,14 @@ static void AS_NodePush(int cx, int cy, int px, int py)
     g_AsNodeCount++;
 }
 
-static void AS_LogU(int i)
-{
-    char buf[128], b1[16], b2[16], b3[16];
-    unsigned q = 0;
-    int k;
-    ASUnit* u = &g_AsUnits[i];
-    q = AppendCStr(buf, q, "as: u w=", sizeof(buf));
-    UtoA((unsigned)u->w, b1);
-    q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCStr(buf, q, " fid=", sizeof(buf));
-    UtoA((unsigned)u->id, b2);
-    q = AppendCStr(buf, q, b2, sizeof(buf));
-    q = AppendCStr(buf, q, " type=\"", sizeof(buf));
-    for (k = 0; k < 24 && u->type[k]; k++)
-        q = AppendCh(buf, q, u->type[k], sizeof(buf));
-    q = AppendCStr(buf, q, "\" fly=", sizeof(buf));
-    UtoA((unsigned)u->fly, b3);
-    q = AppendCStr(buf, q, b3, sizeof(buf));
-    (void)q;
-    LogLine(buf);
-}
-
 static void AS_Press(void)
 {
     void** items;
-    int selN, i, nu = 0, fly = 0;
+    int selN, i, nu = 0;
     int ax, ay, mx, my;
-    char b1[16], b2[16], b3[16], buf[128];
-    unsigned q;
     selN = *(int*)ADDR_SELOBJ_COUNT;
     items = *(void***)ADDR_SELOBJ_ITEMS;
-    if (selN <= 0 || !items || !IsPlausiblePtr(items))
-    { LogLine("as: no selection"); return; }
+    if (selN <= 0 || !items || !IsPlausiblePtr(items)) return;
     for (i = 0; i < selN && nu < AS_CAP; i++)
     {
         void* o = items[i];
@@ -272,7 +256,7 @@ static void AS_Press(void)
         g_AsUnits[nu].w = w;
         nu++;
     }
-    if (nu <= 0) { LogLine("as: no foot"); return; }
+    if (nu <= 0) return;
     /* ID 索引自检 (PatrolCircle 同式, 失败则 fail-open)。 */
     g_AsIdxOk = 0;
     {
@@ -287,9 +271,8 @@ static void AS_Press(void)
     for (i = 0; i < nu; i++)
     {
         ASUnit* u = &g_AsUnits[i];
-        int k, mz, st;
+        int mz, st;
         void* tp = 0;
-        for (k = 0; k < 24; k++) u->type[k] = 0;
         u->fly = 0;
         if (u->w == ABS_AIRCRAFT) u->fly = 1;
         else
@@ -297,37 +280,19 @@ static void AS_Press(void)
             tp = AS_TypeOf(u->unit, u->w);
             if (tp)
             {
-                AS_TypeID(tp, u->type);
                 mz = *(int*)((char*)tp + AS_OFF_MZ);
                 st = *(int*)((char*)tp + AS_OFF_ST);
                 if (mz == AS_MZ_FLY || st == AS_ST_WINGED) u->fly = 1;
             }
         }
-        if (u->fly) fly++;
-        AS_LogU(i);
     }
-    if (!OU_MouseCellPx(&ax, &ay, &mx, &my)) { LogLine("as: off map"); return; }
+    if (!OU_MouseCellPx(&ax, &ay, &mx, &my)) return;
     g_AsArmed = 1;
     g_AsAx = ax; g_AsAy = ay;
     g_AsPx = mx; g_AsPy = my;
     g_AsCount = nu;
     g_AsNodeCount = 0;
     AS_NodePush(ax, ay, mx, my); /* 首节点=锚点 (格+实测像素) */
-    q = 0;
-    q = AppendCStr(buf, q, "as: anchor ", sizeof(buf));
-    UtoA((unsigned)ax, b1);
-    q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCh(buf, q, ',', sizeof(buf));
-    UtoA((unsigned)ay, b2);
-    q = AppendCStr(buf, q, b2, sizeof(buf));
-    q = AppendCStr(buf, q, " n=", sizeof(buf));
-    UtoA((unsigned)nu, b3);
-    q = AppendCStr(buf, q, b3, sizeof(buf));
-    q = AppendCStr(buf, q, " fly=", sizeof(buf));
-    UtoA((unsigned)fly, b1);
-    q = AppendCStr(buf, q, b1, sizeof(buf));
-    (void)q;
-    LogLine(buf);
 }
 
 static int AS_Rnd(double v)
@@ -379,6 +344,64 @@ static int AS_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
     return OU_Enqueue(ev);
 }
 
+/* ---------------- 智能对象令 (攻击/进入/进驻/占领, 与原生点击同形) ---
+ * 攻击: Mission=Attack, Target=敌对象, Dst=空 (FuzzyAttack 同形)。
+ * 进入/进驻/占领: Mission=Enter7/Capture8/Eaten9/Sabotage17,
+ * Target=空, Destination=目标对象 (AutoLoad §11 真实点击布局)。
+ * 全部 IsPlanningEvent=0 直接下令。 */
+
+typedef struct { void* unit; int uid; void* tgt; int tid; int mission; } ASObj;
+
+static ASObj g_AsObj[AS_PEND_CAP];
+static int g_AsObjCount = 0;
+
+static int AS_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
+                         int tgtID, unsigned char tgtRtti)
+{
+    char ev[EVT_SIZE];
+    unsigned i;
+    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
+            tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
+    ev[OFF_PLANFLAG] = 0;
+    return OU_Enqueue(ev);
+}
+
+static int AS_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
+                       int dstID, unsigned char dstRtti, int mission)
+{
+    char ev[EVT_SIZE];
+    unsigned i;
+    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, mission,
+            0, 0, dstID, (unsigned)dstRtti, 0, 0);
+    ev[OFF_PLANFLAG] = 0;
+    return OU_Enqueue(ev);
+}
+
+/* Action(光标) → Mission(订单): gamemd 0x4D74E0 跳转表实证
+ * (Enter3→7 载具, Capture9→8, Sabotage16→17;
+ * 建筑上的 Enter/GuardArea 一律按进驻 17, 与原生驻军同形)。
+ * 未知/不可转发 (Select/Repair/Harvest/超武等) 回 -1 (调用方按无操作处理,
+ * 绝不猜着下单); Move 回 MISSION_MOVE。 */
+static int AS_MissionFor(int targetWhat, int action)
+{
+    if (action == ACTION_ATTACK || action == 62 || action == 63 ||
+        action == 64 || action == 71 || action == 53)
+        return MISSION_ATTACK;
+    if (action == ACTION_ENTER)
+        return (targetWhat == ABS_BUILDING) ? MISSION_SABOTAGE : MISSION_ENTER;
+    if (action == ACTION_SABOTAGE)
+        return MISSION_SABOTAGE;
+    if (action == ACTION_GUARDAREA && targetWhat == ABS_BUILDING)
+        return MISSION_SABOTAGE;
+    if (action == ACTION_CAPTURE)
+        return MISSION_CAPTURE;
+    if (action == ACTION_MOVE)
+        return MISSION_MOVE;
+    return -1;
+}
+
 static void AS_ShiftDown(void)
 {
     int k;
@@ -392,14 +415,59 @@ static void AS_ShiftDown(void)
     g_AsPendCount--;
 }
 
-/* 排空: 每事件先验活再发; house 变化则清空 (读档/换边防串令)。 */
+static void AS_ObjShiftDown(void)
+{
+    int k;
+    for (k = 0; k + 1 < g_AsObjCount; k++)
+    {
+        g_AsObj[k].unit = g_AsObj[k + 1].unit;
+        g_AsObj[k].uid = g_AsObj[k + 1].uid;
+        g_AsObj[k].tgt = g_AsObj[k + 1].tgt;
+        g_AsObj[k].tid = g_AsObj[k + 1].tid;
+        g_AsObj[k].mission = g_AsObj[k + 1].mission;
+    }
+    g_AsObjCount--;
+}
+
+/* 排空: 每事件先验活再发; house 变化则清空 (读档/换边防串令)。
+ * 先排对象令 (攻击/进入/进驻), 再排移动令。 */
 static void AS_Drain(void)
 {
     void* cur = *(void**)ADDR_CURPLAYER;
     int houseIdx, sent = 0;
-    if (!cur || cur != g_AsHouse) { g_AsPendCount = 0; return; }
+    if (!cur || cur != g_AsHouse) { g_AsPendCount = 0; g_AsObjCount = 0; return; }
     houseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
-    if (houseIdx != g_AsHouseIdx) { g_AsPendCount = 0; return; }
+    if (houseIdx != g_AsHouseIdx) { g_AsPendCount = 0; g_AsObjCount = 0; return; }
+    while (g_AsObjCount > 0 && sent < AS_DRAIN_PER_POLL)
+    {
+        ASObj* e = &g_AsObj[0];
+        char srcB[8], tgtB[8];
+        unsigned i;
+        int srcID, tgtID;
+        unsigned char srcR, tgtR;
+        for (i = 0; i < 8; i++) srcB[i] = tgtB[i] = 0;
+        if (!OU_PtrAlive(e->unit, e->uid, g_AsIdxOk)) { AS_ObjShiftDown(); continue; }
+        if (OU_WhatAmI(e->unit) != ABS_UNIT &&
+            OU_WhatAmI(e->unit) != ABS_AIRCRAFT &&
+            OU_WhatAmI(e->unit) != ABS_INFANTRY) { AS_ObjShiftDown(); continue; }
+        if (!OU_PtrAlive(e->tgt, e->tid, g_AsIdxOk)) { AS_ObjShiftDown(); continue; }
+        if (!FN_TGT_OBJ(tgtB, e->tgt)) { AS_ObjShiftDown(); continue; }
+        if (!FN_TGT_OBJ(srcB, e->unit)) { AS_ObjShiftDown(); continue; }
+        srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
+        tgtID = *(int*)(tgtB + 0); tgtR = (unsigned char)tgtB[4];
+        if (e->mission == MISSION_ATTACK)
+        {
+            if (!AS_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR))
+                return;
+        }
+        else
+        {
+            if (!AS_FireDest(houseIdx, srcID, srcR, tgtID, tgtR, e->mission))
+                return;
+        }
+        AS_ObjShiftDown();
+        sent++;
+    }
     while (g_AsPendCount > 0 && sent < AS_DRAIN_PER_POLL)
     {
         ASPend* e = &g_AsPend[0];
@@ -425,35 +493,76 @@ static void AS_Drain(void)
     }
 }
 
-static void AS_LogDst(int i, int cx, int cy)
+/* 落点格上的建筑 (只读 CellClass::FindObjectOfType 0x47C4D0,
+ * FuzzyAttack 同入口; 取链头即够, 建筑一格通常唯一)。 */
+typedef void* __attribute__((thiscall)) (*Fn_FindObjType)(void* cell, int abs, int alt);
+#define FN_FINDOBJTYPE ((Fn_FindObjType)(void*)0x47C4D0u)
+
+static void* AS_CellBuilding(int cx, int cy)
 {
-    char buf[96], b1[16], b2[16], b3[16];
-    unsigned q = 0;
-    q = AppendCStr(buf, q, "as: dst i=", sizeof(buf));
-    UtoA((unsigned)i, b1);
-    q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCStr(buf, q, " cell=", sizeof(buf));
-    UtoA((unsigned)(cx < 0 ? 0 : cx), b2);
-    q = AppendCStr(buf, q, b2, sizeof(buf));
-    q = AppendCh(buf, q, ',', sizeof(buf));
-    UtoA((unsigned)(cy < 0 ? 0 : cy), b3);
-    q = AppendCStr(buf, q, b3, sizeof(buf));
-    (void)q;
-    LogLine(buf);
+    void** cells;
+    int maxc, idx;
+    void* cell;
+    void* head;
+    if (cx < 0 || cy < 0 || cx >= 512 || cy >= 512) return 0;
+    cells = *(void***)(ADDR_DISPLAY + OFF_MAP_CELLS);
+    maxc = *(int*)(ADDR_DISPLAY + OFF_MAP_MAXC);
+    if (!cells || !IsPlausiblePtr(cells) || maxc <= 0 || maxc > 512 * 512) return 0;
+    idx = (cy << 9) + cx;
+    if (idx < 0 || idx >= maxc) return 0;
+    cell = cells[idx];
+    if (!cell || !IsPlausiblePtr(cell)) return 0;
+    head = FN_FINDOBJTYPE(cell, ABS_BUILDING, 0);
+    if (!head || !IsPlausiblePtr(head)) return 0;
+    if (OU_WhatAmI(head) != ABS_BUILDING) return 0;
+    return head;
 }
+
+/* 护航目标 (SmartPoint 移动子集散开时=原目标, 其余散开=NULL):
+ * 落点与之是同一建筑且判定为攻击时保持移动 (不把护驻军打回来)。 */
+static void* g_AsProtTgt = 0;
 
 static void AS_Queue(int ui, int cx, int cy)
 {
     int ox, oy;
     ASUnit* u;
+    void* slotObj;
     if (ui < 0 || ui >= g_AsCount) return;
     u = &g_AsUnits[ui];
-    if (!AS_NearValid(cx, cy, &ox, &oy))
+    if (!AS_NearValid(cx, cy, &ox, &oy)) return;
+    /* 落点转换: 地面单位落点格上有建筑时, 按直接下令处理
+     * (进驻/攻击/占领), 而不是走过去再转攻击。
+     * 空军不管地面建筑; 护航目标同建筑的攻击保持移动。 */
+    if (u->fly == 0 && g_AsHouse)
     {
-        AS_LogDst(ui, -1, -1);
-        return;
+        slotObj = AS_CellBuilding(ox, oy);
+        if (slotObj)
+        {
+            char tb[8];
+            unsigned ti;
+            int act, ms, tid;
+            for (ti = 0; ti < 8; ti++) tb[ti] = 0;
+            if (FN_TGT_OBJ(tb, slotObj))
+            {
+                tid = *(int*)(tb + 0);
+                act = OU_MouseOverObject(u->unit, slotObj);
+                ms = (act < 0) ? -1 : AS_MissionFor(ABS_BUILDING, act);
+                if ((ms == MISSION_ATTACK || ms == MISSION_ENTER ||
+                     ms == MISSION_SABOTAGE || ms == MISSION_CAPTURE) &&
+                    !(slotObj == g_AsProtTgt && ms == MISSION_ATTACK) &&
+                    g_AsObjCount < AS_PEND_CAP)
+                {
+                    g_AsObj[g_AsObjCount].unit = u->unit;
+                    g_AsObj[g_AsObjCount].uid = u->id;
+                    g_AsObj[g_AsObjCount].tgt = slotObj;
+                    g_AsObj[g_AsObjCount].tid = tid;
+                    g_AsObj[g_AsObjCount].mission = ms;
+                    g_AsObjCount++;
+                    return;
+                }
+            }
+        }
     }
-    AS_LogDst(ui, ox, oy);
     if (g_AsPendCount >= AS_PEND_CAP) return;
     g_AsPend[g_AsPendCount].unit = u->unit;
     g_AsPend[g_AsPendCount].id = u->id;
@@ -495,16 +604,193 @@ static void AS_ArcGroup(int* idx, int n)
     }
 }
 
+/* 智能下单: 终点有点中对象时调游戏自己的决策下单。
+ * 全局决策调 DecideAction (与左键下单前同一函数, 只读不下单):
+ * 同选中同目标时回的值与左键光标一致 (代表制: 混编按代表单位定)。
+ * 执行走标准 MegaMission 事件 (与手点同形), 联机安全;
+ * 不调 ObjectClickedAction/ClickedMission (它们写本地单位状态, 联机不安全)。
+ * 护驻军: 建筑可进驻但全局判攻击时 (代表是坦克), 进驻单位照进驻、
+ * 攻击改移动 (不摧毁建筑; 纯坦克则照常攻击, 与左键一致)。
+ * 返回 0=全移动请调用方散开, 1=对象令已下, 2=无操作 (禁散开,
+ * 终点有对象时绝不往对象格散开, 防走到脸上再自动开火)。 */
+static int AS_SmartPoint(int bx, int by, void* tgt)
+{
+    int i, tgtWhat, tgtTid = 0;
+    static int missions[AS_CAP];
+    int nAtk = 0, nEnt = 0, nGar = 0, nCap = 0, nMov = 0;
+    int gAct = -1, gMiss = -1;
+    int fbMode = 0; /* 全局不可用时的逐单位回落 */
+    char tb[8];
+    unsigned ti;
+    if (!tgt || !IsPlausiblePtr(tgt)) return 0;
+    tgtWhat = OU_WhatAmI(tgt);
+    if (tgtWhat != ABS_UNIT && tgtWhat != ABS_INFANTRY &&
+        tgtWhat != ABS_AIRCRAFT && tgtWhat != ABS_BUILDING)
+        return 0;
+    for (ti = 0; ti < 8; ti++) tb[ti] = 0;
+    if (!FN_TGT_OBJ(tb, tgt)) return 0;
+    tgtTid = *(int*)(tb + 0);
+    /* 全局决策: 游戏自己定 (只读 DecideAction)。 */
+    gAct = OU_DecideAction(bx, by, tgt);
+    if (gAct < 0) return 0;
+    gMiss = AS_MissionFor(tgtWhat, gAct);
+    if (gMiss == MISSION_MOVE) return 0; /* 移动: 调用方散开 */
+    if (gMiss < 0)
+    {
+        /* 全局 NoMove/不可转发: 退回逐单位游戏判定 (与悬停光标同源)。
+         * 有单位能攻击/进入/进驻/占领就下单 (防全局误判吞令);
+         * 否则无操作 (绝不往对象上散开)。 */
+        fbMode = 1;
+        for (i = 0; i < g_AsCount; i++)
+        {
+            ASUnit* u = &g_AsUnits[i];
+            int act, ms;
+            missions[i] = -1;
+            if (u->fly != 1 && u->fly != 0) continue;
+            if (u->w != ABS_UNIT && u->w != ABS_AIRCRAFT && u->w != ABS_INFANTRY)
+                continue;
+            if (!OU_PtrAlive(u->unit, u->id, g_AsIdxOk)) continue;
+            act = OU_MouseOverObject(u->unit, tgt);
+            if (act < 0) ms = -1;
+            else ms = AS_MissionFor(tgtWhat, act);
+            if (ms == MISSION_ATTACK || ms == MISSION_ENTER ||
+                ms == MISSION_SABOTAGE || ms == MISSION_CAPTURE)
+                missions[i] = ms;
+            else if (ms == MISSION_MOVE) missions[i] = MISSION_MOVE;
+            else missions[i] = -1;
+        }
+    }
+    else
+    {
+    /* 逐单位能力过滤 (只读 MouseOver): 与全局同任务才下单,
+     * 本会移动的跟随移动, 其它分歧按无操作 (与原生 fail 分支同效果)。 */
+    for (i = 0; i < g_AsCount; i++)
+    {
+        ASUnit* u = &g_AsUnits[i];
+        int act, ms;
+        missions[i] = -1;
+        if (u->fly != 1 && u->fly != 0) continue;
+        if (u->w != ABS_UNIT && u->w != ABS_AIRCRAFT && u->w != ABS_INFANTRY)
+            continue;
+        if (!OU_PtrAlive(u->unit, u->id, g_AsIdxOk)) continue;
+        act = OU_MouseOverObject(u->unit, tgt);
+        if (act < 0) ms = -1;
+        else ms = AS_MissionFor(tgtWhat, act);
+        if (ms == gMiss) missions[i] = ms;
+        else if (ms == MISSION_MOVE) missions[i] = MISSION_MOVE;
+        else missions[i] = -1;
+    }
+    }
+    /* 护驻军 (两路通用): 建筑有单位能进驻/占领/进入时, 攻击改移动。 */
+    if (tgtWhat == ABS_BUILDING)
+    {
+        int hasGar = 0;
+        for (i = 0; i < g_AsCount; i++)
+        {
+            if (missions[i] == MISSION_SABOTAGE || missions[i] == MISSION_CAPTURE ||
+                missions[i] == MISSION_ENTER) { hasGar = 1; break; }
+        }
+        if (hasGar)
+        {
+            if (gMiss == MISSION_ATTACK) gMiss = MISSION_SABOTAGE;
+            for (i = 0; i < g_AsCount; i++)
+            {
+                if (missions[i] == MISSION_ATTACK)
+                    missions[i] = MISSION_MOVE;
+            }
+        }
+    }
+    for (i = 0; i < g_AsCount; i++)
+    {
+        if (g_AsUnits[i].fly != 1 && g_AsUnits[i].fly != 0) continue;
+        if (missions[i] == MISSION_ATTACK) nAtk++;
+        else if (missions[i] == MISSION_ENTER) nEnt++;
+        else if (missions[i] == MISSION_SABOTAGE) nGar++;
+        else if (missions[i] == MISSION_CAPTURE) nCap++;
+        else if (missions[i] == MISSION_MOVE) nMov++;
+    }
+    if (!fbMode && nAtk + nEnt + nGar + nCap <= 0 && nMov > 0)
+        return 0; /* 全局即移动: 回落原散开 (保持配额/螺旋逻辑一致) */
+    if (nAtk + nEnt + nGar + nCap <= 0)
+        return 2; /* 无对象令: 无操作, 禁往对象散开 */
+    /* 对象令入队 (攻击 Target=敌, 进入类 Destination=目标)。 */
+    for (i = 0; i < g_AsCount; i++)
+    {
+        int ms = missions[i];
+        if (ms == MISSION_MOVE || ms < 0) continue;
+        if (g_AsUnits[i].fly != 1 && g_AsUnits[i].fly != 0) continue;
+        if (g_AsObjCount >= AS_PEND_CAP) break;
+        g_AsObj[g_AsObjCount].unit = g_AsUnits[i].unit;
+        g_AsObj[g_AsObjCount].uid = g_AsUnits[i].id;
+        g_AsObj[g_AsObjCount].tgt = tgt;
+        g_AsObj[g_AsObjCount].tid = tgtTid;
+        g_AsObj[g_AsObjCount].mission = ms;
+        g_AsObjCount++;
+    }
+    /* 移动子集绕目标散开 (配额与原点按一致: 步兵3/格, 飞机/车辆1/格)。
+     * 建筑目标跳过中心格 (本格极可能是建筑本体, 不往上派移动令,
+     * 防引擎转移动为攻击); 环从 r=1 起。
+     * 子集落点转换时护航目标不转回攻击 (见 g_AsProtTgt)。 */
+    if (nMov > 0)
+    {
+        g_AsProtTgt = tgt;
+        static int qcx[512], qcy[512];
+        static int quA[512], quI[512], quV[512];
+        int qn = 0, r, k;
+        if (tgtWhat == ABS_BUILDING) qn = 0;
+        else
+        {
+            qcx[0] = bx; qcy[0] = by;
+            quA[0] = quI[0] = quV[0] = 0;
+            qn = OU_CellValid(bx, by) ? 1 : 0;
+        }
+        for (r = 1; r <= 40 && qn < 512; r++)
+        {
+            int dx, dy;
+            for (dx = -r; dx <= r && qn < 512; dx++)
+                if (OU_CellValid(bx + dx, by - r))
+                { qcx[qn] = bx + dx; qcy[qn] = by - r; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
+            for (dy = -r + 1; dy <= r && qn < 512; dy++)
+                if (OU_CellValid(bx + r, by + dy))
+                { qcx[qn] = bx + r; qcy[qn] = by + dy; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
+            for (dx = r - 1; dx >= -r && qn < 512; dx--)
+                if (OU_CellValid(bx + dx, by + r))
+                { qcx[qn] = bx + dx; qcy[qn] = by + r; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
+            for (dy = r - 1; dy >= -r + 1 && qn < 512; dy--)
+                if (OU_CellValid(bx - r, by + dy))
+                { qcx[qn] = bx - r; qcy[qn] = by + dy; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
+        }
+        for (k = 0; k < g_AsCount; k++)
+        {
+            ASUnit* u = &g_AsUnits[k];
+            int cap, c;
+            if (missions[k] != MISSION_MOVE) continue;
+            if (u->fly != 1 && u->fly != 0) continue;
+            if (u->w != ABS_UNIT && u->w != ABS_AIRCRAFT && u->w != ABS_INFANTRY) continue;
+            for (c = 0; c < qn; c++)
+            {
+                if (u->w == ABS_INFANTRY) { cap = 3; if (quI[c] >= cap) continue; quI[c]++; }
+                else if (u->w == ABS_AIRCRAFT) { cap = 1; if (quA[c] >= cap) continue; quA[c]++; }
+                else { cap = 1; if (quV[c] >= cap) continue; quV[c]++; }
+                AS_Queue(k, qcx[c], qcy[c]);
+                break;
+            }
+            (void)cap;
+        }
+    }
+    AS_Drain();
+    return 1;
+}
+
 static void AS_Release(void)
 {
     int bx, by, mx, my;
     int i;
     static int airList[AS_CAP], gndList[AS_CAP];
     int airN = 0, gndN = 0;
-    char buf[128], b1[16], b2[16], b3[16];
-    unsigned q;
+    void* tgt = 0;
     g_AsArmed = 0;
-    if (OU_MouseCellPx(&bx, &by, &mx, &my))
+    if (OU_MouseCellTarget(&bx, &by, &tgt, &mx, &my))
     {
         /* 松开格收尾 (与末节点不同则补记, 尾段不丢)。 */
         if (g_AsNodeCount > 0 &&
@@ -526,18 +812,6 @@ static void AS_Release(void)
         if (u->fly == 1) airList[airN++] = i;
         else if (u->fly == 0) gndList[gndN++] = i;
     }
-    q = 0;
-    q = AppendCStr(buf, q, "as: go nodes=", sizeof(buf));
-    UtoA((unsigned)g_AsNodeCount, b1);
-    q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCStr(buf, q, " air=", sizeof(buf));
-    UtoA((unsigned)airN, b2);
-    q = AppendCStr(buf, q, b2, sizeof(buf));
-    q = AppendCStr(buf, q, " gnd=", sizeof(buf));
-    UtoA((unsigned)gndN, b3);
-    q = AppendCStr(buf, q, b3, sizeof(buf));
-    (void)q;
-    LogLine(buf);
     if (airN + gndN <= 0) return;
     {
         void* cur = *(void**)ADDR_CURPLAYER;
@@ -546,6 +820,18 @@ static void AS_Release(void)
         g_AsHouseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
     }
     g_AsPendCount = 0;
+    g_AsObjCount = 0;
+    g_AsProtTgt = 0;
+    if (tgt)
+    {
+        /* 终点点中对象: 先走智能自适应 (攻击/进入/进驻/占领)。
+         * r==2 无操作: 直接返回。r==1 已下单: 直接返回
+         * (SmartPoint 内部已排空, 绝不能以队列余量判断,
+         * 否则已发的单会被弧形移动覆盖)。r==0 全移动:
+         * 点按走点散开, 划线走弧形 (保阵型)。 */
+        int r = AS_SmartPoint(bx, by, tgt);
+        if (r) return;
+    }
     if (g_AsNodeCount <= 1)
     {
         /* 点按: 像左键点移动一样到目的地, 按配额分开。
@@ -595,52 +881,15 @@ static void AS_Release(void)
                 AS_Queue(i, qcx[c], qcy[c]);
                 break;
             }
-            if (c >= qn) AS_LogDst(i, -1, -1); /* 格不够 (几乎不可能) */
             (void)cap;
         }
-        {
-            char fbuf[96], f1[16];
-            unsigned fq = 0;
-            fq = AppendCStr(fbuf, fq, "as: fire queued=", sizeof(fbuf));
-            UtoA((unsigned)g_AsPendCount, f1);
-            fq = AppendCStr(fbuf, fq, f1, sizeof(fbuf));
-            (void)fq;
-            LogLine(fbuf);
-        }
         AS_Drain();
-        {
-            char fbuf[96], f1[16];
-            unsigned fq = 0;
-            fq = AppendCStr(fbuf, fq, "as: left pend=", sizeof(fbuf));
-            UtoA((unsigned)g_AsPendCount, f1);
-            fq = AppendCStr(fbuf, fq, f1, sizeof(fbuf));
-            (void)fq;
-            LogLine(fbuf);
-        }
         return;
     }
     /* 划线: 空军/地面分组, 各按轨迹弧长重采样为本组槽位数 (弧形怎么画就怎么排)。 */
     AS_ArcGroup(airList, airN);
     AS_ArcGroup(gndList, gndN);
-    {
-        char fbuf[96], f1[16];
-        unsigned fq = 0;
-        fq = AppendCStr(fbuf, fq, "as: fire queued=", sizeof(fbuf));
-        UtoA((unsigned)g_AsPendCount, f1);
-        fq = AppendCStr(fbuf, fq, f1, sizeof(fbuf));
-        (void)fq;
-        LogLine(fbuf);
-    }
     AS_Drain();
-    {
-        char fbuf[96], f1[16];
-        unsigned fq = 0;
-        fq = AppendCStr(fbuf, fq, "as: left pend=", sizeof(fbuf));
-        UtoA((unsigned)g_AsPendCount, f1);
-        fq = AppendCStr(fbuf, fq, f1, sizeof(fbuf));
-        (void)fq;
-        LogLine(fbuf);
-    }
 }
 
 void AirSpread_Poll(void)
@@ -649,7 +898,7 @@ void AirSpread_Poll(void)
     AS_EnsureInit();
     trigDown = OU_KeyDown(g_AsHk.vk);
     if (!g_AsEnable) { g_AsArmed = 0; g_AsPrevTrig = trigDown; return; }
-    if (g_AsPendCount > 0) { AS_Drain(); g_AsPrevTrig = trigDown; return; }
+    if (g_AsPendCount > 0 || g_AsObjCount > 0) { AS_Drain(); g_AsPrevTrig = trigDown; return; }
     if (trigDown && g_AsArmed)
     {
         /* 按住途中加了 Hotkey 附加键/修饰键或 Z/Ctrl 即改主意了: 散开取消待命

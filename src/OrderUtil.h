@@ -46,6 +46,18 @@ typedef void (__attribute__((cdecl)) *Fn_SndCb)(void);
 #define OFF_PLANFLAG  0x1Du   /* MegaMission.IsPlanningEvent (Z 按住=路径点时置 1) */
 #define MISSION_MOVE  2       /* Mission::Move (YRpp GeneralDefinitions.h) */
 #define MISSION_ATTACK 1      /* Mission::Attack (注意不是 Action::Attack=5) */
+#define MISSION_ENTER 7       /* Mission::Enter (载具/运输, Destination=目标对象) */
+#define MISSION_CAPTURE 8     /* Mission::Capture (工程师占领/步兵进驻, Destination=建筑) */
+#define MISSION_SABOTAGE 17   /* Mission::Sabotage (备用进驻, Destination=建筑) */
+
+/* 光标 Action (YRpp GeneralDefinitions.h, MouseOver/DecideAction 返回值)。
+ * 注意与 Mission 编号不同: 如 Action::Attack=5 对应 Mission::Attack=1。 */
+#define ACTION_MOVE 1
+#define ACTION_ENTER 3
+#define ACTION_ATTACK 5
+#define ACTION_CAPTURE 9
+#define ACTION_SABOTAGE 16
+#define ACTION_GUARDAREA 26
 
 #define ABS_UNIT 1
 #define ABS_AIRCRAFT 2
@@ -62,6 +74,19 @@ int OU_CellValid(int cx, int cy);
 int OU_MouseCell(int* cx, int* cy);
 /* 同上 + 实测像素 (橡皮线用, px/py 可空)。 */
 int OU_MouseCellPx(int* cx, int* cy, int* px, int* py);
+/* 同上 + 点中对象 (智能下令用; tgtOut 可空, 无目标时写 0, 返回值仍是格有效性)。 */
+int OU_MouseCellTarget(int* cx, int* cy, void** tgtOut, int* px, int* py);
+/* 光标自适应查询 (只读, 联机安全): 问选中单位 self 点 target 会是什么光标。
+ * 经 vtbl+0x74 (MouseOverObject) 调用, 与 DecideAction 内部同入口;
+ * 只读不下单, 不写模拟内存。失败回 -1。 */
+int OU_MouseOverObject(void* self, void* target);
+/* 全局自适应决策 (只读, 联机安全): DisplayClass::DecideAction (0x692610),
+ * 与左右键下单前引擎调的同一函数 (按选中代表综合判定, 只回 Action 不下单)。
+ * 全函数反汇编实证: 无事件构造/OutList 引用, 纯读。
+ * cx/cy=鼠标格, tgt=点中对象 (须非空; 空地不调, 直接散开)。
+ * thiscall ECX=Display, 栈 (cell*, obj, 1) (双调用点同形)。
+ * 回 Action (0~80), 失败回 -1。 */
+int OU_DecideAction(int cx, int cy, void* tgt);
 /* 存活校验 (Fetch_ID 索引二分, 纯读, 永不碰对象本身)。 */
 int OU_PtrAliveRaw(void* u, int id);
 /* 同上, idxOk=0 时 fail-open 全回活 (索引自检未通过时功能不变)。 */

@@ -1,4 +1,4 @@
-/* AirSpread.h - 中键划线散开 (选中飞行单位沿线分布) 入口 (实现见 AirSpread.cpp)。 */
+/* AirSpread.h - 中键智能下令 (点按自适应/划线散开) 入口 (实现见 AirSpread.cpp)。 */
 #pragma once
 
 void AirSpread_Poll(void);

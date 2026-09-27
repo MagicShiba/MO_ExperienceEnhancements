@@ -80,6 +80,69 @@ int OU_MouseCell(int* cx, int* cy)
     return OU_MouseCellPx(cx, cy, 0, 0);
 }
 
+/* 取格 + 点中对象 (ProcessClickCoords 原型见 OrderUtil.h, tgt 透出)。 */
+int OU_MouseCellTarget(int* cx, int* cy, void** tgtOut, int* px, int* py)
+{
+    int mx, my;
+    Point2D pt;
+    CellStruct center;
+    CoordStruct crd;
+    void* tgtObj = 0;
+    unsigned char b5 = 0, b6 = 0;
+    center.X = center.Y = 0;
+    crd.X = crd.Y = crd.Z = 0;
+    if (tgtOut) *tgtOut = 0;
+    if (!GtMouseGameXY(&mx, &my)) return 0;
+    pt.X = mx; pt.Y = my;
+    if (!FN_CLICKCOORDS((void*)ADDR_DISPLAY, &pt, &center, &crd,
+                        &tgtObj, &b5, &b6))
+        return 0;
+    *cx = (int)center.X; *cy = (int)center.Y;
+    if (px) *px = mx;
+    if (py) *py = my;
+    if (!OU_CellValid(*cx, *cy)) return 0;
+    if (tgtOut && tgtObj && IsPlausiblePtr(tgtObj))
+    {
+        int w = OU_WhatAmI(tgtObj);
+        if (w == ABS_UNIT || w == ABS_INFANTRY ||
+            w == ABS_AIRCRAFT || w == ABS_BUILDING)
+            *tgtOut = tgtObj;
+    }
+    return 1;
+}
+
+typedef int __attribute__((thiscall)) (*Fn_MouseOverObj)(void* self, void* target, int ignoreForce);
+
+/* vtbl+0x74 = MouseOverObject (Unit 0x73FD50 / Infantry 0x51E3B0 同槽,
+ * gamemd 反汇编 + 虚表扫描双确认; DecideAction 内部同入口)。 */
+int OU_MouseOverObject(void* self, void* target)
+{
+    void** vt;
+    Fn_MouseOverObj fn;
+    if (!self || !IsPlausiblePtr(self)) return -1;
+    if (!target || !IsPlausiblePtr(target)) return -1;
+    vt = *(void***)self;
+    if (!vt || !IsPlausiblePtr(vt)) return -1;
+    fn = (Fn_MouseOverObj)vt[0x74 / 4];
+    if (!fn || !IsPlausiblePtr((const void*)fn)) return -1;
+    return fn(self, target, 0);
+}
+
+typedef int __attribute__((thiscall)) (*Fn_DecideAction)(void* disp, void* cell, void* obj, int unk);
+#define FN_DECID ((Fn_DecideAction)(void*)0x692610u)
+
+int OU_DecideAction(int cx, int cy, void* tgt)
+{
+    CellStruct cs;
+    int r;
+    if (!tgt || !IsPlausiblePtr(tgt)) return -1;
+    if (cx < 0 || cy < 0 || cx >= 512 || cy >= 512) return -1;
+    cs.X = (short)cx; cs.Y = (short)cy;
+    r = FN_DECID((void*)ADDR_DISPLAY, &cs, tgt, 1);
+    if (r < 0 || r > 80) return -1;
+    return r;
+}
+
 int OU_PtrAliveRaw(void* u, int id)
 {
     void* base;

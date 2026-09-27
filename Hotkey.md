@@ -63,7 +63,7 @@
 | 功能 | 默认 `Hotkey` | 说明 |
 |---|---|---|
 | 巡逻圈 `[PatrolCircle]` | `Z+Middle` | 按住 Z 划中键画圈 |
-| 散开 `[AirSpread]` | `Middle` | 裸中键; 按住 Z 让路巡逻, 按住 Ctrl 让路模糊 |
+| 智能下令 `[AirSpread]` | `Middle` | 裸中键点按自适应(移动/攻击/进入/进驻)/划线散开; 按住 Z 让路巡逻, 按住 Ctrl 让路模糊 |
 | 砍树 `[TreeChop]` | `Ctrl+Z+Middle` | 三键齐按 |
 | 模糊攻击 `[FuzzyAttack]` | `Ctrl+Middle` | 按住 Z 时让路巡逻/砍树 |
 | 心控收敛 `[MindSelect]` | `Shift+P` | 结尾只剩心控单位 |
