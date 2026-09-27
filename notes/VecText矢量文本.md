@@ -1,3 +1,23 @@
+# 目标与路线：消息队列矢量字体
+
+范围：只替换 ChatBox 消息框里的文字光栅化；消息捕获、过滤、滚动、点击照旧。
+
+选定路线：引擎内 GDI 混合。
+
+1. 沿用绘制接管点 `0x5D4A94`，跳过原版消息列表绘制。
+2. 可见行用 `Microsoft YaHei` 经 GDI 光栅化到内存 32 位 DIB。
+3. 用目标色（来自 `ColorScheme`）按 alpha 混入 `DSurface::Composite`。
+4. 折行宽度改用 GDI 度量，避免与点阵字宽对不齐。
+
+动工前必须先探针验证：
+
+- 本地 `gamemd.exe` 是否与 ChatBox 目标版本一致（地址是否可用）。
+- `Composite` 的 `BytesPerPixel`、`Pitch`、`Lock/Unlock` 行为。
+- `ColorScheme` 取色结果（`BaseColor@0x308` 或 `0x517440`）。
+
+风险：全屏独占下覆盖窗口不可靠，所以不选覆盖窗口；GDI 抗锯齿在透明混合时用灰度 alpha，不要用 ClearType。
+
+
 # VecText 全局文本矢量接管（结论）
 
 单 DLL 多文件中的一份（与 MsgFont 聊天框同 DLL）。只替换字形光栅，
@@ -146,6 +166,7 @@
 - FontFace 行内注释：GetPrivateProfileString 不吃行内 ";"，
   `FontFace=msyh.ttc ; 说明` 会把注释当文件名致 found=none 静默回落。
   已在 ResolveFontFace 遇 ";" 截断（整数值不受影响）；日志 file= 值带 "; ..." 即此病。
+  注：此旧方案已过时，见 notes/智能中键.md（OU_ReadString 加载层统一清洗）。
 - IsPlausiblePtr 要求 4 字节对齐：u8/u16 级寻址一律判非法，
   字节级探测用 VecCanRead（对齐到 4 字节边界再验页）。
 - 正文无体外循环：管线外 Blit 直调零命中，都经 DrawText。
