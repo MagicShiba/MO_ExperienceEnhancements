@@ -26,6 +26,8 @@
 #include "BuildQueue.h"
 #include "PatrolCircle.h"
 #include "AirSpread.h"
+#include "TreeChop.h"
+#include "FuzzyAttack.h"
 
 #define MF_VERSION   "0.2.113d"
 #define MF_SECTION   "MsgFont"
@@ -1878,7 +1880,9 @@ static void PowerDrawBoth(void)
     AirWay_Poll();   /* 每循环必跑的只读飞机轮询 (AirWay, 开关关时直接返回) */
     BuildQueue_Poll(); /* 每循环必跑的建筑本地排队 (BuildQueue, 开关关/队列空时直接返回) */
     PatrolCircle_Poll(); /* Z+中键一键巡逻圈 (开关关/无触发时直接返回) */
-    AirSpread_Poll(); /* 裸中键划线散开 v1 (按住Z时让路巡逻圈, 只记不下令) */
+    AirSpread_Poll(); /* 裸中键划线散开 (Z 让路巡逻圈, Ctrl 让路模糊攻击) */
+    TreeChop_Poll(); /* Ctrl+Z+中键快速砍树 (开关关/无触发时直接返回) */
+    FuzzyAttack_Poll(); /* Ctrl+中键模糊攻击 (开关关/无触发时直接返回) */
     EnsureInit();
     if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
     /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;
@@ -2275,9 +2279,12 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
         if (rc == 1) drew = 1;
     }
 
-    /* 中键散开橡皮线 (armed 时才画, 自锁面, 不影响其它绘制)。 */
+    /* 橡皮线/范围框 (armed/按住时才画, 自锁面, 不影响其它绘制)。 */
     {
         AirSpread_Draw(surf, surfW, surfH, surfPitch);
+        PatrolCircle_Draw(surf, surfW, surfH, surfPitch);
+        FuzzyAttack_Draw(surf, surfW, surfH, surfPitch);
+        TreeChop_Draw(surf, surfW, surfH, surfPitch);
     }
 
     /* 底部电量: 只画侧栏面 (总开关 PowerBottom=0 即关)。

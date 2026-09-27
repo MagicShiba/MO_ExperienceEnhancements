@@ -2,3 +2,5 @@
 #pragma once
 
 void PatrolCircle_Poll(void);
+/* 渲染期橡皮线 (MsgFont_MessageDrawHook 内调用, armed 时才画)。 */
+void PatrolCircle_Draw(void* surf, int w, int h, int pitch);

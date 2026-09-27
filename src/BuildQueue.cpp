@@ -234,6 +234,38 @@ static void BQ_Trace(const char* head, int a, int b, int c, int d);
 static unsigned g_BQEvNext = 0;
 static int g_BQEvInit = 0;
 
+/* 规划事件抓包 (联机同步研究用, 量极小): Type + 前 48 字节 hex。
+ * 用途: 原生巡逻建圈/关环/提交的真实事件序列
+ * (Mega=0x04/Connect=0x2A/Commit=0x2B), 与我方构造逐字节对比,
+ * 目标是去掉本地直调、纯事件关环 (联机安全)。
+ * 测试法: 单机安静局, 不碰中键, 选 1 单位, Z+左键点 4 格,
+ * 左键点首格关环, 松 Z 提交; 再用 Z+中键画一次矩环作对比。 */
+static void BQ_HexB(char* out, unsigned v)
+{
+    static const char* dig = "0123456789ABCDEF";
+    out[0] = dig[(v >> 4) & 15u];
+    out[1] = dig[v & 15u];
+    out[2] = 0;
+}
+
+static void BQ_EvHex(const unsigned char* e)
+{
+    char buf[128], hb[4];
+    unsigned q = 0, i;
+    q = AppendCStr(buf, q, "pev: t=", sizeof(buf));
+    BQ_HexB(hb, (unsigned)e[0]);
+    q = AppendCStr(buf, q, hb, sizeof(buf));
+    for (i = 1; i < 48; i++)
+    {
+        BQ_HexB(hb, (unsigned)e[i]);
+        q = AppendCStr(buf, q, (i & 3) == 1 ? " " : "", sizeof(buf));
+        q = AppendCStr(buf, q, hb, sizeof(buf));
+        if (q + 4 >= sizeof(buf)) break;
+    }
+    (void)q;
+    LogLine(buf);
+}
+
 static void BQ_EvWatch(void)
 {
     unsigned next = *(unsigned*)ADDR_OUT_NEXT;
@@ -262,6 +294,8 @@ static void BQ_EvWatch(void)
         int heap = *(int*)(e + 11);
         BQ_Trace("bq: ev", (int)e[0], (int)e[2], heap,
                  (int)*(unsigned*)ADDR_OUT_COUNT);
+        if (e[0] == 0x04 || e[0] == 0x2A || e[0] == 0x2B)
+            BQ_EvHex(e); /* 规划事件额外 hex (原生序列研究) */
         cur = (cur + 1u) & 0x7Fu;
         guard++;
     }
