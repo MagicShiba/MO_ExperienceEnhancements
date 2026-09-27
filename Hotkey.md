@@ -63,7 +63,8 @@
 | 功能 | 默认 `Hotkey` | 说明 |
 |---|---|---|
 | 巡逻圈 `[PatrolCircle]` | `Z+Middle` | 按住 Z 划中键画圈 |
-| 智能下令 `[AirSpread]` | `Middle` | 裸中键点按自适应(移动/攻击/进入/进驻)/划线散开; 按住 Z 让路巡逻, 按住 Ctrl 让路模糊 |
+| 智能下令 `[AirSpread]` | `Middle` | 裸中键点按自适应(移动/攻击/进入/进驻)/划线散开; 按住 Z 让路巡逻, 按住 Ctrl 让路模糊, 组合中键让路区域自适应 |
 | 砍树 `[TreeChop]` | `Ctrl+Z+Middle` | 三键齐按 |
-| 模糊攻击 `[FuzzyAttack]` | `Ctrl+Middle` | 按住 Z 时让路巡逻/砍树 |
+| 模糊攻击 `[FuzzyAttack]` | `Ctrl+Middle` | 按住 Z 时让路巡逻/砍树; Ctrl+Shift+中键也归模糊 |
+| 范围智能 `[SmartArea]` | `Shift+Middle` | 点按/划线扫块挑目标, 按各自光标下对象令(不移动); 光标无令但非本家时载具/飞机按强制攻击(与模糊同语义, 盟友注意); 步兵对建筑留待命、松 Shift 重判进驻; 松中键即执行, Shift 可连点; 含 Ctrl/Z 时被别家抢走 |
 | 心控收敛 `[MindSelect]` | `Shift+P` | 结尾只剩心控单位 |

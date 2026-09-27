@@ -31,6 +31,7 @@
 #include "GdiText.h"
 #include "AirSpread.h"
 #include "OrderUtil.h"
+#include "SmartArea.h"
 
 #define AS_SECTION "AirSpread"
 
@@ -55,7 +56,7 @@ typedef int (__fastcall *AS_UnlockFn)(void*, void*);
 
 static int g_AsInit = 0;
 static int g_AsEnable = 1;
-static OU_Hotkey g_AsHk;      /* Hotkey=Middle (裸中键, Z/Ctrl 按住时让路) */
+static OU_Hotkey g_AsHk;      /* Hotkey=Middle (裸中键, Z/Ctrl/组合中键按住时让路) */
 static int g_AsNodeStep = 2;    /* 拖线采样步长 (格, 切比雪夫距离) */
 
 /* 分类判据 (参考 RACommands, MO rulesmo 实测 + 内存 dump 双确认):
@@ -901,10 +902,12 @@ void AirSpread_Poll(void)
     if (g_AsPendCount > 0 || g_AsObjCount > 0) { AS_Drain(); g_AsPrevTrig = trigDown; return; }
     if (trigDown && g_AsArmed)
     {
-        /* 按住途中加了 Hotkey 附加键/修饰键或 Z/Ctrl 即改主意了: 散开取消待命
-         * (松开不执行), 执行权交给巡逻/砍树/模糊 (它们按松开瞬间组合键判定)。 */
+        /* 按住途中加了 Hotkey 附加键/修饰键、Z/Ctrl 或组合中键即改主意了:
+         * 散开取消待命 (松开不执行), 执行权交巡逻/砍树/模糊/区域自适应
+         * (它们按松开瞬间组合键判定; 区域自适应关则不认领, 照旧散开)。 */
         if (!OU_ModsDown(g_AsHk.mods) || !OU_ExtraDown(&g_AsHk) ||
-            OU_KeyDown('Z') || OU_KeyDown(VK_CONTROL))
+            OU_KeyDown('Z') || OU_KeyDown(VK_CONTROL) ||
+            SmartArea_ClaimsMiddle())
             g_AsArmed = 0;
     }
     if (trigDown && g_AsArmed)
@@ -917,9 +920,10 @@ void AirSpread_Poll(void)
     if (trigDown && !g_AsPrevTrig)
     {
         /* 按下: Z 按住时归 PatrolCircle, Ctrl 按住时归 FuzzyAttack,
-         * 这里只认 Hotkey 裸键 (三方互斥, 仲裁键见上面)。 */
+         * 组合中键按住时归 SmartArea, 这里只认 Hotkey 裸键 (互斥见上面)。 */
         if (OU_ModsDown(g_AsHk.mods) && OU_ExtraDown(&g_AsHk) &&
-            !OU_KeyDown('Z') && !OU_KeyDown(VK_CONTROL))
+            !OU_KeyDown('Z') && !OU_KeyDown(VK_CONTROL) &&
+            !SmartArea_ClaimsMiddle())
             AS_Press();
     }
     else if (!trigDown && g_AsPrevTrig && g_AsArmed)

@@ -28,10 +28,11 @@
 #include "AirSpread.h"
 #include "TreeChop.h"
 #include "FuzzyAttack.h"
+#include "SmartArea.h"
 #include "MindSelect.h"
 #include "OrderUtil.h"
 
-#define MF_VERSION   "0.2.113d"
+#define MF_VERSION   "0.2.122d"
 #define MF_SECTION   "MsgFont"
 
 /* ---------------- 地址 ---------------- */
@@ -1879,9 +1880,10 @@ static void PowerDrawBoth(void)
     AirWay_Poll();   /* 每循环必跑的只读飞机轮询 (AirWay, 开关关时直接返回) */
     BuildQueue_Poll(); /* 每循环必跑的建筑本地排队 (BuildQueue, 开关关/队列空时直接返回) */
     PatrolCircle_Poll(); /* Z+中键一键巡逻圈 (开关关/无触发时直接返回) */
-    AirSpread_Poll(); /* 裸中键智能下令 (点按自适应/划线散开; Z 让路巡逻, Ctrl 让路模糊) */
+    AirSpread_Poll(); /* 裸中键智能下令 (点按自适应/划线散开; Z 让路巡逻, Ctrl 让路模糊, 组合中键让路区域自适应) */
     TreeChop_Poll(); /* Ctrl+Z+中键快速砍树 (开关关/无触发时直接返回) */
     FuzzyAttack_Poll(); /* Ctrl+中键模糊攻击 (开关关/无触发时直接返回) */
+    SmartArea_Poll(); /* Shift+中键范围智能下令 (开关关/无触发时直接返回) */
     MindSelect_Poll(); /* Shift+P 一步选中被心控单位 (开关关/无组合键时直接返回) */
     EnsureInit();
     if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
@@ -2284,6 +2286,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgFont_MessageDrawHook(void* reg
         AirSpread_Draw(surf, surfW, surfH, surfPitch);
         PatrolCircle_Draw(surf, surfW, surfH, surfPitch);
         FuzzyAttack_Draw(surf, surfW, surfH, surfPitch);
+        SmartArea_Draw(surf, surfW, surfH, surfPitch);
         TreeChop_Draw(surf, surfW, surfH, surfPitch);
     }
 
