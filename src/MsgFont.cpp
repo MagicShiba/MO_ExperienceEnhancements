@@ -28,6 +28,8 @@
 #include "AirSpread.h"
 #include "TreeChop.h"
 #include "FuzzyAttack.h"
+#include "MindSelect.h"
+#include "OrderUtil.h"
 
 #define MF_VERSION   "0.2.113d"
 #define MF_SECTION   "MsgFont"
@@ -191,9 +193,8 @@ static void LoadConfig(void)
     g_Cfg.Enable      = GetPrivateProfileIntA(MF_SECTION, "Enable", 1, g_IniPath);
     g_Cfg.FontHeight  = GetPrivateProfileIntA(MF_SECTION, "FontHeight", 0, g_IniPath);
     g_Cfg.Bold        = GetPrivateProfileIntA(MF_SECTION, "Bold", 0, g_IniPath);
-    GetPrivateProfileStringA(MF_SECTION, "FontFace", "msyh.ttc",
-                             g_Cfg.FontFace, sizeof(g_Cfg.FontFace), g_IniPath);
-    g_Cfg.FontFace[sizeof(g_Cfg.FontFace) - 1] = 0;
+    OU_ReadString(MF_SECTION, "FontFace", "msyh.ttc",
+                  g_Cfg.FontFace, sizeof(g_Cfg.FontFace));
     g_Cfg.Shadow      = GetPrivateProfileIntA(MF_SECTION, "Shadow", 1, g_IniPath);
     g_Cfg.ShadowDX    = GetPrivateProfileIntA(MF_SECTION, "ShadowDX", 1, g_IniPath);
     g_Cfg.ShadowDY    = GetPrivateProfileIntA(MF_SECTION, "ShadowDY", 1, g_IniPath);
@@ -207,7 +208,7 @@ static void LoadConfig(void)
     {   /* MaxWidth: 整数=像素, 0=自动; 0~1小数=按屏宽百分比 */
         char wb[32];
         int pm = 0;
-        GetPrivateProfileStringA(MF_SECTION, "MaxWidth", "0", wb, sizeof(wb), g_IniPath);
+        OU_ReadString(MF_SECTION, "MaxWidth", "0", wb, sizeof(wb));
         g_Cfg.MaxWidth = ParseWidth(wb, &pm);
         g_Cfg.MaxWidthPm = pm;
     }
@@ -224,9 +225,8 @@ static void LoadConfig(void)
     g_Cfg.HintBottom  = GetPrivateProfileIntA(MF_SECTION, "HintBottom", 8, g_IniPath);
     g_Cfg.HintFontHeight = GetPrivateProfileIntA(MF_SECTION, "HintFontHeight", 14, g_IniPath);
     g_Cfg.HintBold    = GetPrivateProfileIntA(MF_SECTION, "HintBold", 0, g_IniPath);
-    GetPrivateProfileStringA(MF_SECTION, "HintFontFace", "msyh.ttc",
-                             g_Cfg.HintFontFace, sizeof(g_Cfg.HintFontFace), g_IniPath);
-    g_Cfg.HintFontFace[sizeof(g_Cfg.HintFontFace) - 1] = 0;
+    OU_ReadString(MF_SECTION, "HintFontFace", "msyh.ttc",
+                  g_Cfg.HintFontFace, sizeof(g_Cfg.HintFontFace));
     g_Cfg.HintColorFollow = GetPrivateProfileIntA(MF_SECTION, "HintColorFollow", 0, g_IniPath);
     g_Cfg.HintMaxLines= GetPrivateProfileIntA(MF_SECTION, "HintMaxLines", 3, g_IniPath);
     g_Cfg.HintMaxWidth= GetPrivateProfileIntA(MF_SECTION, "HintMaxWidth", 320, g_IniPath);
@@ -294,9 +294,8 @@ static void LoadConfig(void)
     g_SW.Enable = GetPrivateProfileIntA(SWPANEL_SECTION, "Enable", 1, g_IniPath);
     g_SW.FontPx = GetPrivateProfileIntA(SWPANEL_SECTION, "FontPx", 16, g_IniPath);
     g_SW.Bold = GetPrivateProfileIntA(SWPANEL_SECTION, "Bold", 0, g_IniPath);
-    GetPrivateProfileStringA(SWPANEL_SECTION, "FontFace", "msyh.ttc",
-                             g_SW.FontFace, sizeof(g_SW.FontFace), g_IniPath);
-    g_SW.FontFace[sizeof(g_SW.FontFace) - 1] = 0;
+    OU_ReadString(SWPANEL_SECTION, "FontFace", "msyh.ttc",
+                  g_SW.FontFace, sizeof(g_SW.FontFace));
     g_SW.Opacity = GetPrivateProfileIntA(SWPANEL_SECTION, "Opacity", 60, g_IniPath);
     g_SW.RightMargin = GetPrivateProfileIntA(SWPANEL_SECTION, "RightMargin", 8, g_IniPath);
     g_SW.BottomMargin = GetPrivateProfileIntA(SWPANEL_SECTION, "BottomMargin", 8, g_IniPath);
@@ -1883,6 +1882,7 @@ static void PowerDrawBoth(void)
     AirSpread_Poll(); /* 裸中键划线散开 (Z 让路巡逻圈, Ctrl 让路模糊攻击) */
     TreeChop_Poll(); /* Ctrl+Z+中键快速砍树 (开关关/无触发时直接返回) */
     FuzzyAttack_Poll(); /* Ctrl+中键模糊攻击 (开关关/无触发时直接返回) */
+    MindSelect_Poll(); /* Shift+P 一步选中被心控单位 (开关关/无组合键时直接返回) */
     EnsureInit();
     if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
     /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;

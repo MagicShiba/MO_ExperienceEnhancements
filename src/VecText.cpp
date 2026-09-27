@@ -20,6 +20,7 @@
 #include <windows.h>
 #include "GdiText.h"
 #include "VecText.h"
+#include "OrderUtil.h"
 
 /* VT_SECTION 见 VecText.h (MsgFont 读电力键共用)。 */
 #define ADDR_BLIT        0x00434120u
@@ -1678,9 +1679,8 @@ void VecText_Install(void)
     GtEnsureLog();
     if (!g_Log) return;   /* 日志都打不开就不装钩 (无意义) */
     g_VT.Enable = GetPrivateProfileIntA(VT_SECTION, "Enable", 1, g_IniPath);
-    GetPrivateProfileStringA(VT_SECTION, "FontFace", "simhei.ttf",
-                             g_VT.FontFace, sizeof(g_VT.FontFace), g_IniPath);
-    g_VT.FontFace[sizeof(g_VT.FontFace) - 1] = 0;
+    OU_ReadString(VT_SECTION, "FontFace", "simhei.ttf",
+                  g_VT.FontFace, sizeof(g_VT.FontFace));
     g_VT.Bold = GetPrivateProfileIntA(VT_SECTION, "Bold", 0, g_IniPath);
     g_VT.FontPx = GetPrivateProfileIntA(VT_SECTION, "FontPx", 0, g_IniPath);
     g_VT.CreditPx = GetPrivateProfileIntA(VT_SECTION, "CreditPx", 0, g_IniPath);

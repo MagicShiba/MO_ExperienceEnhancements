@@ -333,22 +333,12 @@ void ResolveFontFace(const char* cfg, const char* tag, wchar_t* out,
                      const wchar_t* fallback)
 {
     char tmp[64], path[MAX_PATH_LEN * 2];
-    int i = 0, j = 0;
+    int j = 0;
     const char* where = "none";
-    while (cfg[i] == ' ' || cfg[i] == '\t') i++;
-    while (cfg[i] && j < (int)sizeof(tmp) - 1) tmp[j++] = cfg[i++];
-    while (j > 0 && (tmp[j - 1] == ' ' || tmp[j - 1] == '\t')) j--;
+    /* 输入在加载时已由 OU_ReadString 去注释/去两端空格, 这里只做有界拷贝。 */
+    if (!cfg) { CopyFace(out, fallback); return; }
+    while (cfg[j] && j < (int)sizeof(tmp) - 1) { tmp[j] = cfg[j]; j++; }
     tmp[j] = 0;
-    /* 行内注释截断: GetPrivateProfileString 不吃行内 ";" (如
-     * FontFace=msyh.ttc ; 字体文件名 会把注释也当值返回),
-     * 不截的话文件名永远找不到, 静默回落默认字体 (vtext/hint 都中过招,
-     * 日志 file= 值里带 "; ..." 即此病)。整数值不受影响 (API 只取前导数字)。 */
-    {
-        int k = 0;
-        while (tmp[k] && tmp[k] != ';') k++;
-        while (k > 0 && (tmp[k - 1] == ' ' || tmp[k - 1] == '\t')) k--;
-        tmp[k] = 0;
-    }
     if (!tmp[0]) { CopyFace(out, fallback); return; }
     if (!FindFontFile(tmp, path, sizeof(path), &where))
     {

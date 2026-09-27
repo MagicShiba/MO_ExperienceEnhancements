@@ -1,4 +1,4 @@
-/* OrderUtil.h - 下单模块共享工具 (PatrolCircle/AirSpread/TreeChop/FuzzyAttack)。
+/* OrderUtil.h - 下单/选中模块共享工具 (PatrolCircle/AirSpread/TreeChop/FuzzyAttack/MindSelect)。
  * 引擎只读查询 + OutList 标准事件入队, 不写模拟内存 (联机安全)。
  * 实现见 OrderUtil.cpp。构建见 构建.bat (同一 DLL)。 */
 #pragma once
@@ -66,3 +66,37 @@ int OU_MouseCellPx(int* cx, int* cy, int* px, int* py);
 int OU_PtrAliveRaw(void* u, int id);
 /* 同上, idxOk=0 时 fail-open 全回活 (索引自检未通过时功能不变)。 */
 int OU_PtrAlive(void* u, int id, int idxOk);
+
+/* 热键串 (照 AutoLoadDev Hotkey=Ctrl+D 写法, 另支持鼠标键与多主键)。
+ * 语法: 修饰键 Ctrl/Alt/Shift/Win (大小写无所谓, 可多个, +/空格分隔) + 按键。
+ * 大小写不敏感, 空格/Tab 自动忽略, 行尾 ;注释在加载时由 OU_ReadHotkey
+ * 统一截掉 ("Ctrl+Z" 与 "  ctrl + z   ;注释" 等价)。
+ * 按键可多个, 最后一个是主键, 前面的是必须按住的附加键。
+ * 例: "Shift+P" / "Ctrl+Z+Middle" / "Z+Middle" / "Middle"。
+ * 键名: 单个字母/数字, F1~F24, Space/Tab/Enter/Backspace/Insert/Delete/Home/
+ * End/PageUp/PageDown/Up/Down/Left/Right/Pause/Num0~Num9, Middle/MMB/LMB/RMB/
+ * X1/X2 (鼠标)。
+ * "None"/"Off"/"Disabled" = 禁用; 多位纯数字串 = 老 TriggerVK 数值兼容
+ * (单位数字符按字母数字键解, 如 "4" 是数字键 4 不是中键)。
+ * 完整键表见 Hotkey.md。 */
+#define OU_MOD_CTRL  0x01u
+#define OU_MOD_SHIFT 0x02u
+#define OU_MOD_ALT   0x04u
+#define OU_MOD_WIN   0x08u
+#define OU_HK_MAXEXTRA 4
+typedef struct { unsigned vk; unsigned mods; unsigned extra[OU_HK_MAXEXTRA]; int nExtra; int disabled; } OU_Hotkey;
+/* 解析热键串 (输入须已去注释, 见 OU_ReadHotkey)。成功回 1 (None 类写
+ * disabled 回 1); 空串/坏串回 0。 */
+int OU_ParseHotkey(const char* spec, OU_Hotkey* out);
+/* 主键 / 修饰键 / 附加键 / 全组合是否按下。 */
+int OU_KeyDown(unsigned vk);
+int OU_ModsDown(unsigned mods);
+int OU_ExtraDown(const OU_Hotkey* hk);
+int OU_HotkeyDown(const OU_Hotkey* hk);
+/* 从 ini 读热键串并加载 (行尾 ;注释在这里统一剥掉; 缺键/空串/坏串回 0,
+ * 调用方保留原值; 成功含 None 回 1)。数字项不用管, Int 接口遇 ; 本来就停。 */
+/* 从 ini 读字符串并加载时统一清洗: 行尾 ;注释截掉, 两端空格/Tab 去掉;
+ * 缺键/空值用 def。无 CRT。所有读串入口都走这里, 解析处不再各自处理。 */
+void OU_ReadString(const char* section, const char* key, const char* def,
+                   char* buf, int buflen);
+int OU_ReadHotkey(const char* section, const char* key, OU_Hotkey* io);

@@ -46,7 +46,7 @@ typedef int (__fastcall *AS_UnlockFn)(void*, void*);
 
 static int g_AsInit = 0;
 static int g_AsEnable = 1;
-static int g_AsTriggerVK = 4;   /* 4=中键 */
+static OU_Hotkey g_AsHk;      /* Hotkey=Middle (裸中键, Z/Ctrl 按住时让路) */
 static int g_AsNodeStep = 2;    /* 拖线采样步长 (格, 切比雪夫距离) */
 
 /* 分类判据 (参考 RACommands, MO rulesmo 实测 + 内存 dump 双确认):
@@ -64,11 +64,12 @@ static void AS_EnsureInit(void)
     BuildPaths();
     GtEnsureLog();
     g_AsEnable = GetPrivateProfileIntA(AS_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    g_AsTriggerVK = GetPrivateProfileIntA(AS_SECTION, "TriggerVK", 4, g_IniPath);
+    OU_ParseHotkey("Middle", &g_AsHk);            /* 默认 (必成功) */
+    OU_ReadHotkey(AS_SECTION, "Hotkey", &g_AsHk); /* 有则覆盖, 坏串留默认 */
+    if (g_AsHk.disabled) g_AsEnable = 0;
     g_AsNodeStep = GetPrivateProfileIntA(AS_SECTION, "NodeStep", 2, g_IniPath);
     if (g_AsNodeStep < 1) g_AsNodeStep = 1;
     if (g_AsNodeStep > 8) g_AsNodeStep = 8;
-    if (g_AsTriggerVK < 1 || g_AsTriggerVK > 255) g_AsTriggerVK = 4;
     LogLine("airspread: ON (middle spread)");
     if (!g_AsEnable) LogLine("airspread: OFF");
 }
@@ -646,15 +647,15 @@ void AirSpread_Poll(void)
 {
     int trigDown;
     AS_EnsureInit();
-    trigDown = (GetAsyncKeyState(g_AsTriggerVK) & 0x8000) ? 1 : 0;
+    trigDown = OU_KeyDown(g_AsHk.vk);
     if (!g_AsEnable) { g_AsArmed = 0; g_AsPrevTrig = trigDown; return; }
     if (g_AsPendCount > 0) { AS_Drain(); g_AsPrevTrig = trigDown; return; }
     if (trigDown && g_AsArmed)
     {
-        /* 按住途中加了 Z/Ctrl 即改主意了: 散开取消待命 (松开不执行),
-         * 执行权交给巡逻/砍树/模糊 (它们按松开瞬间组合键判定)。 */
-        if ((GetAsyncKeyState(90) & 0x8000) ||
-            (GetAsyncKeyState(0x11) & 0x8000))
+        /* 按住途中加了 Hotkey 附加键/修饰键或 Z/Ctrl 即改主意了: 散开取消待命
+         * (松开不执行), 执行权交给巡逻/砍树/模糊 (它们按松开瞬间组合键判定)。 */
+        if (!OU_ModsDown(g_AsHk.mods) || !OU_ExtraDown(&g_AsHk) ||
+            OU_KeyDown('Z') || OU_KeyDown(VK_CONTROL))
             g_AsArmed = 0;
     }
     if (trigDown && g_AsArmed)
@@ -667,9 +668,9 @@ void AirSpread_Poll(void)
     if (trigDown && !g_AsPrevTrig)
     {
         /* 按下: Z 按住时归 PatrolCircle, Ctrl 按住时归 FuzzyAttack,
-         * 这里只认裸中键 (三方互斥)。 */
-        if (!(GetAsyncKeyState(90) & 0x8000) &&
-            !(GetAsyncKeyState(0x11) & 0x8000))
+         * 这里只认 Hotkey 裸键 (三方互斥, 仲裁键见上面)。 */
+        if (OU_ModsDown(g_AsHk.mods) && OU_ExtraDown(&g_AsHk) &&
+            !OU_KeyDown('Z') && !OU_KeyDown(VK_CONTROL))
             AS_Press();
     }
     else if (!trigDown && g_AsPrevTrig && g_AsArmed)

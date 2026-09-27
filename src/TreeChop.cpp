@@ -1,6 +1,6 @@
 /* TreeChop.cpp - Ctrl+Z+中键快速砍树 (选中地面单位强制攻击树木)。
  *
- * 触发: 按住 Ctrl + Z 的同时按住鼠标中键 (TriggerVK, 默认 4)
+ * 触发: 按住 Ctrl + Z 的同时按住鼠标中键 (Hotkey, 默认 Ctrl+Z+Middle),
  * 显示生效格块菱形框, 松开才在当前格执行: 以鼠标格为基准扫
  * Range x Range (默认 4x4, 可配 2~16), 找树木地形, 选中单位
  * 按轮询均分强制攻击 (MegaMission Mission=Attack, Target=树对象)。
@@ -52,10 +52,8 @@ typedef int (__fastcall *TC_UnlockFn)(void*, void*);
 
 static int g_TcInit = 0;
 static int g_TcEnable = 1;
-static int g_TcTriggerVK = 4;   /* 4=中键 */
-static int g_TcZVK = 90;        /* Z (路径点) */
+static OU_Hotkey g_TcHk;      /* Hotkey=Ctrl+Z+Middle (主键中键 + 按住 Ctrl/Z) */
 static int g_TcRange = 4;       /* 扫描块边长 (格, 鼠标在块内 [Range/2][Range/2]) */
-#define TC_CTRLVK 0x11          /* Ctrl (强制攻击) */
 
 static void TC_EnsureInit(void)
 {
@@ -66,11 +64,10 @@ static void TC_EnsureInit(void)
     BuildPaths();
     GtEnsureLog();
     g_TcEnable = GetPrivateProfileIntA(TC_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    g_TcTriggerVK = GetPrivateProfileIntA(TC_SECTION, "TriggerVK", 4, g_IniPath);
-    g_TcZVK = GetPrivateProfileIntA(TC_SECTION, "ZVK", 90, g_IniPath);
+    OU_ParseHotkey("Ctrl+Z+Middle", &g_TcHk);          /* 默认 (必成功) */
+    OU_ReadHotkey(TC_SECTION, "Hotkey", &g_TcHk);      /* 有则覆盖, 坏串留默认 */
+    if (g_TcHk.disabled) g_TcEnable = 0;
     g_TcRange = GetPrivateProfileIntA(TC_SECTION, "Range", 4, g_IniPath);
-    if (g_TcTriggerVK < 1 || g_TcTriggerVK > 255) g_TcTriggerVK = 4;
-    if (g_TcZVK < 1 || g_TcZVK > 255) g_TcZVK = 90;
     if (g_TcRange < 2) g_TcRange = 2;
     if (g_TcRange > 16) g_TcRange = 16;
     q = AppendCStr(buf, q, "treechop: ON (ctrl+Z+middle) range=", sizeof(buf));
@@ -422,13 +419,11 @@ static void TC_BoxSample(void);
 void TreeChop_Poll(void)
 {
     int trigDown;
-    int ctrl, z, combo;
+    int combo;
 
     TC_EnsureInit();
-    trigDown = (GetAsyncKeyState(g_TcTriggerVK) & 0x8000) ? 1 : 0;
-    ctrl = (GetAsyncKeyState(TC_CTRLVK) & 0x8000) ? 1 : 0;
-    z = (GetAsyncKeyState(g_TcZVK) & 0x8000) ? 1 : 0;
-    combo = (ctrl && z) ? 1 : 0;
+    trigDown = OU_KeyDown(g_TcHk.vk);
+    combo = (OU_ModsDown(g_TcHk.mods) && OU_ExtraDown(&g_TcHk)) ? 1 : 0;
     if (g_TcPendCount > 0)
     { TC_Drain(); g_TcPrevTrig = trigDown; return; } /* drip 续发 */
     if (!g_TcEnable) { g_TcPrevTrig = trigDown; return; }
@@ -524,9 +519,8 @@ void TreeChop_Draw(void* surf, int w, int h, int pitch)
     int lo, hi, x0, y0, x1, y1, x2, y2, x3, y3;
     extern int g_Calibrated;
     if (!g_TcEnable || !g_TcBHas) return;
-    if (!(GetAsyncKeyState(g_TcTriggerVK) & 0x8000)) return;  /* 按住才画 */
-    if (!(GetAsyncKeyState(TC_CTRLVK) & 0x8000)) return;
-    if (!(GetAsyncKeyState(g_TcZVK) & 0x8000)) return;        /* 缺 Z 归别家 */
+    if (!OU_KeyDown(g_TcHk.vk)) return;  /* 按住才画 */
+    if (!OU_ModsDown(g_TcHk.mods) || !OU_ExtraDown(&g_TcHk)) return;
     if (!g_Calibrated) return;
     if (!surf || !IsPlausiblePtr(surf)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;

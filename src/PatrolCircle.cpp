@@ -1,7 +1,7 @@
 /* PatrolCircle.cpp - Z+中键一键巡逻圈 (选中单位直接巡逻)。
  *
- * 触发: 按住 Z (PlanningMode 键) 的同时按鼠标中键 (可配 TriggerVK:
- * 4=中键默认, 5=侧键1, 6=侧键2) 锚定起点, 划线后松开以终点定圈:
+ * 触发: 按住 Z (PlanningMode 键) 的同时按住鼠标中键 (Hotkey, 默认 Z+Middle),
+ * 划线后松开在终点定圈:
  * 起终连线为中线, 四周各外扩 Size/2 (端点沿方向也外扩 Size/2) 成矩环;
  * 点按 (起终两格内) 则以松开格为中心布 4x4 方环 (±2 角) 并开始巡逻。
  * 拖线期间按 NodeStep 采样轨迹节点; 松开时起终距离 < LoopClose
@@ -97,9 +97,7 @@ typedef int (__fastcall *PC_UnlockFn)(void*, void*);
 
 static int g_PcInit = 0;
 static int g_PcEnable = 1;
-static int g_PcTriggerVK = 4;   /* 4=中键, 5=侧键1, 6=侧键2 */
-static int g_PcRequireZ = 1;
-static int g_PcZVK = 90;        /* Z */
+static OU_Hotkey g_PcHk;      /* Hotkey=Z+Middle (主键中键 + 必须按住 Z) */
 static int g_PcSize = 4;        /* 方环边长 (偶数, 角=中心±Size/2) */
 static int g_PcCommit = 1;
 static int g_PcNodeStep = 2;    /* 拖线采样步长 (格, 切比雪夫距离) */
@@ -113,13 +111,11 @@ static void PC_EnsureInit(void)
     BuildPaths();
     GtEnsureLog();
     g_PcEnable = GetPrivateProfileIntA(PC_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    g_PcTriggerVK = GetPrivateProfileIntA(PC_SECTION, "TriggerVK", 4, g_IniPath);
-    g_PcRequireZ = GetPrivateProfileIntA(PC_SECTION, "RequireZ", 1, g_IniPath) ? 1 : 0;
-    g_PcZVK = GetPrivateProfileIntA(PC_SECTION, "ZVK", 90, g_IniPath);
+    OU_ParseHotkey("Z+Middle", &g_PcHk);          /* 默认 (必成功) */
+    OU_ReadHotkey(PC_SECTION, "Hotkey", &g_PcHk); /* 有则覆盖, 坏串留默认 */
+    if (g_PcHk.disabled) g_PcEnable = 0;
     g_PcSize = GetPrivateProfileIntA(PC_SECTION, "Size", 4, g_IniPath);
     g_PcCommit = GetPrivateProfileIntA(PC_SECTION, "Commit", 1, g_IniPath) ? 1 : 0;
-    if (g_PcTriggerVK < 1 || g_PcTriggerVK > 255) g_PcTriggerVK = 4;
-    if (g_PcZVK < 1 || g_PcZVK > 255) g_PcZVK = 90;
     if (g_PcSize < 2) g_PcSize = 2;
     if (g_PcSize > 16) g_PcSize = 16;
     g_PcNodeStep = GetPrivateProfileIntA(PC_SECTION, "NodeStep", 2, g_IniPath);
@@ -710,7 +706,7 @@ void PatrolCircle_Poll(void)
     int trigDown;
 
     PC_EnsureInit();
-    trigDown = (GetAsyncKeyState(g_PcTriggerVK) & 0x8000) ? 1 : 0;
+    trigDown = OU_KeyDown(g_PcHk.vk);
     if (g_PcPendCount > 0)
         PC_Drain(); /* drip 续发 */
     else if (g_PcWaitExec)
@@ -770,10 +766,10 @@ void PatrolCircle_Poll(void)
     { g_PcPrevTrig = trigDown; return; }
     if (trigDown && !g_PcPrevTrig)
     {
-        /* 按下: 锚定起点格 (需 Z, 且不能按 Ctrl——Ctrl+Z+中键归砍树),
-         * 节点[0]=锚点, 等松开再定圈 */
-        if ((!g_PcRequireZ || (GetAsyncKeyState(g_PcZVK) & 0x8000)) &&
-            !(GetAsyncKeyState(0x11) & 0x8000))
+        /* 按下: 锚定起点格 (Hotkey 附加键如 Z 必须按住, 且不能按 Ctrl——
+         * Ctrl+Z+中键归砍树), 节点[0]=锚点, 等松开再定圈 */
+        if (OU_ModsDown(g_PcHk.mods) && OU_ExtraDown(&g_PcHk) &&
+            !OU_KeyDown(VK_CONTROL))
         {
             int ax, ay;
             if (OU_MouseCell(&ax, &ay))
@@ -799,7 +795,7 @@ void PatrolCircle_Poll(void)
         int ax = g_PcAx, ay = g_PcAy;
         int mx = 0, my = 0;
         g_PcArmed = 0;
-        if (GetAsyncKeyState(0x11) & 0x8000)
+        if (OU_KeyDown(VK_CONTROL))
         {
             g_PcPrevTrig = trigDown;
             return;
@@ -869,7 +865,7 @@ void PatrolCircle_Draw(void* surf, int w, int h, int pitch)
     int x0, y0, x1, y1;
     extern int g_Calibrated;
     if (!g_PcEnable || !g_PcArmed) return;
-    if (GetAsyncKeyState(0x11) & 0x8000) return; /* 按住 Ctrl 显示砍树框, 巡逻线让路 */
+    if (OU_KeyDown(VK_CONTROL)) return; /* 按住 Ctrl 显示砍树框, 巡逻线让路 */
     if (!g_Calibrated) return;
     if (!surf || !IsPlausiblePtr(surf)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;

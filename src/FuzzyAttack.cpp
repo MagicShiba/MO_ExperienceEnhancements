@@ -1,7 +1,7 @@
 /* FuzzyAttack.cpp - Ctrl+中键模糊下令 (快速单位难。对开火
  * 目标太小点不中时用)。
  *
- * 触发: 按住 Ctrl (不按 Z) 的同时按住鼠标中键 (TriggerVK, 默认 4)
+ * 触发: 按住 Ctrl (避开 Z) 的同时按住鼠标中键 (Hotkey, 默认 Ctrl+Middle),
  * 显示生效格块菱形框, 松开才在当前格执行: 以鼠标格为基准扫
  * Range x Range (默认 4x4, 可配 2~16) 找敌方对象, 选中单位分组
  * 强制攻击 (MegaMission Mission=Attack=1, Target=敌对象,
@@ -55,11 +55,9 @@ typedef int (__fastcall *FA_UnlockFn)(void*, void*);
 
 static int g_FaInit = 0;
 static int g_FaEnable = 1;
-static int g_FaTriggerVK = 4;   /* 4=中键 */
+static OU_Hotkey g_FaHk;      /* Hotkey=Ctrl+Middle (Z 按住时让路巡逻/砍树) */
 static int g_FaRange = 4;       /* 扫描块边长 (格, 鼠标在块内 [Range/2][Range/2]) */
 static int g_FaSquad = 4;       /* 几打一 (单位<=此数则全员集火一个) */
-#define FA_CTRLVK 0x11          /* Ctrl */
-#define FA_ZVK 90               /* Z (按住则归巡逻/砍树, 这里排除) */
 
 static void FA_EnsureInit(void)
 {
@@ -70,10 +68,11 @@ static void FA_EnsureInit(void)
     BuildPaths();
     GtEnsureLog();
     g_FaEnable = GetPrivateProfileIntA(FA_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    g_FaTriggerVK = GetPrivateProfileIntA(FA_SECTION, "TriggerVK", 4, g_IniPath);
+    OU_ParseHotkey("Ctrl+Middle", &g_FaHk);           /* 默认 (必成功) */
+    OU_ReadHotkey(FA_SECTION, "Hotkey", &g_FaHk);     /* 有则覆盖, 坏串留默认 */
+    if (g_FaHk.disabled) g_FaEnable = 0;
     g_FaRange = GetPrivateProfileIntA(FA_SECTION, "Range", 4, g_IniPath);
     g_FaSquad = GetPrivateProfileIntA(FA_SECTION, "SquadSize", 4, g_IniPath);
-    if (g_FaTriggerVK < 1 || g_FaTriggerVK > 255) g_FaTriggerVK = 4;
     if (g_FaRange < 2) g_FaRange = 2;
     if (g_FaRange > 16) g_FaRange = 16;
     if (g_FaSquad < 2) g_FaSquad = 2;
@@ -405,13 +404,13 @@ static void FA_BoxSample(void);
 void FuzzyAttack_Poll(void)
 {
     int trigDown;
-    int ctrl, z, combo;
+    int combo;
 
     FA_EnsureInit();
-    trigDown = (GetAsyncKeyState(g_FaTriggerVK) & 0x8000) ? 1 : 0;
-    ctrl = (GetAsyncKeyState(FA_CTRLVK) & 0x8000) ? 1 : 0;
-    z = (GetAsyncKeyState(FA_ZVK) & 0x8000) ? 1 : 0;
-    combo = (ctrl && !z) ? 1 : 0;
+    trigDown = OU_KeyDown(g_FaHk.vk);
+    /* 有 Z 归巡逻/砍树 (仲裁, 不在 Hotkey 里): 这里排除 */
+    combo = (OU_ModsDown(g_FaHk.mods) && OU_ExtraDown(&g_FaHk) &&
+             !OU_KeyDown('Z')) ? 1 : 0;
     if (g_FaPendCount > 0)
     { FA_Drain(); g_FaPrevTrig = trigDown; return; } /* drip 续发 */
     if (!g_FaEnable) { g_FaPrevTrig = trigDown; return; }
@@ -507,9 +506,9 @@ void FuzzyAttack_Draw(void* surf, int w, int h, int pitch)
     int lo, hi, x0, y0, x1, y1, x2, y2, x3, y3;
     extern int g_Calibrated;
     if (!g_FaEnable || !g_FaBHas) return;
-    if (!(GetAsyncKeyState(g_FaTriggerVK) & 0x8000)) return;  /* 按住才画 */
-    if (!(GetAsyncKeyState(FA_CTRLVK) & 0x8000)) return;
-    if (GetAsyncKeyState(FA_ZVK) & 0x8000) return;            /* 有 Z 归别家 */
+    if (!OU_KeyDown(g_FaHk.vk)) return;  /* 按住才画 */
+    if (!OU_ModsDown(g_FaHk.mods) || !OU_ExtraDown(&g_FaHk)) return;
+    if (OU_KeyDown('Z')) return;            /* 有 Z 归别家 */
     if (!g_Calibrated) return;
     if (!surf || !IsPlausiblePtr(surf)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;

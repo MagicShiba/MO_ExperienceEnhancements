@@ -106,3 +106,193 @@ int OU_PtrAlive(void* u, int id, int idxOk)
     if (!idxOk) return 1;
     return OU_PtrAliveRaw(u, id);
 }
+
+/* ---------------- 热键串 (照 AutoLoadDev Hotkey= 写法, 无 CRT) ---------------- */
+
+static int OU_Lower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+
+static int OU_StrEqNI(const char* a, const char* b)
+{
+    while (*a && *b)
+    {
+        if (OU_Lower((unsigned char)*a) != OU_Lower((unsigned char)*b)) return 0;
+        a++; b++;
+    }
+    return *a == 0 && *b == 0;
+}
+
+/* 单个键名 -> VK; 0 = 不认识 (多位纯数字由调用方按老数值兼容, 这里不管)。 */
+static unsigned OU_MapKeyToken(const char* t)
+{
+    static const struct { const char* name; unsigned vk; } named[] =
+    {
+        { "Space", VK_SPACE },  { "Tab", VK_TAB },      { "Enter", VK_RETURN },
+        { "Return", VK_RETURN },{ "Backspace", VK_BACK },{ "Back", VK_BACK },
+        { "Insert", VK_INSERT },{ "Ins", VK_INSERT },   { "Delete", VK_DELETE },
+        { "Del", VK_DELETE },   { "Home", VK_HOME },    { "End", VK_END },
+        { "PageUp", VK_PRIOR }, { "PgUp", VK_PRIOR },   { "PageDown", VK_NEXT },
+        { "PgDn", VK_NEXT },    { "Up", VK_UP },        { "Down", VK_DOWN },
+        { "Left", VK_LEFT },    { "Right", VK_RIGHT },  { "Pause", VK_PAUSE },
+        { "Num0", VK_NUMPAD0 }, { "Num1", VK_NUMPAD1 }, { "Num2", VK_NUMPAD2 },
+        { "Num3", VK_NUMPAD3 }, { "Num4", VK_NUMPAD4 }, { "Num5", VK_NUMPAD5 },
+        { "Num6", VK_NUMPAD6 }, { "Num7", VK_NUMPAD7 }, { "Num8", VK_NUMPAD8 },
+        { "Num9", VK_NUMPAD9 },
+        { "Middle", VK_MBUTTON }, { "MMB", VK_MBUTTON },
+        { "LMB", VK_LBUTTON },  { "RMB", VK_RBUTTON },
+        { "X1", VK_XBUTTON1 },  { "X2", VK_XBUTTON2 },
+    };
+    int i, n = 0;
+    while (t[n]) n++;
+    if (n == 1)
+    {
+        unsigned char c = (unsigned char)t[0];
+        if (c >= 'a' && c <= 'z') return (unsigned)(c - 'a' + 'A');
+        if (c >= 'A' && c <= 'Z') return (unsigned)c;
+        if (c >= '0' && c <= '9') return (unsigned)c;
+        return 0;
+    }
+    if (n >= 2 && (t[0] == 'F' || t[0] == 'f'))
+    {
+        int num = 0, ok = 1;
+        for (i = 1; i < n; i++)
+        {
+            if (t[i] < '0' || t[i] > '9') { ok = 0; break; }
+            num = num * 10 + (t[i] - '0');
+        }
+        if (ok && num >= 1 && num <= 24) return (unsigned)(VK_F1 + num - 1);
+    }
+    for (i = 0; i < (int)(sizeof(named) / sizeof(named[0])); i++)
+        if (OU_StrEqNI(t, named[i].name)) return named[i].vk;
+    return 0;
+}
+
+int OU_ParseHotkey(const char* spec, OU_Hotkey* out)
+{
+    char toks[8][16];
+    int ntok = 0, i;
+    unsigned mods = 0;
+    unsigned keys[8];
+    int nkey = 0;
+    const char* p;
+    if (!spec || !out) return 0;
+    out->vk = 0; out->mods = 0; out->nExtra = 0; out->disabled = 0;
+    /* 注: 行尾 ;注释由 OU_ReadHotkey 在加载时统一剥掉, 这里只做纯语法解析。 */
+    if (OU_StrEqNI(spec, "None") || OU_StrEqNI(spec, "Off") ||
+        OU_StrEqNI(spec, "Disabled"))
+    {
+        out->disabled = 1;
+        return 1;
+    }
+    p = spec;
+    while (*p && ntok < 8)
+    {
+        int n = 0;
+        while (*p == '+' || *p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        while (*p && *p != '+' && *p != ' ' && *p != '\t' && n < 15)
+            toks[ntok][n++] = *p++;
+        toks[ntok][n] = 0;
+        if (n) ntok++;
+    }
+    if (ntok == 1)
+    {
+        /* 多位纯数字 = 老 TriggerVK 数值兼容 (例 "80"=P, "4"=中键)。 */
+        int alld = 1, v = 0;
+        for (i = 0; toks[0][i]; i++)
+        {
+            if (toks[0][i] < '0' || toks[0][i] > '9') { alld = 0; break; }
+            v = v * 10 + (toks[0][i] - '0');
+        }
+        if (alld && i > 1 && v >= 1 && v <= 255) { out->vk = (unsigned)v; return 1; }
+    }
+    for (i = 0; i < ntok; i++)
+    {
+        const char* t = toks[i];
+        if (OU_StrEqNI(t, "Ctrl") || OU_StrEqNI(t, "Control")) { mods |= OU_MOD_CTRL; continue; }
+        if (OU_StrEqNI(t, "Alt") || OU_StrEqNI(t, "Menu")) { mods |= OU_MOD_ALT; continue; }
+        if (OU_StrEqNI(t, "Shift")) { mods |= OU_MOD_SHIFT; continue; }
+        if (OU_StrEqNI(t, "Win") || OU_StrEqNI(t, "Windows")) { mods |= OU_MOD_WIN; continue; }
+        {
+            unsigned vk = OU_MapKeyToken(t);
+            if (vk && nkey < 8) keys[nkey++] = vk;
+        }
+    }
+    if (!nkey) return 0;
+    out->mods = mods;
+    out->vk = keys[nkey - 1];       /* 最后一个非修饰键是主键 */
+    for (i = 0; i < nkey - 1 && i < OU_HK_MAXEXTRA; i++) out->extra[i] = keys[i];
+    out->nExtra = (nkey - 1 < OU_HK_MAXEXTRA) ? nkey - 1 : OU_HK_MAXEXTRA;
+    return 1;
+}
+
+int OU_KeyDown(unsigned vk)
+{
+    if (!vk || vk > 255) return 0;
+    return (GetAsyncKeyState((int)vk) & 0x8000) ? 1 : 0;
+}
+
+int OU_ModsDown(unsigned mods)
+{
+    int down = 1;
+    if (mods & OU_MOD_CTRL) down &= OU_KeyDown(VK_CONTROL);
+    if (mods & OU_MOD_SHIFT) down &= OU_KeyDown(VK_SHIFT);
+    if (mods & OU_MOD_ALT) down &= OU_KeyDown(VK_MENU);
+    if (mods & OU_MOD_WIN) down &= (OU_KeyDown(VK_LWIN) || OU_KeyDown(VK_RWIN));
+    return down;
+}
+
+int OU_ExtraDown(const OU_Hotkey* hk)
+{
+    int i;
+    if (!hk) return 0;
+    for (i = 0; i < hk->nExtra; i++)
+        if (!OU_KeyDown(hk->extra[i])) return 0;
+    return 1;
+}
+
+int OU_HotkeyDown(const OU_Hotkey* hk)
+{
+    if (!hk || hk->disabled) return 0;
+    return OU_KeyDown(hk->vk) && OU_ModsDown(hk->mods) && OU_ExtraDown(hk);
+}
+
+void OU_ReadString(const char* section, const char* key, const char* def,
+                   char* buf, int buflen)
+{
+    int i, j;
+    if (!buf || buflen <= 0) return;
+    buf[0] = 0;
+    if (section && key)
+        GetPrivateProfileStringA(section, key, "", buf, buflen, g_IniPath);
+    buf[buflen - 1] = 0;
+    /* 加载时统一清洗: 行尾 ;注释截掉 (ini 接口不剥行尾注释), 两端去空。 */
+    for (i = 0; buf[i]; i++)
+    {
+        if (buf[i] == ';') { buf[i] = 0; break; }
+    }
+    while (i > 0 && (buf[i - 1] == ' ' || buf[i - 1] == '\t')) buf[--i] = 0;
+    j = 0;
+    while (buf[j] == ' ' || buf[j] == '\t') j++;
+    if (j > 0)
+    {
+        for (i = 0; buf[j]; i++, j++) buf[i] = buf[j];
+        buf[i] = 0;
+    }
+    if (!buf[0] && def)
+    {
+        for (i = 0; i < buflen - 1 && def[i]; i++) buf[i] = def[i];
+        buf[i] = 0;
+    }
+}
+
+int OU_ReadHotkey(const char* section, const char* key, OU_Hotkey* io)
+{
+    char buf[64];
+    OU_Hotkey tmp;
+    if (!section || !key || !io) return 0;
+    OU_ReadString(section, key, "", buf, sizeof(buf));
+    if (!buf[0]) return 0;          /* 缺键/空串: 调用方保留原值 */
+    if (!OU_ParseHotkey(buf, &tmp)) return 0;   /* 坏串: 调用方保留原值 */
+    *io = tmp;
+    return 1;
+}
