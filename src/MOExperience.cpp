@@ -30,9 +30,10 @@
 #include "FuzzyAttack.h"
 #include "SmartArea.h"
 #include "MindSelect.h"
+#include "DeployPreview.h"
 #include "OrderUtil.h"
 
-#define MOE_VERSION   "0.2.135d"
+#define MOE_VERSION   "0.2.147d"
 #define MOE_SECTION   "MOExperience"
 
 /* ---------------- 地址 ---------------- */
@@ -1884,6 +1885,7 @@ static void PowerDrawBoth(void)
     TreeChop_Poll(); /* Ctrl+Z+中键快速砍树 (开关关/无触发时直接返回) */
     FuzzyAttack_Poll(); /* Ctrl+中键模糊攻击 (开关关/无触发时直接返回) */
     SmartArea_Poll(); /* Shift+中键范围智能下令 (开关关/无触发时直接返回) */
+    DeployPreview_Poll(); /* 单基地车裸中键点按: 开过去+到位自动展开 (预览框见渲染) */
     MindSelect_Poll(); /* Shift+P 一步选中被心控单位 (开关关/无组合键时直接返回) */
     EnsureInit();
     if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
@@ -2288,6 +2290,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
         FuzzyAttack_Draw(surf, surfW, surfH, surfPitch);
         SmartArea_Draw(surf, surfW, surfH, surfPitch);
         TreeChop_Draw(surf, surfW, surfH, surfPitch);
+        DeployPreview_Draw(surf, surfW, surfH, surfPitch);
     }
 
     /* 底部电量: 只画侧栏面 (总开关 PowerBottom=0 即关)。

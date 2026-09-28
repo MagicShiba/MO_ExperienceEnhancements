@@ -32,6 +32,7 @@
 #include "SmartOrder.h"
 #include "OrderUtil.h"
 #include "SmartArea.h"
+#include "DeployPreview.h"
 
 #define SO_SECTION "SmartOrder"
 
@@ -906,10 +907,11 @@ void SmartOrder_Poll(void)
     {
         /* 按住途中加了 Hotkey 附加键/修饰键、Z/Ctrl 或组合中键即改主意了:
          * 散开取消待命 (松开不执行), 执行权交巡逻/砍树/模糊/区域自适应
-         * (它们按松开瞬间组合键判定; 区域自适应关则不认领, 照旧散开)。 */
+         * (它们按松开瞬间组合键判定; 区域自适应关则不认领, 照旧散开)。
+         * 单基地车中途被认领 (DeployPreview) 同样让路。 */
         if (!OU_ModsDown(g_SoHk.mods) || !OU_ExtraDown(&g_SoHk) ||
             OU_KeyDown('Z') || OU_KeyDown(VK_CONTROL) ||
-            SmartArea_ClaimsMiddle())
+            SmartArea_ClaimsMiddle() || DeployPreview_ClaimsMiddle())
             g_SoArmed = 0;
     }
     if (trigDown && g_SoArmed)
@@ -922,10 +924,11 @@ void SmartOrder_Poll(void)
     if (trigDown && !g_SoPrevTrig)
     {
         /* 按下: Z 按住时归 PatrolCircle, Ctrl 按住时归 FuzzyAttack,
-         * 组合中键按住时归 SmartArea, 这里只认 Hotkey 裸键 (互斥见上面)。 */
+         * 组合中键按住时归 SmartArea, 单基地车裸中键归 DeployPreview,
+         * 这里只认 Hotkey 裸键 (互斥见上面)。 */
         if (OU_ModsDown(g_SoHk.mods) && OU_ExtraDown(&g_SoHk) &&
             !OU_KeyDown('Z') && !OU_KeyDown(VK_CONTROL) &&
-            !SmartArea_ClaimsMiddle())
+            !SmartArea_ClaimsMiddle() && !DeployPreview_ClaimsMiddle())
             SO_Press();
     }
     else if (!trigDown && g_SoPrevTrig && g_SoArmed)
