@@ -21,7 +21,10 @@
 #include "GdiText.h"
 #include "VecText.h"
 #include "OrderUtil.h"
+#include "Icon.h"
 
+/* 后定义的前置声明 (GetDim 高度调整在后用 VecTipStep, 定义在 DrawText 入口前) */
+static int VecPickPx(void* t);
 /* VT_SECTION 见 VecText.h (MOExperience 读电力键共用)。 */
 #define ADDR_BLIT        0x00434120u
 #define ADDR_BLIT_BACK   0x00434127u
@@ -341,6 +344,36 @@ static int VecMenuMatch(unsigned caller, int w, int h, int flags)
  * 电力提示出界修复由 TipBox 接管。 */
 
 
+/* PUA 串行步进: max(原步进, 矢量字号, 串内最大图标高), 只增不减。
+ * 与 GetDim 高度调整同公式, 两处一致行盒才对上。
+ * 背景: 矢量墨水/图标高于原字格时, DrawText 换行步进 (BitFont+0x1C,
+ * 0x434EC2/0x435112 反汇编实证) 会挤行, 行高必须跟内容走。 */
+static int VecTipStep(void* t, const wchar_t* s)
+{
+    int s0, px, mh = 0, q;
+    if (!t || !IsPlausiblePtr(t) || !s) return -1;
+    s0 = *(int*)((char*)t + 0x1C);
+    if (s0 < 8 || s0 > 64) return -1;
+    px = VecPickPx(t);
+    if (px < 8 || px > 40) px = s0;
+    for (q = 0; q < 256; q++)
+    {
+        wchar_t c = s[q];
+        int hh;
+        if (!c) break;
+        if (!Icon_Is((unsigned)c & 0xFFFFu)) continue;
+        hh = Icon_Height((unsigned)c & 0xFFFFu);
+        if (hh > mh) mh = hh;
+    }
+    {
+        int st = s0;
+        if (px > st) st = px;
+        if (mh > st) st = mh;
+        if (st > 64) st = 64;
+        return st;
+    }
+}
+
 int __fastcall VecDrawTextEntry(void* t, void* e,
     int a1, int a2, int a3, int a4, int a5,
     int a6, int a7, int a8, int a9, int a10)
@@ -383,6 +416,10 @@ int __fastcall VecDrawTextEntry(void* t, void* e,
             g_DTBody = (caller == 0x00621144u && a6 >= 400 && a7 >= 100);
         }
     }
+    /* 注: 曾试 DrawText 入口临时抬高 BitFont+0x1C 改行步进, 实证此处的
+     * t+0x1C 恒为 0 (不是行步进源, 真源在 DrawText 栈帧深处), 此路不通,
+     * 相关代码已删。行高以 GetDim 实测为准 (3 行 51px=17px/行, 图标 16px
+     * 装得下, 矢量墨水约 18px 仅 1px 可忽略)。 */
     r = g_OrigDrawText(t, NULL, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
     if (menuTake) g_MenuDepth--;
     if (brief)
@@ -708,7 +745,9 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
  * 先走原版取 h (与原版同口径), w 用 GDI 自然步进和
  * (与绘制笔位同口径: ABC 全宽 + 数字 DigitTrack)。
  * 控制串 (\t \n 等)、超长 (>255 字)、触 maxW (换行逻辑) 一律走原版。
- * 重入守卫: 嵌套调用直接走原版 (防栈爆)。未开 Render 不接管。 */
+ * 非 PUA 多行串另有 grow-only 修正 (原版换行丢行宽, 超武提示窄盒溢出),
+ * 只增不减, 见下。重入守卫: 嵌套调用直接走原版 (防栈爆)。
+ * 未开 Render 不接管。 */
 static int g_GDDepth = 0;
 
 int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
@@ -730,6 +769,131 @@ int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
     if (px < 8 || px > 40 || !GdiEnsure(px, g_VT.Bold, 2, g_VTFace))
         goto fwd;
     tot = 0;
+    /* 先扫 PUA (256 上限): 无图标串走老路 (控制串一律原版, 零回归)。
+     * 含图标串必须自己按行度量: 原版点阵不认 PUA, 盒宽会按无图标算
+     * 导致图标溢出盒外 (建造提示三行出界即此因)。 */
+    {
+        int hasIcon = 0, hasNL = 0, hasCtl = 0, j;
+        for (j = 0; j < 256; j++)
+        {
+            wchar_t c = s[j];
+            if (!c) break;
+            if (Icon_Is((unsigned)c & 0xFFFFu)) { hasIcon = 1; break; }
+            if (c == 0x0A || c == 0x0D) hasNL = 1;
+            else if (c < 0x20) hasCtl = 1;
+        }
+        if (hasIcon)
+        {
+            int lineW = 0;
+            tot = 0;
+            for (i = 0; i < 256; i++)
+            {
+                wchar_t wc = s[i];
+                int ga;
+                if (!wc) break;
+                if (wc == 0x0A)   /* 行尾: 取最大行宽 */
+                {
+                    if (lineW > tot) tot = lineW;
+                    lineW = 0;
+                    continue;
+                }
+                if (wc < 0x20) goto fwd;
+                if (Icon_Is((unsigned)wc & 0xFFFFu))
+                {
+                    ga = Icon_Advance((unsigned)wc & 0xFFFFu);
+                    if (ga <= 0) goto fwd;
+                }
+                else
+                {
+                    ABC abc;
+                    if (!g_G || !g_G->dc ||
+                        !GetCharABCWidthsW(g_G->dc, wc, wc, &abc)) goto fwd;
+                    ga = abc.abcA + abc.abcB + abc.abcC;
+                    if (wc >= 0x30 && wc <= 0x39) ga += g_VT.DigitTrack;
+                }
+                if (ga < 0) ga = 0;
+                lineW += ga;
+                if (lineW >= maxW) goto fwd;   /* 单行触顶 (换行逻辑): 原样 */
+            }
+            if (i >= 256) goto fwd;   /* 超长未见尾: 原样 */
+            if (lineW > tot) tot = lineW;
+            /* 精确行宽: 短串不保底 (160 保底是误诊产物, 图3大空隙即此因;
+             * 当时的"短文本越界"实为超武串走原版度量, 与此分支无关)。 */
+            /* 高度跟步进走: oh 是原步进总高, 按实际步进补每行差值 (只增不减)。
+             * 步进公式与 DrawText 钩一致 (VecTipStep), 否则盒与行错位:
+             * 度量在绘制前跑, +0x1C 此时还是原值, 正好取原步进。 */
+            {
+                int nlines = 1, k, v0 = -1, v1;
+                for (k = 0; k < i; k++) if (s[k] == 0x0A) nlines++;
+                if (t && IsPlausiblePtr(t))
+                {
+                    int v = *(int*)((char*)t + 0x1C);
+                    if (v >= 8 && v <= 64) v0 = v;
+                }
+                v1 = VecTipStep(t, s);
+                if (v0 > 0 && v1 > v0 && oh > 0 && oh < 4096)
+                {
+                    int nh = oh - nlines * v0 + nlines * v1;
+                    if (nh > oh && nh < 4096) oh = nh;
+                }
+            }
+            *w = tot; *h = oh;
+            {
+                DimCE* e = &g_DimC[g_DimCPos % DIMCACHE_N];
+                g_DimCPos++;
+                e->ptr = s; e->w0 = (unsigned)s[0] & 0xFFFFu;
+                e->n = i; e->ow = ow; e->nw = tot;
+            }
+            g_GDDepth--;
+            return r;
+        }
+        /* 非 PUA 多行串 grow-only 修正 (超武提示窄盒溢出修复):
+         * 原版度量 (0x433CF0, 反汇编实证) 换行分支直接清零行宽不存最大,
+         * maxW>0 (提示布局传视图宽, 0x478C36/0x478C83) 时盒宽常只按某行算
+         * ("打击的击"/"回溯的800"溢出即此因, 与 PUA 分支是两套路径)。
+         * 这里按行取 GDI 真最大, 只增不减: 真>原+6 且不超 maxW 才接管
+         * (单行/他种控制符/需换行一律原样, 零回归); 高度不动 (行数不变)。 */
+        else if (hasNL && !hasCtl)
+        {
+            int mx = 0, lw = 0, m, gdBad = 0;
+            for (m = 0; m < 256; m++)
+            {
+                wchar_t wc = s[m];
+                int ga;
+                ABC abc;
+                if (!wc) break;
+                if (wc == 0x0A || wc == 0x0D)
+                {
+                    if (lw > mx) mx = lw;
+                    lw = 0;
+                    continue;
+                }
+                if (!g_G || !g_G->dc ||
+                    !GetCharABCWidthsW(g_G->dc, wc, wc, &abc)) { gdBad = 1; break; }
+                ga = abc.abcA + abc.abcB + abc.abcC;
+                if (wc >= 0x30 && wc <= 0x39) ga += g_VT.DigitTrack;
+                if (ga < 0) ga = 0;
+                lw += ga;
+                if (lw >= maxW) { gdBad = 1; break; }   /* 触顶: 换行意图, 原样 */
+            }
+            if (!gdBad && m < 256)
+            {
+                if (lw > mx) mx = lw;
+                if (mx > ow + 6 && mx <= maxW)
+                {
+                    *w = mx; *h = oh;
+                    {
+                        DimCE* e = &g_DimC[g_DimCPos % DIMCACHE_N];
+                        g_DimCPos++;
+                        e->ptr = s; e->w0 = (unsigned)s[0] & 0xFFFFu;
+                        e->n = m; e->ow = ow; e->nw = mx;
+                    }
+                    g_GDDepth--;
+                    return r;
+                }
+            }
+        }
+    }
     for (i = 0; i < 256; i++)
     {
         wchar_t wc = s[i];
@@ -1349,6 +1513,19 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
     x = VecNormC(x);
     y = VecNormC(y);
     eff = (color == -1) ? (int)(*(unsigned short*)((char*)t + 0x24)) : color;
+    /* PUA 自定义图标 (建造提示第三行): PNG 位图直画, 不走 GDI/原版点阵。
+     * 放在 VecMeasure 之前 (原版度量不认 PUA, 必失败回落出 tofu)。 */
+    if (Icon_Is((unsigned)wc & 0xFFFFu))
+    {
+        int ia = Icon_Advance((unsigned)wc & 0xFFFFu);
+        if (ia > 0)
+        {
+            int rr = Icon_Blit(t, (unsigned)wc & 0xFFFFu, x, y, eff,
+                               Icon_LineH(t));
+            if (rr >= 0) return x + ia;
+        }
+        return g_OrigBlit(t, NULL, wch, x, y, color);
+    }
     adv = VecMeasure(t, wc, &h);
     if (adv < 0)
         return g_OrigBlit(t, NULL, wch, x, y, color);

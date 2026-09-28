@@ -49,18 +49,20 @@ int IsPlausiblePtr(const void* p)
     return (u >= 0x00010000u && u < 0x7FF00000u && (u & 3u) == 0);
 }
 
-/* 无 CRT: 编译器可能把拷贝/清零循环优化成 memcpy/memset 调用, 自备实现 */
+/* 无 CRT: 编译器可能把拷贝/清零循环优化成 memcpy/memset 调用, 自备实现。
+ * 注意: 实现体必须用 volatile, 否则 -O2 会把函数体自身再认作标准语义、
+ * 优化成一次对自己的调用 (0.2.149d 实测 ToolTip 假对象清零因此死循环)。 */
 extern "C" void* memcpy(void* dst, const void* src, unsigned n)
 {
-    unsigned char* d = (unsigned char*)dst;
-    const unsigned char* s = (const unsigned char*)src;
+    volatile unsigned char* d = (volatile unsigned char*)dst;
+    volatile const unsigned char* s = (volatile const unsigned char*)src;
     while (n--) *d++ = *s++;
     return dst;
 }
 
 extern "C" void* memset(void* s, int c, unsigned n)
 {
-    unsigned char* p = (unsigned char*)s;
+    volatile unsigned char* p = (volatile unsigned char*)s;
     while (n--) *p++ = (unsigned char)c;
     return s;
 }
