@@ -33,7 +33,7 @@
 #include "OrderUtil.h"
 #include "ChatEdit.h"
 
-#define MOE_VERSION   "0.2.148d"
+#define MOE_VERSION   "0.2.149a"
 #define MOE_SECTION   "MOExperience"
 
 /* ---------------- 地址 ---------------- */
@@ -47,6 +47,7 @@
 #define ADDR_COLORSCHEME_ARRAY   0x00B054D0u
 #define ADDR_CURRENT_FRAME       0x00A8ED84u
 #define ADDR_SCHEME_TO_COLOR     0x00517440u
+#define ADDR_SESSION             0x00A8B238u /* SessionClass::Instance, 首成员即 GameMode */
 #define ADDR_AFTER_MSGLIST_DRAW  0x005D4A9Bu
 
 #define OFF_REG_ESP              0x14
@@ -121,6 +122,7 @@ typedef struct {
     int PowerPad;    /* 底部电量距底边像素 (默认 6) */
     int PowerMode;   /* 0=负载/电力 (默认); 1=余量纯数字 (够用正/不够负) */
     int ChatBoxSP;   /* 1=单人模式也建聊天框 (Phobos AllowChatBoxInSinglePlayer 同原理) */
+    int ChatNameSP;  /* 1=单机也显示 "名字: " 前缀 (默认0=单机只显示正文, 联机恒显示) */
 } MOExperienceConfig;
 
 static MOExperienceConfig g_Cfg;
@@ -189,6 +191,17 @@ static int ParseWidth(const char* s, int* pmille)
 static wchar_t g_CampFace[FONT_FACE_MAX];
 static wchar_t g_HintFace[FONT_FACE_MAX];
 
+/* 联机判定: [SessionClass] 的首成员就是 GameMode (同 YRPP SessionClass::IsMultiplayer)
+ * 3=LAN / 4=Internet 才是联机; 0=战役 / 5=遭遇战 是单机。
+ * 地址读不到时按联机处理: 宁可多显示一次名字, 也不误吞别人的发言归属。 */
+static int GameIsMultiplayer(void)
+{
+    int sess;
+    if (!IsPlausiblePtr((void*)ADDR_SESSION)) return 1;
+    sess = *(int*)ADDR_SESSION;
+    return (sess == 3 || sess == 4);
+}
+
 
 static void LoadConfig(void)
 {
@@ -240,6 +253,7 @@ static void LoadConfig(void)
     g_Cfg.PowerPad = GetPrivateProfileIntA(VT_SECTION, "PowerPad", 6, g_IniPath);
     g_Cfg.PowerMode = GetPrivateProfileIntA(VT_SECTION, "PowerMode", 0, g_IniPath);
     g_Cfg.ChatBoxSP = GetPrivateProfileIntA(MOE_SECTION, "ChatBoxSP", 1, g_IniPath);
+    g_Cfg.ChatNameSP = GetPrivateProfileIntA(MOE_SECTION, "ChatNameSP", 0, g_IniPath);
     g_Cfg.Enable = g_Cfg.Enable ? 1 : 0;
     g_Cfg.LogMessages = g_Cfg.LogMessages ? 1 : 0;
     g_Cfg.ShowHotZone = g_Cfg.ShowHotZone ? 1 : 0;
@@ -292,6 +306,7 @@ static void LoadConfig(void)
     if (g_Cfg.PowerPad > 200) g_Cfg.PowerPad = 200;
     g_Cfg.PowerMode = g_Cfg.PowerMode ? 1 : 0;
     g_Cfg.ChatBoxSP = g_Cfg.ChatBoxSP ? 1 : 0;
+    g_Cfg.ChatNameSP = g_Cfg.ChatNameSP ? 1 : 0;
 
     g_SW.Enable = GetPrivateProfileIntA(SWPANEL_SECTION, "Enable", 1, g_IniPath);
     g_SW.FontPx = GetPrivateProfileIntA(SWPANEL_SECTION, "FontPx", 16, g_IniPath);
@@ -368,6 +383,13 @@ static void EnsureInit(void)
     p += UtoA((unsigned)g_Cfg.ShadowOpacity, buf + p);
     p = AppendCStr(buf, p, " HovMinOp=", sizeof(buf));
     p += UtoA((unsigned)g_Cfg.HoverMinOpacity, buf + p);
+    LogLine(buf);
+    p = 0;
+    p = AppendCStr(buf, p, "config: ChatBoxSP=", sizeof(buf));
+    p += UtoA((unsigned)g_Cfg.ChatBoxSP, buf + p);
+    p = AppendCStr(buf, p, " ChatNameSP=", sizeof(buf));
+    p += UtoA((unsigned)g_Cfg.ChatNameSP, buf + p);
+    p = AppendCStr(buf, p, " (0=单机不显示名字, 联机恒显示)", sizeof(buf));
     LogLine(buf);
     /* 字体解析放日志打开之后, 解析结果才能记入日志 */
     ResolveFontFace(g_Cfg.FontFace, "camp", g_CampFace, L"Microsoft YaHei");
@@ -656,22 +678,18 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_AddMessageHook(void*
 
     /* 自己的话跟本地玩家色, 只补无名回声 (战役单机回声无名+默认色)。
      * 有名消息游戏自带真方案号, 一律不动。
+     * 联机一律不插手: 联机回声游戏自带真名+真方案号, 且 MatchSent 只按文本
+     * 匹配, 同名同句会误伤别人的发言归属。
      * 直接改栈上颜色参数: 原生标签和我方环同色 (纯显示, 非模拟)。 */
-#define ADDR_SESSION 0x00A8B238u
+    if (!GameIsMultiplayer())
     {
-        int sess = -99;
-        if (IsPlausiblePtr((void*)ADDR_SESSION))
-            sess = *(int*)ADDR_SESSION;
-        if (sess != 1 && sess != 2)
+        if (ChatEdit_MatchSent(argMsg))
         {
-            if (ChatEdit_MatchSent(argMsg))
+            int ls = LocalPlayerScheme(NULL);
+            if (ls >= 0)
             {
-                int ls = LocalPlayerScheme(NULL);
-                if (ls >= 0)
-                {
-                    *(unsigned*)(esp + STK_ARG_CS) = (unsigned)ls;
-                    argColor = (unsigned)ls;
-                }
+                *(unsigned*)(esp + STK_ARG_CS) = (unsigned)ls;
+                argColor = (unsigned)ls;
             }
         }
     }
@@ -961,6 +979,8 @@ static int PickLines(MsgRing* R, int wantSp, int ignoreTimeout, unsigned tmoMul,
                      int textW, int rowBudget, int* pPicked)
 {
     int picked = 0, rows = 0, i, k, total = 0;
+    /* 名字前缀: 联机恒显示 (要区分发言者), 单机默认不显示 (只有自己一个名字, 是噪音)。 */
+    int showName = GameIsMultiplayer() || g_Cfg.ChatNameSP;
     for (i = R->count - 1; i >= 0 && picked < MAX_PICKED && rows < rowBudget; i--)
     {
         ChatMsg* m = MsgAt(R, i);
@@ -969,7 +989,7 @@ static int PickLines(MsgRing* R, int wantSp, int ignoreTimeout, unsigned tmoMul,
         int cnt = 0, off = 0;
         if (m->sp != wantSp) continue;
         if (!ignoreTimeout && !MsgVisibleMul(m, tmoMul)) continue;
-        if (m->name[0])
+        if (m->name[0] && showName)
         {
             wchar_t* comp = g_Compose[picked];
             int pp = 0, q = 0;
@@ -981,7 +1001,7 @@ static int PickLines(MsgRing* R, int wantSp, int ignoreTimeout, unsigned tmoMul,
             body = comp;
         }
             else body = m->text;
-            if (!TextHasContent(body) && !m->name[0]) continue;
+            if (!TextHasContent(body) && !(m->name[0] && showName)) continue;
         {
             int bl = 0;
             while (body[bl]) bl++;
