@@ -43,6 +43,17 @@
 #define CE_INPUT        0x005D4510u
 #define CE_INPUT_BACK   0x005D4515u
 
+/* 原生行缓冲协议 (0x54F1C0/0x54F200 反汇编): 对象=*(0x87F770),
+ * 环首+0x114 (256 槽), 环尾+0x314, 游标(写头)+0x318。
+ * WM_CHAR 分支 (0x54F85C) 先 (A) 0x54F200(0x0A,0) 写标志字 0x000A,
+ * 再 (B) 0x54F1C0(ch) 写原文 (SBCS, <0x100), 两格成对。摘除钩用。 */
+#define CE_LINEOBJ_ADDR  0x0087F770u
+#define CE_LINEBUF_OFF   0x114u
+#define CE_LINECUR_OFF   0x318u
+#define CE_RING_TAIL     (CE_LINECUR_OFF - 4u)   /* 0x314: 环尾 (消费位) */
+#define CE_RING_N        0x100u                  /* 环长 (0x114..0x313) */
+#define CE_CHAR_FLAG     0x000Au                 /* WM_CHAR 的 (A) 标志字 */
+
 #define CE_COMPOSITE    0x0088731Cu
 #define CE_VIEWBOUNDS   0x00886FA0u
 #define CE_BITFONT      0x0089C4D0u
@@ -87,6 +98,9 @@ static int ce_CompCur = 0;
 static unsigned ce_CmdTick = 0; /* Ctrl 组合键上次处理时刻 (Input/轮询握手) */
 static unsigned ce_NavTick = 0; /* 方向键上次处理时刻 (LL/轮询/钩握手) */
 static unsigned ce_LLCnt = 0;   /* LL 事件计数 (轮询重锚用) */
+/* WM_CHAR 摘除钩 (定义在后, 开框时懒安装): 行缓冲游标快照 + 安装前置声明 */
+static unsigned ce_LastCur = 0xFFFFFFFFu;
+static void CE_CharPostInstall(void);
 static unsigned ce_LLSeen = 0;  /* 轮询已消化的 LL 计数 */
 static unsigned ce_LLLastTick = 0; /* LL 末事件时刻 (边缘退让判据) */
 static HWND ce_FgWnd = NULL;
@@ -104,6 +118,20 @@ static int ce_CtrlPrev[4] = { 0, 0, 0, 0 };   /* C/X/V/A 边沿 */
 static int CE_KeyDown(unsigned vk)
 {
     return (GetAsyncKeyState((int)vk) & 0x8000) ? 1 : 0;
+}
+
+/* 区间可读判定。IsPlausiblePtr 是"单指针 4 对齐"判定, 拿它判 [p,p+n) 会
+ * 因尾地址不 4 对齐而恒假: +0x31A (0x318+2) 恒 mod4=2、环内奇数游标恒
+ * 不对齐 —— 英文收编全灭就是这么来的。此处只看起点对齐 + 末字节合法。 */
+static int CE_SafeRange(const void* p, unsigned n)
+{
+    unsigned a = (unsigned)(size_t)p, e;
+    if (!n) return 0;
+    e = a + n - 1u;
+    if (e < a) return 0;                       /* 回绕 */
+    if (a < 0x00010000u || e >= 0x7FF00000u) return 0;
+    if (a & 3u) return 0;
+    return 1;
 }
 
 static void CE_EnsureInit(void)
@@ -616,6 +644,16 @@ static void CE_Activate(void)
     ce_LLSeen = ce_LLCnt;
     ce_LLLastTick = GetTickCount();   /* 先假设 LL 活着 (2s 内纠正) */
     for (k = 0; k < 4; k++) ce_CtrlPrev[k] = 0;
+    /* 行缓冲游标快照 (摘除判据: 只收编开框后新追加的字, 不碰旧残留) */
+    ce_LastCur = 0xFFFFFFFFu;
+    {
+        void* ln = NULL;
+        if (IsPlausiblePtr((void*)CE_LINEOBJ_ADDR))
+            ln = *(void**)CE_LINEOBJ_ADDR;
+        if (ln && CE_SafeRange((char*)ln + CE_LINECUR_OFF, 4))
+            ce_LastCur = *(unsigned*)((char*)ln + CE_LINECUR_OFF);
+    }
+    CE_CharPostInstall();   /* 懒安装 (Ares 系钩子早下完, 此时下最稳) */
     ce_Active = 1;
     CE_LLOn();
     CE_BlinkReset();
@@ -925,7 +963,121 @@ static int CE_CompActiveNow(void)
     return (r > 0) ? 1 : 0;
 }
 
-/* ---------------- Input 运行时补丁 ---------------- */
+/* ---------------- WM_CHAR 摘除钩 (英文输入的唯一入口) ----------------
+ * 反汇编实证: WM_CHAR (0x102) 不进 0xB730EC 队列/Input, 对话框层 0x54F790
+ * 的 WM_CHAR 分支 (跳表项 0x54F85C, isEdit 门控) 先 0x54F200(0x0A,0) 往
+ * 行环写标志字, 再 0x54F1C0(ch) 写原文 —— Input 钩永远见不到英文, 而每帧
+ * CE_Mirror 以我方缓冲为准覆盖原生 ⇒ 不收编就是英文黑洞。
+ * (中文走 WM_IME_CHAR→队列→Input, 不经此处。)
+ * 站点取 0x54F8B4 (原生 call 之后那条 `jmp 0x54fb18`, 5B 无 rel, 除
+ * fall-through 外无别的分支跳进来): 原生照写环, 我方随后把刚 push 的那两格
+ * 摘走 (收编进 ce_Buf + 游标回退 + 清格, 脏字不留给原生消费), 再跳回原目标。
+ * 懒安装 (首帧开框时下, Ares 系钩子那时早下完了)。栈: 裸函数
+ * pusha/call C/popa/push imm32+ret 净零; 跳回游戏地址走 push imm32+ret
+ * (本 DLL 会被重定基址, E9 rel 不可用)。状态全从全局/游戏读, 联机安全。 */
+#define CE_CHARPOST_SITE 0x0054F8B4u
+#define CE_CHARPOST_BACK 0x0054FB18u
+
+static int ce_PostOn = 0;          /* 补丁已下 (只试一次) */
+
+/* 非 static (裸汇编按 C 符号引用, C++ 粉碎后链接不到)。
+ * this_: 摘除点 ecx 即对话框层传进来的 this (0x54F1C0 不碰 ecx, 入口
+ * jmp 时原样保留)。优先用它, 不可信才回退全局 (Ares 等可能自有对象)。
+ * 行环是真队列 (0x54F610 Pop 推进 0x314, 0x54F670 Push 即 0x54F1C0),
+ * 游戏在持续消费, 所以判据要按"这一格是不是刚 push 的"来, 不能只看游标。 */
+extern "C" void CE_CharAdopt2(void* this_)
+{
+    void* line = NULL;
+    unsigned short* ring;
+    unsigned cur, tail, used, idx, back, w;
+    int fieldW;
+
+    CE_EnsureInit();
+    /* 对象选择: 优先入口 this_, 回退全局。判据必须是"区间可读"而不是
+     * IsPlausiblePtr (后者要求 4 对齐, base+0x318+2 恒 mod4=2 必假)。 */
+    if (this_ && CE_SafeRange((char*)this_ + CE_LINECUR_OFF, 4))
+        line = this_;
+    else if (IsPlausiblePtr((void*)CE_LINEOBJ_ADDR))
+    {
+        void* g = *(void**)CE_LINEOBJ_ADDR;
+        if (g && CE_SafeRange((char*)g + CE_LINECUR_OFF, 4)) line = g;
+    }
+    if (!line || !CE_SafeRange((char*)line + CE_LINEBUF_OFF,
+                               CE_RING_N * 2 + 8))
+        return;                     /* 形状不对: passthrough, 不碰原生 */
+    cur = *(unsigned*)((char*)line + CE_LINECUR_OFF);
+    tail = *(unsigned*)((char*)line + CE_RING_TAIL);
+    if (cur >= CE_RING_N || tail >= CE_RING_N) return;   /* 未初始化 (-1) */
+    used = (cur - tail) & (CE_RING_N - 1);
+    if (cur == ce_LastCur) return;   /* 游标没动: (B) 没写, 别碰 */
+    ce_LastCur = cur;
+    if (!ce_Enable || !ce_Active) return;
+    if (used == 0) return;           /* 队列空 (消费方抢在前面) */
+    ring = (unsigned short*)((char*)line + CE_LINEBUF_OFF);
+    idx = (cur - 1) & (CE_RING_N - 1);
+    w = ring[idx];
+    if (w >= 0x100) return;             /* 非原文 (标志字/其它), 留给原生 */
+    if (w < 0x20 || w == 0x7F) return;  /* 控制符走原生 (与今日一致) */
+    fieldW = CE_NativeFieldW();
+    if (fieldW < 80) fieldW = 640;
+    CE_InsertOne((wchar_t)w, fieldW);
+    CE_Mirror();
+    CE_BlinkReset();
+    /* 摘除 (A)(B) 两格: 倒数第二格是本次 (A) 才退 2, 否则只退 1。
+     * WM_CHAR 的 (A) 恒为 0x000A —— 0x54F899 传 (0x0A,0), 0x54F200 跳过
+     * 修饰位轮询原样入环 (高位为 0), 只按 0xFF00 判会漏掉它。 */
+    back = 1;
+    if (used >= 2 && ring[(cur - 2) & (CE_RING_N - 1)] == CE_CHAR_FLAG)
+        back = 2;
+    ring[idx] = 0;
+    if (back == 2) ring[(cur - 2) & (CE_RING_N - 1)] = 0;
+    *(unsigned*)((char*)line + CE_LINECUR_OFF) = (cur - back) & (CE_RING_N - 1);
+    ce_LastCur = (cur - back) & (CE_RING_N - 1);
+}
+
+__attribute__((naked)) void ChatEdit_CharPost(void)
+{
+    /* 注意: 本 DLL 会被系统重定基址 (实证 delta=0x8600000, 见 crash EIP),
+     * E8/E9 的链接期 rel 只对 DLL 内部目标有效 (两端同漂)。
+     * 跳回游戏固定地址必须用基址无关写法: push imm32(数值本身恒对)+ret,
+     * 绝不能 jmp 0x54fb18 (链接期 rel, 重定基址后偏 delta)。 */
+    __asm__ __volatile__(
+        "pusha\n\t"
+        "push %ecx\n\t"          /* this_ (入口 ecx, (B) 不碰它) */
+        "call _CE_CharAdopt2\n\t"
+        "add $4, %esp\n\t"
+        "popa\n\t"
+        "pushl $0x54fb18\n\t"    /* 基址无关跳回 (见上注释) */
+        "ret\n\t"
+    );
+}
+
+static void CE_CharPostInstall(void)
+{
+    unsigned char* p = (unsigned char*)CE_CHARPOST_SITE;
+    unsigned target;
+    int want, rel;
+    DWORD old;
+    if (ce_PostOn) return;
+    ce_PostOn = 1;   /* 只试一次 (失败即认, 不刷屏不重复 VirtualProtect) */
+    want = (int)(CE_CHARPOST_BACK - (CE_CHARPOST_SITE + 5));
+    if (p[0] != 0xE9 || *(int*)(p + 1) != want)
+    { LogLine("chatedit: charpost bytes mismatch, hook OFF"); return; }
+    target = (unsigned)(size_t)ChatEdit_CharPost;
+    rel = (int)(target - (CE_CHARPOST_SITE + 5));
+    if (!VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old))
+    { LogLine("chatedit: charpost protect fail, hook OFF"); return; }
+    p[0] = 0xE9;
+    *(int*)(p + 1) = rel;
+    VirtualProtect(p, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), p, 5);
+    LogLine("chatedit: charpost hook ON");
+}
+
+/* ---------------- Input 运行时补丁 ----------------
+ * 注: Input 只收 WM_IME_CHAR 队列 (中文/拼音)。英文走 WM_CHAR,
+ * 由对话框层 0x54F790 直接 call 0x54F1C0 写原生行缓冲, 不过 Input;
+ * 见上 ChatEdit_CharPost (0x54F8B4 后置摘除), 两钩互补才是全量输入。 */
 
 typedef int (__fastcall *CE_InputFn)(void* t, void* edxUnused,
                                     int* keySlot, int key);

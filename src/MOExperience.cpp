@@ -8,8 +8,7 @@
  *         0x55E477/62F/693/746 单人聊天框 (跳过 session 检查)。
  *   T 键建筑全选见 TypeSelect.cpp。
  *   中键智能下令见 SmartOrder.cpp (裸中键点按自适应/划线散开, 渲染期橡皮线)。
- *   飞行器路径点见 AirWay.cpp (运行时虚表槽 0x7E2908, lazy 补丁;
- *   Syringe 0x41BA90 总入口观察; DIAG 虚表 +0x200/+0x1EC 槽观察; 只读轮询)。
+ *   飞行器路径点见 AirWay.cpp (运行时虚表槽 0x7E2908, lazy 补丁; 只读轮询)。
  * 任何一步失败 (Lock 不上、GDI 未就绪) 都返回 0 走原版绘制, 绝不花屏。
  *
  * 渲染: Microsoft YaHei 经 GDI 光栅化到 32 位内存 DIB (灰度抗锯齿取覆盖率),
@@ -526,13 +525,6 @@ static void FillRectTransVt(void* surf, RectangleStruct* pRect, ColorStruct* pCo
     if (fn) fn(surf, NULL, pRect, pColor, opacity);
 }
 
-/* ColorScheme -> 显示色: 与引擎 Fancy_Text_Print_Wide (0x4A61C0) 完全一致。
- *
- * 引擎做法 (反汇编实证):
- *   ECX = scheme+0x308 (即 &BaseColor), 栈传 3 字节输出缓冲,
- *   call 0x517440 (stdcall, ret 4), 返回输出缓冲指针。
- * 输出 3 字节的通道顺序由运行时移位表 (0x8A0DD0..0x8A0DE4) 决定,
- * 启动时标定 (out[0] 用 D4/D0, out[2] 用 DC/D8, out[1] 用 E4/E0)。 */
 /* 画框线 (悬停生效范围可视化): 上/下/左/右各一条 2px 半透明带 */
 static void DrawOutline(void* surf, int x, int y, int w, int h,
                         unsigned char r, unsigned char g, unsigned char b, int op)
@@ -556,13 +548,16 @@ typedef unsigned char* (__fastcall *SchemeToColorFn)(void* base, void* edxUnused
 static int g_IdxR = 0, g_IdxG = 1, g_IdxB = 2;
 static int g_MapDone = 0;
 
+/* ColorScheme -> 显示色: 与引擎 Fancy_Text_Print_Wide (0x4A61C0) 完全一致。
+ * 引擎做法 (反汇编实证): ECX = scheme+0x308 (即 &BaseColor), 栈传 3 字节
+ * 输出缓冲, call 0x517440 (stdcall, ret 4), 返回输出缓冲指针。
+ * 输出 3 字节的通道顺序由运行时移位表 (0x8A0DD0..0x8A0DE4) 的 shl 决定,
+ * 首次使用读表定序: 红 11/10, 绿 5, 蓝 0。 */
 static void MapChannels(void)
 {
     unsigned sL0 = *(unsigned*)0x8A0DD0u;   /* out[0] 的 shl */
     unsigned sL1 = *(unsigned*)0x8A0DD8u;   /* out[2] 的 shl */
     unsigned sL2 = *(unsigned*)0x8A0DE0u;   /* out[1] 的 shl */
-    char b1[16], b2[16], b3[16], buf[256];
-    unsigned p = 0;
     /* 红在高位 (565:11 / 555:10), 绿在中 (5), 蓝在低 (0) */
     if (sL0 == 11 || sL0 == 10) g_IdxR = 0;
     else if (sL1 == 11 || sL1 == 10) g_IdxR = 2;
@@ -573,29 +568,13 @@ static void MapChannels(void)
     if (sL0 == 0) g_IdxB = 0;
     else if (sL1 == 0) g_IdxB = 2;
     else if (sL2 == 0) g_IdxB = 1;
-    p = AppendCStr(buf, p, "colormap: shl=", sizeof(buf));
-    UtoA(sL0, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCh(buf, p, '/', sizeof(buf));
-    UtoA(sL1, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCh(buf, p, '/', sizeof(buf));
-    UtoA(sL2, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " R=out", sizeof(buf));
-    UtoA((unsigned)g_IdxR, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " G=out", sizeof(buf));
-    UtoA((unsigned)g_IdxG, b2); p = AppendCStr(buf, p, b2, sizeof(buf));
-    p = AppendCStr(buf, p, " B=out", sizeof(buf));
-    UtoA((unsigned)g_IdxB, b3); p = AppendCStr(buf, p, b3, sizeof(buf));
-    LogLine(buf);
 }
 
 static void SchemeColor(void* scheme, ColorStruct* out)
 {
     static SchemeToColorFn fn = NULL;
-    static void* s_sampledSch[8];
-    static int s_sampledN = 0;
     unsigned char buf[4];
     unsigned char* r;
-    int si, seen = 0;
     if (!g_MapDone) { g_MapDone = 1; MapChannels(); }
     if (!scheme || !IsPlausiblePtr(scheme)) { out->R = out->G = out->B = 255; return; }
     if (!fn) fn = (SchemeToColorFn)ADDR_SCHEME_TO_COLOR;
@@ -603,40 +582,6 @@ static void SchemeColor(void* scheme, ColorStruct* out)
     r = fn((char*)scheme + OFF_CSCHEME_BASECOLOR, NULL, buf);
     if (!r || !IsPlausiblePtr(r)) { out->R = out->G = out->B = 255; return; }
     out->R = r[g_IdxR]; out->G = r[g_IdxG]; out->B = r[g_IdxB];
-    if (s_sampledN < 8)
-    {
-        for (si = 0; si < s_sampledN; si++)
-            if (s_sampledSch[si] == scheme) { seen = 1; break; }
-    }
-    else seen = 1;
-    if (!seen)
-    {
-        char b1[16], b2[16], b3[16], b4[16], sb[160];
-        unsigned char* base = (unsigned char*)scheme + OFF_CSCHEME_BASECOLOR;
-        unsigned q = 0;
-        s_sampledSch[s_sampledN++] = scheme;
-        q = AppendCStr(sb, q, "colorsample: scheme=", sizeof(sb));
-        q += HtoA((unsigned)(size_t)scheme, sb + q);
-        q = AppendCStr(sb, q, " base=", sizeof(sb));
-        UtoA(base[0], b1); q = AppendCStr(sb, q, b1, sizeof(sb));
-        q = AppendCh(sb, q, ',', sizeof(sb));
-        UtoA(base[1], b2); q = AppendCStr(sb, q, b2, sizeof(sb));
-        q = AppendCh(sb, q, ',', sizeof(sb));
-        UtoA(base[2], b3); q = AppendCStr(sb, q, b3, sizeof(sb));
-        q = AppendCStr(sb, q, " conv=", sizeof(sb));
-        UtoA(r[0], b1); q = AppendCStr(sb, q, b1, sizeof(sb));
-        q = AppendCh(sb, q, ',', sizeof(sb));
-        UtoA(r[1], b2); q = AppendCStr(sb, q, b2, sizeof(sb));
-        q = AppendCh(sb, q, ',', sizeof(sb));
-        UtoA(r[2], b3); q = AppendCStr(sb, q, b3, sizeof(sb));
-        q = AppendCStr(sb, q, " used=", sizeof(sb));
-        UtoA(out->R, b1); q = AppendCStr(sb, q, b1, sizeof(sb));
-        q = AppendCh(sb, q, ',', sizeof(sb));
-        UtoA(out->G, b2); q = AppendCStr(sb, q, b2, sizeof(sb));
-        q = AppendCh(sb, q, ',', sizeof(sb));
-        UtoA(out->B, b4); q = AppendCStr(sb, q, b4, sizeof(sb));
-        LogLine(sb);
-    }
 }
 
 static void* SchemePtr(int cs)
