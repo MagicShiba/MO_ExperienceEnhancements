@@ -1,6 +1,6 @@
 /* Icon.cpp - 提示栏自定义图标运行时 (声明见 Icon.h)。
  *
- * 数据来自构建期生成的 src/icons.inc (mkicons.py 由 src/icon_*.png 转换,
+ * 数据来自构建期生成的 icons/icons.inc (mkicons.py 由 icons/icon_*.png 转换,
  * 黑=墨白=忽略, 等宽归一化; 见文件头)。此处只做只读 blit, 不写模拟。
  * 混合管线复用 GdiText (Calibrate + GtUnpack16 + Blend16), 坐标裁剪口径
  * 与 VecText VecRender 一致 (Tp/B 取 t+0x34/0x3C, 横向只认面界)。

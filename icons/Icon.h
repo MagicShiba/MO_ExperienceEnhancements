@@ -3,8 +3,8 @@
  * 做法: ToolTip.cpp 拼串时用 PUA 码 (U+E000~E002, 与正常文本零碰撞),
  * VecText 的 Blit 入口与 GetDim 度量见到 PUA 即走此处, 不走 GDI/原版点阵
  * (雅黑缺 ⚡⌚ 等符号字形, 文本方式必 tofu; 见 ToolTip.cpp 文件头)。
- * 位图来自 src/icon_*.png (黑=墨, 白=忽略, 与底部闪电点阵同约定),
- * 由 src/mkicons.py 在构建时转成 src/icons.inc 编进 DLL, 无外部文件。
+ * 位图来自 icons/icon_*.png (黑=墨, 白=忽略, 与底部闪电点阵同约定),
+ * 由 icons/mkicons.py 在改图后手动转成 icons/icons.inc 编进 DLL, 无外部文件。
  * 步进统一 (=归一化宽度), 天然对齐; 高度≤32, 行内垂直居中。
  * 实现见 Icon.cpp。构建见 构建.bat。 */
 

@@ -11,7 +11,7 @@
  *     原文($换费用图标) + "\n" + ▲N/▼N + " " + ○MM:SS (建筑)
  *     原文($换费用图标) + "\n" + ○MM:SS (单位/步兵/飞机)
  *   (▲=供电, ▼=耗电, N=绝对值; 图标列等宽, 与价格行图标列对齐)
- *   图标为 PNG 位图 (src/icon_*.png, 黑=墨白=忽略, 见 Icon.h):
+ *   图标为 PNG 位图 (icons/icon_*.png, 黑=墨白=忽略, 见 icons/Icon.h):
  *   雅黑缺 ⚡U+26A1/⌚U+231A 字形 (GDI 实测皆回 .notdef), 文本方式必 tofu,
  *   故串里只放 PUA 占位码 (U+E000~E002), 由 VecText 按 PNG 实画,
  *   步进统一 (=归一宽度), 对齐天然成立。
@@ -81,7 +81,7 @@ typedef int __attribute__((thiscall)) (*Fn_WhatAmI)(void* self);
 static int g_TTInit = 0;
 static int g_TTEnable = 1;
 /* 图标走 Icon.h 的 PUA 码 (PNG 位图, VecText 拦截绘制)。
- * 固定图标 (src/icon_*.png, 黑=墨白=忽略, 等宽归一天然对齐):
+ * 固定图标 (icons/icon_*.png, 黑=墨白=忽略, 等宽归一天然对齐):
  *   ICON_PWR_UP=供电 / ICON_PWR_DOWN=耗电 / ICON_TIME=耗时表盘。 */
 
 static unsigned TT_Reg(void* regs, unsigned off)
