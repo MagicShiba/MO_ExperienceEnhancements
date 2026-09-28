@@ -32,6 +32,7 @@
 #include "MindSelect.h"
 #include "DeployPreview.h"
 #include "OrderUtil.h"
+#include "ChatEdit.h"
 
 #define MOE_VERSION   "0.2.148d"
 #define MOE_SECTION   "MOExperience"
@@ -649,7 +650,28 @@ static void* SchemePtr(int cs)
     return items[cs];
 }
 
+/* 本地玩家颜色方案: CurrentPlayer 房 +0x16054, 裸值即真方案号。
+ * 三重实证: (1) 房内搜模板名命中 UIName @+0x1602A, +42 恰是此偏移
+ * (YRpp 版式); (2) 青局读 7, 采样 (0,252,255) 正青, 与玩家色一致;
+ * (3) 橙局游戏回声 cs=17, 采样 (255,120,0) 正橙。
+ * LUT/0xA8B394 在单机皆不可靠, 已弃用。只读查询, 联机安全。 */
+#define ADDR_CURPLAYER_HOUSE 0x00A83D4Cu
+#define OFF_HOUSE_COLORIDX   0x16054u
 
+static int LocalPlayerScheme(int* outIdx)
+{
+    void* house;
+    int sc;
+    if (outIdx) *outIdx = -99;
+    if (!IsPlausiblePtr((void*)ADDR_CURPLAYER_HOUSE)) return -1;
+    house = *(void**)ADDR_CURPLAYER_HOUSE;
+    if (!house || !IsPlausiblePtr(house)) return -1;
+    if (!IsPlausiblePtr((char*)house + OFF_HOUSE_COLORIDX + 4)) return -1;
+    sc = *(int*)((char*)house + OFF_HOUSE_COLORIDX);
+    if (outIdx) *outIdx = sc;
+    if (!SchemePtr(sc)) return -1;
+    return sc;
+}
 
 /* ---------------- 排版与绘制 ---------------- */
 
@@ -687,6 +709,28 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_AddMessageHook(void*
     argTimeout = *(unsigned*)(esp + STK_ARG_TIMEOUT);
     argSP      = *(unsigned*)(esp + STK_ARG_SP);
 
+    /* 自己的话跟本地玩家色, 只补无名回声 (战役单机回声无名+默认色)。
+     * 有名消息游戏自带真方案号, 一律不动。
+     * 直接改栈上颜色参数: 原生标签和我方环同色 (纯显示, 非模拟)。 */
+#define ADDR_SESSION 0x00A8B238u
+    {
+        int sess = -99;
+        if (IsPlausiblePtr((void*)ADDR_SESSION))
+            sess = *(int*)ADDR_SESSION;
+        if (sess != 1 && sess != 2)
+        {
+            if (ChatEdit_MatchSent(argMsg))
+            {
+                int ls = LocalPlayerScheme(NULL);
+                if (ls >= 0)
+                {
+                    *(unsigned*)(esp + STK_ARG_CS) = (unsigned)ls;
+                    argColor = (unsigned)ls;
+                }
+            }
+        }
+    }
+
     {
         unsigned born = ClockNow();
         unsigned exp = ExpireStamp((int)argTimeout);
@@ -694,7 +738,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_AddMessageHook(void*
         if (sp) RingPush(&g_HintRing, argName, argMsg, (int)argColor, exp, born, sp);
         else RingPush(&g_CampRing, argName, argMsg, (int)argColor, exp, born, sp);
     }
-
     if (g_Cfg.LogMessages)
     {
         p = 0;
@@ -1124,6 +1167,8 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
         void* scheme = NULL;
         if (B->schemeColor)
         {
+            /* 消息自带色 (自己的话已在 AddMessageHook 入口改过栈上参数,
+             * 这里直接用, 原生/战役统一)。无名警报/系统保持原色。 */
             scheme = SchemePtr(m->color);
             if (!scheme) scheme = SchemePtr(0);
         }
@@ -2301,6 +2346,12 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
         if (pwr == 1) drew = 1;
     }
 
+    /* 自定义聊天输入框: 盖住原生输入行, 顶层 (未激活即无操作) */
+    {
+        int ced = ChatEdit_Frame(surf, bitLineH, screenW, surfW, surfH, surfPitch);
+        if (ced == 1) drew = 1;
+    }
+
     if (!drew && !g_Cfg.ShowHotZone) { StatTick(tick, 1); return 0; }
     StatTick(tick, drew ? 0 : 1);
     if (s_firstDraw)
@@ -2433,6 +2484,7 @@ extern "C" BOOL __stdcall DllMain(HINSTANCE h, DWORD reason, LPVOID res)
         DisableThreadLibraryCalls(h);
         VecText_Install();
         AirWay_Install();
+        ChatEdit_Install();
     }
     return TRUE;
 }

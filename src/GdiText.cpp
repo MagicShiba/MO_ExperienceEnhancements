@@ -67,6 +67,22 @@ extern "C" void* memset(void* s, int c, unsigned n)
     return s;
 }
 
+extern "C" void* memmove(void* dst, const void* src, unsigned n)
+{
+    volatile unsigned char* d = (volatile unsigned char*)dst;
+    volatile const unsigned char* s = (volatile const unsigned char*)src;
+    if (d < s)
+    {
+        while (n--) *d++ = *s++;
+    }
+    else if (d > s)
+    {
+        d += n; s += n;
+        while (n--) *--d = *--s;
+    }
+    return dst;
+}
+
 /* ---------------- 日志 ---------------- */
 
 HANDLE g_Log = NULL;
@@ -331,7 +347,7 @@ static void LogFaceW(const char* tag, const wchar_t* face)
     }
 }
 
-void ResolveFontFace(const char* cfg, const char* tag, wchar_t* out,
+static void ResolveFontFaceRaw(const char* cfg, const char* tag, wchar_t* out,
                      const wchar_t* fallback)
 {
     char tmp[64], path[MAX_PATH_LEN * 2];
@@ -361,6 +377,61 @@ void ResolveFontFace(const char* cfg, const char* tag, wchar_t* out,
     LogFace(tag, " file=", tmp);
     LogFace(tag, " parse failed fallback", "");
     CopyFace(out, fallback);
+}
+
+/* 候选字体 CJK 字形自检: 临时 DC + 16px 测试字, 一(U+4E2D)/：(U+FF1A)
+ * 都有字形才算过。CreateFont 失败/无字形一律 0。纯 Win32, 无游戏依赖。
+ * 背景: 某机器上 "Microsoft YaHei" 解析正常但 CreateFont 实际落到无 CJK
+ * 字形 (ASCII 照常、CJK 空白, RenderLine 整串无兜底); VecText 有逐字回原版
+ * 兜底不受影响, DrawBox/ChatEdit 整串 ExtTextOut 直接空白。 */
+static int FaceHasCJK(const wchar_t* face)
+{
+    static const wchar_t probe[3] = { 0x4E2Du, 0xFF1Au, 0 };
+    HDC screen, dc;
+    HFONT f, old;
+    WORD idx[2];
+    DWORD n;
+    int ok = 0;
+    if (!face || !face[0]) return 0;
+    screen = GetDC(NULL);
+    if (!screen) return 0;
+    dc = CreateCompatibleDC(screen);
+    ReleaseDC(NULL, screen);
+    if (!dc) return 0;
+    f = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
+    if (!f) { DeleteDC(dc); return 0; }
+    old = (HFONT)SelectObject(dc, f);
+    n = GetGlyphIndicesW(dc, probe, 2, idx, 0);
+    if (n == 2 && idx[0] != 0xFFFFu && idx[1] != 0xFFFFu) ok = 1;
+    SelectObject(dc, old);
+    DeleteObject(f);
+    DeleteDC(dc);
+    return ok;
+}
+
+void ResolveFontFace(const char* cfg, const char* tag, wchar_t* out,
+                     const wchar_t* fallback)
+{
+    static const wchar_t* cands[] = {
+        L"Microsoft YaHei", L"SimSun", L"NSimSun", L"SimHei"
+    };
+    unsigned i;
+    ResolveFontFaceRaw(cfg, tag, out, fallback);
+    if (FaceHasCJK(out)) return;   /* 解析/回退本就有字形, 原样 */
+    for (i = 0; i < sizeof(cands) / sizeof(cands[0]); i++)
+    {
+        if (FaceSame(cands[i], out)) continue;
+        if (FaceHasCJK(cands[i]))
+        {
+            LogFace(tag, " cjkHeal=", "");
+            LogFaceW(tag, cands[i]);
+            CopyFace(out, cands[i]);
+            return;
+        }
+    }
+    /* 都没字形: 原样返回 (尽力), 行为不变 */
 }
 
 /* ---------------- 像素格式校准 ----------------
@@ -469,9 +540,10 @@ void GtUnpack16(unsigned short px, unsigned char* r, unsigned char* g,
     *b = (unsigned char)((bv * 255u + ((1u << g_BBits) - 1) / 2) / ((1u << g_BBits) - 1));
 }
 
-/* ---------------- GDI 光栅化 (四槽: 战役/提示/全局文本/超武面板各缓存一套) ---------------- */
+/* ---------------- GDI 光栅化 (五槽: 战役/提示/全局文本/超武面板/聊天输入各缓存一套) ---------------- */
 
-static GdiSlot g_Slots[4] = {
+static GdiSlot g_Slots[5] = {
+    { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
     { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
     { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
     { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
@@ -504,7 +576,7 @@ int GdiEnsure(int fontPx, int bold, int slot, const wchar_t* face)
     char b1[16], b2[16], buf[256];
     unsigned p;
 
-    if (slot < 0 || slot > 3) slot = 0;
+    if (slot < 0 || slot > 4) slot = 0;
     s = &g_Slots[slot];
 
     if (s->dc && fontPx == s->px && wantBold == s->bold && FaceSame(face, s->face)) { g_G = s; return 1; }
@@ -600,7 +672,14 @@ int RenderLine(const wchar_t* text, int len)
 {
     SIZE sz;
     if (!g_G->dc || len <= 0) return 0;
-    if (len * 24 > DIB_W - 8) len = (DIB_W - 8) / 24;  /* 粗限宽, 防溢出 */
+    /* 精确限宽: 按实际字形 fit DIB (之前 len*24 粗估, 16px 下只画 42 字,
+     * 聊天长文尾部直接被砍还留黑盒; CharsFit 同 dc 同字体, 精确无浪费) */
+    {
+        int fit = CharsFit(text, len, DIB_W - 8);
+        if (fit < 0) fit = 0;
+        if (fit < len) len = fit;
+        if (len <= 0) return 0;
+    }
     if (!GetTextExtentPoint32W(g_G->dc, text, len, &sz)) return 0;
     if (sz.cx > DIB_W - 8) sz.cx = DIB_W - 8;
     ClearDib();
