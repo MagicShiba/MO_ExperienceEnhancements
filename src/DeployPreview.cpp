@@ -1,50 +1,23 @@
-/* DeployPreview.cpp - 中键基地车展开位置预览 (只读+渲染, 联机安全)。
+/* DeployPreview.cpp - 中键基地车展开位置预览 + 到位自动展开。
+ * (只读查询 + 渲染面绘制 + 标准事件下令, 联机安全。)
  *
- * 动机: 基地车 (rules [General] BaseUnit=AMCV,SMCV,PCV,FMCV, 例 AMCV→GACNST)
- * 展开成 4x4 建筑, 落点差一格就歪。中键 (物理 VK_MBUTTON 按住时) 以光标
- * 为地基中心画展开后地基外框 (按地面格子投影的菱形), 方便对着围墙对齐。
+ * 预览: 物理中键按住时, 以光标格画展开后地基黄框 (引擎 CoordsToClient
+ * 投影, 每角取其框内格高, 平地高地同式), 细框套目标格, 方便对墙对齐。
+ * 落点 = 光标格 + (大地基 -1,-1) + ShiftX/ShiftY 微调, 预览=移动目标=
+ * 实际落点同一套数学 (TryToDeploy 0x7393C0 反汇编+运行时双确认)。
  *
- * 锚点语义 (闭环三角形, 2026-09-28 定死):
- *   点光标格 C → 车开到 C (目标点=鼠标, 所见即所去) →
- *   车从 C 展开, 落点 = C + (-1,-1) (引擎公式, TryToDeploy 反汇编+
- *   运行时读值双确认) → 黄框画的正是落点 [C-1, C+2] (4x4)。
- * 即: 基点 = 光标格 - (1,1) + 微调 (大地基; 小地基基点=光标格+微调),
- * 框边全落在格线上。预览、移动目标、实际落点三者同一套数学,
- * 黄框与最终房子必定重合 (Shift 微调三者一起走)。
- * 查询全只读, 绘制走渲染面 Lock/Unlock; 下令只走标准事件, 联机安全。
+ * 自动展开 ([DeployPreview] AutoDeploy=1): 选中含可展开单位 (UnitType+
+ * 0x404 DeploysInto 非空) 的裸中键点按由本模块认领 (SmartOrder 让路)。
+ * 单车框跟鼠标自由走; 多车点按按实际地基螺旋平铺 (块块判交不重叠),
+ * 划线 (轨迹弧长 ≥5 格) 沿手绘轨迹弧长均分, Shift 锁横/竖轴排一排。
+ * 混编其它单位按配额 (步兵3/格, 飞机/车辆1/格) 散开并避让房框外扩1格。
+ * 下令: 移动 MegaMission(Move)+到位 Deploy 事件 (0x9, 与手按 D 同形);
+ * 死车/换边/超时 (DeployTimeout 秒)/无处可铺则放弃, 新点按取代旧跟踪。
+ * 认领态另画白色轨迹线 (SmartOrder 熄火时补上, 同观感)。
  *
- * 自动展开 (AutoDeploy=1, 默认开): 选中含可展开单位时的裸中键点按由本
- * 模块认领 (SmartOrder 让路; Z/Ctrl/组合中键一律不动):
- * 点按: 以松开格为锚点铺房子——首块落点=光标格+(-1,-1) (与黄框同一公式,
- * 必定重合), 多车时其余块按步长螺旋平铺, 块块按实际尺寸判交不重叠;
- * 划线 (轨迹弧长超 5 格): N 块沿手绘轨迹全段均匀分布 (SmartOrder 散开
- * 同手感, 弧长取起点→各节点→终点, 间距取步长与全长均分之大者,
- * 短线自动续到尾端之后); Shift 锁横/竖轴直线排布 (一排展开)。
- * 单车起点恒=终点 (框跟鼠标自由走); 非基地车选中单位按原散开
- * 配额 (步兵3/格, 飞机/车辆1/格) 螺旋散开, 但跳过所有房框实际尺寸外扩 1 格。
- * 下令: 每车标准移动令到“自家框基点+(1,1)”(=自家锚点, 与手点同形),
- * 到位轮询到后发标准 Deploy 事件 (EventType 0x9, 与手按 D 同形)。
- * 全程标准事件, 联机安全; 死车/换边/超时 (DeployTimeout 秒)/无处可铺
- * 则放弃对应车辆; 新一次认领点按取代旧跟踪。
- * (认领只看按下瞬间选中快照, 预览框仍按物理中键画, 两者解耦。)
- *
- * 投影不再手算, 直接调引擎 TacticalClass::CoordsToClient (0x6D2140,
- * 反汇编验过是完整实现: 定点等距变换 + Z 高度修正 + 减镜头位, 与游戏
- * 渲染其它东西同一管线同一精度)。手算版 (鼠标映射→lep→30/15) 与引擎
- * 渲染帧之间存在固定平移偏差, 只画相对线看不出来, 对着静止围墙
- * 按格对齐时就暴露了 (细框相对粗框是对的、整体相对实地偏)。
- * 格线角点 lep = (cx*256, cy*256, 0): 平坦地形 Z=0 精确; 坑/崖地形
- * 角点高度非零会有几个像素沉降 (与引擎放建筑鬼影同理, 后续可按格读高)。
- * 颜色用黄色 (255,255,0) 区别于白橡皮线/绿规划线/红模糊线。
- *
- * 开销: 地基尺寸缓存 (选中签名+500ms), 渲染帧内只有一次 ClickCoords +
- * 画线; 类型取得是两次指针解引用加一次数组比对, 无扫描故不会卡死。
- *
- * 构建见 构建.bat (同一 DLL)。渲染挂 MOExperience_MessageDrawHook。
- * 日志仅启动行 + 首次命中一行 (宽/高/光标/基点, 用完即止)。
- * 微调: [DeployPreview] ShiftX/ShiftY (格, 默认 -2,-2, 范围 -8~8),
- * 黄框+细框整体按格平移 (实测相对静止围墙整体偏下两排, 默认直接补上),
- * 改后重启游戏 (配置只读一次)。
+ * 开销: 地基尺寸指纹缓存 (选中签名+500ms), 帧内一次 ClickCoords。
+ * 日志: 启动行 + 首次命中 + 每次 plots/fired/timeout。
+ * 构建见 构建.bat。渲染挂 MOExperience_MessageDrawHook。
  */
 
 #include <windows.h>
@@ -117,15 +90,10 @@ static void DP_EnsureInit(void)
     if (!g_DpAuto) LogLine("deployprev: autodeploy OFF");
 }
 
-/* ---------------- 类型取得 (固定偏移, 无扫描) ----------------
- * 崩溃复盘 (except.txt EIP 0x7372C8E0 = DP_StrOk 首字节读):
- * 前一版对单位内每个候选偏移先做字符串探测, 候选野指针 +0x20 后落在
- * 未映射页即崩。教训: 绝不对未经集合确认的指针做解引用。
- * 本版用反汇编实证固定偏移 (TryToDeploy 0x739460/0x73931C 两处独立同式):
- *   Unit+0x6C4 = UnitType*; UnitType+0x404 = DeploysInto.
- * 只解引用“选中数组里的活对象”(引擎维护, 与 SO_Press 同做法) 和静态
- * 类型数组 (DP_InTypeSet 只比指针, 不解引用候选), 无扫描、无 pin、
- * 无字符串探测, 又快又不会崩。 */
+/* ---------------- 类型取得 (固定偏移, 无扫描无字符串探测) ----------------
+ * Unit+0x6C4 = UnitType*; UnitType+0x404 = DeploysInto (TryToDeploy
+ * 0x739460/0x73931C 两处独立同式)。只解引用选中数组活对象与静态类型
+ * 数组 (InTypeSet 只比指针), 无扫描、无 pin, 又快又不会崩。 */
 
 static int DP_TypeCount(void*** itemsOut)
 {
@@ -254,11 +222,9 @@ typedef int __attribute__((thiscall)) (*Fn_DPC2C)(void* tac,
 #define FN_DP_C2C ((Fn_DPC2C)(void*)0x6D2140u)
 #define DP_TAC_INSTANCE 0x887324u
 
-/* 格子地面高度 (lep, 只读): CellClass::GetFloorHeight (0x47B3A0)。
- * 调用约定已反汇编验明: 只读 [ebp+8] 一个指针参数 + ret 4, 即传
- * Point2D* (MSVC const& 语义, Phobos 同式), 与按值 8 字节严格区分
- * (传错必栈失衡崩溃)。ECX=格指针, 回 EAX=地面高度。
- * 每角取其框内格高度, 无效格回落光标高度, 再回落 0。 */
+/* 格子地面高度 (lep, 只读): CellClass::GetFloorHeight (0x47B3A0,
+ * thiscall 传 Point2D* 单指针 + ret 4, 与按值 8 字节严格区分)。
+ * 每角取其框内格高度, 无效格回落光标高度。 */
 
 typedef int __attribute__((thiscall)) (*Fn_DPFloorH)(void* cell, const Point2D* p);
 #define FN_DP_FLOORH ((Fn_DPFloorH)(void*)0x47B3A0u)
@@ -315,20 +281,7 @@ static int DP_CornerZ(int cx, int cy, int fb, int* zOut)
     return 1;
 }
 
-static int DP_Corner(int gx, int gy, int gz, int* px, int* py)
-{
-    void* tac = *(void**)DP_TAC_INSTANCE;
-    CoordStruct c;
-    Point2D o;
-    if (!tac || !IsPlausiblePtr(tac)) return 0;
-    c.X = gx * 256; c.Y = gy * 256; c.Z = gz;
-    o.X = 0; o.Y = 0;
-    FN_DP_C2C(tac, &c, &o);
-    *px = o.X; *py = o.Y;
-    return 1;
-}
-
-/* 任意 lep 点 → 屏像素 (轨迹线格心用)。 */
+/* 任意 lep 点 → 屏像素 (唯一投影出口, 调引擎 CoordsToClient)。 */
 static int DP_CornerLep(int lx, int ly, int lz, int* px, int* py)
 {
     void* tac = *(void**)DP_TAC_INSTANCE;
@@ -340,6 +293,12 @@ static int DP_CornerLep(int lx, int ly, int lz, int* px, int* py)
     FN_DP_C2C(tac, &c, &o);
     *px = o.X; *py = o.Y;
     return 1;
+}
+
+/* 格线角点 (gx,gy 格) → 屏像素。 */
+static int DP_Corner(int gx, int gy, int gz, int* px, int* py)
+{
+    return DP_CornerLep(gx * 256, gy * 256, gz, px, py);
 }
 
 /* 格心投影 (轨迹线用, 高度取该格)。 */
@@ -431,20 +390,13 @@ static int DP_UnitCell(void* u, int* cx, int* cy)
     return 1;
 }
 
-typedef struct { void* unit; int id; int idxOk; short dx, dy; } DPMove;
-typedef struct {
-    void* unit; int id; int idxOk; short dx, dy;
-    void* house; int houseIdx; unsigned startMs;
-} DPDep;
-
-/* NOTE: 下面的单车静态量已被多车阵列取代, 保留类型名 DPDep 供跟踪用。 */
+typedef struct { void* unit; int id; short dx, dy; } DPMvE;
 #define DP_DEP_CAP 24    /* 跟踪基地车上限 (分配/快照同) */
 #define DP_OTH_CAP 256   /* 快照其它单位上限 */
 #define DP_MV_CAP 320    /* 待发移动令上限 */
 #define DP_PLOT_Q 512    /* 散开候选格上限 */
 #define DP_DRAIN 64      /* 每轮询最多发令数 */
 
-typedef struct { void* unit; int id; short dx, dy; } DPMvE;
 typedef struct {
     void* unit; int id; short dx, dy;
     void* house; int houseIdx; unsigned startMs;
@@ -498,7 +450,11 @@ static void DP_NodePush(int cx, int cy)
     s_DpNodeN++;
 }
 
-static int DP_Rnd(double v);
+/* 四舍五入 (弧长→格用)。 */
+static int DP_Rnd(double v)
+{
+    return (int)(v + (v >= 0 ? 0.5 : -0.5));
+}
 
 /* 轨迹弧长 (格, 含末段到终点; 终点与末节点重合则不重复计)。 */
 static double DP_ArcLen(const int* nx, const int* ny, int nn, int ex, int ey)
@@ -595,9 +551,16 @@ static int DP_RectValid(int bx, int by, int fw, int fh)
     return 1;
 }
 
-static int DP_Rnd(double v)
+/* 排房步长 = 各车 max(宽,高) 之大者 (块块不重叠的最小间距)。 */
+static int DP_MaxStep(int depN, const int depFw[], const int depFh[])
 {
-    return (int)(v + (v >= 0 ? 0.5 : -0.5));
+    int step = 1, i;
+    for (i = 0; i < depN; i++)
+    {
+        int f = depFw[i] > depFh[i] ? depFw[i] : depFh[i];
+        if (f > step) step = f;
+    }
+    return step;
 }
 
 /* 点按铺房: 首块锚点=C (落点=C+偏移=黄框, 单车行为不变),
@@ -606,19 +569,14 @@ static int DP_Rnd(double v)
 static int DP_AssignPoint(int cx, int cy,
                           int depN, const int depFw[], const int depFh[],
                           int shX, int shY,
-                          int bases[][2], int dests[][2])
+                           int bases[][2], int dests[][2])
 {
-    int step, n = 0, i;
+    int step, n = 0;
     int r, ox, oy, tries = 0;
     int g0;
     if (depN <= 0 || depN > DP_DEP_CAP) return 0;
     if (!depFw || !depFh) return 0;
-    step = 1;
-    for (i = 0; i < depN; i++)
-    {
-        int f = depFw[i] > depFh[i] ? depFw[i] : depFh[i];
-        if (f > step) step = f;
-    }
+    step = DP_MaxStep(depN, depFw, depFh);
     g0 = (depFw[0] > 2 || depFh[0] > 2) ? 1 : 0;
     bases[0][0] = cx - g0 + shX;
     bases[0][1] = cy - g0 + shY;
@@ -626,34 +584,34 @@ static int DP_AssignPoint(int cx, int cy,
     dests[0][1] = cy + shY;
     if (!DP_RectValid(bases[0][0], bases[0][1], depFw[0], depFh[0])) return 0;
     n = 1;
-        for (r = 1; r <= 6 && n < depN; r++)
+    for (r = 1; r <= 6 && n < depN; r++)
+    {
+        for (oy = -r; oy <= r && n < depN; oy++)
         {
-            for (oy = -r; oy <= r && n < depN; oy++)
+            for (ox = -r; ox <= r && n < depN; ox++)
             {
-                for (ox = -r; ox <= r && n < depN; ox++)
+                int ax, ay, bx, by, gi, k, hit;
+                if (ox != r && ox != -r && oy != r && oy != -r) continue;
+                if (++tries > 200) return n;
+                ax = cx + ox * step; ay = cy + oy * step;
+                gi = (depFw[n] > 2 || depFh[n] > 2) ? 1 : 0;
+                bx = ax - gi + shX; by = ay - gi + shY;
+                if (!DP_RectValid(bx, by, depFw[n], depFh[n])) continue;
+                hit = 0;
+                for (k = 0; k < n; k++)
                 {
-                    int ax, ay, bx, by, gi, k, hit;
-                    if (ox != r && ox != -r && oy != r && oy != -r) continue;
-                    if (++tries > 200) return n;
-                    ax = cx + ox * step; ay = cy + oy * step;
-                    gi = (depFw[n] > 2 || depFh[n] > 2) ? 1 : 0;
-                    bx = ax - gi + shX; by = ay - gi + shY;
-                    if (!DP_RectValid(bx, by, depFw[n], depFh[n])) continue;
-                    hit = 0;
-                    for (k = 0; k < n; k++)
-                    {
-                        if (DP_RectOverlap(bx, by, depFw[n], depFh[n],
-                                           bases[k][0], bases[k][1],
-                                           depFw[k], depFh[k]))
-                        { hit = 1; break; }
-                    }
-                    if (hit) continue;
-                    bases[n][0] = bx; bases[n][1] = by;
-                    dests[n][0] = ax + shX; dests[n][1] = ay + shY;
-                    n++;
+                    if (DP_RectOverlap(bx, by, depFw[n], depFh[n],
+                                       bases[k][0], bases[k][1],
+                                       depFw[k], depFh[k]))
+                    { hit = 1; break; }
                 }
+                if (hit) continue;
+                bases[n][0] = bx; bases[n][1] = by;
+                dests[n][0] = ax + shX; dests[n][1] = ay + shY;
+                n++;
             }
         }
+    }
     return n;
 }
 
@@ -663,19 +621,14 @@ static int DP_AssignPoint(int cx, int cy,
 static int DP_AssignStraight(int px, int py, int cx, int cy,
                              int depN, const int depFw[], const int depFh[],
                              int shX, int shY,
-                             int bases[][2], int dests[][2])
+                              int bases[][2], int dests[][2])
 {
     int step, n = 0, i;
     int dx, dy, adx, ady;
     double ux = 0.0, uy = 0.0, len, span;
     if (depN <= 0 || depN > DP_DEP_CAP) return 0;
     if (!depFw || !depFh) return 0;
-    step = 1;
-    for (i = 0; i < depN; i++)
-    {
-        int f = depFw[i] > depFh[i] ? depFw[i] : depFh[i];
-        if (f > step) step = f;
-    }
+    step = DP_MaxStep(depN, depFw, depFh);
     dx = cx - px; dy = cy - py;
     adx = dx >= 0 ? dx : -dx; ady = dy >= 0 ? dy : -dy;
     if (adx >= ady && dx != 0) ux = (dx > 0) ? 1.0 : -1.0;
@@ -724,19 +677,14 @@ static int DP_AssignStraight(int px, int py, int cx, int cy,
 static int DP_AssignLine(const int* nx, const int* ny, int nn, int ex, int ey,
                          int depN, const int depFw[], const int depFh[],
                          int shX, int shY,
-                         int bases[][2], int dests[][2])
+                              int bases[][2], int dests[][2])
 {
     int step, n = 0, i;
     double L, span;
     if (!nx || !ny || nn <= 0) return 0;
     if (depN <= 0 || depN > DP_DEP_CAP) return 0;
     if (!depFw || !depFh) return 0;
-    step = 1;
-    for (i = 0; i < depN; i++)
-    {
-        int f = depFw[i] > depFh[i] ? depFw[i] : depFh[i];
-        if (f > step) step = f;
-    }
+    step = DP_MaxStep(depN, depFw, depFh);
     L = DP_ArcLen(nx, ny, nn, ex, ey);
     if (L < 0.5) L = 0.5;
     span = (depN > 1) ? L / (depN - 1) : 0.0;
@@ -1149,16 +1097,18 @@ void DeployPreview_Poll(void)
 static unsigned char* s_DpLocked = 0;
 static int s_DpW = 0, s_DpH = 0, s_DpPitch = 0;
 
-static void DP_Plot(int x, int y, unsigned a)
+/* 3px 粗线 (Bresenham + 上下各 1px, 与 SmartOrder 同风格零依赖)。
+ * 黄=房框/预览, 白=认领态轨迹 (SmartOrder 熄火时补上)。 */
+static void DP_PlotC(int x, int y, int r, int g, int b, unsigned a)
 {
     unsigned short* dstRow;
     if (x < 0 || y < 0 || x >= s_DpW || y >= s_DpH) return;
     dstRow = (unsigned short*)(s_DpLocked + y * s_DpPitch);
-    dstRow[x] = Blend16(dstRow[x], 255, 255, 0, a);
+    dstRow[x] = Blend16(dstRow[x], r, g, b, a);
 }
 
-/* 3px 黄线 (Bresenham + 上下各 1px, 与 SmartOrder 同风格零依赖)。 */
-static void DP_Line(int x0, int y0, int x1, int y1, unsigned a)
+static void DP_LineC(int x0, int y0, int x1, int y1,
+                     int r, int g, int b, unsigned a)
 {
     int dx, dy, sx, sy, err, e2, x, y, n;
     dx = x1 - x0; dy = y1 - y0;
@@ -1169,9 +1119,9 @@ static void DP_Line(int x0, int y0, int x1, int y1, unsigned a)
     x = x0; y = y0;
     for (n = 0; n < 8192; n++)
     {
-        DP_Plot(x, y, a);
-        DP_Plot(x, y - 1, a);
-        DP_Plot(x, y + 1, a);
+        DP_PlotC(x, y, r, g, b, a);
+        DP_PlotC(x, y - 1, r, g, b, a);
+        DP_PlotC(x, y + 1, r, g, b, a);
         if (x == x1 && y == y1) break;
         e2 = err * 2;
         if (e2 > -dy) { err -= dy; x += sx; }
@@ -1179,57 +1129,18 @@ static void DP_Line(int x0, int y0, int x1, int y1, unsigned a)
     }
 }
 
-static void DP_Mark(int cx, int cy, int m, unsigned a)
+static void DP_MarkC(int cx, int cy, int m, int r, int g, int b, unsigned a)
 {
     int k, j;
     for (k = -m; k <= m; k++)
         for (j = -m; j <= m; j++)
-            DP_Plot(cx + k, cy + j, a);
+            DP_PlotC(cx + k, cy + j, r, g, b, a);
 }
 
-/* 白线 (认领态轨迹线, 与 SmartOrder 橡皮线同观感)。 */
-static void DP_WPlot(int x, int y, unsigned a)
-{
-    unsigned short* dstRow;
-    if (x < 0 || y < 0 || x >= s_DpW || y >= s_DpH) return;
-    dstRow = (unsigned short*)(s_DpLocked + y * s_DpPitch);
-    dstRow[x] = Blend16(dstRow[x], 255, 255, 255, a);
-}
-
-static void DP_WLine(int x0, int y0, int x1, int y1, unsigned a)
-{
-    int dx, dy, sx, sy, err, e2, x, y, n;
-    dx = x1 - x0; dy = y1 - y0;
-    sx = (dx >= 0) ? 1 : -1;
-    sy = (dy >= 0) ? 1 : -1;
-    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
-    err = dx - dy;
-    x = x0; y = y0;
-    for (n = 0; n < 8192; n++)
-    {
-        DP_WPlot(x, y, a);
-        DP_WPlot(x, y - 1, a);
-        DP_WPlot(x, y + 1, a);
-        if (x == x1 && y == y1) break;
-        e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
-    }
-}
-
-static void DP_WMark(int cx, int cy, int m, unsigned a)
-{
-    int k, j;
-    for (k = -m; k <= m; k++)
-        for (j = -m; j <= m; j++)
-            DP_WPlot(cx + k, cy + j, a);
-}
-
-/* 细线 (Bresenham 单像素, 目标格描边用, 自带裁剪)。 */
+/* 细线 (Bresenham 单像素, 目标格描边用; PlotC 自带裁剪)。 */
 static void DP_ThinLine(int x0, int y0, int x1, int y1, unsigned a)
 {
     int dx, dy, sx, sy, err, e2, x, y, n;
-    unsigned short* dstRow;
     dx = x1 - x0; dy = y1 - y0;
     sx = (dx >= 0) ? 1 : -1;
     sy = (dy >= 0) ? 1 : -1;
@@ -1238,11 +1149,7 @@ static void DP_ThinLine(int x0, int y0, int x1, int y1, unsigned a)
     x = x0; y = y0;
     for (n = 0; n < 8192; n++)
     {
-        if (x >= 0 && y >= 0 && x < s_DpW && y < s_DpH)
-        {
-            dstRow = (unsigned short*)(s_DpLocked + y * s_DpPitch);
-            dstRow[x] = Blend16(dstRow[x], 255, 255, 0, a);
-        }
+        DP_PlotC(x, y, 255, 255, 0, a);
         if (x == x1 && y == y1) break;
         e2 = err * 2;
         if (e2 > -dy) { err -= dy; x += sx; }
@@ -1293,15 +1200,7 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
         UtoA((unsigned)(by < 0 ? 0 : by), t6); q = AppendCStr(sb, q, t6, sizeof(sb));
         LogLine(sb);
     }
-    /* 四角走引擎投影 (与游戏渲染同系同精度, 吸格线; 每角取其框内格高) */
-    DP_CornerZ(bx, by, mlz, &z0);
-    DP_CornerZ(bx + fw - 1, by, mlz, &z1);
-    DP_CornerZ(bx + fw - 1, by + fh - 1, mlz, &z2);
-    DP_CornerZ(bx, by + fh - 1, mlz, &z3);
-    if (!DP_Corner(bx, by, z0, &x0, &y0)) return;
-    if (!DP_Corner(bx + fw, by, z1, &x1, &y1)) return;
-    if (!DP_Corner(bx + fw, by + fh, z2, &x2, &y2)) return;
-    if (!DP_Corner(bx, by + fh, z3, &x3, &y3)) return;
+    /* 四角投影在认领分支之后算 (认领态提前返回, 省 8 次投影)。 */
     vt = *(unsigned char**)surf;
     if (!vt || !IsPlausiblePtr(vt)) return;
     lockFn = (DP_LockFn)(*(void**)(vt + VT_DP_LOCK));
@@ -1351,34 +1250,31 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
             /* 轨迹白线 (认领后 SmartOrder 熄火, 这里补上; 与裸中键同观感):
              * 节点格心连线 + 当前格心橡皮尾巴, 引擎投影吸格。 */
             {
-                int j, ex, ey, lx, ly;
+                int j, lx, ly;
                 int nn = s_DpNodeN;
                 if (nn > DP_NODE_CAP) nn = DP_NODE_CAP;
-                if (nn > 0 && OU_MouseCell(&ex, &ey))
+                if (nn > 0 && DP_CenterProj(s_DpNx[0], s_DpNy[0], mlz, &lx, &ly))
                 {
-                    if (DP_CenterProj(s_DpNx[0], s_DpNy[0], mlz, &lx, &ly))
+                    int px = lx, py = ly;
+                    DP_MarkC(px, py, 3, 255, 255, 255, 255);   /* 锚点 7x7 */
+                    for (j = 1; j < nn; j++)
                     {
-                        int px = lx, py = ly;
-                        DP_WMark(px, py, 3, 255);   /* 锚点 7x7 */
-                        for (j = 1; j < nn; j++)
+                        int qx, qy;
+                        if (!DP_CenterProj(s_DpNx[j], s_DpNy[j], mlz, &qx, &qy))
+                            continue;
+                        DP_LineC(px, py, qx, qy, 255, 255, 255, 230);
+                        DP_MarkC(qx, qy, 1, 255, 255, 255, 230);
+                        px = qx; py = qy;
+                    }
+                    {
+                        int qx = px, qy = py, ok = 0;
+                        if (DP_CenterProj(ccx, ccy, mlz, &qx, &qy))
                         {
-                            int qx, qy;
-                            if (!DP_CenterProj(s_DpNx[j], s_DpNy[j], mlz, &qx, &qy))
-                                continue;
-                            DP_WLine(px, py, qx, qy, 230);
-                            DP_WMark(qx, qy, 1, 230);
-                            px = qx; py = qy;
+                            ok = 1;
+                            if (qx != px || qy != py)
+                                DP_LineC(px, py, qx, qy, 255, 255, 255, 230);
                         }
-                        {
-                            int qx = px, qy = py, ok = 0;
-                            if (DP_CenterProj(ex, ey, mlz, &qx, &qy))
-                            {
-                                ok = 1;
-                                if (qx != px || qy != py)
-                                    DP_WLine(px, py, qx, qy, 230);
-                            }
-                            if (ok) DP_WMark(qx, qy, 2, 255);   /* 当前 5x5 */
-                        }
+                        if (ok) DP_MarkC(qx, qy, 2, 255, 255, 255, 255);   /* 当前 5x5 */
                     }
                 }
             }
@@ -1386,28 +1282,28 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
             {
                 int px0, py0, px1, py1, px2, py2, px3, py3;
                 int qx0, qy0, qx1, qy1, qx2, qy2, qx3, qy3;
-                int z0, z1, z2, z3, zt;
+                int za, zb, zc, zd, zte;
                 int icx0 = bases[k][0], icy0 = bases[k][1];
                 int icx1 = bases[k][0] + s_DpDepFw[k] - 1, icy1 = bases[k][1];
                 int icx2 = bases[k][0] + s_DpDepFw[k] - 1, icy2 = bases[k][1] + s_DpDepFh[k] - 1;
                 int icx3 = bases[k][0], icy3 = bases[k][1] + s_DpDepFh[k] - 1;
-                DP_CornerZ(icx0, icy0, mlz, &z0);
-                DP_CornerZ(icx1, icy1, mlz, &z1);
-                DP_CornerZ(icx2, icy2, mlz, &z2);
-                DP_CornerZ(icx3, icy3, mlz, &z3);
-                if (!DP_Corner(bases[k][0], bases[k][1], z0, &px0, &py0)) continue;
-                if (!DP_Corner(bases[k][0] + s_DpDepFw[k], bases[k][1], z1, &px1, &py1)) continue;
-                if (!DP_Corner(bases[k][0] + s_DpDepFw[k], bases[k][1] + s_DpDepFh[k], z2, &px2, &py2)) continue;
-                if (!DP_Corner(bases[k][0], bases[k][1] + s_DpDepFh[k], z3, &px3, &py3)) continue;
-                DP_Line(px0, py0, px1, py1, 255);
-                DP_Line(px1, py1, px2, py2, 255);
-                DP_Line(px2, py2, px3, py3, 255);
-                DP_Line(px3, py3, px0, py0, 255);
-                DP_CornerZ(dests[k][0], dests[k][1], mlz, &zt);
-                if (!DP_Corner(dests[k][0], dests[k][1], zt, &qx0, &qy0)) continue;
-                if (!DP_Corner(dests[k][0] + 1, dests[k][1], zt, &qx1, &qy1)) continue;
-                if (!DP_Corner(dests[k][0] + 1, dests[k][1] + 1, zt, &qx2, &qy2)) continue;
-                if (!DP_Corner(dests[k][0], dests[k][1] + 1, zt, &qx3, &qy3)) continue;
+                DP_CornerZ(icx0, icy0, mlz, &za);
+                DP_CornerZ(icx1, icy1, mlz, &zb);
+                DP_CornerZ(icx2, icy2, mlz, &zc);
+                DP_CornerZ(icx3, icy3, mlz, &zd);
+                if (!DP_Corner(bases[k][0], bases[k][1], za, &px0, &py0)) continue;
+                if (!DP_Corner(bases[k][0] + s_DpDepFw[k], bases[k][1], zb, &px1, &py1)) continue;
+                if (!DP_Corner(bases[k][0] + s_DpDepFw[k], bases[k][1] + s_DpDepFh[k], zc, &px2, &py2)) continue;
+                if (!DP_Corner(bases[k][0], bases[k][1] + s_DpDepFh[k], zd, &px3, &py3)) continue;
+                DP_LineC(px0, py0, px1, py1, 255, 255, 0, 255);
+                DP_LineC(px1, py1, px2, py2, 255, 255, 0, 255);
+                DP_LineC(px2, py2, px3, py3, 255, 255, 0, 255);
+                DP_LineC(px3, py3, px0, py0, 255, 255, 0, 255);
+                DP_CornerZ(dests[k][0], dests[k][1], mlz, &zte);
+                if (!DP_Corner(dests[k][0], dests[k][1], zte, &qx0, &qy0)) continue;
+                if (!DP_Corner(dests[k][0] + 1, dests[k][1], zte, &qx1, &qy1)) continue;
+                if (!DP_Corner(dests[k][0] + 1, dests[k][1] + 1, zte, &qx2, &qy2)) continue;
+                if (!DP_Corner(dests[k][0], dests[k][1] + 1, zte, &qx3, &qy3)) continue;
                 DP_ThinLine(qx0, qy0, qx1, qy1, 200);
                 DP_ThinLine(qx1, qy1, qx2, qy2, 200);
                 DP_ThinLine(qx2, qy2, qx3, qy3, 200);
@@ -1418,14 +1314,24 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
             return;
         }
     }
-    DP_Line(x0, y0, x1, y1, 255);
-    DP_Line(x1, y1, x2, y2, 255);
-    DP_Line(x2, y2, x3, y3, 255);
-    DP_Line(x3, y3, x0, y0, 255);
-    DP_Mark(x0, y0, 1, 255);
-    DP_Mark(x1, y1, 1, 255);
-    DP_Mark(x2, y2, 1, 255);
-    DP_Mark(x3, y3, 1, 255);
+    /* 未认领单框老路: 投影四角 (与游戏渲染同系同精度, 吸格线;
+     * 每角取其框内格高, 平地高地同式)。 */
+    DP_CornerZ(bx, by, mlz, &z0);
+    DP_CornerZ(bx + fw - 1, by, mlz, &z1);
+    DP_CornerZ(bx + fw - 1, by + fh - 1, mlz, &z2);
+    DP_CornerZ(bx, by + fh - 1, mlz, &z3);
+    if (!DP_Corner(bx, by, z0, &x0, &y0)) return;
+    if (!DP_Corner(bx + fw, by, z1, &x1, &y1)) return;
+    if (!DP_Corner(bx + fw, by + fh, z2, &x2, &y2)) return;
+    if (!DP_Corner(bx, by + fh, z3, &x3, &y3)) return;
+    DP_LineC(x0, y0, x1, y1, 255, 255, 0, 255);
+    DP_LineC(x1, y1, x2, y2, 255, 255, 0, 255);
+    DP_LineC(x2, y2, x3, y3, 255, 255, 0, 255);
+    DP_LineC(x3, y3, x0, y0, 255, 255, 0, 255);
+    DP_MarkC(x0, y0, 1, 255, 255, 0, 255);
+    DP_MarkC(x1, y1, 1, 255, 255, 0, 255);
+    DP_MarkC(x2, y2, 1, 255, 255, 0, 255);
+    DP_MarkC(x3, y3, 1, 255, 255, 0, 255);
     /* 目标格细描边 (车会开到的格 = 光标格, 松手即下令): 光标在哪格,
      * 细框就套哪格, 与黄框是否对齐一眼可见。 */
     {

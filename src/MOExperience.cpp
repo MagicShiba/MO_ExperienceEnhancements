@@ -33,7 +33,7 @@
 #include "DeployPreview.h"
 #include "OrderUtil.h"
 
-#define MOE_VERSION   "0.2.147d"
+#define MOE_VERSION   "0.2.148d"
 #define MOE_SECTION   "MOExperience"
 
 /* ---------------- 地址 ---------------- */
