@@ -113,43 +113,68 @@ typedef void (__fastcall *SwsDrawShapeFn)(void* surf, void* pal, void* shp,
 static int s_Init = 0;
 static int s_Enable = 1;
 static int s_Opacity = 60;
-static int s_IconW = 60, s_IconH = 48;
+static int s_Alpha = 100;   /* 侧栏整体透明度 0~100 */
+/* 图标盒固定 60x48 (Phobos 原版 cameo 尺寸)。曾做成 IconW/IconH 配置项,
+ * 但 PCX 是固定尺寸源资源, 缩放后目标矩形只按屏幕边界裁剪、不按图标盒裁剪,
+ * 非默认尺寸会溢出格子与底框错位 —— 故去掉, 直接定常量。 */
+#define SWS_ICON_W 60
+#define SWS_ICON_H 48
 static int s_Gap = 2, s_ColGap = 6;
 static int s_RightMargin = 2;
-static int s_CenterY = 1, s_TopMargin = 80;
-static int s_FontPx = 12, s_Bold = 0;
-static char s_FontFace[64];
-static wchar_t s_Face[FONT_FACE_MAX];
-static int s_ClickFire = 1;
-static int s_PcxOn = 0;   /* engine PCX path switch (crash isolation) */
-static int s_WeSetCur = 0;   /* our own write happened this frame */
+/* 纵向定位: 一个键同时表达"按屏幕比例"和"按像素"。
+ *   0 ~ 1  = 比例, 0.5 表示屏幕高的 50% 处对齐 (适合分辨率无关)
+ *   > 1    = 像素 Y 坐标, 80 表示距顶 80px (适合精确微调)
+ * 范围取 0~1 而不是 0~100, 是为了和 ini 里其它"小数量级"参数 (Opacity 之类
+ * 都归一到 0~1 再换算) 保持一致的观感; >1 就明确是像素, 不会有歧义。
+ * 旧的 CenterY(0/1) + TopMargin(px) 两个键已合并成 TopMargin。 */
+static int s_TopIsPct = 0;      /* 1 = s_TopMargin 是比例 */
+static int s_TopMargin = 50000;  /* 比例时是 x100000 (0.5 -> 50000), 像素时是 px */
+static int s_FontPx = 12;
 static OU_Hotkey s_ToggleHk;
 static int s_Visible = 1;
 static int s_PrevTog = 0, s_PrevLB = 0, s_PrevRB = 0;
-/* 待上膛的超武, 延一帧写入。
- * 我们不是 Gadget, 引擎这一帧的 ProcessClickCoords 仍会看到这次左键按下;
- * 当帧就写 CurrentSW 会让引擎**当场**在那个位置把超武放掉。Phobos 靠自己是
- * 真 Gadget 天然规避 (点击在地图看到之前就被 Gadget::Action 吃掉了), 我们
- * 只能"延一帧写 + 用 0x692419 那道门吞掉按下"来等价复现。 */
+/* 待上膛的超武, **等左键松开才写**。
+ *
+ * 为什么不按 Phobos 那样"按下就写": Phobos 的 SWButtonClass 是真 Gadget,
+ * 构造时带 (GadgetFlag::LeftPress|GadgetFlag::RightPress), 引擎的
+ * GadgetClass::Action 消费这次点击时会顺手清掉 MouseClass 的按键态, 所以
+ * DisplayClass::ProcessClickCoords 根本看不到"左键按住"这件事。
+ *
+ * 我们是纯覆盖层+轮询, 引擎照常看到左键按住。而引擎放置超武的判据是
+ * 0x692B06 读 Display+0x11B8 (CurrentSWTypeIndex): 一旦非 -1 且按键按住,
+ * **当帧就在鼠标处释放** (实测日志: armed 紧跟着引擎自己发的
+ * SpecialPlace, cell=236,141, IsExecuted=0x5A, 然后 sws: FIRED)。
+ * 延一帧写不足以躲开 —— 那一帧按键还按着。
+ *
+ * 所以改成"按下只记录, 松开才写": 整段按住期间由 s_HoldSkip 吞掉引擎的
+ * 地图点击, 等价于 Gadget 消费掉这次完整点击; 真正写 CurrentSWTypeIndex
+ * 时按键已经松开, 引擎的"按住即释放"条件不可能成立。 */
 static int s_PendSel = -2;   /* -2 none, -1 cancel, >=0 SW ArrayIndex */
-static int s_EatPress = 0;   /* gate: swallow this frame's click */
+static int s_SelDown = 0;    /* 选中的那一下左键是否还按着 (等松开才上膛) */
+static int s_ArmIdx = -1;    /* s_SelDown 期间记住的 swIdx */
+/* 注意: 曾有一个 s_EatPress ("吞掉这一帧"), 但它在同一次 SWS_Poll 调用里
+ * 置 1 又清零, 门根本读不到 —— 纯死代码, 整段按住由 s_HoldSkip 负责。 */
 /* 物理左键按住期间一直吞掉引擎的地图点击。
  * 关键: 引擎判断的是"左键**按住**"而不是边沿, 所以只要"已选中 + 按住"
- * 同时成立就会当场释放。按下即上膛, 就必须把整段按住都吞掉, 效果才等同
- * 于真 Gadget 消费掉这次完整点击。 */
+ * 同时成立就会当场释放。按下即吞, 一直吞到松开, 效果等同真 Gadget
+ * 消费掉这次完整点击。 */
 static int s_HoldSkip = 0;
+/* 吞没门用的"栏区已知"标志。
+ * **不能**复用 s_BoundValid: 那个标志 SwsScan() 开头就清零 (只在重建条目
+ * 期间有效), 而 SWS_Draw 跑到布局末尾才置 1。点击那帧 SWS_Poll 先跑
+ * (还会 s_ForceScan=1 强制重扫), 门随后才跑, 于是正好撞上 s_BoundValid==0
+ * 分支被放行 —— 表现就是"点了没反应/要点很多次"。栏区几何 (s_BoundX/Y/W/H)
+ * 在重扫期间并没有变, 所以这里另用一个只由 Draw 置位、隐藏时才清零的标志。 */
+static int s_BoundsKnown = 0;
+
 /* 即时超武: 走 SpecialPlace 事件 (定义在下方)。 */
 static int SwsPushSpecialPlace(int swIdx);
-/* 诊断开关: 全部在 SwsEnsureInit 里读一次。
- * 之前 SwsFireWatch 每帧 GetPrivateProfileIntA 一次 = 每帧一次 ini 文件
- * I/O, 而且它在 SWS_Poll 里, 落在 perf 日志的 d/s 计时之外, 帧率掉了
- * 日志却完全看不出来。 */
-static int s_ShowDrain = 0;   /* [SWSidebar] DrainSupers: 1=显示火风暴类 (默认 0=过滤掉) */
+/* 全部在 SwsEnsureInit 里读一次。
+ * 铁律: 每帧路径上**不允许**出现 GetPrivateProfileIntA —— 那等于每帧一次
+ * ini 文件 I/O, 而且落在 perf 计时之外, 帧率掉了日志却看不出来。 */static int s_ShowDrain = 0;   /* [SWSidebar] DrainSupers: 1=显示火风暴类 (默认 0=过滤掉) */
 static int s_ForceScan = 0;     /* 点击时置 1: 强制立刻重扫, 不等 15 帧 */
-static int s_EvWatchOn = 1;     /* [SWSidebar] EvWatch */
-static int s_FireWatchOn = 1;   /* [SWSidebar] FireWatch */
 static int s_ScrollStep = 1;    /* [SWSidebar] ScrollStep */
-/* OutList 抓包 (定义在下方): 引擎事件队列的地址, 供 SwsEventWatch 用。 */
+/* 引擎事件队列 (OutList): SwsPushSpecialPlace 追加 SpecialPlace 事件用。 */
 #define SWS_ADDR_OUT_COUNT  0xA802C8u
 #define SWS_ADDR_OUT_NEXT   0xA802D0u
 #define SWS_ADDR_OUT_BUF    0xA802D4u
@@ -157,8 +182,6 @@ static int s_ScrollStep = 1;    /* [SWSidebar] ScrollStep */
 #define SWS_EVT_SIZE        111u
 #define SWS_EVT_CAP         0x80u
 #define SWS_EVT_SLOTS_N     128u   /* 环形容量; 槽位下标掩码 = SWS_EVT_SLOTS_N-1 = 0x7F */
-static void SwsEventWatch(void);
-static void SwsFireWatch(void);
 
 
 typedef struct { char id[32]; int prio; } SwsIniEnt;
@@ -250,6 +273,12 @@ typedef struct {
 
 static SwsItem s_Items[SWS_CAP];
 static int s_ItemN = 0;
+static wchar_t s_ItemNameBuf[24];   /* 从类型缓存带出来的悬停名字 */
+
+/* 侧栏主题色 (淡蓝): 箭头、箭头边框、文字描边统一用它, 方便一处改色。 */
+#define SWS_ACCENT_R 0xA5
+#define SWS_ACCENT_G 0xD3
+#define SWS_ACCENT_B 0xFF
 static int s_BoundX = 0, s_BoundY = 0, s_BoundW = 0, s_BoundH = 0;
 /* 面板级滚动偏移 (所有列一起上下滚) + 显示行数上限 (超出用滚动条)。
  * 逐列偏移在列间距为 0 时没法各画各的滚动条 (4px 塞不进 0 间距里), 而
@@ -384,17 +413,17 @@ static void SwsLoadIniList(void)
         if (L == 0) break;
         isGlobal =
             SwsStrEq(k, "Enable") || SwsStrEq(k, "Opacity") ||
-            SwsStrEq(k, "ToggleKey") || SwsStrEq(k, "ClickFire") ||
-            SwsStrEq(k, "IconW") || SwsStrEq(k, "IconH") ||
+            SwsStrEq(k, "ToggleKey") ||
             SwsStrEq(k, "Gap") || SwsStrEq(k, "ColGap") ||
-            SwsStrEq(k, "RightMargin") || SwsStrEq(k, "CenterY") ||
-            SwsStrEq(k, "TopMargin") || SwsStrEq(k, "FontPx") ||
-            SwsStrEq(k, "Bold") || SwsStrEq(k, "FontFace") ||
-            SwsStrEq(k, "MaxRows") || SwsStrEq(k, "Pcx") ||
-            SwsStrEq(k, "ScrollStep") || SwsStrEq(k, "DrainSupers") ||
-            SwsStrEq(k, "EvWatch") || SwsStrEq(k, "FireWatch");
+            SwsStrEq(k, "RightMargin") ||
+            SwsStrEq(k, "TopMargin") || SwsStrEq(k, "Alpha") ||
+            SwsStrEq(k, "FontPx") ||
+            SwsStrEq(k, "MaxRows") ||
+            SwsStrEq(k, "ScrollStep") || SwsStrEq(k, "DrainSupers");
         /* 漏一个全局键的后果: 它会被当成"超武 ID"收进 s_Ini, 显示成一个
-         * 永远不亮的空条目。新增配置项时**必须**同时加进这一串。 */
+         * 永远不亮的空条目。新增配置项时**必须**同时加进这一串 —— 而且要
+         * 和上面 SwsEnsureInit 里真正读取的那份保持一致 (曾经两边不一致,
+         * 留下一堆早已删除的键, 害得排查时以为它们还生效)。 */
         if (!isGlobal && L < 31)
         {
             int v = GetPrivateProfileIntA(SWS_SECTION, k, 0, g_IniPath);
@@ -416,24 +445,68 @@ static void SwsEnsureInit(void)
     GtEnsureLog();
     s_Enable = GetPrivateProfileIntA(SWS_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
     s_Opacity = GetPrivateProfileIntA(SWS_SECTION, "Opacity", 60, g_IniPath);
-    s_IconW = GetPrivateProfileIntA(SWS_SECTION, "IconW", 60, g_IniPath);
-    s_IconH = GetPrivateProfileIntA(SWS_SECTION, "IconH", 48, g_IniPath);
     s_Gap = GetPrivateProfileIntA(SWS_SECTION, "Gap", 2, g_IniPath);
     s_ColGap = GetPrivateProfileIntA(SWS_SECTION, "ColGap", 0, g_IniPath);
     s_RightMargin = GetPrivateProfileIntA(SWS_SECTION, "RightMargin", 2, g_IniPath);
-    s_CenterY = GetPrivateProfileIntA(SWS_SECTION, "CenterY", 1, g_IniPath) ? 1 : 0;
-    s_TopMargin = GetPrivateProfileIntA(SWS_SECTION, "TopMargin", 80, g_IniPath);
+    /* TopMargin 一个键两用: 0~1 = 比例(屏幕高), >1 = 像素。
+     * 默认 0.5 = 垂直居中 (等价于旧的 CenterY=1)。
+     * 全整数定点, 不用浮点: 读成 x100000 的定点数 (0.5 -> 50000, 0.25 -> 25000)。 */
+    {
+        char tb[32];
+        OU_ReadString(SWS_SECTION, "TopMargin", "0.5", tb, sizeof(tb));
+        {
+            int neg = 0, seenDot = 0;
+            unsigned i2 = 0, ip = 0, frac = 0, scale = 1;
+            long v;
+            if (tb[0] == '-') { neg = 1; i2 = 1; }
+            else if (tb[0] == '+') i2 = 1;
+            for (; tb[i2]; i2++)
+            {
+                if (tb[i2] == '.') { if (seenDot) break; seenDot = 1; continue; }
+                if (tb[i2] < '0' || tb[i2] > '9') break;
+                if (!seenDot) ip = ip * 10 + (unsigned)(tb[i2] - '0');
+                else if (scale < 100000) { frac = frac * 10 + (unsigned)(tb[i2] - '0'); scale *= 10; }
+            }
+            /* 判定和缩放必须**分开**:
+             *   先由字面值(含小数)决定语义 —— 0~1 算比例, >1 算像素;
+             *   再按语义做换算 —— 比例存成 x100000 定点, 像素原样存。
+             * 早先无条件乘 100000 再判, 结果 "80" 变成 1000000 像素,
+             * 侧栏直接被顶出屏幕。
+             * 用整数运算凑: 先把整串看成"万分之一单位"(fp4), 判定用它的原值,
+             * 需要时再整体放大。 */
+            {
+                /* fp4 = 原值 * 10000 (纯整数, 避免 long 溢出与浮点) */
+                long fp4 = (long)ip * 10000L;
+                if (seenDot)
+                    fp4 += (long)((frac * 10000L) / (long)(scale ? scale : 1));
+                if (neg) fp4 = -fp4;
+                if (fp4 < 0) fp4 = 0;
+                if (fp4 <= 10000L)                       /* 0 ~ 1  -> 比例 */
+                {
+                    s_TopIsPct = 1;
+                    v = fp4 * 10L;                      /* x100000 定点 */
+                    if (v > 100000L) v = 100000L;        /* 比例上限 100.0% */
+                }
+                else                                      /* > 1  -> 像素 */
+                {
+                    s_TopIsPct = 0;
+                    v = (fp4 + 5000L) / 10000L;          /* 四舍五入回像素 */
+                    if (v > 1000000L) v = 1000000L;     /* 防手滑 */
+                }
+            }
+            s_TopMargin = (int)v;
+        }
+    }
+    /* 整体透明度: 0=完全透明, 100=不透明。作用于侧栏画出的**每一个**像素
+     * (底框/图标/边框/滚动条/箭头/文字), 不是只调某一个元素。 */
+    s_Alpha = GetPrivateProfileIntA(SWS_SECTION, "Alpha", 100, g_IniPath);
+    if (s_Alpha < 0) s_Alpha = 0;
+    if (s_Alpha > 100) s_Alpha = 100;
+    /* 充能百分比字号。悬停名走全局 [VecText] 的字体设置, 不在此处配。 */
     s_FontPx = GetPrivateProfileIntA(SWS_SECTION, "FontPx", 12, g_IniPath);
-    s_Bold = GetPrivateProfileIntA(SWS_SECTION, "Bold", 0, g_IniPath) ? 1 : 0;
-    OU_ReadString(SWS_SECTION, "FontFace", "msyh.ttc",
-                  s_FontFace, sizeof(s_FontFace));
-    s_ClickFire = GetPrivateProfileIntA(SWS_SECTION, "ClickFire", 1, g_IniPath) ? 1 : 0;
-    s_PcxOn = GetPrivateProfileIntA(SWS_SECTION, "Pcx", 0, g_IniPath) ? 1 : 0;
     s_MaxRows = GetPrivateProfileIntA(SWS_SECTION, "MaxRows", 10, g_IniPath);
     /* 诊断开关只读一次: 这两个在 SWS_Poll 每帧调用, 现读 ini 就是每帧一次
      * 文件 I/O, 而且在 perf 计时范围之外, 会让帧率掉了日志却看不出来。 */
-    s_EvWatchOn = GetPrivateProfileIntA(SWS_SECTION, "EvWatch", 1, g_IniPath);
-    s_FireWatchOn = GetPrivateProfileIntA(SWS_SECTION, "FireWatch", 1, g_IniPath);
     s_ShowDrain = GetPrivateProfileIntA(SWS_SECTION, "DrainSupers", 0, g_IniPath);
     s_ScrollStep = GetPrivateProfileIntA(SWS_SECTION, "ScrollStep", 1, g_IniPath);
     if (s_ScrollStep < 1) s_ScrollStep = 1;
@@ -444,10 +517,6 @@ static void SwsEnsureInit(void)
     OU_ReadHotkey(SWS_SECTION, "ToggleKey", &s_ToggleHk);
     if (s_Opacity < 0) s_Opacity = 0;
     if (s_Opacity > 100) s_Opacity = 100;
-    if (s_IconW < 40) s_IconW = 40;
-    if (s_IconW > 120) s_IconW = 120;
-    if (s_IconH < 24) s_IconH = 24;
-    if (s_IconH > 96) s_IconH = 96;
     if (s_Gap < 0) s_Gap = 0;
     if (s_Gap > 16) s_Gap = 16;
     if (s_ColGap < 0) s_ColGap = 0;
@@ -455,18 +524,15 @@ static void SwsEnsureInit(void)
     if (s_FontPx < 8) s_FontPx = 8;
     if (s_FontPx > 32) s_FontPx = 32;
     SwsLoadIniList();
-    ResolveFontFace(s_FontFace, "sws", s_Face, L"Microsoft YaHei");
     p = 0;
     p = AppendCStr(buf, p, "sws: en=", sizeof(buf));
     p += UtoA((unsigned)s_Enable, buf + p);
     p = AppendCStr(buf, p, " op=", sizeof(buf));
     p += UtoA((unsigned)s_Opacity, buf + p);
-    p = AppendCStr(buf, p, " click=", sizeof(buf));
-    p += UtoA((unsigned)s_ClickFire, buf + p);
     p = AppendCStr(buf, p, " iniN=", sizeof(buf));
     p += UtoA((unsigned)s_IniN, buf + p);
-    p = AppendCStr(buf, p, " pcx=", sizeof(buf));
-    p += UtoA((unsigned)s_PcxOn, buf + p);
+    p = AppendCStr(buf, p, " rows=", sizeof(buf));
+    p += UtoA((unsigned)s_MaxRows, buf + p);
     LogLine(buf);
 }
 
@@ -582,6 +648,11 @@ typedef struct {
     int   manual;
     int   instant;      /* 1 = 点击即发射 (Action=None 或 SW.UseAITargeting) */
     const char* pcxFile;
+    /* 悬停提示文本, 属于**类型**的固有属性。
+     * 早先它被写进 s_Items[n].name, 而 n 是本次扫描的条目下标 ——
+     * 建筑一变, 条目顺序就变, 那个槽会属于别的超武, 而名字又只在
+     * 首次填充时写一次, 于是悬停提示张冠李戴。 */
+    wchar_t name[24];
 } SwsTypeCache;
 static SwsTypeCache s_TC[SWS_TCACHE];
 static int s_TCN = 0;
@@ -601,6 +672,7 @@ static SwsTypeCache* SwsTypeEntry(void* type, const char* id)
     s_TC[i].manual = 1;
     s_TC[i].instant = 0;
     s_TC[i].pcxFile = NULL;
+    s_TC[i].name[0] = 0;
     s_TC[i].prio = -1;              /* -1 = 尚未填充 */
     s_TC[i].side = -2;
     return &s_TC[i];
@@ -752,7 +824,6 @@ static const char* SwsPcxFileOf(const char* id)
     int i, slot = -1;
     void* rules;
     char buf[64];
-    if (!s_PcxOn) return NULL;
     for (i = 0; i < s_PcxN; i++)
         if (SwsStrEq(s_Pcx[i].id, id)) { slot = i; break; }
     if (slot >= 0 && s_Pcx[slot].tried)
@@ -820,34 +891,8 @@ static void* SwsShpOk(void* type)
     return NULL;
 }
 
-/* ---------------- 性能自测 (QPC, GetTickCount 只有 15.6ms 分辨率) ---------------- */
-static LARGE_INTEGER g_Qpf;
-static LONGLONG g_ScanStart;
-static double g_ScanUsAcc = 0.0;
-static int g_ScanCnt = 0;
-
-static void SwsPerfInit(void)
-{
-    if (!g_Qpf.QuadPart) QueryPerformanceFrequency(&g_Qpf);
-}
-
-static double SwsUsSince(LONGLONG t0)
-{
-    LARGE_INTEGER now;
-    if (!g_Qpf.QuadPart || !t0) return 0.0;
-    QueryPerformanceCounter(&now);
-    return (double)(now.QuadPart - t0) * 1000000.0 / (double)g_Qpf.QuadPart;
-}
-
 static void SwsScan(void)
 {
-    SwsPerfInit();
-    g_ScanStart = 0;
-    {
-        LARGE_INTEGER t;
-        QueryPerformanceCounter(&t);
-        g_ScanStart = t.QuadPart;
-    }
     void* cur;
     void** items;
     void** hItems;
@@ -1114,7 +1159,8 @@ int drainSup = 0;
             /* 按类型指针缓存: ArrayIndex(按 ID 反查类型数组, 不能用猜的字段
              * 偏移 —— 曾读出 135 = 类型总数, 写进 CurrentSWTypeIndex 会让
              * 引擎 Supers[] 越界并当场清掉选中)、阵营归类、ini 优先级/隐藏、
-             * SW.ManualFire、SidebarPCX 文件名。类型对象静态, 只算一次。 */
+             * SW.ManualFire、SidebarPCX 文件名、悬停名字。类型对象静态, 只算一次。
+             * 声明在外面: 下面填 s_Items[n] 时还要用它取名字。 */
             SwsTypeCache* tc = SwsTypeEntry(type, id);
             if (!tc) continue;
             if (tc->swIdx < 0) continue;
@@ -1127,18 +1173,20 @@ int drainSup = 0;
                 tc->manual = SwsManualFireOk(id);
                 tc->pcxFile = SwsPcxFileOf(id);
                 {
-                    /* 悬停提示文本: 优先 UIName, 空则退回 ID */
+                    /* 悬停提示文本: 优先 UIName, 空则退回 ID。
+                     * 存进**类型缓存**而不是 s_Items[n] —— 条目下标会随
+                     * 建筑增减重排, 存那里必然错位。 */
                     const wchar_t* uin = *(const wchar_t**)((char*)type +
                                                             OFF_SWT_UINAME);
-                    wchar_t* dst = s_Items[0].name;   /* 只借个缓冲写下面 */
-                    (void)dst;
-                    SwsCopyName(s_Items[n].name, uin, 24);
-                    if (!s_Items[n].name[0])
+                    SwsCopyName(tc->name, uin, 24);
+                    if (!tc->name[0])
                     {
                         int k = 0;
-                        while (k < 23 && id[k]) { s_Items[n].name[k] =
-                            (wchar_t)(unsigned char)id[k]; k++; }
-                        s_Items[n].name[k] = 0;
+                        while (k < 23 && id[k]) {
+                            tc->name[k] = (wchar_t)(unsigned char)id[k];
+                            k++;
+                        }
+                        tc->name[k] = 0;
                     }
                     /* 缺 SidebarPCX 的超武: 一次性记下来, 便于查它们的图标 */
                     if (!tc->pcxFile)
@@ -1197,6 +1245,9 @@ int drainSup = 0;
             prio = tc->prio;
             pcxFile = tc->pcxFile;
             instant = tc->instant;
+            /* 名字在这里一并带出来 (它属于类型, 不属于本次的条目下标)。
+             * 出了这个块就再也拿不到 tc 了。 */
+            SwsCopyName(s_ItemNameBuf, tc->name, 24);
         }
         total = *(int*)((char*)type + OFF_SWT_RECH);
         if (total < 0 || total > 1000000) total = 0;
@@ -1215,6 +1266,8 @@ int drainSup = 0;
         s_Items[n].side = (side >= 0) ? side : pside;
         s_Items[n].prio = prio;
         SwsCopyId(s_Items[n].id, id);
+        /* 名字随条目一起搬, 保证悬停提示和图标永远对应同一个超武 */
+        SwsCopyName(s_Items[n].name, s_ItemNameBuf, 24);
         /* 一次性记下"点击即生效"的那些: 之前"点了没反应"就有两种可能
          * (没被判成 instant / 判成了但释放方式不对), 这行日志能一次分开。
          * 顺带记 swIdx: 引擎自己发的 SpecialPlace 用的是 id=73/100, 而我们
@@ -1242,8 +1295,6 @@ int drainSup = 0;
         n++;
     }
     s_ItemN = n;
-    g_ScanUsAcc += SwsUsSince(g_ScanStart);
-    g_ScanCnt++;
     {
         static void* s_GotSup = NULL;
         static int s_GotCnt = 0;
@@ -1291,7 +1342,7 @@ extern "C" __declspec(dllexport) int __cdecl SWS_WheelIn(int mx, int my, int dir
     step = s_ScrollStep;   /* SwsEnsureInit 读一次; 这里每滚轮读 ini 是文件 I/O */
     if (!s_Enable || !s_Visible || !s_ColsValid) return 0;
     /* 命中范围: 整块 (含右侧滚动条那几像素) */
-    if (mx < s_BoundX || mx > s_LastX + s_IconW + 5) return 0;
+    if (mx < s_BoundX || mx > s_LastX + SWS_ICON_W + 5) return 0;
     if (my < s_YStart || my >= s_YStart + (s_VisRows * s_RowH - s_Gap)) return 0;
     if (s_MaxSk <= 0) return 0;                  /* 所有列都装得下 */
     if (dir < 0) s_Scroll -= step;
@@ -1305,7 +1356,7 @@ extern "C" __declspec(dllexport) int __cdecl SWS_WheelIn(int mx, int my, int dir
 extern "C" __declspec(dllexport) int __cdecl SWS_OverBar(int mx, int my)
 {
     if (!s_Enable || !s_Visible || !s_ColsValid) return 0;
-    if (mx < s_BoundX || mx > s_LastX + s_IconW + 5) return 0;
+    if (mx < s_BoundX || mx > s_LastX + SWS_ICON_W + 5) return 0;
     if (my < s_YStart || my >= s_YStart + (s_VisRows * s_RowH - s_Gap)) return 0;
     return 1;
 }
@@ -1313,8 +1364,27 @@ extern "C" __declspec(dllexport) int __cdecl SWS_OverBar(int mx, int my)
 void SWS_Poll(void)
 {
     int tog, lb, rb;
-    LARGE_INTEGER t0;
-    QueryPerformanceCounter(&t0);
+    /* ---- 帧门: 这个函数挂在 0x4F42F0, 而那个地址**不是**每帧一次 ----
+     *
+     * gamemd 里 `call 0x4F42F0` 有 113 个静态调用点, 散在 AI / 对象 / 渲染 /
+     * 消息代码里, 其中多处位于逐对象循环内。日志实测: 12,540 个渲染帧里
+     * SWS_Poll 被调了 1,782,420 次 = **每渲染帧约 142 次** (区间 47~225)。
+     *
+     * 于是"每 15 帧扫一次表"实际是每 0.25 秒一次, "每 60 帧记一行日志"实际
+     * 是每渲染帧 2.4 行 —— 当初日志 30,688 行里 29,707 行是 sws: poll 就是这么来的。
+     * 每帧 142 次 GetAsyncKeyState + 2 次 QPC, 以及当初每次 Poll 都跑的
+     * SwsFireWatch (78 条/次 ≈ 1.1 万次迭代/帧), 全是白烧。
+     *
+     * 这里用引擎帧号 0xA8ED84 变化做门, 同一个渲染帧内只真跑一次。
+     * 帧号在输入处理之后才推进, 而 0x4F42F0 的第一次调用发生在帧首, 所以
+     * 用"与上次相同则跳过"即可, 不必关心它到底推进几次。
+     */
+    {
+        static int s_LastFrame = -1;
+        int fr = *(int*)ADDR_FRAME;
+        if (fr == s_LastFrame) return;
+        s_LastFrame = fr;
+    }
     SwsEnsureInit();
     if (!s_Enable) return;
     tog = OU_HotkeyDown(&s_ToggleHk) ? 1 : 0;
@@ -1326,48 +1396,93 @@ void SWS_Poll(void)
     s_PrevTog = tog;
     if (!s_Visible)
     {
-        /* 隐藏时仍采样键态, 防切回瞬间残留边沿误触。 */
-        s_PrevLB = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
-        s_PrevRB = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 1 : 0;
+        /* 隐藏时仍采样键态, 防切回瞬间残留边沿误触。
+         * 同时**保留显隐箭头的点击** —— 箭头在隐藏时依然画在屏幕右缘,
+         * 不处理的话就成了"看得见但点不动", 侧栏再也展不开。
+         *
+         * 边沿判定必须用**和可见分支同一份** s_PrevLB。早先这里另开了一个
+         * s_HidPrevLB, 而可见分支点箭头后是 `return` 直接跳走的, 根本没更新
+         * s_PrevLB —— 于是下一帧进入本分支时 s_PrevLB 还是 0, 而按键确实按着,
+         * 就伪造出一个"新按下沿", 刚收起的侧栏立刻又弹回来, 表现就是
+         * "点一下只闪一下, 第二次点才生效"。 */
+        {
+            int lb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
+            int rb = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 1 : 0;
+            if (lb && !s_PrevLB)
+            {
+                int hx = -1, hy = -1;
+                if (GtMouseGameXY(&hx, &hy) &&
+                    hx >= s_BtnX && hx < s_BtnX + s_BtnW &&
+                    hy >= s_BtnY && hy < s_BtnY + s_BtnH)
+                {
+                    s_Visible = 1;
+                    s_HoldSkip = 1;      /* 吞掉, 别让这次点击漏到地图 */
+                    LogLine("sws: show");
+                }
+            }
+            s_PrevLB = lb;
+            s_PrevRB = rb;
+        }
         s_ItemN = 0;
         s_BoundValid = 0;
         s_PendSel = -2;
-        s_EatPress = 0;
-        s_HoldSkip = 0;
+        s_SelDown = 0;
+        if (!s_PrevLB) s_HoldSkip = 0;   /* 与可见分支同规则: 按住期间不清 */
         return;
     }
-    /* 应用上一帧记下的选择: 引擎已消费完那次点击, 现在进打靶态安全。
-     * (隐藏态不回填, 免得 F4 关掉后又冒出个待选超武。) */
+    /* 应用上一帧记下的选择 (选中后的**松开**边沿记下的, 见 s_PendSel 注释)。
+     * 此时左键已松开, 引擎"按住即释放"的条件不可能成立。 */
     if (s_PendSel != -2)
     {
         int v = s_PendSel;
         s_PendSel = -2;
-        s_WeSetCur = 1;
         *(int*)ADDR_CURSW = v;
         LogLine(v >= 0 ? "sws: armed" : "sws: cancel");
-    }    if (s_ClickFire)
+    }
     {
         lb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
         rb = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 1 : 0;
+        /* ---- 上膛统一在**松开**边沿做 (见 s_PendSel 注释) ---- */
+        if (s_SelDown && !lb)
+        {
+            s_SelDown = 0;
+            s_PendSel = s_ArmIdx;
+            LogLine("sws: release-arm");
+        }
         if ((lb && !s_PrevLB) || (rb && !s_PrevRB))
         {
             s_ForceScan = 1;   /* 点击: 立刻重扫, 不等 15 帧节流 */
             int mx = -1, my = -1;
-            if (s_BoundValid && GtMouseGameXY(&mx, &my) &&
-                mx >= s_BoundX && mx < s_BoundX + s_BoundW &&
-                my >= s_BoundY && my < s_BoundY + s_BoundH)
+            if (s_BoundsKnown && GtMouseGameXY(&mx, &my))
             {
-                int hit = 0;
                 if (lb && !s_PrevLB)
                 {
-                    /* 隐藏按钮 (在栏外, 单独判) */
+                    /* 隐藏按钮: 画在超武块**上方** (yStart-s_BtnH-2), 所以必须
+                     * 在栏区判定**之前**单独命中 —— 早先把它放在栏区判定里面,
+                     * 而栏区要求 my >= s_BoundY (=yStart), 按钮在 yStart 之上,
+                     * 于是永远点不到 (表现就是"有个绿块但没反应")。 */
                     if (mx >= s_BtnX && mx < s_BtnX + s_BtnW &&
                         my >= s_BtnY && my < s_BtnY + s_BtnH)
                     {
                         s_Visible = s_Visible ? 0 : 1;
                         LogLine(s_Visible ? "sws: show" : "sws: hide");
+                        /* 按下就得吞掉, 否则这次点击会漏到引擎那边,
+                         * 而"已选中 + 按住"会让引擎把超武就地释放。 */
+                        s_HoldSkip = 1;
+                        /* 关键: 这里 return 绕过了函数末尾的按键态更新,
+                         * 必须自己记下来 —— 否则下一帧进入隐藏分支时会拿
+                         * 到"上一帧没按键"的旧值, 伪造出一个按下沿, 刚收起
+                         * 的侧栏又弹回来 (点一下只闪一下)。 */
+                        s_PrevLB = lb;
+                        s_PrevRB = rb;
                         return;
                     }
+                }
+                if (mx >= s_BoundX && mx < s_BoundX + s_BoundW &&
+                    my >= s_BoundY && my < s_BoundY + s_BoundH)
+                {
+                    if (lb && !s_PrevLB)
+                    {
                     int k;
                     for (k = 0; k < s_ItemN; k++)
                     {
@@ -1376,17 +1491,15 @@ void SWS_Poll(void)
                          * 竖带都会误判成点在这些不可见条目上。 */
                         if (s_Items[k].x < 0) continue;
                         if (mx >= s_Items[k].x &&
-                            mx < s_Items[k].x + s_IconW &&
+                            mx < s_Items[k].x + SWS_ICON_W &&
                             my >= s_Items[k].y &&
-                            my < s_Items[k].y + s_IconH)
+                            my < s_Items[k].y + SWS_ICON_H)
                         {
                             /* 释放后进入充能: 未就绪不可再选 */
                             if (!s_Items[k].ready)
                             {
-                                s_EatPress = 1;
                                 s_HoldSkip = 1;
                                 LogLine("sws: clk notready");
-                                hit = 1;
                                 break;
                             }
                             if (s_Items[k].instant)
@@ -1395,11 +1508,12 @@ void SWS_Poll(void)
                                  * 走标准事件 SpecialPlace (Phobos LaunchSuper
                                  * 同式), 而不是写 CurrentSW —— 后者只是本地
                                  * UI 状态, 引擎当帧不会释放, 所以"点了没反应"。
-                                 * 事件由引擎在 DoList 执行, 联机也同步。 */
+                                 * 事件由引擎在 DoList 执行, 联机也同步。
+                                 * 这条不写 CurrentSWTypeIndex, 所以不受
+                                 * "松开才上膛"影响, 按下即发。 */
                                 if (SwsPushSpecialPlace(s_Items[k].swIdx))
                                 {
                                     /* 事件已排队: 这一击仍然止于侧栏 */
-                                    s_EatPress = 1;
                                     s_HoldSkip = 1;
                                     LogLine("sws: instant");
                                 }
@@ -1407,36 +1521,37 @@ void SWS_Poll(void)
                                 {
                                     /* OutList 满 (0x80): 本帧发不出去, 照旧吞掉
                                      * 这一击, 别让它漏到地图上变成误下单。 */
-                                    s_EatPress = 1;
                                     s_HoldSkip = 1;
                                     LogLine("sws: instant queued fail");
                                 }
                             }
                             else
                             {
-                                /* 手动打靶: 按下即上膛, 并吞掉整段按住,
-                                 * 等效于真 Gadget 消费掉这次完整点击。 */
-                                s_PendSel = s_Items[k].swIdx;
-                                s_EatPress = 1;
+                                /* 手动打靶: 按下只记 idx, **松开**才写
+                                 * CurrentSWTypeIndex (见 s_PendSel 注释)。
+                                 * 整段按住由 s_HoldSkip 吞掉, 等价于真
+                                 * Gadget 消费掉这次完整点击。 */
+                                s_ArmIdx = s_Items[k].swIdx;
+                                s_SelDown = 1;
                                 s_HoldSkip = 1;
                             }
-                            hit = 1;
                             break;
                         }
                     }
-                    if (!hit)
-                    {
-                        /* 栏内空白处按下: 吞掉, 防误下单 */
-                        s_EatPress = 1;
-                        s_HoldSkip = 1;
-                    }
+                    }   /* 栏区判定 (mx/my 在超武块内) */
                 }
                 else if (rb && !s_PrevRB)
                 {
-                    /* 右键取消: 目标就是"无选中", 按住右键不会引发释放 */
-                    s_WeSetCur = 1;
-                    *(int*)ADDR_CURSW = -1;
-                    LogLine("sws: cancel");
+                    /* 右键取消: 目标就是"无选中", 按住右键不会引发释放。
+                     * 必须限在栏区里 —— 早先这里只要 s_BoundsKnown 就生效,
+                     * 于是玩家在**地图上**右键取消选中的单位, 反而把超武的
+                     * 选中状态给清了, 两边打架。 */
+                    if (mx >= s_BoundX && mx < s_BoundX + s_BoundW &&
+                        my >= s_BoundY && my < s_BoundY + s_BoundH)
+                    {
+                        *(int*)ADDR_CURSW = -1;
+                        LogLine("sws: cancel");
+                    }
                 }
             }
         }
@@ -1445,14 +1560,13 @@ void SWS_Poll(void)
         if (!lb) s_HoldSkip = 0;
         s_PrevLB = lb;
         s_PrevRB = rb;
-        /* 吞没标记只活一帧: 引擎本帧的 ProcessClickCoords 已被门跳过,
-         * 之后玩家点地图必须能正常落子。 */
-        s_EatPress = 0;
     }
-    /* 扫描节流: 每 15 游戏帧 (1 秒) 才重扫一次。扫描要读 78 条超武的
-     * Type/Owner/IsReady/充能计时, 虽然实测只有几微秒, 但它和绘制是两回事
-     * —— 侧栏内容本来就一秒变一次看不出来, 却每帧都跑。
-     * 玩家点击时 (下面 s_ForceScan) 立刻补一次, 保证点到的图标状态是最新的。*/
+    /* 扫描节流: 每 15 **渲染帧** (约 0.25 秒) 才重扫一次。扫描要读 78 条超武的
+     * Type/Owner/IsReady/充能计时, 实测几微秒, 但没必要每帧跑 ——
+     * 侧栏内容本来就看不出每帧的变化。
+     * 玩家点击时 (下面 s_ForceScan) 立刻补一次, 保证点到的图标状态是最新的。
+     * 注: 早先注释写"1 秒"是错的 —— 当时 SWS_Poll 每渲染帧跑 142 次,
+     * 15 次"调用"其实只有 0.25 秒; 帧门修掉之后这个数字才真的是帧。 */
     {
         static int s_ScanAge = 0;
         s_ScanAge++;
@@ -1463,248 +1577,51 @@ void SWS_Poll(void)
             SwsScan();
         }
     }
-    SwsEventWatch();
-    SwsFireWatch();
-    s_WeSetCur = 0;
-    /* 把 Poll 自身也计时上报: 之前 perf 只记 d(绘制)/s(扫描), SWS_Poll 里
-     * 的东西 (含每帧 GetPrivateProfileIntA 这种文件 I/O) 完全在盲区里,
-     * 帧率掉了日志却显示 d=1400us 一切正常。
-     * 汇总周期 60 帧: 每帧一行 LogLine 本身就要写文件, 两处每帧打
-     * (perf + poll) 光日志 I/O 就是几百微秒, 而且日志会涨到几 MB。 */
-    {
-        static double s_PollAcc = 0.0;
-        static int s_PollN = 0;
-        int fr = *(int*)ADDR_FRAME;
-        s_PollAcc += SwsUsSince(t0.QuadPart);
-        s_PollN++;
-        if (s_PollN >= 60)
-        {
-            char sb[80], b1[16], b2[16];
-            unsigned q = AppendCStr(sb, 0, "sws: poll ", sizeof(sb));
-            UtoA((unsigned)(s_PollAcc / s_PollN), b1);
-            q = AppendCStr(sb, q, b1, sizeof(sb));
-            q = AppendCStr(sb, q, "us n=", sizeof(sb));
-            UtoA((unsigned)s_PollN, b2);
-            q = AppendCStr(sb, q, b2, sizeof(sb));
-            LogLine(sb);
-            s_PollAcc = 0.0;
-            s_PollN = 0;
-        }
-        (void)fr;
-    }
 }
 
 /* ---------------- 点击吞没门 ---------------- */
+
+/* 鼠标是否真的压在一个**可见的超武图标**上。
+ *
+ * 吞没门不能拿整块栏区矩形来判。栏区底框是按每列的 maxRows 画满的, 某列
+ * 条目少的时候下半截是空的, 再加上栏区内部的左右留白 —— 这些地方**根本没有
+ * 图标**, 却会把玩家的点击/选中整片吞掉, 表现就是"侧栏盖住的地图那块点不动,
+ * 框单位/打靶都用不了"。所以只在真正画了图标的地方挡, 空地一律还给引擎。 */
+static int SwsMouseOnIcon(int mx, int my)
+{
+    int k;
+    if (s_ItemN <= 0) return 0;
+    for (k = 0; k < s_ItemN; k++)
+    {
+        /* 滚出可见范围的 (x=-1) 不算: 不跳过的话 x=-1 会让命中判定恒真 */
+        if (s_Items[k].x < 0) continue;
+        if (mx >= s_Items[k].x && mx < s_Items[k].x + SWS_ICON_W &&
+            my >= s_Items[k].y && my < s_Items[k].y + SWS_ICON_H)
+            return 1;
+    }
+    return 0;
+}
+
 extern "C" __declspec(dllexport) unsigned __cdecl SWS_ClickGate(void* regs)
 {
-    static int s_GateLog = 0;
     int mx = -1, my = -1;
     int r = 0;
     (void)regs;
     SwsEnsureInit();
-    if (!s_Enable || !s_Visible || !s_ClickFire) return 0;
+    if (!s_Enable || !s_Visible) return 0;
     /* 当帧记下的按下: 一律跳过引擎的 ProcessClickCoords,
      * 让这次点击止于侧栏, 不被当成打靶放置。即时超武也一样吞 ——
-     * 它靠 SpecialPlace 事件生效, 不依赖引擎处理这次点击。 */
-    if (s_EatPress || s_HoldSkip) r = ADDR_CLICKGATE_SKIP;
-    else if (!s_BoundValid) r = 0;
+     * 它靠 SpecialPlace 事件生效, 不依赖引擎处理这次点击。
+     *
+     * 命中判定用 s_BoundsKnown 而不是 s_BoundValid: 后者在 SwsScan 开头
+     * 被清零, 而点击那帧必然 s_ForceScan=1 触发重扫, 门恰好撞上它被清零的
+     * 窗口而放行 (这是"要点很多次"的直接原因)。栏区几何在重扫期间不变。*/
+    if (s_HoldSkip) r = ADDR_CLICKGATE_SKIP;
+    else if (!s_BoundsKnown) r = 0;
     else if (!GtMouseGameXY(&mx, &my)) r = 0;
-    else if (mx >= s_BoundX && mx < s_BoundX + s_BoundW &&
-             my >= s_BoundY && my < s_BoundY + s_BoundH)
-        r = ADDR_CLICKGATE_SKIP;
-    if (s_GateLog < 40 && s_BoundValid)
-    {
-        char sb[192], b1[16], b2[16], b3[16], b4[16];
-        unsigned q = AppendCStr(sb, 0, "sws: gate ", sizeof(sb));
-        UtoA((unsigned)mx, b1);
-        q = AppendCStr(sb, q, b1, sizeof(sb));
-        q = AppendCh(sb, q, ' ', sizeof(sb));
-        UtoA((unsigned)my, b2);
-        q = AppendCStr(sb, q, b2, sizeof(sb));
-        q = AppendCh(sb, q, ' ', sizeof(sb));
-        UtoA((unsigned)s_BoundValid, b3);
-        q = AppendCStr(sb, q, b3, sizeof(sb));
-        q = AppendCh(sb, q, ' ', sizeof(sb));
-        UtoA((unsigned)s_EatPress, b4);
-        q = AppendCStr(sb, q, b4, sizeof(sb));
-        q = AppendCh(sb, q, ' ', sizeof(sb));
-        UtoA((unsigned)(r ? 1 : 0), b4);
-        q = AppendCStr(sb, q, b4, sizeof(sb));
-        LogLine(sb);
-        s_GateLog++;
-    }
+    else if (SwsMouseOnIcon(mx, my)) r = ADDR_CLICKGATE_SKIP;
     return (unsigned)r;
 }
-
-/* 事件抓包 (纯读, 零行为, [SWSidebar] EvWatch 控制)
- *
- * 盯 EventClass::OutList 的写指针, 有新条目就记一行
- * `swsev: t=<Type> h=<house> ... raw=<前16字节hex>`。
- *
- * 用途: 验证我们塞进 OutList 的 SpecialPlace 事件确实按预期构造, 以及
- * 需要时和引擎自己发的那条对照。**这是当初定位"点了没反应"的唯一手段** ——
- * 在此之前我一直是照抄 Phobos 就下结论, 事实证明那样会错。
- *
- * EventClass 布局 (YRpp EventClass.h, pack(1), sizeof=111):
- *   [0] Type(1B) [1] IsExecuted(1B) [2] HouseIndex(1B) [3..6] Frame(4B)
- *   [7..] DataBuffer, 其中 SPECIAL_PLACE { int ID@7; CellStruct Location@11; }
- * 注意: **不要**拿 [1] 当"引擎是否已执行"的判据 —— 实测原版侧栏自己发的
- * 事件 [1] 也是 0x00, 另一类事件才是 0x5A, 与本功能无关 (那个假设已被证伪)。
- */
-#define SWS_EV_TYPE  0x12u   /* EventType::SpecialPlace */
-
-/* 上次见到的写指针 (环形 128 槽的 Tail) */
-static unsigned g_SwsEvNext = 0;
-static int g_SwsEvInit = 0;
-
-static void SwsHexB(char* out, unsigned v)
-{
-    static const char* dig = "0123456789ABCDEF";
-    out[0] = dig[(v >> 4) & 15u];
-    out[1] = dig[v & 15u];
-    out[2] = 0;
-}
-
-static void SwsEventWatch(void)
-{
-    unsigned next, cur, adv;
-    int guard = 0;
-
-    if (!s_EvWatchOn) return;   /* SwsEnsureInit 里读一次, 别每帧读 ini */
-
-    next = *(unsigned*)SWS_ADDR_OUT_NEXT & (SWS_EVT_SLOTS_N - 1u);
-    if (!g_SwsEvInit) { g_SwsEvNext = next; g_SwsEvInit = 1; return; }
-    adv = (next - g_SwsEvNext) & (SWS_EVT_SLOTS_N - 1u);
-    if (!adv) return;
-    if (adv > 8u) { g_SwsEvNext = next; return; }   /* 读档/菜单: 重同步 */
-    cur = g_SwsEvNext;
-    while (cur != next && guard < 8)
-    {
-        const unsigned char* e =
-            (const unsigned char*)(SWS_ADDR_OUT_BUF + cur * SWS_EVT_SIZE);
-        char sb[176], hb[4], t1[16], t2[16];
-        unsigned q = 0, i;
-        int typ = (int)e[0];
-        int house = (int)e[2];
-        /* 只详记超武相关 (SpecialPlace), 其余只记类型+house, 防刷屏。 */
-        q = AppendCStr(sb, q, "swsev: t=", sizeof(sb));
-        UtoA((unsigned)typ, t1);
-        q = AppendCStr(sb, q, t1, sizeof(sb));
-        q = AppendCStr(sb, q, " h=", sizeof(sb));
-        UtoA((unsigned)house, t2);
-        q = AppendCStr(sb, q, t2, sizeof(sb));
-        if (typ == (int)SWS_EV_TYPE)
-        {
-            int id = *(int*)(e + 7);
-            int lx = *(short*)(e + 11);
-            int ly = *(short*)(e + 13);
-            q = AppendCStr(sb, q, " SP id=", sizeof(sb));
-            UtoA((unsigned)id, t1);
-            q = AppendCStr(sb, q, t1, sizeof(sb));
-            q = AppendCStr(sb, q, " cell=", sizeof(sb));
-            UtoA((unsigned)lx, t1);
-            q = AppendCStr(sb, q, t1, sizeof(sb));
-            q = AppendCh(sb, q, ',', sizeof(sb));
-            UtoA((unsigned)ly, t2);
-            q = AppendCStr(sb, q, t2, sizeof(sb));
-        }
-        q = AppendCStr(sb, q, " raw=", sizeof(sb));
-        for (i = 0; i < 16; i++)
-        {
-            SwsHexB(hb, (unsigned)e[i]);
-            if (i && (i % 8) == 0) q = AppendCh(sb, q, ' ', sizeof(sb));
-            q = AppendCStr(sb, q, hb, sizeof(sb));
-        }
-        LogLine(sb);
-        cur = (cur + 1u) & (SWS_EVT_SLOTS_N - 1u);
-        guard++;
-    }
-    g_SwsEvNext = next;
-}
-
-/* --- 释放侦测: 用**效果**证明超武真的放了, 而不是猜机制 ---
- * 之前一直在猜"引擎执行了没有"(IsExecuted 那条路走不通: 引擎自己那条
- * SpecialPlace 首字节是 0x5A, 我们的恒为 0, [1] 根本不是可靠的执行标志)。
- * 换个更硬的事实: 超武一旦释放, 充能计时必然从"就绪"变成"满充能中",
- * 即该超武的 ready 出现 1 -> 0 边沿。这条边沿对**我们的面板**和
- * **原版侧栏**一视同仁, 所以既能验证我们的点击, 也能当原版的基线。
- *
- * 必须按 swIdx 记, 不能按 s_Items 下标: 扫描每帧重建且按阵营/优先级排序,
- * 下标 k 这一帧和下一帧未必是同一个超武。 */
-#define SWS_FIRE_SLOTS 512
-static int s_FirePrev[SWS_FIRE_SLOTS];
-
-static void SwsFireWatch(void)
-{
-    int k;
-    static int s_TblDumped = 0;
-    /* 用缓存值, 不要在这里 GetPrivateProfileIntA。
-     * 那个 API 每次调用都会打开并解析 ini 文件, 放每帧就是每帧一次文件
-     * I/O —— 而且它在 SWS_Poll 里, 落在 perf 日志的 d/s 计时之外, 所以
-     * 日志上 d=1400us 看着正常, 实际帧率被拖垮 (这种"测不到的开销"
-     * 最容易漏)。开关一律在 SwsEnsureInit 读一次。 */
-    if (!s_FireWatchOn) return;
-    /* 首轮把整张表打一遍。**不能**用"第一次调用"当触发条件: 启动那一帧
-     * 类型/超武表还没加载 (日志里 sws: raw sup=0x0/0), s_ItemN 还是 0,
-     * 于是打了 0 行然后就再也不打了 —— 白等一整局。
-     * 改成"第一次拿到非空表时打一次"。 */
-    if (!s_TblDumped)
-    {
-        if (s_ItemN <= 0) return;          /* 还没加载, 下一帧再试 */
-        for (k = 0; k < SWS_FIRE_SLOTS; k++) s_FirePrev[k] = 0;
-        s_TblDumped = 1;
-        {
-            int j;
-            for (j = 0; j < s_ItemN; j++)
-            {
-                char sb[192], t1[16], t2[16], t3[16];
-                unsigned q = AppendCStr(sb, 0, "sws: tbl ", sizeof(sb));
-                UtoA((unsigned)s_Items[j].swIdx, t1);
-                q = AppendCStr(sb, q, t1, sizeof(sb));
-                q = AppendCh(sb, q, ' ', sizeof(sb));
-                q = AppendCStr(sb, q, s_Items[j].id, sizeof(sb));
-                q = AppendCStr(sb, q, " inst=", sizeof(sb));
-                UtoA((unsigned)s_Items[j].instant, t2);
-                q = AppendCStr(sb, q, t2, sizeof(sb));
-                q = AppendCStr(sb, q, " rdy=", sizeof(sb));
-                UtoA((unsigned)s_Items[j].ready, t2);
-                q = AppendCStr(sb, q, t2, sizeof(sb));
-                q = AppendCStr(sb, q, " rem=", sizeof(sb));
-                UtoA((unsigned)s_Items[j].remain, t2);
-                q = AppendCStr(sb, q, t2, sizeof(sb));
-                q = AppendCh(sb, q, '/', sizeof(sb));
-                UtoA((unsigned)s_Items[j].total, t3);
-                q = AppendCStr(sb, q, t3, sizeof(sb));
-                LogLine(sb);
-            }
-        }
-        return;
-    }
-    for (k = 0; k < s_ItemN; k++)
-    {
-        int id = s_Items[k].swIdx;
-        if (id < 0 || id >= SWS_FIRE_SLOTS) continue;
-        if (s_FirePrev[id] == 1 && s_Items[k].ready == 0)
-        {
-            char sb[128], t1[16], t2[16];
-            unsigned q = AppendCStr(sb, 0, "sws: FIRED id=", sizeof(sb));
-            UtoA((unsigned)id, t1);
-            q = AppendCStr(sb, q, t1, sizeof(sb));
-            q = AppendCStr(sb, q, " inst=", sizeof(sb));
-            UtoA((unsigned)s_Items[k].instant, t2);
-            q = AppendCStr(sb, q, t2, sizeof(sb));
-            q = AppendCStr(sb, q, " rem=", sizeof(sb));
-            UtoA((unsigned)s_Items[k].remain, t2);
-            q = AppendCStr(sb, q, t2, sizeof(sb));
-            q = AppendCh(sb, q, '/', sizeof(sb));
-            UtoA((unsigned)s_Items[k].total, t2);
-            q = AppendCStr(sb, q, t2, sizeof(sb));
-            LogLine(sb);
-        }
-        s_FirePrev[id] = s_Items[k].ready;
-    }
-}
-
 
 /* ---------------- 即时超武: SpecialPlace 事件 (联机安全) ----------------
  * Action==None 的超武是"点了就放", Phobos 不写 CurrentSW, 而是往
@@ -1796,7 +1713,6 @@ static int SwsPushSpecialPlace(int swIdx)
         q = AppendCStr(sb, q, hb, sizeof(sb));
         for (i = 0; i < 16; i++)
         {
-            SwsHexB(hb, (unsigned)(unsigned char)ev[i]);
             if (i && (i % 8) == 0) q = AppendCh(sb, q, ' ', sizeof(sb));
             q = AppendCStr(sb, q, hb, sizeof(sb));
         }
@@ -1862,13 +1778,28 @@ static int SwsPcxBlitLocked(unsigned short* dstBase, int pitch,
             if (tx < 0 || tx >= surfW) continue;
             c = srow[sx];
             if (c == PCX_TRANS_PARENT) continue;   /* 色键 */
-            drow[tx] = c;
+            /* 整体透明度 <100 时不能直接覆盖: 要和底下的像素混合, 否则
+             * 图标会永远是 100% 不透明, Alpha 就只对底框/边框这些
+             * 走 SwsFillLocked 的元素生效。 */
+            if (s_Alpha >= 100) drow[tx] = c;
+            else
+            {
+                unsigned short bgc = drow[tx];
+                int sr = c & 0x1F, sg = (c >> 5) & 0x3F, sb = (c >> 11) & 0x1F;
+                int br = bgc & 0x1F, bg = (bgc >> 5) & 0x3F, bb = (bgc >> 11) & 0x1F;
+                int nr = (sr * s_Alpha + br * (100 - s_Alpha)) / 100;
+                int ng = (sg * s_Alpha + bg * (100 - s_Alpha)) / 100;
+                int nb = (sb * s_Alpha + bb * (100 - s_Alpha)) / 100;
+                drow[tx] = (unsigned short)(nb << 11 | ng << 5 | nr);
+            }
         }
     }
     return 1;
 }
 
-/* 锁面状态下的半透明填充 (替代每条目 6 次 FillRectTrans 虚表调用) */
+/* 锁面状态下的半透明填充 (替代每条目 6 次 FillRectTrans 虚表调用)
+ * op 先乘上**侧栏整体透明度** s_Alpha: 这样底框/边框/滚动条/箭头这些各带
+ * 自己的局部 alpha 的元素, 只要走这里就自动被整体透明度统一调制。 */
 static void SwsFillLocked(unsigned char* base, int pitch, int surfW, int surfH,
                           int x, int y, int rw, int rh,
                           unsigned char r, unsigned char g, unsigned char b,
@@ -1878,6 +1809,8 @@ static void SwsFillLocked(unsigned char* base, int pitch, int surfW, int surfH,
     if (!base || rw <= 0 || rh <= 0) return;
     if (op < 0) op = 0;
     if (op > 100) op = 100;
+    op = (op * s_Alpha) / 100;
+    if (op <= 0) return;
     for (yy = 0; yy < rh; yy++)
     {
         int ty = y + yy;
@@ -1895,7 +1828,81 @@ static void SwsFillLocked(unsigned char* base, int pitch, int surfW, int surfH,
 
 
 
-static LONGLONG g_DrawStart;
+/* ---- 显隐按钮几何 ----
+ * 超武块**上方** 2px, 横向扁长。宽>高是为了像个"折叠手柄", 也好点中。
+ *
+ * 注意: 按钮在栏区判定框**之外**(块顶之上), 所以 `SWS_Poll` 里它的命中
+ * 判定必须排在 "my >= s_BoundY" 那个栏区判定**之前**, 否则永远点不到
+ * (曾经就因为这个位置而"看得见点不动")。 */
+static void SwsBtnGeom(int w, int blockTop)
+{
+    s_BtnW = 28;      /* 宽 */
+    s_BtnH = 16;       /* 高 —— 宽明显大于高 */
+    s_BtnX = s_ColsValid ? (s_LastX + SWS_ICON_W - s_BtnW)
+                         : (w - s_RightMargin - s_BtnW);
+    if (s_BtnX < 0) s_BtnX = 0;
+    if (s_BtnX + s_BtnW > w) s_BtnX = (w - s_BtnW > 0) ? w - s_BtnW : 0;
+    s_BtnY = blockTop - s_BtnH - 2;   /* 上方, 留 2px 缝, 不压图标 */
+    if (s_BtnY < 0) s_BtnY = 0;
+}
+
+/* ---- 显隐按钮: 圆角底板 + 边框 + 实心三角 ----
+ * 三层, 由外到内:
+ *   1) 底板  整块矩形, 绿黑半透 (和侧栏底板一个观感)
+ *   2) 边框  四条边亮一档, 让它在深色地图上也看得见轮廓
+ *   3) 三角  按列画的高度渐变, 尖端指向 dir 指定的方向
+ *        dir=0 -> ◀ 侧栏隐藏时, 点它展开
+ *        dir=1 -> ▶ 侧栏显示时, 点它收起
+ * 底板用 SwsFillLocked 画, 所以会自动吃到侧栏整体透明度 s_Alpha。 */
+static void SwsDrawArrow(unsigned char* base, int pitch, int surfW, int surfH,
+                         int x, int y, int bw, int bh, int dir,
+                         int mx, int my)
+{
+    int cx, hov;
+    int inX, inY, inW, inH;
+    if (!base || bw <= 0 || bh <= 0) return;
+    if (bw < 8) bw = 8;
+    if (bh < 5) bh = 5;
+    hov = (mx >= x && mx < x + bw && my >= y && my < y + bh);
+
+    /* 1) 底板: 主题色压得很淡, 只为让按钮有个"面", 不再额外垫一圈黑底
+     *    (早先底板是纯黑往外扩 2px, 边框又是绿的, 结果看着就是"一层黑一层绿")。
+     *    底板和边框都走 SwsFillLocked, 所以自动吃到侧栏整体透明度 s_Alpha。 */
+    SwsFillLocked(base, pitch, surfW, surfH, x, y, bw, bh,
+                  SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, hov ? 70 : 45);
+
+    /* 2) 边框: 就一层, 上下左右各一条 1px 主题色边 */
+    {
+        int bc = hov ? 225 : 165;
+        SwsFillLocked(base, pitch, surfW, surfH, x, y, bw, 1,
+                      SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, bc);
+        SwsFillLocked(base, pitch, surfW, surfH, x, y + bh - 1, bw, 1,
+                      SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, bc);
+        SwsFillLocked(base, pitch, surfW, surfH, x, y, 1, bh,
+                      SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, bc);
+        SwsFillLocked(base, pitch, surfW, surfH, x + bw - 1, y, 1, bh,
+                      SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, bc);
+    }
+
+    /* 3) 三角: 留 2px 内边距, 按列画高度 -> 尖端指向 dir */
+    inX = x + 3; inY = y + 2;
+    inW = bw - 6; inH = bh - 4;
+    if (inW < 2) inW = 2;
+    if (inH < 1) inH = 1;
+    for (cx = 0; cx < inW; cx++)
+    {
+        int hh = (inH * cx) / (inW - 1 > 0 ? inW - 1 : 1);
+        int off;
+        if (dir) hh = inH - hh;             /* dir=1 ▶ 尖端在右 */
+        if (hh < 1) hh = 1;
+        if (hh > inH) hh = inH;
+        off = (inH - hh) / 2;
+        SwsFillLocked(base, pitch, surfW, surfH, inX + cx, inY + off, 1, hh,
+                      SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, hov ? 255 : 215);
+    }
+}
+
+
 void SWS_Draw(void* surf, int w, int h, int pitch)
 {
     /* 精简绘制 (为帧率):
@@ -1904,7 +1911,6 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
      *   - 悬停项: 高亮框 + 名字文本
      * 之前每条目 6 次填充 + 未就绪罩 + 状态字渲染, 64 个条目时是主要开销。
      */
-    LARGE_INTEGER td;
     int order[SWS_CAP];
     int colCount[4] = { 0, 0, 0, 0 };
     int colX[4] = { 0, 0, 0, 0 };
@@ -1916,13 +1922,43 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
     SwsLockFn lockFn;
     SwsUnlockFn unlockFn;
     unsigned char* locked;
-    SwsPerfInit();
-    QueryPerformanceCounter(&td);
-    g_DrawStart = td.QuadPart;
 
-    if (!s_Enable || !s_Visible) return;
+    if (!s_Enable) return;
     if (!surf || !IsPlausiblePtr(surf)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;
+    GtMouseGameXY(&mx, &my);
+
+    /* ---- 侧栏隐藏时: 只画展开箭头, 其余全跳过 ----
+     * 箭头**必须留着** —— 连它一起藏掉的话, 玩家就找不到再展开的地方了
+     * (这正是"箭头隐藏了点哪里展开?"那个问题)。所以这条早退放在拿到锁面
+     * 之后、画超武之前, 而不是像原来那样连箭头一起 return 掉。 */
+    if (!s_Visible)
+    {
+        unsigned char* lk;
+        unsigned char* v2;
+        v2 = *(unsigned char**)surf;
+        if (!v2 || !IsPlausiblePtr(v2)) return;
+        lockFn = (SwsLockFn)(*(void**)(v2 + VT_LOCK));
+        unlockFn = (SwsUnlockFn)(*(void**)(v2 + VT_UNLOCK));
+        if (!lockFn || !unlockFn ||
+            !IsPlausiblePtr((const void*)lockFn) ||
+            !IsPlausiblePtr((const void*)unlockFn)) return;
+        lk = (unsigned char*)lockFn(surf, NULL, 0, 0);
+        if (!lk || !IsPlausiblePtr(lk)) return;
+        {
+            /* 纵向位置沿用同一套 TopMargin 规则, 但**不减半个块高** ——
+             * 隐藏时没有块, 减去半高会让箭头偏上, 与展开后的位置对不上。 */
+            int by;
+            if (s_TopIsPct) by = (int)(((long)h * (long)s_TopMargin) / 100000L);
+            else            by = s_TopMargin;
+            if (by < 0) by = 0;
+            SwsBtnGeom(w, by);
+        }
+        SwsDrawArrow(lk, pitch, w, h, s_BtnX, s_BtnY, s_BtnW, s_BtnH, 0, mx, my);
+        unlockFn(surf, NULL);
+        return;
+    }
+
     n = s_ItemN;
     if (n <= 0 || n > SWS_CAP) return;
 
@@ -1961,17 +1997,26 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
         if (colCount[f] - maxRows > s_MaxSk) s_MaxSk = colCount[f] - maxRows;
     if (s_Scroll > s_MaxSk) s_Scroll = s_MaxSk;
     if (s_Scroll < 0) s_Scroll = 0;
-    rowH = s_IconH + s_Gap;
+    rowH = SWS_ICON_H + s_Gap;
     blockH = maxRows * rowH - s_Gap;
     totW = 0;
     for (f = 0; f < 4; f++)
-        if (colCount[f] > 0) totW += (totW ? s_ColGap : 0) + s_IconW;
+        if (colCount[f] > 0) totW += (totW ? s_ColGap : 0) + SWS_ICON_W;
     /* 有列装不下时, 整块左边让出 5px 给右侧那根滚动条 (否则会顶出屏幕) */
     s_BarValid = (s_MaxSk > 0);
     s_BarW = s_BarValid ? 4 : 0;
     xStart = w - s_RightMargin - totW - (s_BarValid ? 5 : 0);
     if (xStart < 0) xStart = 0;
-    yStart = s_CenterY ? (h - blockH) / 2 : s_TopMargin;
+    /* 比例 = 屏幕高 * 比例, 再减去半个块高 -> 视觉上居中 (块不会偏上);
+     * 像素 = 直接当 Y 坐标。 */
+    if (s_TopIsPct)
+    {
+        yStart = (int)(((long)h * (long)s_TopMargin) / 100000L) - blockH / 2;
+    }
+    else
+    {
+        yStart = s_TopMargin;
+    }
     if (yStart < 0) yStart = 0;
     {
         int cx = xStart;
@@ -1979,7 +2024,7 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
         {
             if (colCount[f] <= 0) continue;
             colX[f] = cx;
-            cx += s_IconW + s_ColGap;
+            cx += SWS_ICON_W + s_ColGap;
         }
     }
     {
@@ -1997,11 +2042,14 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
         }
     }
     /* 隐藏按钮: 放在超武块正上方 (右上角) */
-    s_BtnW = 24;
-    s_BtnH = 14;
-    s_BtnX = xStart + totW - s_BtnW;
-    s_BtnY = yStart - s_BtnH - 2;
-    if (s_BtnY < 0) s_BtnY = yStart + 2;
+    s_BtnW = 12;      /* 左右箭头: 竖向窄、横向略宽一点, 比例接近 1:1 才好画三角 */
+    s_BtnH = 18;
+    /* 放在超武块**右侧**贴屏幕边 (不再放上方 —— 上方那个位置在栏区判定
+     * 之外, 早先就因为这个点不到)。 */
+    s_BtnX = xStart + totW + (s_BarValid ? 6 : 1);
+    if (s_BtnX + s_BtnW > w) s_BtnX = w - s_BtnW;
+    if (s_BtnX < 0) s_BtnX = 0;
+    s_BtnY = yStart;
     {
         static int s_LayLog = 0;
         if (!s_LayLog)
@@ -2037,6 +2085,7 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
     s_BoundW = totW;
     s_BoundH = blockH;
     s_BoundValid = 1;
+    s_BoundsKnown = 1;   /* 吞没门用: 不随 SwsScan 清零 (见声明处注释) */
     for (f = 0; f < 4; f++) { s_ColCount[f] = colCount[f]; s_ColX[f] = colX[f]; }
     s_YStart = yStart;
     s_RowH = rowH;
@@ -2051,7 +2100,7 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
         s_Cols[f].vis = (colCount[f] < maxRows) ? colCount[f] : maxRows;
         if (colCount[f] > 0) { s_NCols++; s_LastX = colX[f]; }
     }
-    s_BarX = s_LastX + s_IconW + 1;
+    s_BarX = s_LastX + SWS_ICON_W + 1;
     if (!g_Calibrated) Calibrate();
 
     /* 悬停项 (悬停时才画文字, 平时零文本开销) */
@@ -2060,8 +2109,8 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
     {
         SwsItem* it = &s_Items[order[i]];
         if (it->x < 0) continue;                 /* 被滚动裁掉 */
-        if (mx >= it->x && mx < it->x + s_IconW &&
-            my >= it->y && my < it->y + s_IconH)
+        if (mx >= it->x && mx < it->x + SWS_ICON_W &&
+            my >= it->y && my < it->y + SWS_ICON_H)
         {
             hover = i;
             break;
@@ -2086,7 +2135,7 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
         if (colCount[f] <= 0) continue;
         /* 底框只画可见行数 (超出部分不显示) */
         ch = (colCount[f] < maxRows ? colCount[f] : maxRows) * rowH - s_Gap;
-        SwsFillLocked(locked, pitch, w, h, colX[f], yStart, s_IconW, ch,
+        SwsFillLocked(locked, pitch, w, h, colX[f], yStart, SWS_ICON_W, ch,
                       0, 0, 0, s_Opacity);
     }
 
@@ -2101,7 +2150,7 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
         {
             /* 优先在已持有的锁面里直接写像素; 布局对不上才退回引擎 blit */
             if (!SwsPcxBlitLocked((unsigned short*)locked, pitch, w, h,
-                                  it->x, it->y, s_IconW, s_IconH, ps))
+                                  it->x, it->y, SWS_ICON_W, SWS_ICON_H, ps))
             {
                 void* pcxInst = (void*)ADDR_PCX_INSTANCE;
                 if (pcxInst && IsPlausiblePtr(pcxInst))
@@ -2109,7 +2158,7 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
                     char rect[16];
                     unlockFn(surf, NULL);
                     *(int*)(rect + 0) = it->x; *(int*)(rect + 4) = it->y;
-                    *(int*)(rect + 8) = s_IconW; *(int*)(rect + 12) = s_IconH;
+                    *(int*)(rect + 8) = SWS_ICON_W; *(int*)(rect + 12) = SWS_ICON_H;
                     FN_PCXBLIT(pcxInst, rect, surf, ps, PCX_TRANS_PARENT);
                     locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
                     if (!locked || !IsPlausiblePtr(locked)) return;
@@ -2117,8 +2166,8 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
             }
             /* 未就绪 (释放后充能中): 压暗。只对这类条目做, 通常 0~1 个。 */
             if (!it->ready)
-                SwsFillLocked(locked, pitch, w, h, it->x, it->y, s_IconW,
-                              s_IconH, 0, 0, 0, 45);
+                SwsFillLocked(locked, pitch, w, h, it->x, it->y, SWS_ICON_W,
+                              SWS_ICON_H, 0, 0, 0, 45);
         }
         else if (it->shp)
         {
@@ -2165,14 +2214,15 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
             if (sw > 0)
             {
                 /* 顶部显示。两趟都用 sw 宽度: 多画 2px 会切出字形 overhang
-                 * 的碎片 (形似 '<'; 微软雅黑 extent 非矩形, 见 GdiText 注释)。 */
-                sx = it->x + (s_IconW - sw) / 2;
+                 * 的碎片 (形似 '<'; 微软雅黑 extent 非矩形, 见 GdiText 注释)。
+                 * BlitCoverage 自己不乘 s_Alpha, 所以这里要预乘。 */
+                sx = it->x + (SWS_ICON_W - sw) / 2;
                 ny = it->y + 1;
                 if (sx < it->x) sx = it->x;
                 BlitCoverage(locked, pitch, w, h, sx + 1, ny + 1, sw, adv,
-                             0, 0, 0, 80);
+                             0, 0, 0, 80 * s_Alpha / 100);
                 BlitCoverage(locked, pitch, w, h, sx, ny, sw, adv,
-                             255, 255, 255, 100);
+                             255, 255, 255, 100 * s_Alpha / 100);
             }
         }
         if (i == hover || it->swIdx == curSel)
@@ -2180,13 +2230,13 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
             const unsigned char* hc = (i == hover) ?
                 (const unsigned char*)"\xFF\xFF\xFF" : kSideCol[it->side];
             SwsFillLocked(locked, pitch, w, h, it->x - 1, it->y - 1,
-                          s_IconW + 2, 1, hc[0], hc[1], hc[2], 220);
-            SwsFillLocked(locked, pitch, w, h, it->x - 1, it->y + s_IconH,
-                          s_IconW + 2, 1, hc[0], hc[1], hc[2], 220);
-            SwsFillLocked(locked, pitch, w, h, it->x - 1, it->y, 1, s_IconH,
+                          SWS_ICON_W + 2, 1, hc[0], hc[1], hc[2], 220);
+            SwsFillLocked(locked, pitch, w, h, it->x - 1, it->y + SWS_ICON_H,
+                          SWS_ICON_W + 2, 1, hc[0], hc[1], hc[2], 220);
+            SwsFillLocked(locked, pitch, w, h, it->x - 1, it->y, 1, SWS_ICON_H,
                           hc[0], hc[1], hc[2], 220);
-            SwsFillLocked(locked, pitch, w, h, it->x + s_IconW, it->y, 1,
-                          s_IconH, hc[0], hc[1], hc[2], 220);
+            SwsFillLocked(locked, pitch, w, h, it->x + SWS_ICON_W, it->y, 1,
+                          SWS_ICON_H, hc[0], hc[1], hc[2], 220);
         }
     }
 
@@ -2198,13 +2248,13 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
         if (colCount[f] <= 0) continue;
         c = kSideCol[f];
         ch = (colCount[f] < maxRows ? colCount[f] : maxRows) * rowH - s_Gap;
-        SwsFillLocked(locked, pitch, w, h, colX[f], yStart, s_IconW, 1,
+        SwsFillLocked(locked, pitch, w, h, colX[f], yStart, SWS_ICON_W, 1,
                       c[0], c[1], c[2], 150);
-        SwsFillLocked(locked, pitch, w, h, colX[f], yStart + ch - 1, s_IconW, 1,
+        SwsFillLocked(locked, pitch, w, h, colX[f], yStart + ch - 1, SWS_ICON_W, 1,
                       c[0], c[1], c[2], 150);
         SwsFillLocked(locked, pitch, w, h, colX[f], yStart, 1, ch,
                       c[0], c[1], c[2], 150);
-        SwsFillLocked(locked, pitch, w, h, colX[f] + s_IconW - 1, yStart, 1, ch,
+        SwsFillLocked(locked, pitch, w, h, colX[f] + SWS_ICON_W - 1, yStart, 1, ch,
                       c[0], c[1], c[2], 150);
     }
 
@@ -2232,15 +2282,13 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
         }
     }
 
-    /* ---- 隐藏按钮 (画在最上层) ---- */
-    {
-        const unsigned char* bc = s_Visible ? (const unsigned char*)
-            "\x40\xFF\x60" : (const unsigned char*)"\x80\x80\x80";
-        SwsFillLocked(locked, pitch, w, h, s_BtnX, s_BtnY, s_BtnW, s_BtnH,
-                      bc[0], bc[1], bc[2], 150);
-        SwsFillLocked(locked, pitch, w, h, s_BtnX, s_BtnY, s_BtnW, 1,
-                      255, 255, 255, 120);
-    }
+    /* ---- 显隐按钮: 向右箭头 ▶ (收起), 贴在超武块右侧 ----
+     * 侧栏显示时用 ▶ (往右收); 隐藏时只留一个 ◀ (往左展开) 贴在屏幕右缘,
+     * 见 SWS_Draw 开头的 !s_Visible 分支 —— 箭头任何时候都不能藏,
+     * 否则藏起来之后就找不到再展开的地方了。 */
+    SwsBtnGeom(w, yStart);
+    SwsDrawArrow(locked, pitch, w, h, s_BtnX, s_BtnY, s_BtnW, s_BtnH,
+                 1, mx, my);
 
     /* ---- 悬停名字 (带底框, 跟随全局矢量字体) ---- */
     if (hover >= 0)
@@ -2264,53 +2312,39 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
             {
                 sx = mx - sw / 2;
                 ny = it->y - adv - 2;
-                if (ny < 0) ny = it->y + s_IconH + 2;
-                if (sx < 2) sx = 2;
-                if (sx + sw + 2 > w - 2) sx = w - sw - 4;
-                /* 底框: 半透明黑, 让白字在亮图上也读得清 */
-                SwsFillLocked(locked, pitch, w, h, sx - 2, ny - 2, sw + 6,
-                              adv + 4, 0, 0, 0, 70);
+                if (ny < 2) ny = it->y + SWS_ICON_H + 2;
+                /* 框比文字左右各宽 2px, 夹取要按**框**算, 否则右边会跑出屏幕 */
+                if (sx < 4) sx = 4;
+                if (sx + sw + 6 > w - 2) sx = (w - sw - 8 > 4) ? w - sw - 8 : 4;
+                /* 提示框: 半透明黑底 + 一圈主题色边框。
+                 * 边框先算好, 底色和边框都走 SwsFillLocked —— 它内部已经乘过
+                 * s_Alpha 了 (见 SwsFillLocked 里的 op = op * s_Alpha / 100),
+                 * 所以这里**只能给原始不透明度**, 早先写成 70 * s_Alpha / 100
+                 * 等于乘了两次, Alpha=30 时底框实际只剩 6%, 几乎看不见。
+                 *
+                 * 对比: BlitCoverage 相反, 它不乘 s_Alpha, 调用方才要预乘。 */
+                {
+                    int bx = sx - 2, by = ny - 2, bwid = sw + 6, bhei = adv + 4;
+                    SwsFillLocked(locked, pitch, w, h, bx, by, bwid, bhei,
+                                  0, 0, 0, 70);
+                    /* 边框画在底框的四条边上, 1px, 主题色 */
+                    SwsFillLocked(locked, pitch, w, h, bx, by, bwid, 1,
+                                  SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 190);
+                    SwsFillLocked(locked, pitch, w, h, bx, by + bhei - 1, bwid, 1,
+                                  SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 190);
+                    SwsFillLocked(locked, pitch, w, h, bx, by, 1, bhei,
+                                  SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 190);
+                    SwsFillLocked(locked, pitch, w, h, bx + bwid - 1, by, 1, bhei,
+                                  SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 190);
+                }
                 BlitCoverage(locked, pitch, w, h, sx + 1, ny + 1, sw, adv,
-                             0, 0, 0, 70);
+                             0, 0, 0, 70 * s_Alpha / 100);
                 BlitCoverage(locked, pitch, w, h, sx, ny, sw, adv,
-                             255, 255, 255, 100);
+                             255, 255, 255, 100 * s_Alpha / 100);
             }
             }
         }
     }
     unlockFn(surf, NULL);
 
-    /* 耗时汇总: 每 60 帧记一行**平均**值。
-     * 原来这里是每帧一行 LogLine —— 一帧一次文件写, 21 万行把日志撑到
-     * 4MB+, 光这个 I/O 就是几百微秒/帧, 属于自己把自己拖慢。
-     * 和 SWS_Poll 里的 sws: poll 一起节流。 */
-    {
-        static int s_N = 0;
-        static double s_DrawUs = 0.0;
-        static double s_ScanUs = 0.0;
-        static int s_Items2 = 0;
-        s_N++;
-        s_DrawUs += SwsUsSince(g_DrawStart);
-        s_ScanUs += (g_ScanCnt ? g_ScanUsAcc / g_ScanCnt : 0.0);
-        s_Items2 = n;
-        if (s_N >= 60)
-        {
-            char sb[160], b1[16], b2[16], b3[16];
-            unsigned q = AppendCStr(sb, 0, "sws: perf d=", sizeof(sb));
-            UtoA((unsigned)(s_DrawUs / s_N), b1);
-            q = AppendCStr(sb, q, b1, sizeof(sb));
-            q = AppendCStr(sb, q, " s=", sizeof(sb));
-            UtoA((unsigned)(s_ScanUs / s_N), b2);
-            q = AppendCStr(sb, q, b2, sizeof(sb));
-            q = AppendCStr(sb, q, " n=", sizeof(sb));
-            UtoA((unsigned)s_Items2, b3);
-            q = AppendCStr(sb, q, b3, sizeof(sb));
-            LogLine(sb);
-            s_N = 0;
-            s_DrawUs = 0.0;
-            s_ScanUs = 0.0;
-            g_ScanUsAcc = 0.0;
-            g_ScanCnt = 0;
-        }
-    }
 }
