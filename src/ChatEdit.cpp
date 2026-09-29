@@ -11,8 +11,13 @@
  *   文本全程镜像进原生 EditBuffer (0xA8BC60+0x28, 光标 +0x2B0, 始终有效):
  *     提交/取消直接调原生 Input(Enter/Esc), 发包字节与手打完全一致
  *     (单机+联机同路, 不碰任何模拟/网络函数)。
- *   显示: MessageDrawHook 尾部调 ChatEdit_Frame (状态/轮询/组字),
- *     绘制在 DrawTail (0x5D4A8D, 原生编辑块之后) 做, 不透明黑底盖住原生行。
+ *   显示: 原生编辑行整块不画 (0x5D49B4 即 IsEdit 判定处跳 0x5D4A8D, 跳过
+ *     Lock/画行/Unlock 整段, 栈零失衡, 落点同引擎"不在编辑"分支), 自绘盒子
+ *     画在 MessageDrawHook 尾部 (战役框之后) —— 输入框在战役文本之上, 压不住。
+ *     盒子位置: 底部模式 (CampBottom=1) 贴战役框下沿 (留在留出的底部间距
+ *     里); 顶部模式留在原生行原位, 不挪 (原生行本来就在 (3,0) 的左上角)。
+ *     底板只按画出的内容宽, 不按原生输入域宽铺满 (原生 EditPos 在 (3,0)
+ *     而 fieldW=整屏宽, 铺满就是顶上留一条黑杠)。
  *     GDI 槽 4 (字体与战役框同源: [MOExperience] FontFace/Bold 同解析)。
  *   粘贴: CF_UNICODETEXT; 复制/剪切写剪贴板 (全本地 Win32)。
  *   组字: 每帧 Imm 轮询组字串画出来+下划线 (全屏下系统组字窗不可见),
@@ -34,14 +39,23 @@
 #define CE_OFF_EDITBUF  0x28u
 #define CE_OFF_EDITLABEL 0x24u
 #define CE_OFF_EDITPOS  0x1Cu
-#define CE_OFF_MAXCHARS 0x10u
 #define CE_OFF_CURPOS   0x2B0u
 #define CE_OFF_INITPOS  0x2B4u
+#define CE_OFF_CURSORCHAR 0x2B8u /* CursorCharacter (wchar_t): Draw 0x5D49F0 判它==0 就整行不画 */
+#define CE_OFF_MAXCHARS 0x10u    /* Draw 0x5D4A0E 拿它算光标可视窗口 */
 #define CE_OFF_FIELDW   0x2C4u
 #define CE_BUF_N        162
 
 #define CE_INPUT        0x005D4510u
 #define CE_INPUT_BACK   0x005D4515u
+
+/* MessageListClass::Draw: 原生编辑行绘制段的落点, 也是引擎自己
+ * "不在编辑" 分支的落点 (跳过该段栈零失衡, 见 ChatEdit_HideNative)。 */
+#define CE_NATIVE_SKIP  0x005D4A8Du
+/* 越过引擎的"无文本就不画"判据, 落点=判据之后第一条指令。 */
+#define CE_CURSOR_CHAR  0x005Fu   /* '_' : 引擎只认有没有光标字符, 不挑字形 */
+#define CE_FORCE_DRAWFLAG 0x005D4A00u
+#define CE_FORCE_DRAW   0x005D4A22u
 
 /* 原生行缓冲协议 (0x54F1C0/0x54F200 反汇编): 对象=*(0x87F770),
  * 环首+0x114 (256 槽), 环尾+0x314, 游标(写头)+0x318。
@@ -63,11 +77,11 @@
 #define CE_VT_LOCK      0x5Cu
 #define CE_VT_UNLOCK    0x60u
 #define CE_VT_FILLRECT  0x1Cu
-#define CE_VT_GET_PITCH 0x74u
-#define CE_VT_GET_WIDTH 0x7Cu
-#define CE_VT_GET_HEIGHT 0x80u
 
 #define CE_SECTION      "MOExperience"
+
+/* Syringe 传进来的寄存器块 (同 MOExperience.cpp 的用法) */
+#define CE_OFF_REG_ECX  0x20u
 
 /* 字体跟战役框 (同 [MOExperience] FontFace/Bold, 经 ResolveFontFace 解析;
  * 直接把 "msyh.ttc" 当字体名传 GDI 会回退到无 CJK 字形, 中文空白) */
@@ -79,6 +93,11 @@ static int ce_Bold = 0;
 static int ce_Init = 0;
 static int ce_Enable = 1;
 static int ce_Active = 0;
+/* 落位只记一次 (排查用: 见 CE_LogWhere) */
+static int ce_AnchorLogged = 0;
+/* 本帧盒子是用战役框锚点 (0) 还是留在原生行原位 (1)。留在原位时不允许
+ * 钳屏内位移, 否则和原生行分家, 合并黑板失效。 */
+static int ce_AtNative = 1;
 
 static wchar_t ce_Buf[CE_BUF_N];
 static int ce_Len = 0;
@@ -97,12 +116,9 @@ static int ce_CompCur = 0;
 
 static unsigned ce_CmdTick = 0; /* Ctrl 组合键上次处理时刻 (Input/轮询握手) */
 static unsigned ce_NavTick = 0; /* 方向键上次处理时刻 (LL/轮询/钩握手) */
-static unsigned ce_LLCnt = 0;   /* LL 事件计数 (轮询重锚用) */
 /* WM_CHAR 摘除钩 (定义在后, 开框时懒安装): 行缓冲游标快照 + 安装前置声明 */
 static unsigned ce_LastCur = 0xFFFFFFFFu;
 static void CE_CharPostInstall(void);
-static unsigned ce_LLSeen = 0;  /* 轮询已消化的 LL 计数 */
-static unsigned ce_LLLastTick = 0; /* LL 末事件时刻 (边缘退让判据) */
 static HWND ce_FgWnd = NULL;
 
 typedef struct { int vk; int prev; unsigned nextRep; } CENavKey;
@@ -188,17 +204,34 @@ static int CE_TextWidth(const wchar_t* s, int n)
 }
 
 /* 文本镜像进原生缓冲 (提交/原生路径永远看到有效文本)。
- * 光标置尾 (有效位内), 起点置 0 (空=取消, 非空=发送, 与原生语义一致)。 */
+ * 光标置尾 (有效位内), 起点置 0 (空=取消, 非空=发送, 与原生语义一致)。
+ * ce_DivCnt 记"原生缓冲已被别人改过"的次数: 对话框层自己也直接改这块
+ * (Backspace/Delete/方向键), 我们的 LL 钩漏了键它就会动手。改完下一帧
+ * 被这里覆盖回去, 用户看着就是"删的是游戏内那份、我这份没反应"。 */
+static int ce_DivCnt = 0;
+static unsigned ce_DivT = 0;
 static void CE_Mirror(void)
 {
     wchar_t* nb = (wchar_t*)(CE_MSGLIST + CE_OFF_EDITBUF);
     int i;
     if (!IsPlausiblePtr(nb)) return;
     if (ce_Len > CE_BUF_N - 1) ce_Len = CE_BUF_N - 1;
+    for (i = 0; i < ce_Len; i++) if (nb[i] != ce_Buf[i]) { ce_DivCnt++; break; }
+    if (nb[ce_Len] != 0) ce_DivCnt++;
     for (i = 0; i < ce_Len; i++) nb[i] = ce_Buf[i];
     nb[ce_Len] = 0;
     *(int*)(CE_MSGLIST + CE_OFF_CURPOS) = ce_Len;
     *(int*)(CE_MSGLIST + CE_OFF_INITPOS) = 0;
+    if (ce_DivCnt && GetTickCount() - ce_DivT > 2000)
+    {
+        char sb[64], t1[16];
+        unsigned q = 0;
+        ce_DivT = GetTickCount();
+        q = AppendCStr(sb, q, "chatedit: native buffer edited behind us x", sizeof(sb));
+        q += UtoA((unsigned)ce_DivCnt, t1);
+        AppendCStr(sb, q, t1, sizeof(sb));
+        ce_DivCnt = 0;
+        LogLine(sb);    }
 }
 
 /* ---------------- 编辑操作 (调用后须 CE_Mirror + 闪烁复位) ---------------- */
@@ -470,7 +503,15 @@ static void CE_NavMove(int vk, int shift, int ctrl)
     CE_BlinkReset();
 }
 
-/* LL 与轮询共用: 移动/删除 + 握手时刻 */
+/* 游戏主窗是否就是当前前台窗口。轮询与泵都只在这里为真时动手 ——
+ * GetAsyncKeyState 是全局按键状态, 用户切到别的程序删字时它照样为 1。 */
+static int CE_GameForeground(void)
+{
+    if (!ce_FgWnd) return 0;
+    return (GetForegroundWindow() == ce_FgWnd);
+}
+
+/* 轮询按帧处理移动/删除 (唯一的按键来源) */
 static void CE_ApplyNav(int vk)
 {
     int shift = CE_KeyDown(VK_SHIFT);
@@ -489,23 +530,17 @@ static void CE_PollKeys(int fieldW)
     for (i = 0; i < sizeof(ce_NavKeys) / sizeof(ce_NavKeys[0]); i++)
     {
         int down = CE_KeyDown((unsigned)ce_NavKeys[i].vk);
-        /* 边缘: 只在 LL 长期静默 (>2s, 基本等于 LL 已死) 才接管;
-         * LL 活着时边缘一律让路 (LL 那步已走)。慢点按 (>150ms 间隔)
-         * 不再被 LL+轮询各走一步 (双步跳字, 体感"卡住")。 */
-        if (down && !ce_NavKeys[i].prev && (int)(now - ce_LLLastTick) > 2000)
+        /* 边缘立刻走一步; 按住则 400ms 后起每 33ms 连发 (等同系统重复率)。
+         * 这里只读 GetAsyncKeyState, 不装任何全局钩, 见 CE_KeyScope 说明。 */
+        if (down && !ce_NavKeys[i].prev)
         {
             CE_ApplyNav(ce_NavKeys[i].vk);
             ce_NavKeys[i].nextRep = now + 400;
         }
-        /* 连发: 轮询按 33ms 自走; 若自上次轮询步进后有新 LL 事件,
-         * 本拍跳过并重锚 (LL 那步已走, 防双步; 锚后下拍继续, 不饿死)。
-         * LL 30Hz 时轮询基本全跳过 (LL 全包); LL 6Hz/死亡时轮询补满。 */
         else if (down && (int)(now - ce_NavKeys[i].nextRep) >= 0)
         {
-            if (ce_LLCnt != ce_LLSeen)
-            { ce_LLSeen = ce_LLCnt; ce_NavKeys[i].nextRep = now + 33; }
-            else
-            { CE_ApplyNav(ce_NavKeys[i].vk); ce_NavKeys[i].nextRep = now + 33; }
+            CE_ApplyNav(ce_NavKeys[i].vk);
+            ce_NavKeys[i].nextRep = now + 33;
         }
         ce_NavKeys[i].prev = down;
     }
@@ -533,17 +568,23 @@ static void CE_PollKeys(int fieldW)
     }
 }
 
-/* 泵线程 (独立线程, 与主循环解耦): 框开着时以 ~60Hz 投 WM_NULL,
- * 主循环不断流。无锁、无阻塞调用, 联机安全。 */
+/* 泵线程 (独立线程, 与主循环解耦): 同时管 LL 钩子的生死。
+ * 框开着时以 ~60Hz 投 WM_NULL, 主循环不断流; 主循环一消息一帧, 吞掉方向键
+ * 后无其它消息即饿死 (冻住、动一次走一帧), 线程投递与主循环解耦, 联机安全。
+ *
+ * LL 钩 (WH_KEYBOARD_LL) 是**全局**钩, 装上就在整个系统里生效。这里让它
+ * 只在游戏当前台时存在: 失焦即卸, 回焦再装。逐键判前台已经够严了
+ * (CE_KeyScope 比进程号+句柄), 但"失焦时根本不存在这个钩"才是结构性保证
+ * —— 之前用户切到别的程序后那边删不动字/光标移不动, 而逐键判据日志全是 0
+ * (钩在别的前台下压根没被调), 说明问题出在钩的生命周期而不是判据。 */
+
 static DWORD WINAPI CE_Watchdog(LPVOID unused)
 {
     (void)unused;
     for (;;)
     {
-        /* 喂泵: 框开着时以 ~60Hz 投 WM_NULL, 主循环不断流。
-         * 主循环一消息一帧, 吞掉方向键后无其它消息即饿死
-         * (冻住、动一次走一帧); 线程投递与主循环解耦, 联机安全。 */
-        if (ce_Active && ce_FgWnd) PostMessageA(ce_FgWnd, WM_NULL, 0, 0);
+        if (ce_Active && ce_FgWnd && GetForegroundWindow() == ce_FgWnd)
+            PostMessageA(ce_FgWnd, WM_NULL, 0, 0);
         Sleep(16);
     }
     return 0;
@@ -561,54 +602,6 @@ static void CE_PumpEnsure(void)
 }
 
 /* ---------------- 低级键盘钩 (导航/编辑键消息级处理+吞掉, 防滚地图/旁路) ---------------- */
-
-static HHOOK ce_LLHook = NULL;
-
-static LRESULT CALLBACK CE_LLProc(int nCode, WPARAM wp, LPARAM lp)
-{
-    if (nCode == HC_ACTION && ce_Active &&
-        (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN))
-    {
-        KBDLLHOOKSTRUCT* k = (KBDLLHOOKSTRUCT*)lp;
-        unsigned vku = k->vkCode;
-        if (!(k->flags & LLKHF_INJECTED) &&
-            GetForegroundWindow() == ce_FgWnd && ce_FgWnd &&
-            (vku == VK_LEFT || vku == VK_RIGHT || vku == VK_HOME ||
-             vku == VK_END || vku == VK_DELETE || vku == VK_BACK) &&
-            ce_CompLen <= 0)
-        {
-            /* 消息级直接处理 (不依赖轮询/重绘率) + 吞掉:
-             * 对话框层看不到这些键, 不再旁路改原生缓冲。
-             * 组字中放行 (组字光标归 IME, 与原生一致) */
-            CE_ApplyNav((int)vku);
-            ce_LLCnt++;   /* 轮询重锚判据 (计次, 不计时: LL 再稀疏也不饿死轮询) */
-            ce_LLLastTick = GetTickCount();   /* 边缘退让判据 */
-            /* 喂泵: 主循环是消息驱动的, 吞掉方向键后若鼠标不动又无其它消息,
-             * 队列 starved → 主循环饿死 → 整局冻住、松开 (keyup 照常投递)
-             * 才恢复。补一个无副作用的 WM_NULL 让循环继续转; 游戏看不到
-             * 方向键 (照样吞), 地图不滚、旁路不写。 */
-            if (ce_FgWnd) PostMessageA(ce_FgWnd, WM_NULL, 0, 0);
-            return 1;
-        }
-    }
-    return CallNextHookEx(ce_LLHook, nCode, wp, lp);
-}
-
-static void CE_LLOn(void)
-{
-    HMODULE hm = NULL;
-    if (ce_LLHook) return;
-    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                       (LPCSTR)CE_LLProc, &hm);
-    ce_LLHook = SetWindowsHookExA(WH_KEYBOARD_LL, CE_LLProc, hm, 0);
-}
-
-static void CE_LLOff(void)
-{
-    if (!ce_LLHook) return;
-    UnhookWindowsHookEx(ce_LLHook);
-    ce_LLHook = NULL;
-}
 
 /* ---------------- 激活/关闭 ---------------- */
 
@@ -641,8 +634,6 @@ static void CE_Activate(void)
     if (!ce_FgWnd) ce_FgWnd = GetActiveWindow();
     for (k = 0; k < sizeof(ce_NavKeys) / sizeof(ce_NavKeys[0]); k++)
     { ce_NavKeys[k].prev = 0; ce_NavKeys[k].nextRep = 0; }
-    ce_LLSeen = ce_LLCnt;
-    ce_LLLastTick = GetTickCount();   /* 先假设 LL 活着 (2s 内纠正) */
     for (k = 0; k < 4; k++) ce_CtrlPrev[k] = 0;
     /* 行缓冲游标快照 (摘除判据: 只收编开框后新追加的字, 不碰旧残留) */
     ce_LastCur = 0xFFFFFFFFu;
@@ -655,7 +646,6 @@ static void CE_Activate(void)
     }
     CE_CharPostInstall();   /* 懒安装 (Ares 系钩子早下完, 此时下最稳) */
     ce_Active = 1;
-    CE_LLOn();
     CE_BlinkReset();
 }
 
@@ -664,7 +654,6 @@ static void CE_Deactivate(void)
     ce_Active = 0;
     ce_Anchor = -1;
     ce_CompLen = 0;
-    CE_LLOff();
 }
 
 /* ---------------- 绘制 ---------------- */
@@ -672,20 +661,7 @@ static void CE_Deactivate(void)
 typedef void* (__fastcall *CE_LockFn)(void*, void*, int, int);
 typedef int (__fastcall *CE_UnlockFn)(void*, void*);
 typedef int (__fastcall *CE_FillFn)(void*, void*, RectangleStruct*,
-                                   ColorStruct*, int);
-typedef int (__fastcall *CE_GetIntFn)(void* t, void* edxUnused);
-
-static int CE_SurfGet(void* surf, unsigned vtOff)
-{
-    unsigned char* vt;
-    CE_GetIntFn fn;
-    if (!surf || !IsPlausiblePtr(surf)) return -1;
-    vt = *(unsigned char**)surf;
-    if (!vt || !IsPlausiblePtr(vt)) return -2;
-    fn = (CE_GetIntFn)(*(void**)(vt + vtOff));
-    if (!fn) return -3;
-    return fn(surf, NULL);
-}
+                                    ColorStruct*, int);
 
 static void CE_FillRect(void* surf, int x, int y, int w, int h,
                         unsigned char r, unsigned char g, unsigned char b,
@@ -703,6 +679,32 @@ static void CE_FillRect(void* surf, int x, int y, int w, int h,
     rc.X = x; rc.Y = y; rc.Width = w; rc.Height = h;
     c.R = r; c.G = g; c.B = b;
     fn(surf, NULL, &rc, &c, op);
+}
+
+/* 输入框落位只记一次 (排查用: 改 CampBottom/PosX/分辨率/字号后好核对) */
+static void CE_LogWhere(const char* what, int x, int y,
+                        int fieldW, int surfW, int surfH)
+{
+    char lb[128], t1[16], t2[16];
+    unsigned q = 0;
+    if (ce_AnchorLogged) return;
+    ce_AnchorLogged = 1;
+    q = AppendCStr(lb, q, "chatedit: ", sizeof(lb));
+    q = AppendCStr(lb, q, what, sizeof(lb));
+    q = AppendCStr(lb, q, " x=", sizeof(lb));
+    q += UtoA((unsigned)x, lb + q);
+    q = AppendCStr(lb, q, " y=", sizeof(lb));
+    q += UtoA((unsigned)y, lb + q);
+    q = AppendCStr(lb, q, " fieldW=", sizeof(lb));
+    UtoA((unsigned)fieldW, t1);
+    q = AppendCStr(lb, q, t1, sizeof(lb));
+    q = AppendCStr(lb, q, " surf=", sizeof(lb));
+    UtoA((unsigned)surfW, t2);
+    q = AppendCStr(lb, q, t2, sizeof(lb));
+    AppendCh(lb, q, 'x', sizeof(lb));
+    UtoA((unsigned)surfH, t1);
+    AppendCStr(lb, q, t1, sizeof(lb));
+    LogLine(lb);
 }
 
 static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
@@ -723,23 +725,37 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     if (lineH < 8 || lineH > 64) lineH = 16;
     fieldW = CE_NativeFieldW();
     if (fieldW < 80 || fieldW > surfW) fieldW = (surfW - 16 > 80) ? surfW - 16 : 640;
-    /* 位置跟原生编辑行: 首选对话框维护的 EditPos (+0x1C, 屏幕坐标);
-     * label 自身 X/Y 是创建占位 (实测常落 (3,0) 左上, 不是绘制位)。
-     * 都非法才回退底部条带。 */
+    /* 位置: 底部模式 (CampBottom=1) 贴战役框下沿, 左侧与战役文本对齐
+     * (ChatAnchor_CampBelow); 顶部模式留在原生行原位不挪——战役框本来就在
+     * 左上角, 输入框也留在 (3,0), 同位同层, 画序保证输入框在上面。
+     * 兜底顺序: 对话框维护的 EditPos (+0x1C, 屏幕坐标) → label 自身 X/Y
+     * (创建占位, 只在 EditPos 不可用时用) → 底部条带。 */
     lx = 8; ly = surfH - lineH - 12;
     {
-        int ex = *(int*)(CE_MSGLIST + CE_OFF_EDITPOS);
-        int ey = *(int*)(CE_MSGLIST + CE_OFF_EDITPOS + 4);
-        if (ex >= 0 && ex < surfW && ey >= 0 && ey < surfH) { lx = ex; ly = ey; }
+        int ax = 0, ay = 0;
+        ce_AtNative = 1;
+        if (ChatAnchor_CampBelow(surfW, surfH, lineH, &ax, &ay))
+        {
+            lx = ax; ly = ay;
+            ce_AtNative = 0;
+            CE_LogWhere("camp-anchor", lx, ly, fieldW, surfW, surfH);
+        }
         else
         {
-            label = *(void**)(CE_MSGLIST + CE_OFF_EDITLABEL);
-            if (label && IsPlausiblePtr(label))
+            int ex = *(int*)(CE_MSGLIST + CE_OFF_EDITPOS);
+            int ey = *(int*)(CE_MSGLIST + CE_OFF_EDITPOS + 4);
+            if (ex >= 0 && ex < surfW && ey >= 0 && ey < surfH) { lx = ex; ly = ey; }
+            else
             {
-                int qx = *(int*)((char*)label + 12);
-                int qy = *(int*)((char*)label + 16);
-                if (qx >= 0 && qx < surfW && qy >= 0 && qy < surfH) { lx = qx; ly = qy; }
+                label = *(void**)(CE_MSGLIST + CE_OFF_EDITLABEL);
+                if (label && IsPlausiblePtr(label))
+                {
+                    int qx = *(int*)((char*)label + 12);
+                    int qy = *(int*)((char*)label + 16);
+                    if (qx >= 0 && qx < surfW && qy >= 0 && qy < surfH) { lx = qx; ly = qy; }
+                }
             }
+            CE_LogWhere("native-pos", lx, ly, fieldW, surfW, surfH);
         }
     }
     if (!GdiEnsure(lineH, ce_Bold, CE_GDI_SLOT, ce_Face)) return 0;
@@ -799,6 +815,16 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     bh = th + 6;
     tx = lx; ty = ly;
     boxY = ty - 3;
+    /* 钳回屏内只在"盒子被挪到战役框锚点"时做: 留在原生位时绝不能挪,
+     * 一挪就和原生行分家, 合并成一块板的前提没了 (会退化成两条黑)。
+     * ty 下面按 boxY 重新算 (垂直居中), 这里只定板的上沿。 */
+    if (!ce_AtNative)
+    {
+        if (tx + bw + 4 > surfW) tx = surfW - bw - 4;
+        if (tx < 0) tx = 0;
+        if (boxY + bh + 4 > surfH) boxY = surfH - bh - 4;
+        if (boxY < 0) boxY = 0;
+    }
     /* 墨水在盒内垂直居中 (数字/字母与汉字同基线是 GDI 天然行为;
      * 之前字贴盒顶是因为盒矮+笔位顶对齐)。 */
     {
@@ -823,7 +849,9 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
     if (!locked || !IsPlausiblePtr(locked)) return 0;
 
-    /* 底板 (不透明, 盖住原生行) */
+    /* 底板: 只按画出的内容宽 (左 4 右 4 内边距, 高按真实行步进上下 3)。
+     * 不按原生输入域宽铺满: 原生 EditPos 在 (3,0) 而 fieldW=整屏宽, 铺满
+     * 就是屏幕顶上留一条黑杠。原生那行由 ChatEdit_HideNative 整个不画, 无需盖。 */
     CE_FillRect(surf, tx - 4, boxY, bw, bh, 0, 0, 0, 100);
     /* 选中底 (钳到盒内) */
     if (lo >= 0)
@@ -1198,6 +1226,14 @@ void ChatEdit_Install(void)
     int rel, i;
     DWORD old;
     CE_EnsureInit();
+    /* ChatEdit=0 = 全走原生: 一个字节都不改。这里必须提前返回——Input 的
+     * 运行时补丁是**永久**的 (E9 直写 0x5D4510, 没有任何还原路径), 装了
+     * 就等于接管了这个函数, "0=全走原生" 就不成立了。 */
+    if (!ce_Enable)
+    {
+        LogLine("chatedit: OFF, input hook not installed");
+        return;
+    }
     for (i = 0; i < 5; i++)
         if (p[i] != CE_WANT_INPUT[i])
         { LogLine("chatedit: input bytes mismatch, hook OFF"); return; }
@@ -1213,27 +1249,241 @@ void ChatEdit_Install(void)
     LogLine("chatedit: input hook ON");
 }
 
-/* ---------------- 原生编辑行之后绘制 (0x5D4A8D, 5B) ----------------
- * Draw 的编辑块之后、消息列表之前 (mov ecx,[esi] + pop esi + test, 无 rel):
- * 我方激活即在原生行之上画不透明盒子 (原生照画, 被盖住), 只加绘制、
- * 不改原生一字节控制流 (SkipNative 跳过方案导致二次回车崩溃, 已撤)。
- * 未激活直接返回 0 跑原指令。
- * 钩子经 dist/MOExperience.dll.inj: 0x5D4A8D = ChatEdit_DrawTail, 5。 */
-extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_DrawTail(void* regs)
+
+/* ---------------- 隐藏原生编辑行 (0x5D49B4, 3B) ----------------
+ * MessageListClass::Draw (0x5D49A0):
+ *   0x5D49B4  mov al,[esi+0x19]     ; IsEdit
+ *   0x5D49B9  je 0x5D4A8D           ; 不在编辑 → 整段跳过
+ *   0x5D49BF..0x5D4A8C              ; Lock 临时面 / 显示 label / 测量 /
+ *                                   ;   压栈 8 参数 call 0x4A61C0 画原生行 / Unlock
+ * 我方激活时跳 0x5D4A8D: 这段区间 push 与 pop/`add esp` 全部成对
+ * (push edi..pop edi, Lock..Unlock, 8 压栈..add esp,0x20), 栈零失衡;
+ * 落点就是引擎自己"不在编辑"分支的落点 (引擎整个游戏大部分时间都走它)。
+ * 不改任何原生控制流, 只是把"原生行不画"这件事提前到分支之前决定。
+ * 未激活返回 0 跑原指令。
+ * 钩子经 dist/MOExperience.dll.inj: 0x5D49B4 = ChatEdit_HideNative, 3。
+ * ChatEdit=0 时只放行 (引擎自己画原生行), 放行这件事由 0x5D49FA/0x5D4A1E
+ * 两个越过钩配合完成。 */
+extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_HideNative(void* regs)
 {
-    void* surf;
-    int surfW, surfH, surfPitch, bitLineH;
+    static int s_logged = 0;
+    static int s_loggedOff = 0;
+    unsigned char* ecx;
     (void)regs;
     CE_EnsureInit();
-    if (!ce_Enable || !ce_Active) return 0;
-    surf = *(void**)CE_COMPOSITE;
-    if (!surf || !IsPlausiblePtr(surf)) return 0;
-    surfW = CE_SurfGet(surf, CE_VT_GET_WIDTH);
-    surfH = CE_SurfGet(surf, CE_VT_GET_HEIGHT);
-    surfPitch = CE_SurfGet(surf, CE_VT_GET_PITCH);
-    if (surfW <= 0 || surfH <= 0 || surfPitch <= 0) return 0;
-    bitLineH = CE_LivePx();
-    CE_Render(surf, bitLineH, surfW, surfH, surfPitch);
+    ecx = *(unsigned char**)((char*)regs + CE_OFF_REG_ECX);
+    if (!ce_Enable)
+    {
+        /* ChatEdit=0 = 交回引擎自己画原生行, 这里纯放行 + 补上光标字符。
+         * [+0x2B8] 是 CursorCharacter (wchar_t), **不是"要不要画"的标志** ——
+         * 类布局 (sizeof==0x149C) 对得上: 0x28 EditBuffer[162],
+         * 0x2B0 EditCurrentPos, 0x2B4 EditInitialPos, 0x2B8 CursorCharacter,
+         * 0x2C4 Width。Draw 0x5D49F0 判 `cmp word[esi+0x2B8],0 / je` 是
+         * "没有光标字符就不画整行"; 引擎自己的 AddEdit 调用点
+         * (0x55E5A7 push edi) 在单机下传的就是 0 → 引擎主动不画。
+         * 所以这里补一个光标字符, 让它照原生路径画。 */
+        if (ecx && IsPlausiblePtr(ecx) && ecx[0x19])
+        {
+            *(unsigned short*)(CE_MSGLIST + CE_OFF_CURSORCHAR) = CE_CURSOR_CHAR;
+            if (!s_loggedOff)
+            {
+                char sb[192], t1[16], t2[16];
+                unsigned q = 0;
+                const void* lab = *(const void**)(CE_MSGLIST + CE_OFF_EDITLABEL);
+                int wn = 0;
+                const wchar_t* nb = *(const wchar_t**)(CE_MSGLIST + CE_OFF_EDITBUF);
+                if (nb) while (nb[wn]) wn++;
+                s_loggedOff = 1;
+                q = AppendCStr(sb, q, "chatedit: OFF cursorChar set, editPos=", sizeof(sb));
+                UtoA((unsigned)*(const int*)(CE_MSGLIST + CE_OFF_EDITPOS), t1);
+                q = AppendCStr(sb, q, t1, sizeof(sb));
+                q = AppendCStr(sb, q, ",", sizeof(sb));
+                UtoA((unsigned)*(const int*)(CE_MSGLIST + CE_OFF_EDITPOS + 4), t1);
+                q = AppendCStr(sb, q, t1, sizeof(sb));
+                q = AppendCStr(sb, q, " msgPos=", sizeof(sb));
+                UtoA((unsigned)*(const int*)(CE_MSGLIST + 0x04), t1);
+                q = AppendCStr(sb, q, t1, sizeof(sb));
+                q = AppendCStr(sb, q, ",", sizeof(sb));
+                UtoA((unsigned)*(const int*)(CE_MSGLIST + 0x08), t1);
+                q = AppendCStr(sb, q, t1, sizeof(sb));
+                q = AppendCStr(sb, q, " label=", sizeof(sb));
+                UtoA((unsigned)(size_t)lab, t2);
+                q = AppendCStr(sb, q, t2, sizeof(sb));
+                q = AppendCStr(sb, q, " labXY=", sizeof(sb));
+                UtoA(lab ? *(const int*)((const char*)lab + 0x0C) : 0u, t1);
+                q = AppendCStr(sb, q, t1, sizeof(sb));
+                q = AppendCStr(sb, q, ",", sizeof(sb));
+                UtoA(lab ? *(const int*)((const char*)lab + 0x10) : 0u, t1);
+                q = AppendCStr(sb, q, t1, sizeof(sb));
+                q = AppendCStr(sb, q, " maxCh=", sizeof(sb));
+                UtoA((unsigned)*(const int*)(CE_MSGLIST + CE_OFF_MAXCHARS), t1);
+                q = AppendCStr(sb, q, t1, sizeof(sb));
+                q = AppendCStr(sb, q, " bufLen=", sizeof(sb));
+                UtoA((unsigned)wn, t1);
+                AppendCStr(sb, q, t1, sizeof(sb));
+                LogLine(sb);
+            }
+        }
+        return 0;
+    }
+    /* 判 [this+0x19] (IsEdit) 而不是 ce_Active: ce_Active 在 MessageDrawHook
+     * (0x5D4A94) 里才置位, 比这里晚一帧。同一帧 ChatEdit_Frame 见 IsEdit 即
+     * CE_Activate 并画盒子, 不会空框。 */
+    if (!ecx || !IsPlausiblePtr(ecx) || !ecx[0x19]) return 0;
+    if (!s_logged)
+    {
+        /* 一次性: 万一哪天这钩又被换地址, 至少能从日志确认它还在被调 */
+        char sb[128], t1[16];
+        unsigned q = 0;
+        s_logged = 1;
+        q = AppendCStr(sb, q, "chatedit: native line hidden (this=", sizeof(sb));
+        UtoA((unsigned)(size_t)ecx, t1);
+        q = AppendCStr(sb, q, t1, sizeof(sb));
+        AppendCh(sb, q, ')', sizeof(sb));
+        LogLine(sb);
+    }
+    return CE_NATIVE_SKIP;   /* 0x5D4A8D */
+}
+
+/* 越过"要不要画"判据 (0x5D49FA, 6B) ----------------
+ *   0x5D49F0  cmp word [esi+0x2B8],0x0
+ *   0x5D49F8  mov edi,eax
+ *   0x5D49FA  je  0x5D4A81          ; ← 单机下 [+0x2B8]==0, 整段被跳过
+ * [+0x2B8] 是 AddEdit (0x5D4210) 从对话框参数存下来的"本次编辑是否可见"标志,
+ * 单机路径没人置 1。踩过的坑: 在别处写这个标志都没用 —— 写帧尾 (ChatEdit_Frame,
+ * 0x5D4A94) 太晚, 读它的是**同一帧更早**的 0x5D49F0; 写 0x5D49B4 (就在判据前
+ * 几个字节) 也只撑一帧, 0x5D49C8/0x5D49D2 两个 vcall 又把它清 0
+ * (0.2.152a/152b 实测: 0x5D4A1E 探针 0 次被调)。所以不写标志, 直接跳过这条
+ * je —— 区间 0x5D49FA..0x5D49FF 内没有任何 push, 栈零变动, 落点 0x5D4A00
+ * 紧接原指令, 其后所有引擎状态 (Lock/测量/光标窗口) 照常跑。
+ * 钩子经 dist/MOExperience.dll.inj: 0x5D49FA = ChatEdit_ForceRow, 6。 */
+extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_ForceRow(void* regs)
+{
+    static int s_n = 0;
+    (void)regs;
+    CE_EnsureInit();
+    if (ce_Enable) return 0;      /* 自绘盒子: 整段早已被 HideNative 跳过, 到不了这 */
+    if (s_n < 2)                  /* 记一次四道判据的实际值, 确认下一道会不会再跳 */
+    {
+        char sb[176], t1[16];
+        unsigned q = 0;
+        s_n++;
+        q = AppendCStr(sb, q, "chatedit: forced row #", sizeof(sb));
+        UtoA((unsigned)s_n, t1); q = AppendCStr(sb, q, t1, sizeof(sb));
+        q = AppendCStr(sb, q, " cursorChar=", sizeof(sb));
+        UtoA((unsigned)*(unsigned short*)(CE_MSGLIST + CE_OFF_CURSORCHAR), t1);
+        q = AppendCStr(sb, q, t1, sizeof(sb));
+        q = AppendCStr(sb, q, " cur=", sizeof(sb));
+        UtoA((unsigned)*(int*)(CE_MSGLIST + CE_OFF_CURPOS), t1);
+        q = AppendCStr(sb, q, t1, sizeof(sb));
+        q = AppendCStr(sb, q, " init=", sizeof(sb));
+        UtoA((unsigned)*(int*)(CE_MSGLIST + CE_OFF_INITPOS), t1);
+        q = AppendCStr(sb, q, t1, sizeof(sb));
+        q = AppendCStr(sb, q, " maxCh=", sizeof(sb));
+        UtoA((unsigned)*(int*)(CE_MSGLIST + CE_OFF_MAXCHARS), t1);
+        q = AppendCStr(sb, q, t1, sizeof(sb));
+        q = AppendCStr(sb, q, " bufLen=", sizeof(sb));
+        {
+            int wn = 0;
+            const wchar_t* nb = *(const wchar_t**)(CE_MSGLIST + CE_OFF_EDITBUF);
+            if (nb) while (nb[wn]) wn++;
+            UtoA((unsigned)wn, t1);
+        }
+        AppendCStr(sb, q, t1, sizeof(sb));
+        LogLine(sb);
+    }
+    return CE_FORCE_DRAWFLAG;     /* 0x5D4A00 */
+}
+
+/* 越过"空文本"判据 (0x5D4A1B, 3B) ----------------
+ *   0x5D4A1B  call [edx+0x58]     ; EditLabel 的某个查询 (无参, 只读)
+ *   0x5D4A1E  test al,al
+ *   0x5D4A20  je  0x5D4A81         ; 单机下返回 0 → 整行不画
+ * 跳 0x5D4A22 (打印起点), 落点之前没有 push, 栈零变动。顺带把那个只读查询
+ * 一起跳过 —— 它无参无副作用, 留着只会再给一条不画的分支。
+ * 钩在 0x5D4A1B 覆 3 字节 (与已验证能中的 ChatEdit_HideNative 同为 3B),
+ * 而不是 0x5D4A1E 的 2B —— 2B 钩实测从未被调, 不可信。
+ * 钩子经 dist/MOExperience.dll.inj: 0x5D4A1B = ChatEdit_ForceNative, 3。 */
+extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_ForceNative(void* regs)
+{
+    static int s_n = 0;
+    (void)regs;
+    CE_EnsureInit();
+    if (ce_Enable) return 0;          /* 自绘盒子: 原生行由 HideNative 整段跳过 */
+    if (s_n < 4)                     /* 记一次: 能到这说明上一道 je 没跳 */
+    {
+        char sb[96], t1[16];
+        unsigned q = 0;
+        s_n++;
+        q = AppendCStr(sb, q, "chatedit: forced native row #", sizeof(sb));
+        UtoA((unsigned)s_n, t1);
+        AppendCStr(sb, q, t1, sizeof(sb));
+        LogLine(sb);
+    }
+    return CE_FORCE_DRAW;             /* 0x5D4A22 */
+}
+
+/* ---------------- 原生行流程探针 (透明: 一律 return 0 走原指令) ----------------
+ * 只为定位 Draw 0x5D49BF..0x5D4A22 这段到底走到哪一步就断了, 定位完删。
+ * 每个探针挑的都是"读一个内存就完事"的整指令, 覆写后回放原字节,
+ * 栈/寄存器/EAX 全部保持引擎原样, 因此可以同时挂多个。 */
+static void CE_Probe(const char* what, unsigned code, unsigned a, unsigned b,
+                     unsigned c, unsigned d)
+{
+    static int s_n = 0;
+    char sb[176], t1[16];
+    unsigned q = 0;
+    if (s_n >= 8) return;
+    s_n++;
+    q = AppendCStr(sb, q, "chatedit: probe ", sizeof(sb));
+    q = AppendCStr(sb, q, what, sizeof(sb));
+    q = AppendCStr(sb, q, " @", sizeof(sb));
+    UtoA(code, t1); q = AppendCStr(sb, q, t1, sizeof(sb));
+    q = AppendCStr(sb, q, " v1=", sizeof(sb));
+    UtoA(a, t1); q = AppendCStr(sb, q, t1, sizeof(sb));
+    q = AppendCStr(sb, q, " v2=", sizeof(sb));
+    UtoA(b, t1); q = AppendCStr(sb, q, t1, sizeof(sb));
+    q = AppendCStr(sb, q, " v3=", sizeof(sb));
+    UtoA(c, t1); q = AppendCStr(sb, q, t1, sizeof(sb));
+    q = AppendCStr(sb, q, " v4=", sizeof(sb));
+    UtoA(d, t1); q = AppendCStr(sb, q, t1, sizeof(sb));
+    LogLine(sb);
+}
+
+extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_Pr1(void* regs)
+{
+    CE_EnsureInit();
+    CE_Probe("A/5D49BF", 0x5D49BF, (unsigned)(size_t)*(void**)0x887640u,
+              0, 0, 0);
+    return 0;
+}
+extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_Pr2(void* regs)
+{
+    CE_EnsureInit();
+    CE_Probe("B/5D4A00", 0x5D4A00,
+              (unsigned)*(int*)(CE_MSGLIST + CE_OFF_CURPOS),
+              (unsigned)*(int*)(CE_MSGLIST + CE_OFF_INITPOS),
+              (unsigned)*(unsigned short*)(CE_MSGLIST + CE_OFF_CURSORCHAR),
+              (unsigned)*(int*)(CE_MSGLIST + CE_OFF_MAXCHARS));
+    return 0;
+}
+extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_Pr3(void* regs)
+{
+    CE_EnsureInit();
+    CE_Probe("C/5D4A12", 0x5D4A12,
+              (unsigned)*(int*)(CE_MSGLIST + CE_OFF_CURPOS) -
+                  (unsigned)*(int*)(CE_MSGLIST + CE_OFF_INITPOS),
+              (unsigned)*(int*)(CE_MSGLIST + CE_OFF_MAXCHARS) - 1u, 0, 0);
+    return 0;
+}
+extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_Pr4(void* regs)
+{
+    CE_EnsureInit();
+    CE_Probe("D/5D4A22", 0x5D4A22,
+              (unsigned)*(unsigned short*)(CE_MSGLIST + CE_OFF_CURSORCHAR),
+              (unsigned)(size_t)*(void**)(CE_MSGLIST + CE_OFF_EDITLABEL),
+              (unsigned)*(int*)((char*)*(void**)(CE_MSGLIST + CE_OFF_EDITLABEL) + 0x0C),
+              (unsigned)*(int*)((char*)*(void**)(CE_MSGLIST + CE_OFF_EDITLABEL) + 0x10));
     return 0;
 }
 
@@ -1246,13 +1496,13 @@ int ChatEdit_Frame(void* surf, int bitLineH, int screenW,
     (void)screenW;
     CE_EnsureInit();
     CE_PumpEnsure();
+    if (!surf || surfW <= 0 || surfH <= 0 || surfPitch <= 0) return 0;
+    isEdit = CE_NativeIsEdit();
     if (!ce_Enable)
     {
         if (ce_Active) CE_Deactivate();
         return 0;
     }
-    if (!surf || surfW <= 0 || surfH <= 0 || surfPitch <= 0) return 0;
-    isEdit = CE_NativeIsEdit();
     if (isEdit && !ce_Active) CE_Activate();
     else if (!isEdit && ce_Active) CE_Deactivate();
     if (!ce_Active) return 0;
@@ -1261,7 +1511,9 @@ int ChatEdit_Frame(void* surf, int bitLineH, int screenW,
     {
         fieldW = CE_NativeFieldW();
         if (fieldW < 80 || fieldW > surfW) fieldW = 640;
-        CE_PollKeys(fieldW);
+        /* 轮询只在游戏自己当前台时才动: GetAsyncKeyState 是全局按键状态,
+         * 用户切到别的程序删字时它照样为 1, 不加这道门就是我方照删。 */
+        if (CE_GameForeground()) CE_PollKeys(fieldW);
     }
     /* 逐帧指纹: 单机发送不走 Input 回车分支 (对话框直接发),
      * 回车点存档会 miss; 缓冲非空就每帧刷新, 回声何时到都命中。 */
@@ -1271,7 +1523,11 @@ int ChatEdit_Frame(void* surf, int bitLineH, int screenW,
      * 不修的话"显示没删、发送少字"。我方缓冲为准 (原生只在发送瞬间读),
      * 帧级覆盖后旁路修改永远到不了发送; 我方轮询 Delete 照常生效。 */
     CE_Mirror();
-    (void)surf; (void)bitLineH; (void)screenW;
-    (void)surfW; (void)surfH; (void)surfPitch;
-    return 1;   /* 激活中 (绘制在 DrawTail 做, 与原生行叠序正确) */
+    /* 绘制放这里而不是原生 Draw 之后: MessageDrawHook 里本函数在战役框/
+     * 提示框/超武面板之后, 输入框才真正压在所有文本之上 (左上角那种
+     * 战役框和输入框重叠的布局也不会被压住)。原生行已由
+     * ChatEdit_HideNative 整个不画, 这里不用再盖。 */
+    CE_Render(surf, bitLineH, surfW, surfH, surfPitch);
+    (void)screenW;
+    return 1;   /* 激活中 */
 }

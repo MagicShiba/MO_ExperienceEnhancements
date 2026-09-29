@@ -33,7 +33,7 @@
 #include "OrderUtil.h"
 #include "ChatEdit.h"
 
-#define MOE_VERSION   "0.2.149a"
+#define MOE_VERSION   "0.2.152e"
 #define MOE_SECTION   "MOExperience"
 
 /* ---------------- 地址 ---------------- */
@@ -1240,6 +1240,33 @@ static int CampTriggerRect(int bitLineH, int screenW, int surfH, RectangleStruct
     out->Width = maxW + 6;
     out->Height = adv + 4;
     return adv;
+}
+
+/* 聊天输入框锚点 (ChatEdit 用): 贴战役框下沿, 左侧与战役文本左缘对齐。
+ * 只在**底部模式**成立: DrawBox 的 autoBottom 让战役框底边固定在
+ * surfH-CampBottomMargin+2 (与行数无关的不变量), 其下就是配置里留的底部
+ * 间距, 贴边放输入框, 位置不随消息条数变化。
+ * 顶部模式返回 0 = 输入框留在原生位置: 战役框本来就在左上角, 输入框也留在
+ * 原生那行 (两者同位, 画序保证输入框在上层, 不会有第二块黑条)。
+ * 返回 1=有锚点 (写 px/py 两个 int), 0=无 (调用方用原生位置)。 */
+int ChatAnchor_CampBelow(int surfW, int surfH, int bitLineH, int* px, int* py)
+{
+    RectangleStruct tr;
+    int adv, gap = 6, ax, ay;
+    if (!g_Cfg.Enable) return 0;
+    if (surfW <= 0 || surfH <= 0) return 0;
+    if (!g_Cfg.CampBottom) return 0;
+    adv = CampTriggerRect(bitLineH, surfW, surfH, &tr);
+    if (adv < 8) adv = 16;
+    ax = tr.X + 3;  /* tr.X 是底板左缘, +3 才是文本左缘 (与战役文本同列) */
+    ay = surfH - g_Cfg.CampBottomMargin + gap;
+    if (ax < 0) ax = 0;
+    if (ax > surfW - 40) ax = surfW - 40;
+    if (ay < 0) ay = 0;
+    if (ay > surfH - 4) ay = surfH - 4;
+    *px = ax;
+    *py = ay;
+    return 1;
 }
 
 /* 触发条命中 (外扩几像素防抖, 与 MouseInCampRect 同手感) */

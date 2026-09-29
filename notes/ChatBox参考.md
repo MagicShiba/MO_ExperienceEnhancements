@@ -38,6 +38,54 @@
 
 本地使用前，必须用反汇编核对上述地址是否适用于 `G:\motest\gamemd.exe`。
 
+## 自定义输入框的落位与原生行隐藏（0.2.149f 定案）
+
+`MessageListClass::Draw`（`0x5D49A0`，`this` 恒为 `0xA8BC60`，探针实测）：
+
+```
+0x5D49A0  sub esp,0x24 / push esi / mov esi,ecx
+0x5D49B4  mov al,[esi+0x19]     ; IsEdit
+0x5D49B9  je  0x5D4A8D           ; 不在编辑 → 整段跳过
+0x5D49BF..0x5D4A8C              ; Lock 临时面 / label->v[0x6C](1) /
+                                ;   0x4A60D0 + 0x433ED0 测量 /
+                                ;   压 8 参数 call 0x4A61C0 画原生行 / Unlock
+0x5D4A8D  mov ecx,[esi] / pop esi / 逐条 v[0x2C](1) 显示消息 label
+0x5D4A94  ; MessageDrawHook (0x5D4A94) 在此之后
+0x5D4A9B  add esp,0x24 / ret
+```
+
+**隐藏原生行**：钩 `0x5D49B4`（`8A 46 19`，3 字节无 rel）=
+`ChatEdit_HideNative`，判 `[this+0x19]` 为真时返回 `0x5D4A8D`。跳过的
+`0x5D49B4..0x5D4A8C` 里 push 与 pop/`add esp` 全部成对（`push edi`..`pop edi`、
+Lock..Unlock、8 压栈..`add esp,0x20`），**栈零失衡**；落点就是引擎自己
+"不在编辑"分支的落点（引擎绝大部分时间走它）。不改任何原生控制流。
+
+**踩过的坑（0.2.149b~e）**：钩装在 `0x5D4A1E`（2 字节）和 `0x5D4A1B`
+（3 字节）两版，日志实测 **0 次被调**，而同函数 `0x5D49A0`/`0x5D49A94` 的
+钩都调得到、探针还确认 `this=0xA8BC60` 且 `IsEdit=1` —— 即分支根本没走、
+是**那两个地址的钩没装上**。所以钩只放在 `0x5D49B4` 这一个验证过的位置。
+教训：`.inj` 加钩后必须用一次性日志确认它真被调到，不能靠"代码看着对"。
+
+**原生行的位置**：`EditPos`（`+0x1C/+0x20`）= **(3,0)**，`fieldW`（`+0x2C4`）
+= **整屏宽**。`AddEdit`（`0x5D4210`，`0x5D42FF` 起）把 EditPos 拷进编辑
+label 的 X/Y（`+0x24` 的 `+0x0C/+0x10`），Draw 只读 label 的 X/Y。
+实测**写 label X/Y 搬不动原生行**，所以别再试那套。
+
+**落位**（`ChatAnchor_CampBelow`，`MOExperience.cpp`）：
+
+- 底部模式（`CampBottom=1`）→ 贴战役框下沿（`surfH-CampBottomMargin+gap`），
+  落在留出的底部间距里，位置不随消息条数变。
+- 顶部模式 → 返回 0，盒子留在原生行原位（不挪）。此时 `ce_AtNative=1`，
+  **禁止**钳屏内位移，一挪就和原生位分家。
+- 底板只按画出的内容宽。**不要**按 `fieldW` 铺满：那是整屏宽，铺出来就是
+  屏幕顶上留一条黑杠（试过，很难看）。
+
+**叠序**：自绘盒子**不能**挂在 `0x5D4A8D`（`ChatEdit_DrawTail`，已撤）——
+那里在 `MessageDrawHook` 之前，战役框会画在输入框之上。盒子改在
+`MOExperience_MessageDrawHook` 尾部调 `ChatEdit_Frame` 时画：调用点在
+战役框/提示框/超武面板/橡皮线之后，输入框压在最上层。
+
+
 
 # 战役框显隐（淡入淡出 + 悬停展开）
 
