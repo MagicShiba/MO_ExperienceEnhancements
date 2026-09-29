@@ -1,6 +1,6 @@
 0x5D3BA0 = MOExperience_AddMessageHook, 6
 0x5D49A0 = MOExperience_GreenHook, 6
-; ԭ���༭����բ: ������� (0x5D4A8D ���� / 0x5D49BF ����), �������� 0, �� ChatEdit.cpp
+; 原生编辑行汇总: 两个落点 (0x5D4A8D 跳过 / 0x5D49BF 进入), 永不返回 0, 见 ChatEdit.cpp
 0x5D49B4 = ChatEdit_HideNative, 3
 0x5D4A94 = MOExperience_MessageDrawHook, 7
 0x777998 = MOExperience_WheelHook, 6
@@ -13,23 +13,26 @@
 0x732B28 = TypeSelect_SetCtx, 6
 0x465D40 = TypeSelect_BuildingGate, 6
 0x732C20 = TypeSelect_Clear, 8
-; 左键切换清产压制 (只跳原生地址, E8 事件构造点一律不�? �?notes)
+; 左键切换清产压制 (只跳原生地址, E8 事件构造点一律不碰, 见 notes)
 0x6AB689 = BQ_QueueClick, 5
-; 暂停块入口也剥离 (Ares 上游 LoadCameo2 可能绕过 H0, 此处绕不�?
+; 暂停块入口也剥离 (Ares 上游 LoadCameo2 可能绕过 H0, 此处绕不过)
 0x6AB0C1 = BQ_PausePeel, 6
-; 右键: N>1 直接减数不暂�?(暂停检查点), N==1 走原生暂停取�?
+; 右键: N>1 直接减数不暂停(暂停检查点), N==1 走原生暂停取消
 0x6AB197 = BQ_CancelPeel, 8
 0x6AAE44 = BQ_DarkDispatchPeel, 6
 0x6AAFE1 = BQ_DarkPauseSeen, 5
-; 右键取消: 只钩�?rel 的分支入口做本地剥离, E8 事件构造点一律不�?
-; (0x6AA7E7 / 0x6AB1B5 / 0x6AB231 / 0x6AB1FF / 0x6AAFDC 全部撤钩, �?notes)
+; 右键取消: 只钩无rel 的分支入口做本地剥离, E8 事件构造点一律不碰
+; (0x6AA7E7 / 0x6AB1B5 / 0x6AB231 / 0x6AB1FF / 0x6AAFDC 全部撤钩, 见 notes)
 0x6AB6CE = BQ_FreeShift, 10
 0x6A9C86 = BQ_ShowCount, 5
 0x6A9C6C = BQ_DrawNullFac, 6
 ; 工厂空时本地数照显示 (建筑页没下单则槽位无工厂, 防御页连带被跳过)
-; 建造提示追加耗时/耗电 (退出点 mov eax,TooltipBuffer, 纯传�?5B, �?ToolTip.cpp)
+; 建造提示追加耗时/耗电 (退出点 mov eax,TooltipBuffer, 纯传送5B, 见 ToolTip.cpp)
 0x6A93D9 = ToolTip_Extend, 5
-; 提示盒钳�?(FillRect �?mov+间接call 无rel 5B, 出屏整体平移, �?ToolTip.cpp)
+; 提示盒钳制(FillRect 经mov+间接call 无rel 5B, 出屏整体平移, 见 ToolTip.cpp)
 0x478FDC = ToolTip_Clamp, 5
-; 字形 advance 修正 (0x4346C0 查表�?5B 无rel, PUA 回图标步�? �?ToolTip.cpp)
+; 字形 advance 修正 (0x4346C0 查表头5B 无rel, PUA 回图标步长, 见 ToolTip.cpp)
 0x4346C0 = ToolTip_AdvFix, 5
+; 超武侧栏点击吞没 (DisplayClass::ProcessClickCoords 内, Phobos SkipOnNewButtons 同点;
+; 落栏内跳 0x6925FC 防误下单, 余者跑原版, 见 SWSBar.cpp)
+0x692419 = SWS_ClickGate, 7

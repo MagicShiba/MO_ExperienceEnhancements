@@ -32,8 +32,9 @@
 #include "DeployPreview.h"
 #include "OrderUtil.h"
 #include "ChatEdit.h"
+#include "SWSBar.h"
 
-#define MOE_VERSION   "0.2.153a"
+#define MOE_VERSION   "0.2.154a"
 #define MOE_SECTION   "MOExperience"
 
 /* ---------------- 地址 ---------------- */
@@ -1924,6 +1925,7 @@ static void PowerDrawBoth(void)
     SmartArea_Poll(); /* Shift+中键范围智能下令 (开关关/无触发时直接返回) */
     DeployPreview_Poll(); /* 单基地车裸中键点按: 开过去+到位自动展开 (预览框见渲染) */
     MindSelect_Poll(); /* Shift+P 一步选中被心控单位 (开关关/无组合键时直接返回) */
+    SWS_Poll(); /* 超武侧栏切换+扫描 (开关关/隐藏时直接返回, 只读) */
     EnsureInit();
     if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
     /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;
@@ -2319,6 +2321,9 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
         if (rc < 0) { StatTick(tick, rc == -1 ? 2 : 4); return 0; }
         if (rc == 1) drew = 1;
     }
+
+    /* 超武侧栏: 右侧 4 列图标 (SWSBar, 开关关/隐藏/无超武时无操作)。 */
+    SWS_Draw(surf, surfW, surfH, surfPitch);
 
     /* 橡皮线/范围框 (armed/按住时才画, 自锁面, 不影响其它绘制)。 */
     {

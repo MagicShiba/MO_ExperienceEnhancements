@@ -4,3 +4,4 @@
 /test
 *.zip
 *.7z
+/obj
