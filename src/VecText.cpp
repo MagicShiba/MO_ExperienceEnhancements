@@ -1844,6 +1844,11 @@ const wchar_t* VecText_FontFace(void)
 {
     return g_VTFace;
 }
+
+int VecText_FontPx(void)
+{
+	return g_VT.FontPx;
+}
 int VecText_Bold(void)
 {
     return g_VT.Bold;

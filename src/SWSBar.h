@@ -13,3 +13,9 @@ void SWS_Draw(void* surf, int w, int h, int pitch);
 /* 点击吞没门 (0x692419, 7B, 见 dist/MOExperience.dll.inj):
  * 鼠标落在侧栏区内时跳往 0x6925FC (Phobos 同式), 否则返回 0 跑原版。 */
 extern "C" __declspec(dllexport) unsigned __cdecl SWS_ClickGate(void* regs);
+
+/* æ»è½®è½®æ¥ (MOExperience_WheelHook @0x777998 åè°):
+ *  é¼ æ å¨ä¾Öäº®ä¾§æ åºåæ¶ä¸/ä¸ç»å¨éè§£
+ *  s_Cols è¡¨æ å¨æè¿ä¸å± SWS_Draw éåå¸, æ å±å¼æ¶èªå¨åä¸éé¼å¨ç»åå½é. */
+extern "C" __declspec(dllexport) int __cdecl SWS_WheelIn(int mx, int my, int dir);
+extern "C" __declspec(dllexport) int __cdecl SWS_OverBar(int mx, int my);

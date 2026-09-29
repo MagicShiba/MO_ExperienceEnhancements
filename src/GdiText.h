@@ -69,6 +69,7 @@ typedef struct {
     int px;     /* -1 = 空槽 */
     int bold;
     int adv;
+    unsigned gen;                /* DIB clear/redraw generation (for render caching) */
     wchar_t face[FONT_FACE_MAX];  /* 缓存键: 字体名不同即重建 */
 } GdiSlot;
 
@@ -82,6 +83,11 @@ int RenderLine(const wchar_t* text, int len);
 /* 单字形光栅: 清 DIB 后在 (x0,y0) 画一个 wchar, 返回 GDI 像素宽 (*outW 同) */
 int GtRenderGlyphAt(wchar_t ch, int x0, int y0, int* outW);
 /* DIB 覆盖率 blit 到已 Lock 的 16 位面 (裁剪到面内) */
+/* Current slot DIB generation; bumped on every clear/redraw. Lets callers
+ * tell whether the DIB still holds what they last drew, so repeated GDI
+ * text renders of the same string can be skipped. */
+unsigned GdiSlotGen(void);
+
 void BlitCoverage(unsigned char* dstBase, int dstPitch, int surfW, int surfH,
                   int dx, int dy, int w, int h,
                   unsigned fr, unsigned fg, unsigned fb, unsigned alphaScale);

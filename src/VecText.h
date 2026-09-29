@@ -21,6 +21,9 @@ int VecText_CreditPx(void);
 /* Credits resolved typeface + bold ([VecText] FontFace/Bold): power uses same. */
 const wchar_t* VecText_FontFace(void);
 int VecText_Bold(void);
+/* Resolved global vector font pixel size ([VecText] FontPx, 0 = auto). */
+int VecText_FontPx(void);
+int VecText_Bold(void);
 
 /* ---------------- 超武列表整体接管 (Print 入口收集, 消息帧统一重绘) ----------------
  * VecText.cpp 只做高层级隐藏+收集 (不管内容细节, 不逐行绘制);

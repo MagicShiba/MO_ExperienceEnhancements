@@ -2391,8 +2391,21 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_WheelHook(void* regs
     static unsigned s_wheelN = 0;
 
     EnsureInit();
+    if (!MouseXY(&mx, &my)) return 0;
+
+    /* 超武面板优先: 鼠标在超武栏上就滚超武栏, 不碰战役框。
+     * 必须在 g_CampValid 判定之前 —— 战役框无效时超武栏照样要能滚。 */
+    if (g_Cfg.Enable)
+    {
+        wparam = *(unsigned*)((char*)regs + OFF_REG_ECX);
+        /* 战役框: wparam 高位=上滚 -> g_Skip 减小 (看更新的)。
+         * 超武栏 s_Scroll 是"第一条可见的条目下标", 上滚应看更靠前=减小。
+         * 实测这个方向是反的, 所以这里传反的 dir, 手感才和战役框一致。 */
+        if (SWS_WheelIn(mx, my, (wparam & 0x80000000u) ? 1 : -1)) return 0;
+    }
+
     if (!g_Cfg.Enable || !g_CampValid) return 0;
-    if (!MouseXY(&mx, &my) || !MouseInCampRect(mx, my)) return 0;
+    if (!MouseInCampRect(mx, my)) return 0;
 
     wparam = *(unsigned*)((char*)regs + OFF_REG_ECX);
     if (wparam & 0x80000000u)
@@ -2414,7 +2427,8 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_WheelHook(void* regs
     return 0;
 }
 
-/* 侧栏滚动 (0x533F50, 5B): 悬停战役框时跳过, 滚轮只滚消息。 */
+/* 侧栏滚动 (0x533F50, 5B): 悬停战役框时跳过, 滚轮只滚消息。
+ * 悬停超武面板时同样跳过 —— 那一滚已经给了超武栏 (见 WheelHook)。 */
 #define ADDR_SKIP_SCROLL_SIDEBAR 0x00533FC3u
 
 extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_SidebarHook(void* regs)
@@ -2422,8 +2436,10 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_SidebarHook(void* re
     int mx, my;
     (void)regs;
     EnsureInit();
+    if (!MouseXY(&mx, &my)) return 0;
+    if (g_Cfg.Enable && SWS_OverBar(mx, my)) return ADDR_SKIP_SCROLL_SIDEBAR;
     if (!g_Cfg.Enable || !g_CampValid) return 0;
-    if (!MouseXY(&mx, &my) || !MouseInCampRect(mx, my)) return 0;
+    if (!MouseInCampRect(mx, my)) return 0;
     return ADDR_SKIP_SCROLL_SIDEBAR;
 }
 

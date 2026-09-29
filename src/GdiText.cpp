@@ -661,6 +661,7 @@ static void ClearDib(void)
 {
     int y, x;
     unsigned char* row;
+    if (g_G) g_G->gen++;
     for (y = 0; y < DIB_H; y++)
     {
         row = g_G->bits + y * g_G->pitch;
@@ -669,6 +670,11 @@ static void ClearDib(void)
 }
 
 /* 把一行画进 DIB (黑底白字), 返回实际像素宽; 覆盖率=红色通道 */
+unsigned GdiSlotGen(void)
+{
+    return g_G ? g_G->gen : 0;
+}
+
 int RenderLine(const wchar_t* text, int len)
 {
     SIZE sz;
