@@ -1,0 +1,11 @@
+# MOExperience.dll.inj 是 GBK 编码的 Syringe 钩子表。
+# 规则顺序有意义: 后面的覆盖前面的, 所以这个 -text 必须放在通配之后。
+# 标 -text 的原因: 否则 Git 当文本处理, 检出时做行尾转换 (LF<->CRLF),
+# 字节一变中文注释的 GBK 序列就可能损坏, 钩子表静默出错 -> 游戏崩溃。
+# 改这个文件一律用 GBK 读写, 不要用 UTF-8 工具碰。
+* text=auto eol=lf
+*.cpp text eol=lf
+*.h   text eol=lf
+*.md  text eol=lf
+
+dist/MOExperience.dll.inj -text

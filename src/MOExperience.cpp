@@ -33,7 +33,7 @@
 #include "OrderUtil.h"
 #include "ChatEdit.h"
 
-#define MOE_VERSION   "0.2.152e"
+#define MOE_VERSION   "0.2.153a"
 #define MOE_SECTION   "MOExperience"
 
 /* ---------------- 地址 ---------------- */
