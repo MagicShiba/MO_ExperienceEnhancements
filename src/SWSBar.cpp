@@ -81,16 +81,11 @@
 #define OFF_SUP_PRESENT  0x6Du
 #define OFF_SUP_READY    0x6Fu
 #define OFF_SUP_SUSPEND  0x70u
-/* ChargeDrainState@0x7C (由 SuperClass.h 布局自 CanHold@0x60 /
- * ChronoMapCoords@0x62 / Animation@0x68 三个已知锚点推出):
- *   -1=None 0=Charging 1=Ready 2=Draining (GeneralDefinitions.h) */
-#define OFF_SUP_DRAIN    0x7Cu
 
 #define OFF_SWT_ID       0x24u   /* 与 Super 同源 +12 漂移, 待 id 计数验证 */
 #define OFF_SWT_UINAME   0x60u
 #define OFF_SWT_ARRIDX   0x98u
 #define OFF_SWT_RECH     0xB0u
-#define OFF_SWT_ACTION   0xBCu   /* Action (Action::None=0 => 点击即生效) */
 #define OFF_SWT_SHPIMG   0xB8u   /* SidebarImage (SHP), +12 假设, shp 计数验证 */
 
 /* 图标绘制 (Phobos SWButton::Draw 同参, 只读渲染, 联机安全):
@@ -103,18 +98,11 @@ typedef void (__fastcall *SwsDrawShapeFn)(void* surf, void* pal, void* shp,
     int frame, const void* pos, const void* bounds, int flags, int remap,
     int zadj, int zgrad, int bright, int tint, void* zshp, int zframe,
     int xoff, int yoff);
-#define FN_DRAWSHAPE ((SwsDrawShapeFn)(void*)0x4AED70u)
-#define ADDR_CAMEO_PAL   0x87F6B0u
-#define ADDR_SIDEBAR_PAL 0x87F6CCu
-#define SWS_BF_400 0x400
-#define SWS_ZGROUND 0
 
 
-#define VT_FILL_RECT_TRANS 0x1C
 #define VT_LOCK            0x5C
 #define VT_UNLOCK          0x60
 
-#define ADDR_CLICKGATE      0x00692419u
 #define ADDR_CLICKGATE_SKIP 0x006925FCu
 
 #define SWS_CAP 160
@@ -133,37 +121,30 @@ static int s_FontPx = 12, s_Bold = 0;
 static char s_FontFace[64];
 static wchar_t s_Face[FONT_FACE_MAX];
 static int s_ClickFire = 1;
-/* Learn mode: diff the whole Display object across frames and dump every
- * offset the engine itself touches when the player picks/releases a real
- * superweapon cameo. That is the ground truth we then replay ourselves. */
-static int s_Learn = 0;
 static int s_PcxOn = 0;   /* engine PCX path switch (crash isolation) */
 static int s_WeSetCur = 0;   /* our own write happened this frame */
 static OU_Hotkey s_ToggleHk;
 static int s_Visible = 1;
 static int s_PrevTog = 0, s_PrevLB = 0, s_PrevRB = 0;
-/* Pending selection, applied one frame later.
- * Reason: we are not a Gadget, so the engine still sees the very same
- * left-press in ProcessClickCoords later this frame. Writing CurrentSW
- * right away makes the engine release the super at that spot instantly.
- * Phobos avoids this by being a real Gadget (the click is consumed by
- * Gadget::Action before the map sees it). We reproduce that by deferring
- * the write and swallowing the press through the 0x692419 gate. */
+/* 待上膛的超武, 延一帧写入。
+ * 我们不是 Gadget, 引擎这一帧的 ProcessClickCoords 仍会看到这次左键按下;
+ * 当帧就写 CurrentSW 会让引擎**当场**在那个位置把超武放掉。Phobos 靠自己是
+ * 真 Gadget 天然规避 (点击在地图看到之前就被 Gadget::Action 吃掉了), 我们
+ * 只能"延一帧写 + 用 0x692419 那道门吞掉按下"来等价复现。 */
 static int s_PendSel = -2;   /* -2 none, -1 cancel, >=0 SW ArrayIndex */
 static int s_EatPress = 0;   /* gate: swallow this frame's click */
 /* 物理左键按住期间一直吞掉引擎的地图点击。
- * 实测 (日志): 0x692419 门工作正常 (鼠标在栏内时返回跳过), 但"等松开再
- * 上膛"永远等不到松开边沿, 每次都走 60 帧兜底, 而兜底触发时按键还按着
- * —— 引擎看到"已选中 + 左键按住"就当场释放。这才是原地释放的真正原因。
- * 现在改成: 按下即上膛, 同时把整段按住期间都吞掉, 效果等同真 Gadget
- * 消费掉这次完整点击。 */
+ * 关键: 引擎判断的是"左键**按住**"而不是边沿, 所以只要"已选中 + 按住"
+ * 同时成立就会当场释放。按下即上膛, 就必须把整段按住都吞掉, 效果才等同
+ * 于真 Gadget 消费掉这次完整点击。 */
 static int s_HoldSkip = 0;
-/* 即时超武: 走 SpecialPlace 事件, 定义在下方"绘制"之前。 */
+/* 即时超武: 走 SpecialPlace 事件 (定义在下方)。 */
 static int SwsPushSpecialPlace(int swIdx);
 /* 诊断开关: 全部在 SwsEnsureInit 里读一次。
  * 之前 SwsFireWatch 每帧 GetPrivateProfileIntA 一次 = 每帧一次 ini 文件
  * I/O, 而且它在 SWS_Poll 里, 落在 perf 日志的 d/s 计时之外, 帧率掉了
  * 日志却完全看不出来。 */
+static int s_ShowDrain = 0;   /* [SWSidebar] DrainSupers: 1=显示火风暴类 (默认 0=过滤掉) */
 static int s_ForceScan = 0;     /* 点击时置 1: 强制立刻重扫, 不等 15 帧 */
 static int s_EvWatchOn = 1;     /* [SWSidebar] EvWatch */
 static int s_FireWatchOn = 1;   /* [SWSidebar] FireWatch */
@@ -175,18 +156,10 @@ static int s_ScrollStep = 1;    /* [SWSidebar] ScrollStep */
 #define SWS_ADDR_OUT_PAR    0xA83A54u
 #define SWS_EVT_SIZE        111u
 #define SWS_EVT_CAP         0x80u
-#define SWS_EVT_SLOTS_N     24
+#define SWS_EVT_SLOTS_N     128u   /* 环形容量; 槽位下标掩码 = SWS_EVT_SLOTS_N-1 = 0x7F */
 static void SwsEventWatch(void);
-static void SwsEvCheck(void);
-static void SwsEvNote(unsigned slot);
 static void SwsFireWatch(void);
-static void SwsDrainWatch(void);
-/* Arm on mouse *release*, not on press. RA2 tests "left button held" for
- * superweapon placement, so arming while the button is still down fires
- * the super at that spot. Phobos dodges this because a real Gadget eats
- * the press before the map sees it; we have no Gadget, so we arm on the
- * release edge instead: press = select intent, release = enter targeting,
- * next press = place. Identical to the stock sidebar from the user's side. */
+
 
 typedef struct { char id[32]; int prio; } SwsIniEnt;
 static SwsIniEnt s_Ini[SWS_INI_CAP];
@@ -270,9 +243,6 @@ typedef struct {
     void* shp;
     const char* pcxFile;  /* SidebarPCX= 文件名, 指向我们自己的表 */
     int instant;          /* 1 = 点击即生效 (Action=None 或 SW.UseAITargeting) */
-    int drain;            /* 1 = UseChargeDrain: 长期生效, 点击是开关 */
-    int unstoppable;      /* 1 = SW.Unstoppable: 生效中不许手动关 */
-    int drainState;       /* ChargeDrainState: -1/0=Charging 1=Ready 2=Draining */
     int row;              /* 该条目在本列的行号 (滚动用) */
     char id[32];          /* 超武 ID (诊断表用: 名字<->swIdx 对照) */
     wchar_t name[24];     /* 悬停提示用; 每类型填一次 */
@@ -420,8 +390,11 @@ static void SwsLoadIniList(void)
             SwsStrEq(k, "RightMargin") || SwsStrEq(k, "CenterY") ||
             SwsStrEq(k, "TopMargin") || SwsStrEq(k, "FontPx") ||
             SwsStrEq(k, "Bold") || SwsStrEq(k, "FontFace") ||
-            SwsStrEq(k, "Learn") || SwsStrEq(k, "MaxRows") ||
-            SwsStrEq(k, "Pcx");
+            SwsStrEq(k, "MaxRows") || SwsStrEq(k, "Pcx") ||
+            SwsStrEq(k, "ScrollStep") || SwsStrEq(k, "DrainSupers") ||
+            SwsStrEq(k, "EvWatch") || SwsStrEq(k, "FireWatch");
+        /* 漏一个全局键的后果: 它会被当成"超武 ID"收进 s_Ini, 显示成一个
+         * 永远不亮的空条目。新增配置项时**必须**同时加进这一串。 */
         if (!isGlobal && L < 31)
         {
             int v = GetPrivateProfileIntA(SWS_SECTION, k, 0, g_IniPath);
@@ -455,13 +428,13 @@ static void SwsEnsureInit(void)
     OU_ReadString(SWS_SECTION, "FontFace", "msyh.ttc",
                   s_FontFace, sizeof(s_FontFace));
     s_ClickFire = GetPrivateProfileIntA(SWS_SECTION, "ClickFire", 1, g_IniPath) ? 1 : 0;
-    s_Learn = GetPrivateProfileIntA(SWS_SECTION, "Learn", 0, g_IniPath) ? 1 : 0;
     s_PcxOn = GetPrivateProfileIntA(SWS_SECTION, "Pcx", 0, g_IniPath) ? 1 : 0;
     s_MaxRows = GetPrivateProfileIntA(SWS_SECTION, "MaxRows", 10, g_IniPath);
     /* 诊断开关只读一次: 这两个在 SWS_Poll 每帧调用, 现读 ini 就是每帧一次
      * 文件 I/O, 而且在 perf 计时范围之外, 会让帧率掉了日志却看不出来。 */
     s_EvWatchOn = GetPrivateProfileIntA(SWS_SECTION, "EvWatch", 1, g_IniPath);
     s_FireWatchOn = GetPrivateProfileIntA(SWS_SECTION, "FireWatch", 1, g_IniPath);
+    s_ShowDrain = GetPrivateProfileIntA(SWS_SECTION, "DrainSupers", 0, g_IniPath);
     s_ScrollStep = GetPrivateProfileIntA(SWS_SECTION, "ScrollStep", 1, g_IniPath);
     if (s_ScrollStep < 1) s_ScrollStep = 1;
     if (s_ScrollStep > 10) s_ScrollStep = 10;
@@ -608,8 +581,6 @@ typedef struct {
     int   hide;
     int   manual;
     int   instant;      /* 1 = 点击即发射 (Action=None 或 SW.UseAITargeting) */
-    int   drain;        /* 1 = UseChargeDrain 长期生效 */
-    int   unstoppable;  /* 1 = SW.Unstoppable */
     const char* pcxFile;
 } SwsTypeCache;
 static SwsTypeCache s_TC[SWS_TCACHE];
@@ -629,8 +600,6 @@ static SwsTypeCache* SwsTypeEntry(void* type, const char* id)
     s_TC[i].hide = 0;
     s_TC[i].manual = 1;
     s_TC[i].instant = 0;
-    s_TC[i].drain = 0;
-    s_TC[i].unstoppable = 0;
     s_TC[i].pcxFile = NULL;
     s_TC[i].prio = -1;              /* -1 = 尚未填充 */
     s_TC[i].side = -2;
@@ -698,14 +667,13 @@ static int SwsManualFireOk(const char* id)
  *                         而不需要手动选择目标"
  * MO 里只有 EliteReservesSpecial 满足 (`SW.UseAITargeting=yes`)。
  *
- * 另外长期生效类 (UseChargeDrain=yes: Blasticade / PsychicFlash) 点击是
- * **开关**而非一次性发射, 侧栏要显示 Active, 见 SwsItem::drainState。
+ * 另外长期生效类 (UseChargeDrain=yes: 爆裂屏障/心灵之火) 只能读到 drain 标志,
+ * 用来把它们从侧栏过滤掉 (原因见扫描处那段注释)。
  */
 typedef struct {
     char id[32];
     int instant;    /* 1 = 点击即发射, 无需选格 */
     int drain;      /* 1 = UseChargeDrain (长期生效, 点击是开关) */
-    int unstoppable;/* 1 = SW.Unstoppable (生效中不许手动关) */
     int tried;
 } SwsBehavior;
 
@@ -744,7 +712,6 @@ static SwsBehavior* SwsBehaviorOf(const char* id)
     s_Beh[slot].tried = 1;
     s_Beh[slot].instant = 0;
     s_Beh[slot].drain = 0;
-    s_Beh[slot].unstoppable = 0;
     rules = *(void**)ADDR_INI_RULES;
     if (rules && IsPlausiblePtr(rules))
     {
@@ -776,7 +743,6 @@ static SwsBehavior* SwsBehaviorOf(const char* id)
             s_Beh[slot].drain = 1;
             s_Beh[slot].instant = 1;
         }
-        if (SwsIniYes(rules, id, "SW.Unstoppable")) s_Beh[slot].unstoppable = 1;
     }
     return &s_Beh[slot];
 }
@@ -1131,8 +1097,7 @@ static void SwsScan(void)
         int swIdx, total, start, left, frame, remain, side, prio;
         const char* pcxFile = NULL;
         int instant = 0;
-int drain = 0;
-int unstoppable = 0;
+int drainSup = 0;
         if (!sup || !IsPlausiblePtr(sup)) continue;
         type = *(void**)((char*)sup + OFF_SUP_TYPE);
         owner = *(void**)((char*)sup + OFF_SUP_OWNER);
@@ -1186,22 +1151,46 @@ int unstoppable = 0;
                 }
                 /* "点击即生效" 的判据取自 rules INI, 不再用
                  * `Action==0` —— 那个判据是错的 (见 SwsBehaviorOf 注释):
-                 * Action=Custom 会被 Ares 改写成 0x7F, 而 MO 这六个全是
+                 * Action=Custom 会被 Ares 改写成 0x7F, 而 MO 这几个全是
                  * Custom。真正的判据是 `Action=None` 或 `SW.UseAITargeting`。
-                 * 同时把长期生效 (UseChargeDrain) 与 Unstoppable 一起取回来,
-                 * 侧栏要按 ChargeDrain 三态显示。 */
+                 * drainSup 单独取 UseChargeDrain, 用来把它们过滤掉。 */
                 {
                     SwsBehavior* bh = SwsBehaviorOf(id);
                     tc->instant = bh ? bh->instant : 0;
-                    tc->drain = bh ? bh->drain : 0;
-                    tc->unstoppable = bh ? bh->unstoppable : 0;
+                    drainSup = bh ? bh->drain : 0;
                 }
-                drain = tc->drain;
-                unstoppable = tc->unstoppable;
             }
             /* 支援技能与超武同分类, 一并显示; 只排除 SW.ManualFire=no。
              * 不能拿引擎 ShowTimers 集合当显示清单 —— 它只有 11 个, 是
              * "正在计时"的子集, 不是侧栏该有的全量。 */
+            /* 火风暴类长期生效超武 (UseChargeDrain=yes: 爆裂屏障/心灵之火)
+             * **不显示也不处理** —— 决定放弃了。
+             *
+             * 为什么放弃 (结论已查实, 见 notes/超武侧栏.md):
+             *   Ares 的 ChargeDrain 开关状态机只接在 SuperClass::ClickFire,
+             *   而 SpecialPlace 事件走的是 Fire_SW -> Launch -> Activate,
+             *   两条入口不相交 —— 事件能把效果打出去, 但 ChargeDrainState
+             *   永远停在 Ready, 侧栏显示不出 "生效中"。Phobos 也没接这条
+             *   (它的 LaunchSuper 与 Ares 逐条同构), 没有现成实现可抄。
+             *   要真修就得写引擎的 ChargeDrainState, 而那需要
+             *   HouseClass::Supers 的偏移; 从 YRpp 头推导时出现 40 处尺寸
+             *   未知成员, 推导值与先前估值差 0x204, 不可信 —— 拿猜的偏移
+             *   写引擎结构迟早崩游戏。
+             *   代价远大于收益 (两个超武), 所以过滤掉。
+             * [SWSidebar] DrainSupers=1 可以临时放回来试。 */
+            if (drainSup && !s_ShowDrain)
+            {
+                static int s_DrainHidden = 0;
+                tc->hide = 1;
+                if (s_DrainHidden < 16)
+                {
+                    char sb[96];
+                    unsigned q2 = AppendCStr(sb, 0, "sws: hide drain ", sizeof(sb));
+                    q2 = AppendCStr(sb, q2, id, sizeof(sb));
+                    LogLine(sb);
+                    s_DrainHidden++;
+                }
+            }
             if (tc->hide || !tc->manual) continue;
             swIdx = tc->swIdx;
             side = tc->side;
@@ -1250,9 +1239,6 @@ int unstoppable = 0;
         s_Items[n].remain = remain;
         s_Items[n].total = total;
         s_Items[n].instant = instant;
-        s_Items[n].drain = drain;
-        s_Items[n].unstoppable = unstoppable;
-        s_Items[n].drainState = *(int*)((char*)sup + OFF_SUP_DRAIN);
         n++;
     }
     s_ItemN = n;
@@ -1294,67 +1280,6 @@ int unstoppable = 0;
 
 /* ---------------- 轮询 (切换键 + 点击 + 扫描) ---------------- */
 
-
-/* ---------------- 学习模式: 抄引擎真实点击改了哪些字段 ---------------- */
-
-#define ADDR_DISPLAY    0x87F7E8u
-#define DISP_REGION     0x1400u
-
-static void SwsLearnTick(void)
-{
-    static unsigned char shadow[DISP_REGION];
-    static int primed = 0;
-    static int logged = 0;
-    static int prevCur = -99;
-    unsigned char* d;
-    int cur, i, n;
-    if (!s_Learn || logged >= 3) return;
-    d = (unsigned char*)ADDR_DISPLAY;
-    if (!IsPlausiblePtr((void*)ADDR_DISPLAY)) return;
-    cur = *(int*)ADDR_CURSW;
-    if (!primed)
-    {
-        for (i = 0; i < (int)DISP_REGION; i++) shadow[i] = d[i];
-        primed = 1;
-        prevCur = cur;
-        return;
-    }
-    /* 只在"引擎自己"改变选中态的那一帧报 (排除我们自己写的)。 */
-    if (!s_WeSetCur && cur != prevCur)
-    {
-        char sb[512], hx[16];
-        unsigned q = 0;
-        n = 0;
-        q = AppendCStr(sb, q, cur >= 0 ? "sws: learn SEL " : "sws: learn CLR ",
-                       sizeof(sb));
-        UtoA((unsigned)(prevCur < 0 ? 0 : prevCur), hx);
-        q = AppendCStr(sb, q, hx, sizeof(sb));
-        q = AppendCh(sb, q, '>', sizeof(sb));
-        UtoA((unsigned)(cur < 0 ? 0 : cur), hx);
-        q = AppendCStr(sb, q, hx, sizeof(sb));
-        for (i = 0; i < (int)DISP_REGION && n < 14 && q < 470; i += 4)
-        {
-            unsigned a, b2;
-            a = *(unsigned*)(shadow + i);
-            b2 = *(unsigned*)(d + i);
-            if (a == b2) continue;
-            n++;
-            q = AppendCh(sb, q, ' ', sizeof(sb));
-            HtoA((unsigned)i, hx);
-            q = AppendCStr(sb, q, hx, sizeof(sb));
-            q = AppendCh(sb, q, ':', sizeof(sb));
-            UtoA(a, hx);
-            q = AppendCStr(sb, q, hx, sizeof(sb));
-            q = AppendCh(sb, q, '>', sizeof(sb));
-            UtoA(b2, hx);
-            q = AppendCStr(sb, q, hx, sizeof(sb));
-        }
-        LogLine(sb);
-        logged++;
-    }
-    prevCur = cur;
-    for (i = 0; i < (int)DISP_REGION; i++) shadow[i] = d[i];
-}
 
 /* ---------------- 滚轮 (由 MOExperience_WheelHook @0x777998 调用) ----------------
  * 语义与战役框一致: 鼠标落在侧栏区内才接管滚轮, dir<0 = 上滚(看更靠前),
@@ -1464,47 +1389,8 @@ void SWS_Poll(void)
                                 hit = 1;
                                 break;
                             }
-                            /* 长期生效类 (爆裂屏障/心灵之火) **不走 SpecialPlace
-                             * 事件**。实测 47/102 推了 7 次一次没中 (而非 drain 的
-                             * 53/73/100 每次都中, FIRED 都有记录), 而且带真实鼠标格
-                             * 的事件还会让"点完它之后别的武器第一次点击失效"。
-                             * Ares 的 ClickFire 只在 ChargeDrainState 为
-                             * Draining/Ready 时才动作, Charging 态两个分支都不进,
-                             * 什么都不发生 —— 所以事件这条路对该类无效。
-                             * 先退回打靶路径(可用), 一次点击的问题等拿到逐字节
-                             * 对比数据再定。 */
-                            if (s_Items[k].drain)
-                            {
-                                s_PendSel = s_Items[k].swIdx;
-                                s_EatPress = 1;
-                                s_HoldSkip = 1;
-                                LogLine("sws: drain select");
-                                hit = 1;
-                                break;
-                            }
                             if (s_Items[k].instant)
                             {
-                                /* 长期生效类生效中 + SW.Unstoppable=yes:
-                                 * Ares 侧栏钩子 (SWType/Hooks.cpp 0x6AAEDF)
-                                 * 写得很直白 —— "disallow manuals and active
-                                 * unstoppables":
-                                 *     bool unstoppable = UseChargeDrain
-                                 *         && ChargeDrainState == Draining
-                                 *         && SW_Unstoppable;
-                                 *     if(manual || unstoppable) return;
-                                 * 手册也说 SW.Unstoppable = "是否禁止手工停止,
-                                 * 简直就是火风暴专用"。所以照抄引擎, 吞掉这一击,
-                                 * 记一行便于确认。 */
-                                if (s_Items[k].drain &&
-                                    s_Items[k].drainState == 2 &&
-                                    s_Items[k].unstoppable)
-                                {
-                                    s_EatPress = 1;
-                                    s_HoldSkip = 1;
-                                    LogLine("sws: drain unstoppable, click eaten");
-                                    hit = 1;
-                                    break;
-                                }
                                 /* Action==None: 点击即生效, 不用再点地图。
                                  * 走标准事件 SpecialPlace (Phobos LaunchSuper
                                  * 同式), 而不是写 CurrentSW —— 后者只是本地
@@ -1515,8 +1401,7 @@ void SWS_Poll(void)
                                     /* 事件已排队: 这一击仍然止于侧栏 */
                                     s_EatPress = 1;
                                     s_HoldSkip = 1;
-                                    LogLine(s_Items[k].drain ? "sws: instant drain"
-                                                             : "sws: instant");
+                                    LogLine("sws: instant");
                                 }
                                 else
                                 {
@@ -1579,10 +1464,7 @@ void SWS_Poll(void)
         }
     }
     SwsEventWatch();
-    SwsEvCheck();
     SwsFireWatch();
-    SwsDrainWatch();
-    SwsLearnTick();
     s_WeSetCur = 0;
     /* 把 Poll 自身也计时上报: 之前 perf 只记 d(绘制)/s(扫描), SWS_Poll 里
      * 的东西 (含每帧 GetPrivateProfileIntA 这种文件 I/O) 完全在盲区里,
@@ -1654,63 +1536,24 @@ extern "C" __declspec(dllexport) unsigned __cdecl SWS_ClickGate(void* regs)
     return (unsigned)r;
 }
 
-/* 事件抓包 (纯读, 零行为): 盯着 EventClass::OutList 的写指针, 有新条目
- * 就把 Type / HouseIndex / 前 32 字节记一行。用途: **别再靠猜**。
- * 之前"点了没反应"就是因为我照抄 Phobos 就以为完事了, 而没先看一眼
- * 引擎自己在玩家点即时超武时到底往 OutList 里塞了什么。
- * 用法: 进游戏先用**原版侧栏**点一次即时超武 (或用我们的面板点),
- * 看日志里 `swsev: t=<Type> h=<house> ...` 那几行, 拿它当基准。
- * 布局: EventClass pack(1) sizeof=111, Type@0(1B), HouseIndex@2,
- * SpecialPlace{ int ID; CellStruct Location; } (YRpp EventClass.h)。 */
+/* 事件抓包 (纯读, 零行为, [SWSidebar] EvWatch 控制)
+ *
+ * 盯 EventClass::OutList 的写指针, 有新条目就记一行
+ * `swsev: t=<Type> h=<house> ... raw=<前16字节hex>`。
+ *
+ * 用途: 验证我们塞进 OutList 的 SpecialPlace 事件确实按预期构造, 以及
+ * 需要时和引擎自己发的那条对照。**这是当初定位"点了没反应"的唯一手段** ——
+ * 在此之前我一直是照抄 Phobos 就下结论, 事实证明那样会错。
+ *
+ * EventClass 布局 (YRpp EventClass.h, pack(1), sizeof=111):
+ *   [0] Type(1B) [1] IsExecuted(1B) [2] HouseIndex(1B) [3..6] Frame(4B)
+ *   [7..] DataBuffer, 其中 SPECIAL_PLACE { int ID@7; CellStruct Location@11; }
+ * 注意: **不要**拿 [1] 当"引擎是否已执行"的判据 —— 实测原版侧栏自己发的
+ * 事件 [1] 也是 0x00, 另一类事件才是 0x5A, 与本功能无关 (那个假设已被证伪)。
+ */
 #define SWS_EV_TYPE  0x12u   /* EventType::SpecialPlace */
 
-/* --- IsExecuted 追踪: 证明引擎真的吃下了我们塞的事件 ---
- * EventClass 布局 (YRpp, pack1): [0]Type [1]IsExecuted [2]HouseIndex
- * [3..6]Frame [7..]DataBuffer。引擎执行事件时把 [1] 置 1。
- * 之前一直只能"事件进队列了", 无法证明"引擎执行了" —— 这正是"点了没反应"
- * 查不下去的原因。现在记住刚塞进去的槽位, 之后每轮回看 [1], 变了就记一行。
- * 这比看效果 (充能计时) 更直接, 也不受渲染节奏影响。 */
-typedef struct { unsigned slot; int armed; } SwsEvSlot;
-static SwsEvSlot g_SwsEvSeen[SWS_EVT_SLOTS_N];
-static int g_SwsEvSeenN = 0;
-
-static void SwsEvNote(unsigned slot)
-{
-    if (g_SwsEvSeenN >= SWS_EVT_SLOTS_N) return;
-    g_SwsEvSeen[g_SwsEvSeenN].slot = slot;
-    g_SwsEvSeen[g_SwsEvSeenN].armed = 1;
-    g_SwsEvSeenN++;
-}
-
-static void SwsEvCheck(void)
-{
-    int i, j;
-    for (i = 0; i < g_SwsEvSeenN; i++)
-    {
-        const unsigned char* e;
-        if (!g_SwsEvSeen[i].armed) continue;
-        e = (const unsigned char*)(SWS_ADDR_OUT_BUF +
-                                   g_SwsEvSeen[i].slot * SWS_EVT_SIZE);
-        if (e[0] != (unsigned char)SWS_EV_TYPE) continue;  /* 槽已被复用 */
-        if (e[1])   /* IsExecuted */
-        {
-            char sb[96], t1[16], t2[16];
-            unsigned q = AppendCStr(sb, 0, "swsev: EXECUTED slot=", sizeof(sb));
-            UtoA(g_SwsEvSeen[i].slot, t1);
-            q = AppendCStr(sb, q, t1, sizeof(sb));
-            q = AppendCStr(sb, q, " id=", sizeof(sb));
-            UtoA((unsigned)*(int*)(e + 7), t2);
-            q = AppendCStr(sb, q, t2, sizeof(sb));
-            LogLine(sb);
-            g_SwsEvSeen[i].armed = 0;
-        }
-    }
-    /* 压缩掉已确认的, 免得长期占满 */
-    for (i = 0, j = 0; i < g_SwsEvSeenN; i++)
-        if (g_SwsEvSeen[i].armed) g_SwsEvSeen[j++] = g_SwsEvSeen[i];
-    g_SwsEvSeenN = j;
-}
-
+/* 上次见到的写指针 (环形 128 槽的 Tail) */
 static unsigned g_SwsEvNext = 0;
 static int g_SwsEvInit = 0;
 
@@ -1729,9 +1572,9 @@ static void SwsEventWatch(void)
 
     if (!s_EvWatchOn) return;   /* SwsEnsureInit 里读一次, 别每帧读 ini */
 
-    next = *(unsigned*)SWS_ADDR_OUT_NEXT & 0x7Fu;
+    next = *(unsigned*)SWS_ADDR_OUT_NEXT & (SWS_EVT_SLOTS_N - 1u);
     if (!g_SwsEvInit) { g_SwsEvNext = next; g_SwsEvInit = 1; return; }
-    adv = (next - g_SwsEvNext) & 0x7Fu;
+    adv = (next - g_SwsEvNext) & (SWS_EVT_SLOTS_N - 1u);
     if (!adv) return;
     if (adv > 8u) { g_SwsEvNext = next; return; }   /* 读档/菜单: 重同步 */
     cur = g_SwsEvNext;
@@ -1766,15 +1609,14 @@ static void SwsEventWatch(void)
             q = AppendCStr(sb, q, t2, sizeof(sb));
         }
         q = AppendCStr(sb, q, " raw=", sizeof(sb));
-        for (i = 0; i < 32; i++)
+        for (i = 0; i < 16; i++)
         {
             SwsHexB(hb, (unsigned)e[i]);
             if (i && (i % 8) == 0) q = AppendCh(sb, q, ' ', sizeof(sb));
             q = AppendCStr(sb, q, hb, sizeof(sb));
         }
-        (void)q;
         LogLine(sb);
-        cur = (cur + 1u) & 0x7Fu;
+        cur = (cur + 1u) & (SWS_EVT_SLOTS_N - 1u);
         guard++;
     }
     g_SwsEvNext = next;
@@ -1824,15 +1666,6 @@ static void SwsFireWatch(void)
                 q = AppendCStr(sb, q, " inst=", sizeof(sb));
                 UtoA((unsigned)s_Items[j].instant, t2);
                 q = AppendCStr(sb, q, t2, sizeof(sb));
-                q = AppendCStr(sb, q, " dr=", sizeof(sb));
-                UtoA((unsigned)s_Items[j].drain, t2);
-                q = AppendCStr(sb, q, t2, sizeof(sb));
-                q = AppendCh(sb, q, '/', sizeof(sb));
-                UtoA((unsigned)s_Items[j].drainState + 1u, t2);
-                q = AppendCStr(sb, q, t2, sizeof(sb));
-                q = AppendCStr(sb, q, "/u", sizeof(sb));
-                UtoA((unsigned)s_Items[j].unstoppable, t2);
-                q = AppendCStr(sb, q, t2, sizeof(sb));
                 q = AppendCStr(sb, q, " rdy=", sizeof(sb));
                 UtoA((unsigned)s_Items[j].ready, t2);
                 q = AppendCStr(sb, q, t2, sizeof(sb));
@@ -1872,53 +1705,6 @@ static void SwsFireWatch(void)
     }
 }
 
-/* ChargeDrainState 跳变日志: 长期生效类 (爆裂屏障/心灵之火) 靠它才知道
- * 有没有真的激活/关闭。只在变的时候记, 不刷屏。OFF_SUP_DRAIN=0x7C 是推算
- * 出来的, 这行日志同时也是那个偏移对不对的验证 —— 如果值是乱七八糟的
- * (不是 -1/0/1/2) 就说明偏移错了。 */
-static int s_DrainPrev[SWS_FIRE_SLOTS];
-static int s_DrainInit = 0;
-
-static void SwsDrainWatch(void)
-{
-    int k;
-    if (!s_FireWatchOn) return;
-    if (!s_DrainInit)
-    {
-        for (k = 0; k < SWS_FIRE_SLOTS; k++) s_DrainPrev[k] = -99;
-        s_DrainInit = 1;
-        return;
-    }
-    for (k = 0; k < s_ItemN; k++)
-    {
-        int id = s_Items[k].swIdx;
-        if (id < 0 || id >= SWS_FIRE_SLOTS) continue;
-        if (!s_Items[k].drain) continue;
-        if (s_DrainPrev[id] != s_Items[k].drainState)
-        {
-            /* ChargeDrainState: -1=None 0=Charging 1=Ready 2=Draining
-             * (GeneralDefinitions.h)。这里之前写成 {None,Charging,Ready,...}
-             * 是**差一错误** —— 0 是 Charging 不是 None, 导致打出的 "Charging"
-             * 其实是状态 1(Ready), 差点让我误判成"没充好所以点不动"。 */
-            static const char* kName[4] = { "Charging", "Ready", "Draining", "?" };
-            const char* nm = (s_Items[k].drainState >= 0 && s_Items[k].drainState <= 2)
-                             ? kName[s_Items[k].drainState] : "None";
-            char sb[144], t1[16], t2[16];
-            unsigned q = AppendCStr(sb, 0, "sws: drain id=", sizeof(sb));
-            UtoA((unsigned)id, t1);
-            q = AppendCStr(sb, q, t1, sizeof(sb));
-            q = AppendCStr(sb, q, " ", sizeof(sb));
-            q = AppendCStr(sb, q, s_Items[k].id, sizeof(sb));
-            q = AppendCStr(sb, q, " ", sizeof(sb));
-            q = AppendCStr(sb, q, nm, sizeof(sb));
-            q = AppendCStr(sb, q, " unstop=", sizeof(sb));
-            UtoA((unsigned)s_Items[k].unstoppable, t2);
-            q = AppendCStr(sb, q, t2, sizeof(sb));
-            LogLine(sb);
-            s_DrainPrev[id] = s_Items[k].drainState;
-        }
-    }
-}
 
 /* ---------------- 即时超武: SpecialPlace 事件 (联机安全) ----------------
  * Action==None 的超武是"点了就放", Phobos 不写 CurrentSW, 而是往
@@ -1957,7 +1743,7 @@ static int SwsPushSpecialPlace(int swIdx)
     if (count >= SWS_EVT_CAP) return 0;          /* 满了就下帧重试 */
     /* Next 读回来就夹一次: 它是环形计数器的 Tail, 引擎自己会掩码推进,
      * 万一读到脏值也不能拿它当数组下标去写 0xA802D4+next*111。 */
-    next = *(unsigned*)SWS_ADDR_OUT_NEXT & 0x7Fu;
+    next = *(unsigned*)SWS_ADDR_OUT_NEXT & (SWS_EVT_SLOTS_N - 1u);
 
     houseIdx = *(int*)((char*)house + SWS_OFF_HOUSE_INDEX);
     /* ctor 之前必须把 111 字节全清零: EventClass 是 pack(1) 且 union 后面
@@ -1995,15 +1781,12 @@ static int SwsPushSpecialPlace(int swIdx)
         eaxAfter = 0;
     *(unsigned*)(SWS_ADDR_OUT_PAR + next * 4u) = eaxAfter;
 
-    *(unsigned*)SWS_ADDR_OUT_NEXT = (next + 1u) & 0x7Fu;
+    *(unsigned*)SWS_ADDR_OUT_NEXT = (next + 1u) & (SWS_EVT_SLOTS_N - 1u);
     *(unsigned*)SWS_ADDR_OUT_COUNT = count + 1u;
-    SwsEvNote(next);
     /* 记下自己塞进去的那一条 (houseIdx/swIdx), 用来和抓包日志里引擎自己
      * 产生的 SuperWeapon 事件逐字节对比 —— 别再靠"应该对吧"来判断。 */
     {
-        /* 把**我们构造出来的**事件前 32 字节原样打出来, 好和抓包日志里
-         * 引擎自己发的那条逐字节对比。drain 类 (47/102) 推了 7 次一次没中,
-         * 而 53/73/100 每次都中, 差异一定在这 32 字节里。 */
+        /* 我们构造出来的事件前 16 字节, 便于和抓包日志里引擎发的对照。 */
         char sb[256], hb[4];
         unsigned q = AppendCStr(sb, 0, "sws: push h=", sizeof(sb));
         UtoA((unsigned)houseIdx, hb);
@@ -2011,7 +1794,7 @@ static int SwsPushSpecialPlace(int swIdx)
         q = AppendCStr(sb, q, " id=", sizeof(sb));
         UtoA((unsigned)swIdx, hb);
         q = AppendCStr(sb, q, hb, sizeof(sb));
-        for (i = 0; i < 32; i++)
+        for (i = 0; i < 16; i++)
         {
             SwsHexB(hb, (unsigned)(unsigned char)ev[i]);
             if (i && (i % 8) == 0) q = AppendCh(sb, q, ' ', sizeof(sb));
@@ -2026,9 +1809,8 @@ static int SwsPushSpecialPlace(int swIdx)
 
 
 /* ---- PCX 逐像素贴图 (不走引擎 BlitToSurface) ----
- * 引擎 BlitToSurface 每调一次就锁/解锁一次合成面: 62 个条目 = 62 次锁面,
- * 实测 d=5960us/帧, 这就是掉帧主因 (扫描只要 2us)。所以改成在下面那次
- * 锁面里直接写像素。BSurface 布局 (YRpp Surface.h):
+ * 引擎 BlitToSurface 每调一次就锁/解锁一次合成面, N 个条目 = N 次锁面。
+ * 所以改成在下面那次锁面里直接写像素。BSurface 布局 (YRpp Surface.h):
  *   Surface{Width+0x88, Height+0x8C}
  *   -> XSurface{LockLevel+0x90, BytesPerPixel+0x94}
  *   -> BSurface::MemoryBuffer{void* Buffer +0x98; int Size; bool Allocated}
@@ -2358,41 +2140,6 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
             if (it->susp)
             {
                 st[0] = 'H'; st[1] = 'o'; st[2] = 'l'; st[3] = 'd';
-            }
-            /* 长期生效类 (UseChargeDrain): 点击是**开关**而不是一次性发射,
-             * 状态是三态而不是百分比。引擎/Ares 的侧栏也是按 ChargeDrainState
-             * 三档出字的 (SWType/Hooks.cpp SuperClass_GetCameoName):
-             *   Charging -> Text.Charging / Ready -> Text.Ready
-             *   Draining -> Text.Active   (rulesmo 里两个都是 NAME:BLASTRUNNING)
-             * 之前这里只画百分比, 于是爆裂屏障/心灵之火"生效中"这个状态
-             * 完全没体现 —— 就是用户说的"没在超武侧栏上体现"。 */
-            else if (it->drain)
-            {
-                if (it->drainState == 2)          /* Draining = 生效中 */
-                {
-                    st[0] = 'O'; st[1] = 'N';
-                }
-                else if (it->drainState == 1)     /* Ready = 可激活 */
-                {
-                    st[0] = 'R'; st[1] = 'd'; st[2] = 'y';
-                }
-                else if (it->total > 0)           /* Charging: 仍给百分比 */
-                {
-                    int pct = 100 - (it->remain * 100) / it->total;
-                    if (pct < 0) pct = 0;
-                    if (pct > 99) pct = 99;
-                    if (pct >= 10)
-                    {
-                        st[0] = (wchar_t)('0' + (pct / 10) % 10);
-                        st[1] = (wchar_t)('0' + pct % 10);
-                        st[2] = '%';
-                    }
-                    else
-                    {
-                        st[0] = (wchar_t)('0' + pct);
-                        st[1] = '%';
-                    }
-                }
             }
             else if (!it->ready && it->total > 0)
             {

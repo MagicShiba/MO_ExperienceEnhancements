@@ -28,9 +28,11 @@ if "%NEEDFULL%"=="1" (
   exit /b %errorlevel%
 )
 
-"%PWSH%" -NoProfile -Command "$src = @(Get-ChildItem src\*.cpp) + @(Get-Item icons\Icon.cpp); $hdr = @(Get-ChildItem src\*.h); $stale = foreach ($f in $src) { $o = 'obj\' + $f.BaseName + '.o'; $ot = (Get-Item $o).LastWriteTime; if ($f.LastWriteTime -gt $ot) { $f } elseif ($hdr | Where-Object { $_.LastWriteTime -gt $ot }) { $f } }; @($stale) | Set-Content -Encoding ascii obj\stale.txt"
+"%PWSH%" -NoProfile -Command "$src = @(Get-ChildItem src\*.cpp) + @(Get-Item icons\Icon.cpp); $hdr = @(Get-ChildItem src\*.h); $stale = @(foreach ($f in $src) { $o = 'obj\' + $f.BaseName + '.o'; if (-not (Test-Path $o)) { $f; continue }; $ot = (Get-Item $o).LastWriteTime; if ($f.LastWriteTime -gt $ot) { $f } elseif ($hdr | Where-Object { $_.LastWriteTime -gt $ot }) { $f } }); if ($stale.Count -gt 0) { $stale | ForEach-Object { $_.FullName } | Set-Content -Encoding ascii obj\stale.txt } else { Set-Content -Encoding ascii -Value '' obj\stale.txt }"
 
 if exist obj\compiled.flag del obj\compiled.flag
+rem NOTE: keep obj\stale.txt existing even when empty. "for /f in" errors out
+rem with "file not found" (and looks like a failure) if the list is absent.
 
 for /f "usebackq delims=" %%F in ("obj\stale.txt") do (
   if not "%%F"=="" (
@@ -57,7 +59,10 @@ if errorlevel 1 exit /b 1
 del obj\stale.txt >nul 2>nul
 del obj\compiled.flag >nul 2>nul
 copy /Y dist\MOExperience.dll ..\MOExperience.dll >nul
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+  echo [fast] ERROR: cannot copy to ..\MOExperience.dll - is the game running?
+  exit /b 1
+)
 copy /Y dist\MOExperience.dll.inj ..\MOExperience.dll.inj >nul
 if errorlevel 1 exit /b 1
 echo [fast] ok
