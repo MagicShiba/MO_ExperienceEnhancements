@@ -1726,11 +1726,25 @@ static int SwsPushSpecialPlace(int swIdx)
 
 /* ---- PCX 逐像素贴图 (不走引擎 BlitToSurface) ----
  * 引擎 BlitToSurface 每调一次就锁/解锁一次合成面, N 个条目 = N 次锁面。
- * 所以改成在下面那次锁面里直接写像素。BSurface 布局 (YRpp Surface.h):
- *   Surface{Width+0x88, Height+0x8C}
- *   -> XSurface{LockLevel+0x90, BytesPerPixel+0x94}
- *   -> BSurface::MemoryBuffer{void* Buffer +0x98; int Size; bool Allocated}
- * 布局对不上就返回 0, 由调用方退回引擎 blit, 保证不会画不出来。 */
+ * 所以改成在下面那次锁面里直接写像素。
+ *
+ * BSurface 布局 (gamemd.exe 0x6B9D00 的构造函数据实, 与 YRpp Surface.h:144 一致):
+ *   +0x00 void* vptr          (BSurface 虚表 0x7E2070)
+ *   +0x04 int   Width
+ *   +0x08 int   Height
+ *   +0x0C int   LockLevel
+ *   +0x10 int   BytesPerPixel  (=2, 16bpp RGB565)
+ *   +0x14 void* Buffer         (WORD*, 紧排, 行距 = Width*2)
+ *   +0x18 int   Size           (= Width*Height*2)
+ *   +0x1C bool  Allocated
+ *   sizeof == 0x20, alignof == 4
+ *
+ * 早先这里写的是 0x88/0x8C/0x94/0x98 —— 那是把**虚表大小** (34*4=0x88) 当成了
+ * 字段偏移, 实际对象只有 0x20 字节。于是每次都在下面的校验处提前 return 0,
+ * 图标一直退回引擎 BlitToSurface, 而那条路是整块覆盖、100% 不透明, 根本不
+ * 认 s_Alpha —— 现象就是"Alpha 对底框/边框有效, 对图标完全无效"。
+ *
+ * 布局对不上仍然返回 0, 由调用方退回引擎 blit, 保证不会画不出来。 */
 static int SwsPcxBlitLocked(unsigned short* dstBase, int pitch,
                             int surfW, int surfH,
                             int dx, int dy, int dw, int dh, void* psurf)
@@ -1738,12 +1752,16 @@ static int SwsPcxBlitLocked(unsigned short* dstBase, int pitch,
     int pw, ph, bpp, x, y;
     unsigned short* src;
     if (!dstBase || !psurf || !IsPlausiblePtr(psurf)) return 0;
-    pw = *(int*)((char*)psurf + 0x88);
-    ph = *(int*)((char*)psurf + 0x8C);
-    bpp = *(int*)((char*)psurf + 0x94);
-    src = *(unsigned short**)((char*)psurf + 0x98);
+    /* 虚表必须指向代码段, 否则说明根本不是 BSurface */
+    if (!IsPlausiblePtr(*(void**)psurf)) return 0;
+    pw = *(int*)((char*)psurf + 0x04);
+    ph = *(int*)((char*)psurf + 0x08);
+    bpp = *(int*)((char*)psurf + 0x10);
+    src = *(unsigned short**)((char*)psurf + 0x14);
     if (pw < 1 || pw > 256 || ph < 1 || ph > 256 || bpp != 2) return 0;
     if (!src || !IsPlausiblePtr((void*)src)) return 0;
+    /* Size 自洽校验: Buffer 至少得有这么多字节, 挡掉读到野指针 */
+    if (*(int*)((char*)psurf + 0x18) != pw * ph * 2) return 0;
     {
         static int s_Logged = 0;
         if (!s_Logged)
@@ -1800,16 +1818,16 @@ static int SwsPcxBlitLocked(unsigned short* dstBase, int pitch,
 /* 锁面状态下的半透明填充 (替代每条目 6 次 FillRectTrans 虚表调用)
  * op 先乘上**侧栏整体透明度** s_Alpha: 这样底框/边框/滚动条/箭头这些各带
  * 自己的局部 alpha 的元素, 只要走这里就自动被整体透明度统一调制。 */
-static void SwsFillLocked(unsigned char* base, int pitch, int surfW, int surfH,
-                          int x, int y, int rw, int rh,
-                          unsigned char r, unsigned char g, unsigned char b,
-                          int op)
+/* 实际填充: 调用方已经把 s_Alpha 乘进去了, 这里不再管整体透明度。 */
+static void SwsFillCore(unsigned char* base, int pitch, int surfW, int surfH,
+                        int x, int y, int rw, int rh,
+                        unsigned char r, unsigned char g, unsigned char b,
+                        int op)
 {
     int yy, xx;
     if (!base || rw <= 0 || rh <= 0) return;
     if (op < 0) op = 0;
     if (op > 100) op = 100;
-    op = (op * s_Alpha) / 100;
     if (op <= 0) return;
     for (yy = 0; yy < rh; yy++)
     {
@@ -1824,6 +1842,29 @@ static void SwsFillLocked(unsigned char* base, int pitch, int surfW, int surfH,
             row[tx] = Blend16(row[tx], r, g, b, (unsigned)op * 255 / 100);
         }
     }
+}
+
+/* 吃侧栏整体透明度的填充: 底框/边框/滚动条/箭头/图标底板都走这里。 */
+static void SwsFillLocked(unsigned char* base, int pitch, int surfW, int surfH,
+                          int x, int y, int rw, int rh,
+                          unsigned char r, unsigned char g, unsigned char b,
+                          int op)
+{
+    if (op < 0) op = 0;
+    if (op > 100) op = 100;
+    SwsFillCore(base, pitch, surfW, surfH, x, y, rw, rh, r, g, b,
+                (op * s_Alpha) / 100);
+}
+
+/* **不**吃整体透明度的填充: 只给悬停提示框用。
+ * 提示框是"此刻正在读"的信息, 必须始终清晰 —— 跟着侧栏透明度一起淡到 30%
+ * 就看不清是哪个超武了。它是侧栏里唯一无视 Alpha 的元素。 */
+static void SwsFillRawLocked(unsigned char* base, int pitch, int surfW, int surfH,
+                             int x, int y, int rw, int rh,
+                             unsigned char r, unsigned char g, unsigned char b,
+                             int op)
+{
+    SwsFillCore(base, pitch, surfW, surfH, x, y, rw, rh, r, g, b, op);
 }
 
 
@@ -2317,30 +2358,36 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
                 if (sx < 4) sx = 4;
                 if (sx + sw + 6 > w - 2) sx = (w - sw - 8 > 4) ? w - sw - 8 : 4;
                 /* 提示框: 半透明黑底 + 一圈主题色边框。
-                 * 边框先算好, 底色和边框都走 SwsFillLocked —— 它内部已经乘过
-                 * s_Alpha 了 (见 SwsFillLocked 里的 op = op * s_Alpha / 100),
-                 * 所以这里**只能给原始不透明度**, 早先写成 70 * s_Alpha / 100
-                 * 等于乘了两次, Alpha=30 时底框实际只剩 6%, 几乎看不见。
                  *
-                 * 对比: BlitCoverage 相反, 它不乘 s_Alpha, 调用方才要预乘。 */
+                 * 这一块**刻意不吃侧栏整体透明度**: 用 SwsFillRawLocked 而不是
+                 * SwsFillLocked, 文字的 BlitCoverage 也直接给 100/85 而不是
+                 * 乘 s_Alpha。原因是提示框是玩家**此刻正在读**的信息, 侧栏整体
+                 * 调到 Alpha=30 时它要是也跟着淡到 30%, 就看不清是哪个超武了。
+                 * 它是侧栏里唯一无视 Alpha 的元素。
+                 *
+                 * 顺带记一下两个绘制函数的约定是相反的 (踩过):
+                 *   SwsFillLocked  内部乘 s_Alpha -> 只能给原始不透明度
+                 *   BlitCoverage   不乘 s_Alpha   -> 调用方才预乘
+                 * 早先提示框给 SwsFillLocked 传了 70 * s_Alpha / 100, 等于乘两次,
+                 * Alpha=30 时底框实际只剩 6%, 几乎看不见。 */
                 {
                     int bx = sx - 2, by = ny - 2, bwid = sw + 6, bhei = adv + 4;
-                    SwsFillLocked(locked, pitch, w, h, bx, by, bwid, bhei,
-                                  0, 0, 0, 70);
+                    SwsFillRawLocked(locked, pitch, w, h, bx, by, bwid, bhei,
+                                     0, 0, 0, 150);
                     /* 边框画在底框的四条边上, 1px, 主题色 */
-                    SwsFillLocked(locked, pitch, w, h, bx, by, bwid, 1,
-                                  SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 190);
-                    SwsFillLocked(locked, pitch, w, h, bx, by + bhei - 1, bwid, 1,
-                                  SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 190);
-                    SwsFillLocked(locked, pitch, w, h, bx, by, 1, bhei,
-                                  SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 190);
-                    SwsFillLocked(locked, pitch, w, h, bx + bwid - 1, by, 1, bhei,
-                                  SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 190);
+                    SwsFillRawLocked(locked, pitch, w, h, bx, by, bwid, 1,
+                                     SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
+                    SwsFillRawLocked(locked, pitch, w, h, bx, by + bhei - 1, bwid, 1,
+                                     SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
+                    SwsFillRawLocked(locked, pitch, w, h, bx, by, 1, bhei,
+                                     SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
+                    SwsFillRawLocked(locked, pitch, w, h, bx + bwid - 1, by, 1, bhei,
+                                     SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
                 }
                 BlitCoverage(locked, pitch, w, h, sx + 1, ny + 1, sw, adv,
-                             0, 0, 0, 70 * s_Alpha / 100);
+                             0, 0, 0, 85);
                 BlitCoverage(locked, pitch, w, h, sx, ny, sw, adv,
-                             255, 255, 255, 100 * s_Alpha / 100);
+                             255, 255, 255, 100);
             }
             }
         }
