@@ -540,9 +540,14 @@ void GtUnpack16(unsigned short px, unsigned char* r, unsigned char* g,
     *b = (unsigned char)((bv * 255u + ((1u << g_BBits) - 1) / 2) / ((1u << g_BBits) - 1));
 }
 
-/* ---------------- GDI 光栅化 (六槽: 战役/提示/全局文本/超武面板/聊天输入/超武侧栏各缓存一套) ---------------- */
+/* ---------------- GDI 光栅化 (七槽: 战役/提示/全局文本/超武面板/聊天输入/
+ * 超武侧栏充能%/超武侧栏悬停名 各缓存一套) ----------------
+ * 超武侧栏占两槽是有原因的: 充能百分比走 [SWSidebar] FontPx, 悬停名走全局
+ * [VecText] 字号, 共用一个槽会让 GdiEnsure 每次都拆了重建 (CreateDIBSection
+ * + CreateFontW), 反而比重新光栅还贵。 */
 
-static GdiSlot g_Slots[6] = {
+static GdiSlot g_Slots[7] = {
+    { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
     { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
     { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
     { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
@@ -577,7 +582,7 @@ int GdiEnsure(int fontPx, int bold, int slot, const wchar_t* face)
     char b1[16], b2[16], buf[256];
     unsigned p;
 
-    if (slot < 0 || slot > 5) slot = 0;
+    if (slot < 0 || slot > 6) slot = 0;
     s = &g_Slots[slot];
 
     if (s->dc && fontPx == s->px && wantBold == s->bold && FaceSame(face, s->face)) { g_G = s; return 1; }

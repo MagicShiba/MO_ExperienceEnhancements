@@ -74,7 +74,9 @@ typedef struct {
 } GdiSlot;
 
 extern GdiSlot* g_G;      /* 当前槽 (GdiEnsure 成功后指向它) */
-/* 槽号: 0=战役框, 1=提示框, 2=全局文本 (VecText), 3=超武面板, 4=聊天输入, 5=超武侧栏 */
+/* 槽号: 0=战役框, 1=提示框, 2=全局文本 (VecText), 3=超武面板/底电,
+ * 4=聊天输入, 5=超武侧栏充能百分比, 6=超武侧栏悬停名 (5/6 分槽是因为两者
+ * 字号来源不同, 共用一槽会让 GdiEnsure 每次拆了重建)。 */
 int GdiEnsure(int fontPx, int bold, int slot, const wchar_t* face);
 /* 量一段文本在 maxW 内能放几个字符 */
 int CharsFit(const wchar_t* text, int len, int maxW);

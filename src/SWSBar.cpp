@@ -9,12 +9,15 @@
  *     rulesmo.ini 的授予建筑 Owner/Prerequisite 链离线推导), 查不到落玩家阵营。
  *   - 排序/隐藏: [SWSidebar] 单节, 以超武 ID 为键: 负数=隐藏, 0=默认
  *     (优先级 1000), 正数=优先级 (越小越靠前); 缺键=默认显示。
- *   - 绘制: 图标盒 60x48 + 阵营色边框 + GDI 名/状态两行字 + 底部进度条,
- *     整体 Opacity 可调; 不需要 Phobos 那套 PCX UI 资源。
+ *   - 绘制: 图标盒 60x48 + 阵营色边框 + 充能百分比 + 悬停名提示, 整体 Alpha
+ *     可调; 不需要 Phobos 那套 PCX UI 资源。**画进自有离屏缓存**, 15 个游戏
+ *     逻辑帧才重建一次, 交互 (悬停/选中/滚动/开关) 当帧重建; 每渲染帧只做
+ *     一次带 alpha 的合成。见下面"绘制: 离屏缓存"。
  *   - 图标: MO 的超武图标是 PCX (rulesmo.ini 的 SidebarPCX=), 不是 SHP ——
- *     SidebarImage 指向引擎 XXICON.SHP 占位引用, 画出来是 11 个一样的紫球。
- *     走 INI_Rules->ReadString 读 SidebarPCX= + PCX::Instance 的
- *     GetSurface/ForceLoadFile 贴图; 无 PCX 才回退 SHP。
+ *     SidebarImage 指向引擎 XXICON.SHP 占位引用, 画出来是 11 个一样的紫球,
+ *     所以 SHP 那条路整条删了。走 INI_Rules->ReadString 读 SidebarPCX= +
+ *     PCX::Instance 的 GetSurface/ForceLoadFile 拿面, 逐像素贴进缓存。
+ *     鼠标悬停的那一个**不透明**绘制 (不吃 Alpha)。
  *   - 交互: ToggleKey 切换显隐 (隐藏即不占空间: 不画+不吞点击); 左键图标=
  *     选中打靶 (只写 CurrentSWTypeIndex, 与 Phobos targeting 分支同义, 非模拟),
  *     右键栏内=取消; 点击吞没经 0x692419 门防误下单。
@@ -71,19 +74,12 @@
 #define OFF_SWT_UINAME   0x60u
 #define OFF_SWT_ARRIDX   0x98u
 #define OFF_SWT_RECH     0xB0u
-#define OFF_SWT_SHPIMG   0xB8u   /* SidebarImage (SHP), +12 假设, shp 计数验证 */
 
-/* 图标绘制 (Phobos SWButton::Draw 同参, 只读渲染, 联机安全):
- * CC_Draw_Shape(surf, pal, shp, 0, pos, bounds,
- *   bf_400, 0,0,Ground, 1000, 0, NULL,0,0,0)。
- * 注意: YRpp Surface.h 里 CC_Draw_Shape 是 __fastcall 自由函数
- * (Surface->ECX, Palette->EDX, 其余压栈)。早前误写成 __stdcall 会让
- * 16 个参数全部压栈、ECX 留垃圾, blitter 首次真正被调用即崩溃。 */
-typedef void (__fastcall *SwsDrawShapeFn)(void* surf, void* pal, void* shp,
-    int frame, const void* pos, const void* bounds, int flags, int remap,
-    int zadj, int zgrad, int bright, int tint, void* zshp, int zframe,
-    int xoff, int yoff);
-
+/* CC_Draw_Shape 那条 SHP 路线 (Phobos SWButton::Draw 同参) 已随 SHP 兜底
+ * 一起删掉 —— MO 的 SidebarImage 指向引擎 XXICON.SHP 占位图, 画出来是紫球。
+ * 顺带记一笔踩过的坑, 免得以后再写一遍: YRpp Surface.h 里 CC_Draw_Shape 是
+ * __fastcall 自由函数 (Surface->ECX, Palette->EDX, 其余压栈), 写成 __stdcall
+ * 会让 16 个参数全部压栈、ECX 留垃圾, blitter 首次真正被调用即崩溃。 */
 
 #define VT_LOCK            0x5C
 #define VT_UNLOCK          0x60
@@ -143,12 +139,10 @@ static int s_ArmIdx = -1;    /* s_SelDown 期间记住的 swIdx */
  * 同时成立就会当场释放。按下即吞, 一直吞到松开, 效果等同真 Gadget
  * 消费掉这次完整点击。 */
 static int s_HoldSkip = 0;
-/* 吞没门用的"栏区已知"标志。
- * **不能**复用 s_BoundValid: 那个标志 SwsScan() 开头就清零 (只在重建条目
- * 期间有效), 而 SWS_Draw 跑到布局末尾才置 1。点击那帧 SWS_Poll 先跑
- * (还会 s_ForceScan=1 强制重扫), 门随后才跑, 于是正好撞上 s_BoundValid==0
- * 分支被放行 —— 表现就是"点了没反应/要点很多次"。栏区几何 (s_BoundX/Y/W/H)
- * 在重扫期间并没有变, 所以这里另用一个只由 Draw 置位、隐藏时才清零的标志。 */
+/* 吞没门/滚轮用的"栏区已知"标志 = 缓存里有一帧可合成的画面。
+ * 只由重建路径置位, 无条目/收起时清零 —— 两者都对应"屏上确实没有侧栏可点"。
+ * (早先还有一个 s_BoundValid, SwsScan() 开头清零、Draw 末尾置 1, 却被谁都不
+ * 读, 已删; 它的注释"不能复用"说的就是这个混用问题, 现在只剩一个标志。) */
 static int s_BoundsKnown = 0;
 
 /* 即时超武: 走 SpecialPlace 事件 (定义在下方)。 */
@@ -259,20 +253,16 @@ typedef struct {
     int remain;   /* 剩余帧 */
     int total;    /* 总帧 (<=0=未知) */
     int x, y;
-    void* shp;
     const char* pcxFile;  /* SidebarPCX= 文件名, 指向我们自己的表 */
     int instant;          /* 1 = 点击即生效 (Action=None 或 SW.UseAITargeting) */
-    int row;              /* 该条目在本列的行号 (滚动用) */
-    char id[32];          /* 超武 ID (诊断表用: 名字<->swIdx 对照) */
     wchar_t name[24];     /* 悬停提示用; 每类型填一次 */
 } SwsItem;
 
 static SwsItem s_Items[SWS_CAP];
 static int s_ItemN = 0;
-static wchar_t s_ItemNameBuf[24];   /* 从类型缓存带出来的悬停名字 */
 /* 排序结果缓存: 排序键 (阵营, ini 优先级, ArrayIndex) 全都来自 s_Items, 而
  * s_Items 只有 SwsScan 会改 —— 也就是说这个顺序**与帧无关**, 原来每帧重排一次
- * 是白做。SwsScan 结束时置脏, SWS_Draw 排一次就清掉。 */
+ * 是白做。现在只在缓存重建时排一次 (见 SwsRebuild)。 */
 static int s_Order[SWS_CAP];
 static int s_OrderN = -1;           /* -1 = 还没排过 */
 static int s_OrderColCount[4];
@@ -287,18 +277,14 @@ static int s_BoundX = 0, s_BoundY = 0, s_BoundW = 0, s_BoundH = 0;
  * 战役框那套也是整框一个偏移, 所以统一成一个。 */
 static int s_Scroll = 0;
 static int s_MaxRows = 10;         /* [SWSidebar] MaxRows, 0 = 不限 */
-static int s_BtnX = 0, s_BtnY = 0, s_BtnW = 0, s_BtnH = 0;  /* 隐藏按钮 */
-/* SWS_Draw 算好的布局, 供点击/滚动判定使用 */
-static int s_ColCount[4] = { 0, 0, 0, 0 };
-static int s_ColX[4] = { 0, 0, 0, 0 };
+static int s_BtnX = 0, s_BtnY = 0, s_BtnW = 0, s_BtnH = 0;  /* 显隐按钮 */
+/* 展开态那一帧记下的按钮坐标: 收起时原样沿用, 折叠/展开不许跳位。
+ * 见 SwsCollapsedBtnGeom。 -1 = 还没展开过。 */
+static int s_BtnXKeep = -1, s_BtnYKeep = -1;
+/* SWS_Draw 算好的布局, 供点击/滚动判定使用 (现在由缓存重建路径发布) */
 static int s_YStart = 0, s_RowH = 50, s_VisRows = 0;
-/* 每列滚动几何, SWS_Draw 布局后发布, 供 SWS_WheelIn 判定 */
-typedef struct { int count, vis, x; } SwsColGeom;
-static SwsColGeom s_Cols[4];
-static int s_NCols = 0, s_LastX = 0, s_ColsValid = 0;
-static int s_BarX = 0, s_BarW = 0, s_BarValid = 0, s_MaxSk = 0;
+static int s_LastX = 0, s_MaxSk = 0;
 
-static int s_BoundValid = 0;
 static int s_ScanLogged = 0;
 
 /* ---------------- 小工具 (无 CRT) ---------------- */
@@ -625,9 +611,9 @@ typedef void* (__thiscall *SwsPcxGetSurfFn)(void* pcx, const char* name, void* p
 #define FN_PCXGETSURF ((SwsPcxGetSurfFn)(void*)0x6BA140u)
 typedef int (__thiscall *SwsPcxLoadFn)(void* pcx, const char* name, int f1, int f2);
 #define FN_PCXLOAD ((SwsPcxLoadFn)(void*)0x6B9D00u)
-typedef int (__thiscall *SwsPcxBlitFn)(void* pcx, void* rect, void* dstSurf,
-    void* pcxSurf, unsigned short transparent);
-#define FN_PCXBLIT ((SwsPcxBlitFn)(void*)0x6BA580u)
+/* PCX::BlitToSurface (0x6BA580) 也已删: 它只能 blit 进**已锁的合成面**, 而
+ * 现在图标是画进自有缓存的 (见 "绘制: 离屏缓存" 一节), 重建期不持锁面。
+ * 旧代码为它保留的中途 unlock/relock 兜底路也一并没了。 */
 #define ADDR_PCX_INSTANCE 0xAC4848u
 #define PCX_TRANS_PARENT 0xF81Fu   /* COLOR_PURPLE = COLOR_RED|COLOR_BLUE */
 
@@ -851,26 +837,11 @@ static void* SwsPcxLiveSurf(const char* file)
     return surf;
 }
 
-/* SHP 兜底: 跟随 SHPReference::Data (+0x0C) 并按需 GetData() 懒加载。
- * 注意: Phobos 是把引用原样交给 DrawSHP 的, 但那是 YRpp 基线二进制;
- * 本机是 Ares 3.0, 传裸引用进 CC_Draw_Shape 已实测崩 (18:50 转储),
- * 所以这里坚持交出真正带像素的 SHPFile。 */
-typedef void* (__fastcall *SwsGetDataFn)(void* self);
-#define FN_SHPGETDATA ((SwsGetDataFn)(void*)0x69E580u)
-
-static void* SwsShpOk(void* type)
-{
-    void* shp, *data;
-    if (!type || !IsPlausiblePtr(type)) return NULL;
-    shp = *(void**)((char*)type + OFF_SWT_SHPIMG);
-    if (!shp || !IsPlausiblePtr(shp)) return NULL;
-    if (*(unsigned short*)shp != 0xFFFFu) return shp;
-    data = *(void**)((char*)shp + 0x0Cu);
-    if (data && IsPlausiblePtr(data)) return data;
-    data = FN_SHPGETDATA(shp);
-    if (data && IsPlausiblePtr(data)) return data;
-    return NULL;
-}
+/* SHP 兜底已删: `SidebarImage` 在 MO 里是引擎的 XXICON.SHP 占位引用, 画出来
+ * 是 11 个一样的紫球, 一直没人用 (SWS_Draw 里那句"什么都不画"就是它唯一的
+ * 归宿)。而为了"万一要用"每帧给每个无 PCX 的超武跑一遍 SwsShpOk —— 里面
+ * 还有一次引擎调用 SHPReference::GetData 的懒加载 —— 属于纯白烧。真正缺图标
+ * 的正解是 rulesmo.ini 里补 SidebarPCX=, 或在 [SWSidebar] 里给它负值隐藏。 */
 
 /* 首次遇到这个超武类型时把它算一遍 (阵营/优先级/隐藏/ManualFire/图标/悬停名/
  * 即时类)。类型对象是静态的, 所以只算一次 —— 抽成独立函数是因为
@@ -962,9 +933,8 @@ static void SwsScan(void)
     void** items;
     void** hItems;
     int count, hCount, i, n = 0;
-    int pside;
+    int pside, frame;
     s_ItemN = 0;
-    s_BoundValid = 0;
     /* 以下全是固定地址字读取, 不碰数组内容, 任何状态下安全。 */
     cur = *(void**)ADDR_CURPLAYER;
     if (!cur || !IsPlausiblePtr(cur)) return;
@@ -995,6 +965,7 @@ static void SwsScan(void)
         if (hItems[i] == cur) break;
     if (i >= hCount) return;
     pside = SwsPlayerSide();
+    frame = *(int*)ADDR_FRAME;
     for (i = 0; i < count && n < SWS_CAP; i++)
     {
         void* sup = items[i];
@@ -1002,9 +973,10 @@ static void SwsScan(void)
         void* owner;
         const char* id;
         unsigned char present, ready, susp;
-        int swIdx, total, start, left, frame, remain, side, prio;
+        int swIdx, total, start, left, remain, side, prio;
         const char* pcxFile = NULL;
         int instant = 0;
+        SwsTypeCache* tc;
         if (!sup || !IsPlausiblePtr(sup)) continue;
         type = *(void**)((char*)sup + OFF_SUP_TYPE);
         owner = *(void**)((char*)sup + OFF_SUP_OWNER);
@@ -1017,45 +989,37 @@ static void SwsScan(void)
         if (ready > 1 || susp > 1) continue;
         id = (const char*)type + OFF_SWT_ID;
         if (!SwsIdOk(id)) continue;
-        {
-            /* 按类型指针缓存 (ArrayIndex 按 ID 反查类型数组, 不能用猜的字段
-             * 偏移)、阵营、ini 优先级/隐藏、SW.ManualFire、SidebarPCX、悬停名。
-             * 声明在外面: 下面填 s_Items[n] 时还要用它取名字。 */
-            SwsTypeCache* tc = SwsTypeEntry(type, id);
-            if (!tc) continue;
-            if (tc->swIdx < 0) continue;
-            if (tc->prio < 0) SwsFillType(tc, type, id);
-            /* 支援技能与超武同分类, 一并显示; 只排除 SW.ManualFire=no。
-             * 不能拿引擎 ShowTimers 集合当显示清单 —— 它只有 11 个, 是
-             * "正在计时"的子集, 不是侧栏该有的全量。 */
-            if (tc->hide || !tc->manual) continue;
-            swIdx = tc->swIdx;
-            side = tc->side;
-            prio = tc->prio;
-            pcxFile = tc->pcxFile;
-            instant = tc->instant;
-            /* 名字属于类型, 不属于本次的条目下标; 出了这个块就再也拿不到 tc */
-            SwsCopyName(s_ItemNameBuf, tc->name, 24);
-        }
+        /* 按类型指针缓存 (ArrayIndex 按 ID 反查类型数组, 不能用猜的字段
+         * 偏移)、阵营、ini 优先级/隐藏、SW.ManualFire、SidebarPCX、悬停名。 */
+        tc = SwsTypeEntry(type, id);
+        if (!tc) continue;
+        if (tc->swIdx < 0) continue;
+        if (tc->prio < 0) SwsFillType(tc, type, id);
+        /* 支援技能与超武同分类, 一并显示; 只排除 SW.ManualFire=no。
+         * 不能拿引擎 ShowTimers 集合当显示清单 —— 它只有 11 个, 是
+         * "正在计时"的子集, 不是侧栏该有的全量。 */
+        if (tc->hide || !tc->manual) continue;
+        swIdx = tc->swIdx;
+        side = tc->side;
+        prio = tc->prio;
+        pcxFile = tc->pcxFile;
+        instant = tc->instant;
         total = *(int*)((char*)type + OFF_SWT_RECH);
         if (total < 0 || total > 1000000) total = 0;
         start = *(int*)((char*)sup + OFF_SUP_RTSTART);
         left = *(int*)((char*)sup + OFF_SUP_RTLEFT);
-        frame = *(int*)ADDR_FRAME;
         if (start == -1) remain = left;
         else remain = left - (frame - start);
         if (remain < 0) remain = 0;
         if (total > 0 && remain > total) remain = total;
         s_Items[n].type = type;
         s_Items[n].pcxFile = pcxFile;
-        /* PCX 优先 (Phobos SWButtonClass::Draw 同序); 没有 PCX 才回退 SHP。 */
-        s_Items[n].shp = pcxFile ? NULL : SwsShpOk(type);
         s_Items[n].swIdx = swIdx;
         s_Items[n].side = (side >= 0) ? side : pside;
         s_Items[n].prio = prio;
-        SwsCopyId(s_Items[n].id, id);
-        /* 名字随条目一起搬, 保证悬停提示和图标永远对应同一个超武 */
-        SwsCopyName(s_Items[n].name, s_ItemNameBuf, 24);
+        /* 名字属于类型, 存进类型缓存; 搬进条目时一并带走, 保证悬停提示和
+         * 图标永远对应同一个超武 (直接拷 tc->name, 不再经过中转缓冲区)。 */
+        SwsCopyName(s_Items[n].name, tc->name, 24);
         s_Items[n].ready = (ready == 1 && susp == 0) ? 1 : 0;
         s_Items[n].susp = (susp == 1) ? 1 : 0;
         s_Items[n].remain = remain;
@@ -1538,7 +1502,7 @@ extern "C" __declspec(dllexport) int __cdecl SWS_WheelIn(int mx, int my, int dir
 {
     int step;
     step = s_ScrollStep;   /* SwsEnsureInit 读一次; 这里每滚轮读 ini 是文件 I/O */
-    if (!s_Enable || !s_Visible || !s_ColsValid) return 0;
+    if (!s_Enable || !s_Visible || !s_BoundsKnown) return 0;
     /* 命中范围: 整块 (含右侧滚动条那几像素) */
     if (mx < s_BoundX || mx > s_LastX + SWS_ICON_W + 5) return 0;
     if (my < s_YStart || my >= s_YStart + (s_VisRows * s_RowH - s_Gap)) return 0;
@@ -1547,13 +1511,14 @@ extern "C" __declspec(dllexport) int __cdecl SWS_WheelIn(int mx, int my, int dir
     else          s_Scroll += step;
     if (s_Scroll < 0) s_Scroll = 0;
     if (s_Scroll > s_MaxSk) s_Scroll = s_MaxSk;
+    /* s_Scroll 进了缓存重建的指纹 (见 SwsSig), 所以下一帧 SWS_Draw 就会重画 */
     return 1;
 }
 
 /* 鼠标是否在侧栏区内 (含滚动条): 战役框 WheelHook 用它决定优先级 */
 extern "C" __declspec(dllexport) int __cdecl SWS_OverBar(int mx, int my)
 {
-    if (!s_Enable || !s_Visible || !s_ColsValid) return 0;
+    if (!s_Enable || !s_Visible || !s_BoundsKnown) return 0;
     if (mx < s_BoundX || mx > s_LastX + SWS_ICON_W + 5) return 0;
     if (my < s_YStart || my >= s_YStart + (s_VisRows * s_RowH - s_Gap)) return 0;
     return 1;
@@ -1607,6 +1572,7 @@ void SWS_Poll(void)
                 {
                     s_Visible = 1;
                     s_DedupDirty = 1;
+                    s_ForceScan = 1;   /* 刚点的展开箭头: 立刻重扫, 别等 15 帧 */
                     s_HoldSkip = 1;      /* 吞掉, 别让这次点击漏到地图 */
                     LogLine("sws: show");
                 }
@@ -1615,7 +1581,6 @@ void SWS_Poll(void)
             s_PrevRB = rb;
         }
         s_ItemN = 0;
-        s_BoundValid = 0;
         s_PendSel = -2;
         s_SelDown = 0;
         if (!s_PrevLB) s_HoldSkip = 0;   /* 与可见分支同规则: 按住期间不清 */
@@ -1805,25 +1770,46 @@ void SWS_Poll(void)
 
 /* ---------------- 点击吞没门 ---------------- */
 
-/* 鼠标是否真的压在一个**可见的超武图标**上。
+/* 鼠标压在哪个**可见的超武图标**上。
+ * 返回的是**排序后**的下标 (s_Order 里的位置), -1 = 无。
  *
- * 吞没门不能拿整块栏区矩形来判。栏区底框是按每列的 maxRows 画满的, 某列
+ * ⚠ 这个下标必须和高亮/图标循环里的 i 用**同一个坐标系**。那两个循环走的
+ *   是 s_Items[s_Order[i]], 而条目在 s_Items 里的原序 (SuperClass 数组序)
+ *   和排序后 (阵营 → ini 优先级 → ArrayIndex) **不是一回事**。
+ *   早先这个函数扫的是原序 s_Items[k], 高亮循环却拿它跟排序下标 i 比 ——
+ *   于是高亮框落在**另一个**超武身上 (实测: 鼠标悬停"心灵支配", 亮的是
+ *   "回澜"), 而提示框因为直接用 s_Items[hover] 取名字, 看着是对的, 更骗人。
+ *
+ * 用的就是**屏上这一帧**的布局 (s_Items[].x/y 由缓存重建时发布), 所以命中
+ * 与画面永远一致; 重建一改布局, 下一帧就会重画。
+ *
+ * 命中不能拿整块栏区矩形来判。栏区底框是按每列的 maxRows 画满的, 某列
  * 条目少的时候下半截是空的, 再加上栏区内部的左右留白 —— 这些地方**根本没有
  * 图标**, 却会把玩家的点击/选中整片吞掉, 表现就是"侧栏盖住的地图那块点不动,
  * 框单位/打靶都用不了"。所以只在真正画了图标的地方挡, 空地一律还给引擎。 */
-static int SwsMouseOnIcon(int mx, int my)
+static int SwsHitItem(int mx, int my)
 {
-    int k;
-    if (s_ItemN <= 0) return 0;
+    int k, o;
+    if (s_ItemN <= 0) return -1;
     for (k = 0; k < s_ItemN; k++)
     {
+        const SwsItem* it;
+        /* 扫描刚换过条目集而重建还没跑时 s_Order 是上一套的, 夹一道 */
+        o = s_Order[k];
+        if (o < 0 || o >= s_ItemN) continue;
+        it = &s_Items[o];
         /* 滚出可见范围的 (x=-1) 不算: 不跳过的话 x=-1 会让命中判定恒真 */
-        if (s_Items[k].x < 0) continue;
-        if (mx >= s_Items[k].x && mx < s_Items[k].x + SWS_ICON_W &&
-            my >= s_Items[k].y && my < s_Items[k].y + SWS_ICON_H)
-            return 1;
+        if (it->x < 0) continue;
+        if (mx >= it->x && mx < it->x + SWS_ICON_W &&
+            my >= it->y && my < it->y + SWS_ICON_H)
+            return k;
     }
-    return 0;
+    return -1;
+}
+
+static int SwsMouseOnIcon(int mx, int my)
+{
+    return SwsHitItem(mx, my) >= 0;
 }
 
 extern "C" __declspec(dllexport) unsigned __cdecl SWS_ClickGate(void* regs)
@@ -1837,9 +1823,9 @@ extern "C" __declspec(dllexport) unsigned __cdecl SWS_ClickGate(void* regs)
      * 让这次点击止于侧栏, 不被当成打靶放置。即时超武也一样吞 ——
      * 它靠 SpecialPlace 事件生效, 不依赖引擎处理这次点击。
      *
-     * 命中判定用 s_BoundsKnown 而不是 s_BoundValid: 后者在 SwsScan 开头
-     * 被清零, 而点击那帧必然 s_ForceScan=1 触发重扫, 门恰好撞上它被清零的
-     * 窗口而放行 (这是"要点很多次"的直接原因)。栏区几何在重扫期间不变。*/
+     * 命中判定用 s_BoundsKnown (= 缓存里有可合成的一帧): 点击那帧必然
+     * s_ForceScan=1 触发重扫, 而重扫不改布局, 所以拿屏上这一帧的图标矩形
+     * 判定就准 (早先还有个 SwsScan 开头清零的 s_BoundValid, 谁都不读)。 */
     if (s_HoldSkip) r = ADDR_CLICKGATE_SKIP;
     else if (!s_BoundsKnown) r = 0;
     else if (!GtMouseGameXY(&mx, &my)) r = 0;
@@ -1922,209 +1908,454 @@ static int SwsPushSpecialPlace(int swIdx)
     return 1;
 }
 
-/* ---------------- 绘制 ---------------- */
-
-
-/* ---- PCX 逐像素贴图 (不走引擎 BlitToSurface) ----
- * BlitToSurface 每调一次就锁/解锁一次合成面 (N 个条目 = N 次锁面), 所以改成在
- * 下面那次锁面里直接写像素。
+/* ================= 绘制: 离屏缓存 + 15 逻辑帧节流 =================
  *
+ * 这一节整体重写过, 起因是"侧栏一开帧率就掉"。根因不在哪一行, 在**频率**:
+ * 侧栏整块贴在一个每渲染帧都被重画的合成面上, 所以早先的写法是每帧把整块
+ * 从零画一遍:
+ *   - 78 个 PCX 逐像素缩放+混合 (22 万像素, 每像素两次整数除法算源坐标);
+ *   - 一整块底框走 Blend16 —— Blend16 每个像素约 20 次整数除法, 12 万像素
+ *     就是 240 万次除法/帧, 这一项单独就够吃掉十几毫秒;
+ *   - 四列边框 + 滚动条 + 两个按钮, 每个条目还各来一次 RenderLine (GDI
+ *     光栅化前要清一遍 1024x64x4 的 DIB)。
+ * 而侧栏内容一秒才变几次 (充能/就绪/增减条目), 这些每帧重算是纯冗余。
+ *
+ * 现在拆成两层:
+ *   重建 (SwsRebuild)    画进自有缓存, 触发 = 15 个游戏逻辑帧一次 + 交互;
+ *   合成 (SwsCacheBlit)  每渲染帧一次带 alpha 的拷贝, 无分支无除法热点。
+ *
+ * 缓存为什么是"16 位色 + 8 位覆盖率"两张平面而不是一张 16 位色: 侧栏自己
+ * 各层要互相压上去 (底框压住底、图标压住底框、边框压住图标), 最后才与
+ * 面下的地图合成。只存 16 位色会把"半透明"烙死在缓存里, 换个背景就错;
+ * 存覆盖率才能既做内部层间混合, 又在合成时与地图正确混合。
+ *
+ * 另一个配套决定: **悬停提示不再跟着鼠标逐像素走**, 而是挂在图标水平中心。
+ * 之前它锚在鼠标 x 上, 于是鼠标在图标里横移一像素就要重画整块 —— 和缓存
+ * 完全相冲, 而且逐像素跟随本身就是抖的。挂图标上更稳, 也让"鼠标移到哪个
+ * 哪个亮"变成一次事件而不是每帧事件。
+ */
+
+/* ---- 缓存 ---- */
+#define SWS_REBUILD_FRAMES 15      /* 重建节流: N 个游戏逻辑帧 (与扫描同频) */
+#define SWS_CACHE_MAXPX    2000000 /* 缓存上限 2M 像素 (6MB), 超过就不画 */
+
+static unsigned short* s_CchC = NULL;   /* 16 位色 */
+static unsigned char*  s_CchA = NULL;   /* 覆盖率 0~255 (0 = 完全透明) */
+static int s_CchCap = 0, s_CchW = 0, s_CchH = 0;
+static int s_CchX = 0, s_CchY = 0;      /* 缓存左上角在合成面里的位置 */
+static int s_CchOK = 0;                 /* 缓存里有可合成的内容 */
+static int s_CchFrame = -1;             /* 上次重建时的逻辑帧号 */
+static unsigned s_CchSig = 0;           /* 上次重建时的结构指纹 */
+static int s_CchHover = -2;             /* 上次重建用的悬停项 (改了就重画) */
+static int s_CchBtn = -1;               /* 上次重建用的按钮悬停态 */
+static int s_CchSel = -9999;            /* 上次重建用的当前选中 (改了就重画) */
+
+/* 8 位 RGB -> 目标位深的 16 位色 (与 Blend16 同一套移位/掩码) */
+static unsigned short SwsPack(unsigned char r, unsigned char g, unsigned char b)
+{
+    return (unsigned short)(((unsigned)r * ((1u << g_RBits) - 1u) / 255u)
+                                << (g_GBits == 6 ? 11 : 10) |
+                            ((unsigned)g * ((1u << g_GBits) - 1u) / 255u) << 5 |
+                            ((unsigned)b * ((1u << g_BBits) - 1u) / 255u));
+}
+
+/* 缓存内一次"源在上"合成: 源色 c, 源覆盖率 a8 (0~255)。
+ * 两条快路吃掉绝大多数像素 —— 源全覆盖 (s_Alpha=100 的图标/文字) 与
+ * 目标空 (最底下那层底框) —— 两条都**不含一次除法**。中间那档
+ * (半透明压半透明, 例如 Alpha<100 的图标压在 30% 底框上) 才走除法,
+ * 而它只在重建时跑。逐分量插、不跨分量借位, 与 Blend16 一致。 */
+static void SwsOver(unsigned short* dp, unsigned char* ap,
+                    unsigned short c, int a8)
+{
+    int da = *ap, na, ia, den;
+    unsigned bs, gm;
+    int r, g2, b, dr, dg, db;
+    if (a8 >= 255) { *dp = c; *ap = 255; return; }
+    if (da == 0) { *dp = c; *ap = (unsigned char)a8; return; }
+    ia = 255 - a8;
+    na = a8 + (da * ia + 127) / 255;
+    if (na <= 0) { *ap = 0; return; }
+    den = 255 * na;
+    bs = (g_GBits == 6) ? 11u : 10u;
+    gm = (g_GBits == 6) ? 0x3Fu : 0x1Fu;
+    r = c & 0x1F; g2 = (c >> 5) & gm; b = (c >> bs) & 0x1F;
+    dr = *dp & 0x1F; dg = (*dp >> 5) & gm; db = (*dp >> bs) & 0x1F;
+    /* r*a8*255 <= 63*255*255, dc*da*ia 同量级, 和 < 2^24, int 装得下 */
+    r = (r * a8 * 255 + dr * da * ia + (den >> 1)) / den;
+    g2 = (g2 * a8 * 255 + dg * da * ia + (den >> 1)) / den;
+    b = (b * a8 * 255 + db * da * ia + (den >> 1)) / den;
+    if (r > 31) r = 31;
+    if (g2 > (int)gm) g2 = (int)gm;
+    if (b > 31) b = 31;
+    *dp = (unsigned short)((b << bs) | (g2 << 5) | r);
+    *ap = (unsigned char)na;
+}
+
+/* 矩形填充进缓存 (屏幕坐标; 内部减掉缓存原点再夹一次)。
+ * 上下左右各夹一次, 内层循环不逐像素判越界 —— 重建期画的是矩形块,
+ * 整块被裁的情况不多, 但夹取仍然必须有 (提示框/按钮可能探出缓存外)。 */
+static void SwsCFill(int x, int y, int rw, int rh, unsigned char r,
+                     unsigned char g, unsigned char b, int op)
+{
+    int x0, x1, y0, y1, xx, yy, a8;
+    unsigned short c;
+    if (!s_CchA || rw <= 0 || rh <= 0 || op <= 0) return;
+    if (op > 100) op = 100;
+    x -= s_CchX; y -= s_CchY;
+    x0 = (x < 0) ? 0 : x;
+    x1 = x + rw; if (x1 > s_CchW) x1 = s_CchW;
+    y0 = (y < 0) ? 0 : y;
+    y1 = y + rh; if (y1 > s_CchH) y1 = s_CchH;
+    if (x1 <= x0 || y1 <= y0) return;
+    c = SwsPack(r, g, b);
+    a8 = (op * 255 + 50) / 100;
+    for (yy = y0; yy < y1; yy++)
+    {
+        unsigned short* crow = s_CchC + (size_t)yy * s_CchW;
+        unsigned char* arow = s_CchA + (size_t)yy * s_CchW;
+        for (xx = x0; xx < x1; xx++) SwsOver(crow + xx, arow + xx, c, a8);
+    }
+}
+/* 吃侧栏整体透明度 (底框/边框/滚动条/按钮/未就绪罩)。 */
+static void SwsCFillA(int x, int y, int rw, int rh, unsigned char r,
+                      unsigned char g, unsigned char b, int op)
+{
+    if (op < 0) op = 0;
+    if (op > 100) op = 100;
+    SwsCFill(x, y, rw, rh, r, g, b, (op * s_Alpha) / 100);
+}
+/* **不**吃整体透明度: 只给悬停提示框。它是"此刻正在读"的信息, 必须始终
+ * 清晰 —— 跟着侧栏淡到 30% 就看不清是哪个超武了。 */
+static void SwsCFillR(int x, int y, int rw, int rh, unsigned char r,
+                      unsigned char g, unsigned char b, int op)
+{
+    SwsCFill(x, y, rw, rh, r, g, b, op);
+}
+
+/* ---- PCX 逐像素贴图进缓存 ----
  * BSurface 布局 (gamemd 0x6B9D00 构造函数实证, 与 YRpp Surface.h:144 一致):
  *   +0x00 vptr / +0x04 Width / +0x08 Height / +0x0C LockLevel /
  *   +0x10 BytesPerPixel(=2) / +0x14 Buffer(WORD*, 行距=Width*2) /
  *   +0x18 Size(=W*H*2) / +0x1C Allocated;  sizeof 0x20
- * 曾把这几个偏移写成 0x88/0x8C/0x94/0x98 —— 那是把**虚表大小** (34*4=0x88) 当
- * 成了字段偏移, 于是每次都在校验处提前 return 0, 图标退回整块覆盖的引擎 blit
- * (那条路 100% 不透明、不认 s_Alpha)。布局对不上仍返回 0 让调用方兜底。 */
-static int SwsPcxBlitLocked(unsigned short* dstBase, int pitch,
-                            int surfW, int surfH,
-                            int dx, int dy, int dw, int dh, void* psurf)
+ * 曾把这几个偏移写成 0x88/0x8C/0x94/0x98 (那是虚表大小 34*4), 于是每次都在
+ * 校验处提前 return 0, 图标退回整块覆盖的引擎 blit。
+ * 现在**没有兜底**: 校验不过就不画这个图标 (条目仍在, 边框/百分比照旧),
+ * 而且只记一行日志。早先那条兜底 (PCX::BlitToSurface) 要求已锁的合成面,
+ * 而重建期刻意不持锁面 —— 为了它中途 unlock/relock 再重入半段布局, 代价
+ * 远大于它兜的那点风险; 而且它 100% 不透明、不认 Alpha, 留着只会让半透明
+ * 在个别条目上失效。 */
+static void SwsCPcx(int x, int y, int dw, int dh, void* psurf, int opaque)
 {
-    int pw, ph, bpp, x, y;
+    int pw, ph, bpp, r, xx, x0, x1, y0, a8;
     unsigned short* src;
-    if (!dstBase || !psurf || !IsPlausiblePtr(psurf)) return 0;
-    /* 虚表必须指向代码段, 否则说明根本不是 BSurface */
-    if (!IsPlausiblePtr(*(void**)psurf)) return 0;
+    unsigned short sxmap[SWS_ICON_W];
+    static int s_BadLogged = 0;
+    if (!s_CchA || dw <= 0 || dh <= 0 || dw > SWS_ICON_W) return;
+    if (!psurf || !IsPlausiblePtr(psurf)) return;
+    if (!IsPlausiblePtr(*(void**)psurf)) return;   /* 虚表必须指向代码段 */
     pw = *(int*)((char*)psurf + 0x04);
     ph = *(int*)((char*)psurf + 0x08);
     bpp = *(int*)((char*)psurf + 0x10);
     src = *(unsigned short**)((char*)psurf + 0x14);
-    if (pw < 1 || pw > 256 || ph < 1 || ph > 256 || bpp != 2) return 0;
-    if (!src || !IsPlausiblePtr((void*)src)) return 0;
-    /* Size 自洽校验: Buffer 至少得有这么多字节, 挡掉读到野指针 */
-    if (*(int*)((char*)psurf + 0x18) != pw * ph * 2) return 0;
-    /* 目标矩形左右各夹一次, 内层循环里不再逐像素判越界 (整块面可能被裁掉)。
-     * 这是最热的循环 (78 个条目 x 60x48), 所以 Alpha 的混合系数也**提到
-     * 循环外**预先算好 —— 原来每个像素做 3 次除以 100。 */
+    /* 占位面通常尺寸离谱 (1x1 / 0), 这几道校验就是挡它的 */
+    if (pw < 1 || pw > 256 || ph < 1 || ph > 256 || bpp != 2) goto bad;
+    if (!src || !IsPlausiblePtr((void*)src)) goto bad;
+    if (*(int*)((char*)psurf + 0x18) != pw * ph * 2) goto bad;
+    x -= s_CchX; y -= s_CchY;
+    x0 = (x < 0) ? 0 : x;
+    x1 = x + dw; if (x1 > s_CchW) x1 = s_CchW;
+    y0 = (y < 0) ? 0 : y;
+    if (x1 <= x0) return;
+    /* 缩放映射表: 源列宽这一行是固定的, 一次算好 dw 项就行 (下标相对 x0 ——
+     * 绝对下标会越出这张 60 项的小表)。原来每个像素现算 ((x-dx)*pw)/dw,
+     * 22 万像素就是 44 万次整数除法。 */
+    for (xx = x0; xx < x1; xx++)
+        sxmap[xx - x0] = (unsigned short)(((xx - x) * pw) / dw);
+    /* 悬停的那一个画不透明: 图标也是"此刻正在读"的东西, 别让侧栏的 Alpha
+     * 把它一起淡掉 (悬停名提示框早就是这个规矩, 这里跟它对齐)。 */
+    a8 = opaque ? 255 : (s_Alpha * 255 + 50) / 100;
+    if (a8 <= 0) return;
+    for (r = 0; r < dh; r++)
     {
-        int x0 = (dx < 0) ? 0 : dx;
-        int x1 = dx + dw;
-        int kA = s_Alpha, kB = 100 - s_Alpha;
-        if (x1 > surfW) x1 = surfW;
-        if (x1 <= x0) return 1;
-        for (y = 0; y < dh; y++)
+        int ty = y + r;
+        int sy = (ph <= 1) ? 0 : (r * ph) / dh;
+        unsigned short* crow;
+        unsigned char* arow;
+        const unsigned short* srow;
+        if (ty < y0) continue;              /* 上边被裁 */
+        if (ty >= s_CchH) break;            /* 下边被裁: 后面整段都白跑 */
+        crow = s_CchC + (size_t)ty * s_CchW;
+        arow = s_CchA + (size_t)ty * s_CchW;
+        srow = src + (size_t)sy * pw;
+        for (xx = x0; xx < x1; xx++)
         {
-            int ty = dy + y;
-            int sy = (ph <= 1) ? 0 : (y * ph) / dh;
-            unsigned short* drow;
-            const unsigned short* srow;
-            if (ty < 0 || ty >= surfH) continue;
-            drow = dstBase + (size_t)ty * pitch / 2;
-            srow = src + (size_t)sy * pw;
-            for (x = x0; x < x1; x++)
-            {
-                int sx = (pw <= 1) ? 0 : ((x - dx) * pw) / dw;
-                unsigned short c = srow[sx];
-                if (c == PCX_TRANS_PARENT) continue;   /* 色键 */
-                /* 整体透明度 <100 时不能直接覆盖: 要和底下的像素混合, 否则
-                 * 图标会永远 100% 不透明, Alpha 就只对走 SwsFillLocked 的
-                 * 那些元素生效。 */
-                if (kA >= 100) drow[x] = c;
-                else
-                {
-                    unsigned short bgc = drow[x];
-                    int nr = ((c & 0x1F) * kA + (bgc & 0x1F) * kB) / 100;
-                    int ng = (((c >> 5) & 0x3F) * kA +
-                              ((bgc >> 5) & 0x3F) * kB) / 100;
-                    int nb = (((c >> 11) & 0x1F) * kA +
-                              ((bgc >> 11) & 0x1F) * kB) / 100;
-                    drow[x] = (unsigned short)(nb << 11 | ng << 5 | nr);
-                }
-            }
+            unsigned short c = srow[sxmap[xx - x0]];
+            if (c == PCX_TRANS_PARENT) continue;   /* 色键 */
+            SwsOver(crow + xx, arow + xx, c, a8);
         }
     }
+    return;
+bad:
+    if (!s_BadLogged)
+    {
+        s_BadLogged = 1;
+        LogLine("sws: pcx surface layout bad, icons skipped");
+    }
+}
+
+/* 覆盖率 blit 进缓存。src 是 1 字节/像素的覆盖率 (GDI DIB 是 4 字节/像素,
+ * 取第 2 字节, 白字 R=G=B)。aScale 只做调用方的预乘, 这里**不**再吃
+ * s_Alpha —— 覆盖率本身就是不透明度, 与 s_Alpha 无关。 */
+static void SwsCCov(const unsigned char* src, int spitch, int sbpp,
+                    int x, int y, int w, int h,
+                    unsigned char r, unsigned char g, unsigned char b,
+                    int aScale)
+{
+    int xs, ys, x0, x1, y0, y1, xx, yy, cb = (sbpp == 4) ? 2 : 0;
+    unsigned short c;
+    if (!s_CchA || !src || w <= 0 || h <= 0 || aScale <= 0) return;
+    if (aScale > 100) aScale = 100;
+    xs = x - s_CchX; ys = y - s_CchY;
+    x0 = (xs < 0) ? 0 : xs;
+    x1 = xs + w; if (x1 > s_CchW) x1 = s_CchW;
+    y0 = (ys < 0) ? 0 : ys;
+    y1 = ys + h; if (y1 > s_CchH) y1 = s_CchH;
+    if (x1 <= x0 || y1 <= y0) return;
+    c = SwsPack(r, g, b);
+    for (yy = y0; yy < y1; yy++)
+    {
+        const unsigned char* srow =
+            src + (size_t)(yy + s_CchY - y) * spitch;   /* DIB/提示行号 */
+        unsigned short* crow = s_CchC + (size_t)yy * s_CchW;
+        unsigned char* arow = s_CchA + (size_t)yy * s_CchW;
+        for (xx = x0; xx < x1; xx++)
+        {
+            int cov = srow[(xx - xs) * sbpp + cb];
+            int a;
+            if (!cov) continue;
+            a = (cov * aScale + 50) / 100;
+            if (a > 255) a = 255;
+            if (!a) continue;
+            SwsOver(crow + xx, arow + xx, c, a);
+        }
+    }
+}
+
+/* 缓存 -> 已锁的合成面: 每渲染帧唯一的一次遍历, 也是唯一碰得到地图的地方。
+ * 逐分量线性插值 (与 SwsOver 同一套移位/掩码)。除法用 "+128 再 >>8" 代替:
+ * (v*ia) 在 ±7905 内, 算术右移 8 位只是除 255 的近似, 先加半个 LSB 把舍入
+ * 补上 (a=1 这种极低不透明度时不补能差整整一个最低位), 省掉每像素三次整数
+ * 除法。a==0 的像素整条跳过 (留着地图), 所以侧栏没画的地方是**零开销**。 */
+static void SwsCacheBlit(unsigned char* base, int pitch, int surfW, int surfH)
+{
+    int y, x, x0, x1;
+    unsigned bs, gm;
+    if (!s_CchC || !s_CchA || !s_CchOK) return;
+    bs = (g_GBits == 6) ? 11u : 10u;
+    gm = (g_GBits == 6) ? 0x3Fu : 0x1Fu;
+    /* ⚠ 这里有**两套坐标系**, 混用过一次, 整块侧栏被平铺糊满全屏:
+     *   缓存内下标 x ∈ [0, s_CchW)  ->  画面列 s_CchX + x。
+     * 所以 (a) 内层循环的 x 必须是**缓存内**下标, 写的时候要加上 s_CchX ——
+     *     漏了它整块就贴到画面最左边, 而不是缓存原点; 而
+     * (b) 夹取也必须按"缓存内下标"来算, 不能把画面坐标留在 x1 里:
+     *     只写 "if (超出画面) x1 = surfW - s_CchX" 是不够的 —— 整块在画面内
+     *     时那个分支根本不进, x1 就留在 s_CchX+s_CchW, 内层多跑 s_CchX 次,
+     *     源指针越过本行读进下一行缓存、目标也越过右缘写进下一行。
+     * 正确写法: 目标列区间 [0,surfW) 平移成缓存内下标区间, 再与 [0,s_CchW)
+     * 取交, 两头都夹。 */
+    x0 = 0;
+    x1 = s_CchW;
+    if (s_CchX < 0) x0 = -s_CchX;                       /* dest col 0 */
+    if (s_CchX + s_CchW > surfW) x1 = surfW - s_CchX;   /* dest col surfW-1 */
+    if (x1 > s_CchW) x1 = s_CchW;
+    if (x1 <= x0) return;
+    for (y = 0; y < s_CchH; y++)
+    {
+        int ty = s_CchY + y;
+        unsigned short* drow;
+        const unsigned short* crow;
+        const unsigned char* arow;
+        if (ty < 0) continue;
+        if (ty >= surfH) break;
+        drow = (unsigned short*)(base + (size_t)ty * pitch);
+        crow = s_CchC + (size_t)y * s_CchW;
+        arow = s_CchA + (size_t)y * s_CchW;
+        for (x = x0; x < x1; x++)
+        {
+            int a = arow[x], ia, t, r, g2, b, dr, dg, db;
+            unsigned short c, d;
+            int dx = s_CchX + x;              /* 画面列 */
+            if (!a) continue;
+            c = crow[x];
+            if (a >= 255) { drow[dx] = c; continue; }
+            d = drow[dx];
+            ia = 255 - a;
+            r = c & 0x1F; g2 = (c >> 5) & gm; b = (c >> bs) & 0x1F;
+            dr = d & 0x1F; dg = (d >> 5) & gm; db = (d >> bs) & 0x1F;
+            t = (dr - r) * ia; r += (t + 128) >> 8;
+            t = (dg - g2) * ia; g2 += (t + 128) >> 8;
+            t = (db - b) * ia; b += (t + 128) >> 8;
+            drow[dx] = (unsigned short)(((b & 0x1F) << bs) | ((g2 & gm) << 5) |
+                                        (r & 0x1F));
+        }
+    }
+}
+
+/* 尺寸变了才重分配 (只发生在窗口缩放/改配置, 不是每帧)。
+ * 只清覆盖率平面: 覆盖率 0 的像素在合成时被整条跳过, 颜色平面留着旧值
+ * 永远读不到, 省一半 memset。 */
+static int SwsCacheAlloc(int w, int h)
+{
+    int need, i;
+    if (w <= 0 || h <= 0) return 0;
+    need = w * h;
+    if (need > SWS_CACHE_MAXPX)
+    {
+        static int s_TooBig = 0;
+        if (!s_TooBig)
+        {
+            s_TooBig = 1;
+            LogLine("sws: cache too big, sidebar not drawn (lower MaxRows/Gap)");
+        }
+        return 0;
+    }
+    if (need > s_CchCap)
+    {
+        unsigned short* c;
+        unsigned char* a;
+        static int s_AllocFail = 0;
+        if (s_CchC) { LocalFree(s_CchC); s_CchC = NULL; }
+        if (s_CchA) { LocalFree(s_CchA); s_CchA = NULL; }
+        s_CchCap = 0;
+        c = (unsigned short*)LocalAlloc(LMEM_FIXED, (SIZE_T)need * 2u);
+        a = (unsigned char*)LocalAlloc(LMEM_FIXED, (SIZE_T)need);
+    if (!c || !a)
+    {
+        if (c) LocalFree(c);
+        if (a) LocalFree(a);
+        /* 分配不成时下面会走 nogeo (s_CchOK=0), 而 SWS_Draw 每帧都会
+         * 再进来试一次 —— 不限流就是一帧一行日志把日志撑爆。 */
+        if (!s_AllocFail) { s_AllocFail = 1; LogLine("sws: cache alloc fail"); }
+        return 0;
+    }
+        s_CchC = c; s_CchA = a; s_CchCap = need;
+    }
+    s_CchW = w; s_CchH = h;
+    for (i = 0; i < need; i++) s_CchA[i] = 0;
     return 1;
 }
 
-/* 锁面状态下的半透明填充 (替代每条目 6 次 FillRectTrans 虚表调用)
- * op 先乘上**侧栏整体透明度** s_Alpha: 这样底框/边框/滚动条/箭头这些各带
- * 自己的局部 alpha 的元素, 只要走这里就自动被整体透明度统一调制。 */
-/* 实际填充。热路径 (整栏底框一帧一万多像素, 加上图标/边框/滚动条更多), 所以:
- *   - 上下左右边界**各夹一次**到画布内, 内层循环里不再逐像素判越界;
- *   - op==100 走直接写 (不调 Blend16), 全不透明的那些填充省掉逐像素混合。
- * 绘制面可能被裁掉一部分, 所以夹取是必须的, 但夹一次就够。 */
-static void SwsFillCore(unsigned char* base, int pitch, int surfW, int surfH,
-                        int x, int y, int rw, int rh,
-                        unsigned char r, unsigned char g, unsigned char b,
-                        int op)
+/* ---- 悬停名提示: 字形缓存 ----
+ * 照搬 MOExperience 的 PwrCache 做法: 把 DIB 的覆盖率拷进自有小缓冲, 之后
+ * 画进缓存只读它。直接每帧 RenderLine 是不行的 —— RenderLine 每次都要先
+ * ClearDib 一遍 1024x64x4 (256KB), 悬停时每帧一次纯属白烧; 有了它, 换名字
+ * 或换字号才重新光栅化。 */
+/* 宽度取 DIB_W (1024): RenderLine 自己就把行宽夹在 DIB_W-8, 所以这块缓冲
+ * 永远装得下, 可见宽度与原来"直接 BlitCoverage"完全一致 (字号拉满 + 长名字
+ * 也不会退化成没有提示)。 */
+#define SWS_TIP_COV_W 1024
+#define SWS_TIP_COV_H 48
+static struct {
+    int fontPx, bold, sw, adv, ok;
+    wchar_t nm[24];
+    unsigned char cov[SWS_TIP_COV_W * SWS_TIP_COV_H];
+} s_Tip = { 0, 0, 0, 0, 0, { 0 }, { 0 } };
+
+/* 备好悬停提示的字形; 0 = 没有提示/备不成。必须在分配缓存**之前**调用 ——
+ * 提示框可能探出侧栏块之外, 缓存矩形得把它算进去。 */
+static int SwsTipPrepare(const wchar_t* nm)
 {
-    int yy, x0, x1;
-    if (!base || rw <= 0 || rh <= 0) return;
-    if (op <= 0) return;
-    if (op > 100) op = 100;
-    x0 = (x < 0) ? 0 : x;
-    x1 = x + rw;
-    if (x1 > surfW) x1 = surfW;
-    if (x1 <= x0) return;
-    rw = x1 - x0;
-    if (y < 0) { rh += y; y = 0; }              /* 上边被裁: 同步减高度 */
-    if (y + rh > surfH) rh = surfH - y;
-    if (rh <= 0) return;
-    if (op >= 100)
+    int gpx, adv, sw, sl = 0, yy, xx;
+    if (!nm || !nm[0]) return 0;
+    gpx = VecText_FontPx();
+    if (gpx <= 0) gpx = 18;
+    if (s_Tip.ok && gpx == s_Tip.fontPx && VecText_Bold() == s_Tip.bold &&
+        FaceSame(nm, s_Tip.nm))
+        return s_Tip.sw;
+    s_Tip.ok = 0; s_Tip.sw = 0;
+    s_Tip.fontPx = gpx; s_Tip.bold = VecText_Bold();
+    SwsCopyName(s_Tip.nm, nm, 24);   /* 有界拷贝: 别用 CopyFace (那是 48 宽的) */
+    /* 提示框自己的 GDI 槽 (6): 充能百分比用槽 5 (各自的字号), 共用一个槽
+     * 会让 GdiEnsure 每次都拆了重建 (CreateDIBSection+CreateFontW), 反而更贵。 */
+    if (!GdiEnsure(gpx, s_Tip.bold, 6, VecText_FontFace())) return 0;
+    adv = g_G->adv > 0 ? g_G->adv : gpx + 2;
+    while (sl < 23 && nm[sl]) sl++;
+    sw = sl ? RenderLine(nm, sl) : 0;
+    if (sw <= 0 || sw + 2 > SWS_TIP_COV_W || adv > SWS_TIP_COV_H) return 0;
+    for (yy = 0; yy < adv; yy++)
     {
-        /* 不透明 = 直接写目标色。位深是运行时探测的 (565 或 555, 见 GdiText),
-         * 所以照 Blend16 的同一套移位来压, 不能硬编码 RGB565。 */
-        unsigned rMax = (1u << g_RBits) - 1u;
-        unsigned gMax = (1u << g_GBits) - 1u;
-        unsigned bMax = (1u << g_BBits) - 1u;
-        unsigned short c = (unsigned short)
-            (((unsigned)r * rMax / 255u) << (g_GBits == 6 ? 11 : 10) |
-             ((unsigned)g * gMax / 255u) << 5 |
-             ((unsigned)b * bMax / 255u));
-        for (yy = 0; yy < rh; yy++)
-        {
-            unsigned short* row =
-                (unsigned short*)(base + (size_t)(y + yy) * pitch) + x0;
-            int xx;
-            for (xx = 0; xx < rw; xx++) row[xx] = c;
-        }
-        return;
+        const unsigned char* srow = g_G->bits + (size_t)yy * g_G->pitch;
+        for (xx = 0; xx < sw + 2; xx++)
+            s_Tip.cov[yy * SWS_TIP_COV_W + xx] = srow[xx * 4 + 2];
     }
-    {
-        unsigned a = (unsigned)op * 255 / 100;
-        for (yy = 0; yy < rh; yy++)
-        {
-            unsigned short* row =
-                (unsigned short*)(base + (size_t)(y + yy) * pitch) + x0;
-            int xx;
-            for (xx = 0; xx < rw; xx++)
-                row[xx] = Blend16(row[xx], r, g, b, a);
-        }
-    }
+    s_Tip.sw = sw; s_Tip.adv = adv; s_Tip.ok = 1;
+    return sw;
 }
 
-/* 吃侧栏整体透明度的填充: 底框/边框/滚动条/箭头/图标底板都走这里。 */
-static void SwsFillLocked(unsigned char* base, int pitch, int surfW, int surfH,
-                          int x, int y, int rw, int rh,
-                          unsigned char r, unsigned char g, unsigned char b,
-                          int op)
+/* 提示框矩形 (屏幕坐标)。ax = 锚点 (图标水平中心), ayTop = 图标**下**边。
+ * rw<=0 表示没有提示。
+ *
+ * 默认挂在图标**下面**, 不挂上面: 侧栏块顶上方只有两个按钮那一行
+ * (18px), 挂上去的话框顶会探出块外被缓存边界削掉一截 —— 表现就是名字被
+ * 拦腰截断 (实测)。挂下面则始终落在块内那一侧, 只有最后一行可能顶到
+ * 屏幕底, 那种情况翻到上面 (下面这条会同时把缓存上边界让出来)。
+ * 水平方向仍要夹: 名字再长也不能跑出画面。 */
+static void SwsTipRect(int w, int h, int ax, int ayTop,
+                       int* rx, int* ry, int* rw, int* rh)
 {
-    if (op < 0) op = 0;
-    if (op > 100) op = 100;
-    SwsFillCore(base, pitch, surfW, surfH, x, y, rw, rh, r, g, b,
-                (op * s_Alpha) / 100);
+    int sw = s_Tip.ok ? s_Tip.sw : 0, adv = s_Tip.adv, sx, ny;
+    *rw = 0; *rh = 0;
+    if (sw <= 0) return;
+    sx = ax - sw / 2;
+    ny = ayTop + 2;
+    if (ny - 2 + adv + 4 > h) ny = ayTop - adv - 4;   /* 底下放不下就翻上去 */
+    if (sx < 4) sx = 4;
+    /* 夹取要按**框**算, 否则右边会跑出屏幕 */
+    if (sx + sw + 6 > w - 2) sx = (w - sw - 8 > 4) ? w - sw - 8 : 4;
+    *rx = sx - 2; *ry = ny - 2; *rw = sw + 6; *rh = adv + 4;
 }
 
-/* **不**吃整体透明度的填充: 只给悬停提示框用。
- * 提示框是"此刻正在读"的信息, 必须始终清晰 —— 跟着侧栏透明度一起淡到 30%
- * 就看不清是哪个超武了。它是侧栏里唯一无视 Alpha 的元素。 */
-static void SwsFillRawLocked(unsigned char* base, int pitch, int surfW, int surfH,
-                             int x, int y, int rw, int rh,
-                             unsigned char r, unsigned char g, unsigned char b,
-                             int op)
+/* 提示框: 半透明黑底 + 主题色边框 + 白字。刻意**不吃**侧栏整体透明度
+ * (SwsCFillR / SwsCCov 都不乘 s_Alpha)。 */
+static void SwsDrawTip(int w, int h, int ax, int ayTop)
 {
-    SwsFillCore(base, pitch, surfW, surfH, x, y, rw, rh, r, g, b, op);
+    int bx, by, bw, bh, sx;
+    if (!s_Tip.ok) return;
+    SwsTipRect(w, h, ax, ayTop, &bx, &by, &bw, &bh);
+    if (bw <= 0) return;
+    SwsCFillR(bx, by, bw, bh, 0, 0, 0, 150);
+    SwsCFillR(bx, by, bw, 1, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
+    SwsCFillR(bx, by + bh - 1, bw, 1, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
+    SwsCFillR(bx, by, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
+    SwsCFillR(bx + bw - 1, by, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
+    sx = bx + 2;
+    SwsCCov(s_Tip.cov, SWS_TIP_COV_W, 1, sx + 1, by + 1, s_Tip.sw, s_Tip.adv,
+            0, 0, 0, 85);
+    SwsCCov(s_Tip.cov, SWS_TIP_COV_W, 1, sx, by, s_Tip.sw, s_Tip.adv,
+            255, 255, 255, 100);
 }
-
-
-
-/* ---- 显隐按钮几何 (旧版: 横扁手柄, 挂在超武块上方 2px) ----
- * 已被 SwsTwoBtnGeom 取代: 现在两个按钮统一挂在超武块**右侧**、同一行,
- * 显隐在右、隐藏重复在左 (需求: "在显示/隐藏按钮左边添加一个按钮")。
- * 位置必须由绘制期统一发布, 因为 SWS_Poll 的点击命中读的就是这四个值 ——
- * 放在栏区判定框**之外** (超武块右边), 所以命中判定要排在栏区判定**之前**,
- * 否则永远点不到 (曾经就因为这个位置而"看得见点不动")。 */
 
 /* ---- 显隐按钮: 圆角底板 + 边框 + 实心三角 ----
  * 三层, 由外到内:
- *   1) 底板  整块矩形, 绿黑半透 (和侧栏底板一个观感)
- *   2) 边框  四条边亮一档, 让它在深色地图上也看得见轮廓
+ *   1) 底板  整块矩形, 主题色压得很淡, 只为让按钮有个"面"
+ *   2) 边框  四条边亮一档, 深色地图上也看得见轮廓
  *   3) 三角  按列画的高度渐变, 尖端指向 dir 指定的方向
  *        dir=0 -> ◀ 侧栏隐藏时, 点它展开
  *        dir=1 -> ▶ 侧栏显示时, 点它收起
- * 底板用 SwsFillLocked 画, 所以会自动吃到侧栏整体透明度 s_Alpha。 */
-static void SwsDrawArrow(unsigned char* base, int pitch, int surfW, int surfH,
-                         int x, int y, int bw, int bh, int dir,
-                         int mx, int my)
+ * 悬停态 hov 由调用方算好传进来 —— 按钮画在缓存里, 亮暗变化要靠重建。 */
+static void SwsDrawArrow(int x, int y, int bw, int bh, int dir, int hov)
 {
-    int cx, hov;
-    int inX, inY, inW, inH;
-    if (!base || bw <= 0 || bh <= 0) return;
+    int cx, inX, inY, inW, inH, a;
     if (bw < 8) bw = 8;
     if (bh < 5) bh = 5;
-    hov = (mx >= x && mx < x + bw && my >= y && my < y + bh);
-
-    /* 1) 底板: 主题色压得很淡, 只为让按钮有个"面", 不再额外垫一圈黑底
-     *    (曾底板纯黑外扩 2px 而边框是绿的, 看着就是"一层黑一层绿")。
-     *    底板/边框都走 SwsFillLocked, 自动吃到 s_Alpha。 */
-    SwsFillLocked(base, pitch, surfW, surfH, x, y, bw, bh,
-                  SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, hov ? 70 : 45);
-
-    /* 2) 边框: 就一层, 上下左右各一条 1px 主题色边 */
-    {
-        int bc = hov ? 225 : 165;
-        SwsFillLocked(base, pitch, surfW, surfH, x, y, bw, 1,
-                      SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, bc);
-        SwsFillLocked(base, pitch, surfW, surfH, x, y + bh - 1, bw, 1,
-                      SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, bc);
-        SwsFillLocked(base, pitch, surfW, surfH, x, y, 1, bh,
-                      SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, bc);
-        SwsFillLocked(base, pitch, surfW, surfH, x + bw - 1, y, 1, bh,
-                      SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, bc);
-    }
-
-    /* 3) 三角: 留 2px 内边距, 按列画高度 -> 尖端指向 dir */
-    inX = x + 3; inY = y + 2;
+    SwsCFillA(x, y, bw, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B,
+              hov ? 70 : 45);
+    a = hov ? 225 : 165;
+    SwsCFillA(x, y, bw, 1, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, a);
+    SwsCFillA(x, y + bh - 1, bw, 1, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, a);
+    SwsCFillA(x, y, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, a);
+    SwsCFillA(x + bw - 1, y, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, a);
+    inX = x + 3; inY = y + 2;                 /* 留 2px 内边距 */
     inW = bw - 6; inH = bh - 4;
     if (inW < 2) inW = 2;
     if (inH < 1) inH = 1;
@@ -2132,13 +2363,46 @@ static void SwsDrawArrow(unsigned char* base, int pitch, int surfW, int surfH,
     {
         int hh = (inH * cx) / (inW - 1 > 0 ? inW - 1 : 1);
         int off;
-        if (dir) hh = inH - hh;             /* dir=1 ▶ 尖端在右 */
+        if (dir) hh = inH - hh;               /* dir=1 ▶ 尖端在右 */
         if (hh < 1) hh = 1;
         if (hh > inH) hh = inH;
         off = (inH - hh) / 2;
-        SwsFillLocked(base, pitch, surfW, surfH, inX + cx, inY + off, 1, hh,
-                      SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, hov ? 255 : 215);
+        SwsCFillA(inX + cx, inY + off, 1, hh, SWS_ACCENT_R, SWS_ACCENT_G,
+                  SWS_ACCENT_B, hov ? 255 : 215);
     }
+}
+
+/* ---- 隐藏重复按钮: 禁入牌 (方框 + 斜杠) ----
+ * 语义直白: 开着 = 防御页上的重复超武被"禁止"了, 灭 = 原样。
+ * 开着偏绿、灭掉偏灰, 悬停整块提亮, 所以不靠形状也读得出状态。 */
+static void SwsDrawDedup(int x, int y, int bw, int bh, int on, int hov)
+{
+    static const unsigned char kOn[3]  = { 90, 235, 150 };
+    static const unsigned char kOff[3] = { 155, 155, 165 };
+    const unsigned char* c = on ? kOn : kOff;
+    int s, bx, by, i, a;
+    if (bw < 8) bw = 8;
+    if (bh < 5) bh = 5;
+    SwsCFillA(x, y, bw, bh, c[0], c[1], c[2], hov ? 70 : 40);
+    a = hov ? 235 : (on ? 190 : 115);
+    SwsCFillA(x, y, bw, 1, c[0], c[1], c[2], a);
+    SwsCFillA(x, y + bh - 1, bw, 1, c[0], c[1], c[2], a);
+    SwsCFillA(x, y, 1, bh, c[0], c[1], c[2], a);
+    SwsCFillA(x + bw - 1, y, 1, bh, c[0], c[1], c[2], a);
+    s = bw - 6;                                /* 取宽高小的那个做正方, 居中 */
+    if (bh - 6 < s) s = bh - 6;
+    if (s < 3) s = 3;
+    bx = x + (bw - s) / 2;
+    by = y + (bh - s) / 2;
+    a = hov ? 235 : (on ? 210 : 130);
+    SwsCFillA(bx, by, s, 1, c[0], c[1], c[2], a);
+    SwsCFillA(bx, by + s - 1, s, 1, c[0], c[1], c[2], a);
+    SwsCFillA(bx, by, 1, s, c[0], c[1], c[2], a);
+    SwsCFillA(bx + s - 1, by, 1, s, c[0], c[1], c[2], a);
+    /* 斜杠只在"隐藏中"时画, 于是灭掉的按钮是个空框, 状态一眼可分 */
+    if (on)
+        for (i = 0; i < s; i++)
+            SwsCFillA(bx + i, by + i, 1, 1, c[0], c[1], c[2], hov ? 255 : 225);
 }
 
 /* ---- 两个按钮的公共几何 ----
@@ -2146,9 +2410,9 @@ static void SwsDrawArrow(unsigned char* base, int pitch, int surfW, int surfH,
  * [显隐][空 3][隐藏重复]; 所以块要多让出 18px 顶部空间, 而**不用**在右边留位。
  * ⚠ 只能挂块上方: SWS_Draw 拿到的是**合成面**, 宽 = 屏幕宽 − 原版侧栏宽
  * (日志 1752 = 1920-168), 块右缘已紧贴原版侧栏, 挂右边 x 会算到面外被丢掉。
- * 位置由绘制期统一发布, 因为 SWS_Poll 的命中读的就是这几个值 —— 两个按钮都在
- * 栏区判定框 (s_BoundX/Y/W/H) **之外**(块顶之上), 命中判定必须排在栏区判定
- * **之前**, 否则永远点不到。 */
+ * 位置由重建期统一发布, 因为 SWS_Poll 的命中读的就是这几个值 —— 两个按钮
+ * 都在栏区判定框 (s_BoundX/Y/W/H) **之外**(块顶之上), 命中判定必须排在栏区
+ * 判定**之前**, 否则永远点不到。 */
 #define SWS_BTN_W  20      /* 宽>高, 好点中 */
 #define SWS_BTN_H  16
 #define SWS_BTN_GAP 3
@@ -2168,177 +2432,121 @@ static void SwsTwoBtnGeom(int xStart, int totW, int w, int blockTop)
     if (s_BtnY < 0) s_BtnY = 0;
     s_HidY = s_BtnY;
     s_HidValid = 1;
+    /* 记下展开态的位置: 收起时**原样**用它, 折叠/展开不许跳位。 */
+    s_BtnXKeep = s_BtnX;
+    s_BtnYKeep = s_BtnY;
 }
 
-/* 侧栏收起时: 只留一个显隐箭头, 贴屏幕右缘 (超武块没了, 没有右缘可对齐)。
- * 像素 TopMargin 模式下它和展开时落在同一行 (都用 TopMargin-18); 比例模式下
- * 展开时要减半个块高, 所以会差 blockH/2 —— 这是原有行为, 不动。
- * 隐藏重复按钮既不画也不可点 —— 侧栏都没了, "侧栏里有" 也就无从谈起
- * (见 SwsDedupSync 的 want)。 */
+/* 侧栏收起时: 只留一个显隐箭头。
+ * ⚠ 位置必须和展开态**完全一致**, 所以直接沿用 SwsTwoBtnGeom 记下的那一帧
+ * 坐标。早先这里另算 "w - s_RightMargin - s_BtnW" (贴屏幕右缘), 展开时却是
+ * "块右缘 - 宽" —— 两者差一个滚动条让出的 5px, 于是每次按折叠/展开, 箭头
+ * 都会肉眼可见地跳一下。收起时块没了不代表按钮的锚点该换, 玩家要能对着
+ * 同一个位置点回去。
+ * 从来没展开过 (s_BtnXKeep<0) 才退 fallback, 那时用右缘。 */
 static void SwsCollapsedBtnGeom(int w, int blockTop)
 {
     s_BtnW = SWS_BTN_W;
     s_BtnH = SWS_BTN_H;
-    s_BtnX = w - s_RightMargin - s_BtnW;
+    if (s_BtnXKeep >= 0)
+    {
+        s_BtnX = s_BtnXKeep;
+        s_BtnY = s_BtnYKeep;
+    }
+    else
+    {
+        s_BtnX = w - s_RightMargin - s_BtnW;
+        s_BtnY = blockTop - s_BtnH - 2;
+    }
     if (s_BtnX < 0) s_BtnX = 0;
-    s_BtnY = blockTop - s_BtnH - 2;
+    if (s_BtnX + s_BtnW > w) s_BtnX = w - s_BtnW;
+    if (s_BtnX < 0) s_BtnX = 0;
     if (s_BtnY < 0) s_BtnY = 0;
     s_HidX = s_BtnX;
     s_HidY = s_BtnY;
     s_HidValid = 0;
 }
 
-/* ---- 隐藏重复按钮: 禁入牌 (方框 + 斜杠) ----
- * 语义直白: 开着 = 防御页上的重复超武被"禁止"了, 灭 = 原样。
- * 开着偏绿、灭掉偏灰, 悬停整块提亮, 所以不靠形状也读得出状态。 */
-static void SwsDrawDedup(unsigned char* base, int pitch, int surfW, int surfH,
-                         int x, int y, int bw, int bh, int on, int mx, int my)
+/* 鼠标压在哪个按钮上: 0=无 1=显隐 2=隐藏重复。亮暗画在缓存里, 所以这个值
+ * 变了就得重建。 */
+static int SwsHitBtn(int mx, int my)
 {
-    static const unsigned char kOn[3]  = { 90, 235, 150 };
-    static const unsigned char kOff[3] = { 155, 155, 165 };
-    const unsigned char* c = on ? kOn : kOff;
-    int hov, s, bx, by, i, a;
-    if (!base || bw <= 0 || bh <= 0) return;
-    if (bw < 8) bw = 8;
-    if (bh < 5) bh = 5;
-    hov = (mx >= x && mx < x + bw && my >= y && my < y + bh);
-    /* 底板 + 1px 边框 (走 SwsFillLocked, 自动吃侧栏整体透明度) */
-    SwsFillLocked(base, pitch, surfW, surfH, x, y, bw, bh,
-                  c[0], c[1], c[2], hov ? 70 : 40);
-    a = hov ? 235 : (on ? 190 : 115);
-    SwsFillLocked(base, pitch, surfW, surfH, x, y, bw, 1, c[0], c[1], c[2], a);
-    SwsFillLocked(base, pitch, surfW, surfH, x, y + bh - 1, bw, 1, c[0], c[1], c[2], a);
-    SwsFillLocked(base, pitch, surfW, surfH, x, y, 1, bh, c[0], c[1], c[2], a);
-    SwsFillLocked(base, pitch, surfW, surfH, x + bw - 1, y, 1, bh, c[0], c[1], c[2], a);
-    /* 里面的"牌子": 取宽高小的那个做正方, 居中 */
-    s = bw - 6;
-    if (bh - 6 < s) s = bh - 6;
-    if (s < 3) s = 3;
-    bx = x + (bw - s) / 2;
-    by = y + (bh - s) / 2;
-    a = hov ? 235 : (on ? 210 : 130);
-    SwsFillLocked(base, pitch, surfW, surfH, bx, by, s, 1, c[0], c[1], c[2], a);
-    SwsFillLocked(base, pitch, surfW, surfH, bx, by + s - 1, s, 1, c[0], c[1], c[2], a);
-    SwsFillLocked(base, pitch, surfW, surfH, bx, by, 1, s, c[0], c[1], c[2], a);
-    SwsFillLocked(base, pitch, surfW, surfH, bx + s - 1, by, 1, s, c[0], c[1], c[2], a);
-    /* 斜杠: 只在"隐藏中"时画, 于是灭掉的按钮是个空框, 状态一眼可分 */
-    if (on)
-    {
-        a = hov ? 255 : 225;
-        for (i = 0; i < s; i++)
-            SwsFillLocked(base, pitch, surfW, surfH, bx + i, by + i, 1, 1,
-                          c[0], c[1], c[2], a);
-    }
+    if (mx < 0 || my < 0) return 0;
+    if (s_HidValid && mx >= s_HidX && mx < s_HidX + s_BtnW &&
+        my >= s_HidY && my < s_HidY + s_BtnH) return 2;
+    if (mx >= s_BtnX && mx < s_BtnX + s_BtnW &&
+        my >= s_BtnY && my < s_BtnY + s_BtnH) return 1;
+    return 0;
 }
 
-/* ---- 悬停提示框: 半透明黑底 + 主题色边框 + 白字 ----
- * ax = 水平锚点, ayUp = 提示所挂东西的**上**边, ayDn = **下**边 (上面放不下
- * 就自动改挂下面)。
- * 刻意**不吃**侧栏整体透明度 (用 SwsFillRawLocked 而非 SwsFillLocked, 文字
- * BlitCoverage 直接给 100/85): 提示框是玩家此刻正在读的信息, 侧栏调到 Alpha=30
- * 时它跟着淡到 30% 就看不清是哪个超武了 —— 它是唯一无视 Alpha 的元素。
- * ⚠ 两个绘制函数的约定**相反**: SwsFillLocked 内部乘 s_Alpha (只能给原始
- * 不透明度), BlitCoverage 不乘 (调用方才预乘)。曾给前者传 70*s_Alpha/100, 等于
- * 乘两次, Alpha=30 时底框只剩 6%。 */
-static void SwsDrawTip(unsigned char* locked, int pitch, int w, int h,
-                       const wchar_t* nm, int ax, int ayUp, int ayDn)
+/* ---- 重建判据: 一个"结构指纹" ----
+ * 凡是把画面改得**面目全非**的输入都进去, 剩下的交给 15 帧节流。
+ * ⚠ 刻意**不含** remain (充能倒计时): 只要有一个超武在充能, 它每次扫描
+ *   都在变, 放进来等于永不作废 —— 缓存就白做了。倒计时跟着节流走 (每秒
+ *   4 次), 视觉上完全够用。
+ * ⚠ 也不含 x/y: 那是本函数自己刚算出来的布局, 不是输入。
+ * 悬停项/按钮悬停/当前选中 (curSel) 同样不进指纹, 它们在 SWS_Draw 里
+ * 单独跟缓存里"上次用的值"比 —— 所以**鼠标移上去、点中、松开上膛**都是
+ * 当帧就重画, 不用等节流。 */
+static unsigned SwsSig(int w, int h, int pitch)
 {
-    int sl = 0, sw, sx, ny, adv, gpx;
-    if (!locked || !nm || !nm[0]) return;
-    gpx = VecText_FontPx();
-    if (gpx <= 0) gpx = 18;
-    if (!GdiEnsure(gpx, VecText_Bold(), 5, VecText_FontFace())) return;
-    adv = g_G->adv > 0 ? g_G->adv : gpx + 2;
-    while (sl < 23 && nm[sl]) sl++;
-    sw = sl ? RenderLine(nm, sl) : 0;
-    if (sw <= 0) return;
-    sx = ax - sw / 2;
-    ny = ayUp - adv - 2;
-    if (ny < 2) ny = ayDn;
-    /* 框比文字左右各宽 2px, 夹取要按**框**算, 否则右边会跑出屏幕 */
-    if (sx < 4) sx = 4;
-    if (sx + sw + 6 > w - 2) sx = (w - sw - 8 > 4) ? w - sw - 8 : 4;
+    unsigned s = 0x5A17C0D3u;
+    int i;
+    s = s * 33u + (unsigned)w;
+    s = s * 33u + (unsigned)h;
+    s = s * 33u + (unsigned)pitch;
+    s = s * 33u + (unsigned)s_Visible;
+    s = s * 33u + (unsigned)s_DedupHide;
+    s = s * 33u + (unsigned)s_Scroll;
+    s = s * 33u + (unsigned)s_ItemN;
+    for (i = 0; i < s_ItemN && i < SWS_CAP; i++)
     {
-        int bx = sx - 2, by = ny - 2, bwid = sw + 6, bhei = adv + 4;
-        SwsFillRawLocked(locked, pitch, w, h, bx, by, bwid, bhei, 0, 0, 0, 150);
-        SwsFillRawLocked(locked, pitch, w, h, bx, by, bwid, 1,
-                         SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
-        SwsFillRawLocked(locked, pitch, w, h, bx, by + bhei - 1, bwid, 1,
-                         SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
-        SwsFillRawLocked(locked, pitch, w, h, bx, by, 1, bhei,
-                         SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
-        SwsFillRawLocked(locked, pitch, w, h, bx + bwid - 1, by, 1, bhei,
-                         SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
+        const SwsItem* it = &s_Items[i];
+        s = s * 31u + (unsigned)it->swIdx;
+        s = s * 31u + (unsigned)it->side;
+        s = s * 31u + (unsigned)it->prio;
+        s = s * 31u + (unsigned)it->ready;
+        s = s * 31u + (unsigned)it->susp;
+        s = s * 31u + (unsigned)it->instant;
+        s = s * 31u + (unsigned)(size_t)it->pcxFile;
     }
-    BlitCoverage(locked, pitch, w, h, sx + 1, ny + 1, sw, adv, 0, 0, 0, 85);
-    BlitCoverage(locked, pitch, w, h, sx, ny, sw, adv, 255, 255, 255, 100);
+    return s;
 }
 
-
-void SWS_Draw(void* surf, int w, int h, int pitch)
+/* 收起态重建: 只有一个显隐箭头 (◀, 指左边=展开)。
+ * 纵向位置沿用同一套 TopMargin 规则, 但**不减半个块高** —— 隐藏时没有块,
+ * 减去半高会让箭头偏上, 与展开后的位置对不上。 */
+static void SwsRebuildCollapsed(int w, int h, unsigned sig, int fr, int btnHov)
 {
-    /* 精简绘制 (为帧率):
-     *   - 一列一个底框 + 一列一组边框, 不再每个超武画一个方框
-     *   - 不画"就绪"等状态字 (只在鼠标悬停时画名字)
-     *   - 悬停项: 高亮框 + 名字文本
-     * 之前每条目 6 次填充 + 未就绪罩 + 状态字渲染, 64 个条目时是主要开销。
-     */
+    int by;
+    if (s_TopIsPct) by = (int)(((long)h * (long)s_TopMargin) / 100000L);
+    else            by = s_TopMargin;
+    if (by < 0) by = 0;
+    SwsCollapsedBtnGeom(w, by);
+    if (!SwsCacheAlloc(s_BtnW, s_BtnH)) { s_CchOK = 0; s_BoundsKnown = 0; return; }
+    s_CchX = s_BtnX; s_CchY = s_BtnY;
+    SwsDrawArrow(s_BtnX, s_BtnY, s_BtnW, s_BtnH, 0, btnHov == 1);
+    s_CchOK = 1;
+    s_BoundsKnown = 0;      /* 收起时没有可点的超武块 */
+    s_CchSig = sig; s_CchFrame = fr;
+    s_CchHover = -1; s_CchBtn = btnHov; s_CchSel = -9999;
+}
+
+/* 展开态重建: 布局 + 全部画进缓存。 */
+static void SwsRebuild(int w, int h, int mx, int my, int curSel,
+                       unsigned sig, int fr, int btnHov)
+{
+    int n = s_ItemN;
     int colCount[4] = { 0, 0, 0, 0 };
     int colX[4] = { 0, 0, 0, 0 };
-    int i, n, f, totW, xStart, yStart, rowH, maxRows, blockH;
-    int curSel = -9999;
-    int mx = -1, my = -1;
-    int hover = -1;
-    int dedupOn = 0;
-    unsigned char* vt;
-    SwsLockFn lockFn;
-    SwsUnlockFn unlockFn;
-    unsigned char* locked;
+    int rows[4];
+    int i, f, totW, xStart, yStart, rowH, maxRows, blockH;
+    int bar, barX, barW, firstX, right, bottom, top, ch, hover = -1, txtOk;
+    int tipX = 0, tipY = 0, tipW = 0, tipH = 0;
+    if (n <= 0 || n > SWS_CAP) goto nogeo;
 
-    if (!s_Enable) return;
-    if (!surf || !IsPlausiblePtr(surf)) return;
-    if (w <= 0 || h <= 0 || pitch <= 0) return;
-    GtMouseGameXY(&mx, &my);
-
-    /* ---- 侧栏隐藏时: 只画展开箭头, 其余全跳过 ----
-     * 箭头**必须留着** —— 连它一起藏掉的话, 玩家就找不到再展开的地方了
-     * (这正是"箭头隐藏了点哪里展开?"那个问题)。所以这条早退放在拿到锁面
-     * 之后、画超武之前, 而不是像原来那样连箭头一起 return 掉。 */
-    if (!s_Visible)
-    {
-        unsigned char* lk;
-        unsigned char* v2;
-        v2 = *(unsigned char**)surf;
-        if (!v2 || !IsPlausiblePtr(v2)) return;
-        lockFn = (SwsLockFn)(*(void**)(v2 + VT_LOCK));
-        unlockFn = (SwsUnlockFn)(*(void**)(v2 + VT_UNLOCK));
-        if (!lockFn || !unlockFn ||
-            !IsPlausiblePtr((const void*)lockFn) ||
-            !IsPlausiblePtr((const void*)unlockFn)) return;
-        lk = (unsigned char*)lockFn(surf, NULL, 0, 0);
-        if (!lk || !IsPlausiblePtr(lk)) return;
-        {
-            /* 纵向位置沿用同一套 TopMargin 规则, 但**不减半个块高** ——
-             * 隐藏时没有块, 减去半高会让箭头偏上, 与展开后的位置对不上。 */
-            int by;
-            if (s_TopIsPct) by = (int)(((long)h * (long)s_TopMargin) / 100000L);
-            else            by = s_TopMargin;
-            if (by < 0) by = 0;
-            SwsCollapsedBtnGeom(w, by);
-        }
-        SwsDrawArrow(lk, pitch, w, h, s_BtnX, s_BtnY, s_BtnW, s_BtnH, 0, mx, my);
-        unlockFn(surf, NULL);
-        return;
-    }
-
-    n = s_ItemN;
-    /* 一个超武都没有时整块不画, 两个按钮也就没画出来 —— 必须把 s_HidValid
-     * 清掉, 否则 SWS_Poll 会拿上一帧的旧几何把点击判到"隐藏重复"上。 */
-    s_HidValid = 0;
-    if (n <= 0 || n > SWS_CAP) return;
-
-    /* ---- 排序: 阵营 -> ini 优先级 -> ArrayIndex ----
-     * 结果缓存在 s_Order 里, 只在 SwsScan 改过 s_Items 之后重排一次。 */
+    /* 1) 排序: 阵营 -> ini 优先级 -> ArrayIndex。s_Items 只有 SwsScan 会改,
+     *    所以顺序与帧无关, 只在条目数变了才真排一次。 */
     if (s_OrderN != n)
     {
         for (f = 0; f < 4; f++) s_OrderColCount[f] = 0;
@@ -2365,15 +2573,12 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
     }
     for (f = 0; f < 4; f++) colCount[f] = s_OrderColCount[f];
     maxRows = 0;
-    for (f = 0; f < 4; f++)
-    {
-        if (colCount[f] > maxRows) maxRows = colCount[f];
-    }
-    if (maxRows <= 0) return;
+    for (f = 0; f < 4; f++) if (colCount[f] > maxRows) maxRows = colCount[f];
+    if (maxRows <= 0) goto nogeo;
     /* 超过上限的列用滚动条: 可见行数取 min */
     if (s_MaxRows > 0 && maxRows > s_MaxRows) maxRows = s_MaxRows;
     /* 夹紧滚动偏移: 最大偏移 = 最长列条目数 - 可见行数 (滚到最后一屏就停,
-     * 早先写成 colCount-1 会一路滚到只剩最后一行, 中间全空。 */
+     * 早先写成 colCount-1 会一路滚到只剩最后一行, 中间全空) */
     s_MaxSk = 0;
     for (f = 0; f < 4; f++)
         if (colCount[f] - maxRows > s_MaxSk) s_MaxSk = colCount[f] - maxRows;
@@ -2384,267 +2589,215 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
     totW = 0;
     for (f = 0; f < 4; f++)
         if (colCount[f] > 0) totW += (totW ? s_ColGap : 0) + SWS_ICON_W;
-    /* 有列装不下时, 整块左边让出 5px 给右侧那根滚动条 (否则会顶出屏幕)。
-     * 纵向要多留 SWS_BTN_H+2 给块顶上方的两个按钮 (见 SwsTwoBtnGeom)。 */
-    s_BarValid = (s_MaxSk > 0);
-    s_BarW = s_BarValid ? 4 : 0;
-    xStart = w - s_RightMargin - totW - (s_BarValid ? 5 : 0);
+    /* 有列装不下时, 整块左边让出 5px 给右侧那根滚动条 (否则会顶出屏幕) */
+    bar = (s_MaxSk > 0);
+    barW = bar ? 4 : 0;
+    xStart = w - s_RightMargin - totW - (bar ? 5 : 0);
     if (xStart < 0) xStart = 0;
     /* 比例 = 屏幕高 * 比例, 再减去半个块高 -> 视觉上居中 (块不会偏上);
-     * 像素 = 直接当 Y 坐标。 */
+     * 像素 = 直接当 Y 坐标。纵向要多留 SWS_BTN_H+2 给块顶上方的两个按钮。 */
     if (s_TopIsPct)
-    {
         yStart = (int)(((long)h * (long)s_TopMargin) / 100000L) - blockH / 2;
-    }
     else
-    {
         yStart = s_TopMargin;
-    }
-    /* 块顶上方要放两个按钮, 像素模式下把它一起顶上去 (比例模式下按半块高
-     * 居中, 两个按钮多半还在屏幕里, 夹取在 SwsTwoBtnGeom 里做)。 */
     if (yStart < SWS_BTN_H + 2) yStart = SWS_BTN_H + 2;
+    /* 2) 四列的 x。空列跳过, 所以列是连续排下去的。 */
+    firstX = xStart;
     {
-        int cx = xStart;
+        int cx = xStart, first = 1;
         for (f = 0; f < 4; f++)
         {
             if (colCount[f] <= 0) continue;
+            if (first) { firstX = cx; first = 0; }
             colX[f] = cx;
             cx += SWS_ICON_W + s_ColGap;
         }
     }
-    {
-        int rows[4] = { 0, 0, 0, 0 };
-        for (i = 0; i < n; i++)
-        {
-            SwsItem* it = &s_Items[s_Order[i]];
-            int r = rows[it->side] - s_Scroll;
-            it->x = colX[it->side];
-            it->y = yStart + r * rowH;
-            it->row = rows[it->side];
-            rows[it->side]++;
-            /* 滚出可见范围的条目不参与命中/绘制 */
-            if (r < 0 || r >= maxRows) it->x = -1;
-        }
-    }
-    /* 两个按钮: 显隐 (▶ 收起) 在右, 隐藏重复在左, 挂在超武块**正上方**一行、
-     * 右对齐到块的右缘。挂块顶上方是落在栏区判定框之外的, 所以 SWS_Poll 里
-     * 它们的命中判定必须排在栏区判定**之前** (见 SwsTwoBtnGeom 注释)。 */
-    SwsTwoBtnGeom(xStart, totW, w, yStart);
-    /* 每局一行: 布局上限 / 一屏行数 / 四列各几条 / 总条数。侧栏"看着空"时
-     * 先看这里, 就能分清是没扫到条目还是被 maxRows 卡住了。 */
-    {
-        static int s_LayLog = 0;
-        if (!s_LayLog)
-        {
-            char sb[96], b1[16];
-            unsigned q = AppendCStr(sb, 0, "sws: lay cap=", sizeof(sb));
-            UtoA((unsigned)s_MaxRows, b1);
-            q = AppendCStr(sb, q, b1, sizeof(sb));
-            q = AppendCStr(sb, q, " vis=", sizeof(sb));
-            UtoA((unsigned)maxRows, b1);
-            q = AppendCStr(sb, q, b1, sizeof(sb));
-            q = AppendCStr(sb, q, " cnt=", sizeof(sb));
-            for (i = 0; i < 4; i++)
-            {
-                if (i) q = AppendCh(sb, q, '/', sizeof(sb));
-                UtoA((unsigned)colCount[i], b1);
-                q = AppendCStr(sb, q, b1, sizeof(sb));
-            }
-            q = AppendCStr(sb, q, " n=", sizeof(sb));
-            UtoA((unsigned)n, b1);
-            q = AppendCStr(sb, q, b1, sizeof(sb));
-            LogLine(sb);
-            s_LayLog = 1;
-        }
-    }
-    s_BoundX = xStart;
-    s_BoundY = yStart;
-    s_BoundW = totW;
-    s_BoundH = blockH;
-    s_BoundValid = 1;
-    s_BoundsKnown = 1;   /* 吞没门用: 不随 SwsScan 清零 (见声明处注释) */
-    for (f = 0; f < 4; f++) { s_ColCount[f] = colCount[f]; s_ColX[f] = colX[f]; }
-    s_YStart = yStart;
-    s_RowH = rowH;
-    s_VisRows = maxRows;
-    /* 滚轮用的几何 (SWS_WheelIn 据此判断命中与能否再滚) */
-    s_ColsValid = 1;
-    s_NCols = 0;
-    for (f = 0; f < 4; f++)
-    {
-        s_Cols[f].count = colCount[f];
-        s_Cols[f].x = colX[f];
-        s_Cols[f].vis = (colCount[f] < maxRows) ? colCount[f] : maxRows;
-        if (colCount[f] > 0) { s_NCols++; s_LastX = colX[f]; }
-    }
-    s_BarX = s_LastX + SWS_ICON_W + 1;
-    if (!g_Calibrated) Calibrate();
-
-    /* 悬停项 (悬停时才画文字, 平时零文本开销) */
-    GtMouseGameXY(&mx, &my);
+    s_LastX = 0;
+    for (f = 0; f < 4; f++) if (colCount[f] > 0) s_LastX = colX[f];
+    /* 3) 每条目在屏幕上的位置; 滚出可见范围的 x=-1 (不参与命中/绘制) */
+    rows[0] = rows[1] = rows[2] = rows[3] = 0;
     for (i = 0; i < n; i++)
     {
         SwsItem* it = &s_Items[s_Order[i]];
-        if (it->x < 0) continue;                 /* 被滚动裁掉 */
-        if (mx >= it->x && mx < it->x + SWS_ICON_W &&
-            my >= it->y && my < it->y + SWS_ICON_H)
-        {
-            hover = i;
-            break;
-        }
+        int r = rows[it->side] - s_Scroll;
+        it->x = colX[it->side];
+        it->y = yStart + r * rowH;
+        rows[it->side]++;
+        if (r < 0 || r >= maxRows) it->x = -1;
     }
-    if (IsPlausiblePtr((void*)ADDR_CURSW)) curSel = *(int*)ADDR_CURSW;
-
-    vt = *(unsigned char**)surf;
-    if (!vt || !IsPlausiblePtr(vt)) return;
-    lockFn = (SwsLockFn)(*(void**)(vt + VT_LOCK));
-    unlockFn = (SwsUnlockFn)(*(void**)(vt + VT_UNLOCK));
-    if (!lockFn || !unlockFn ||
-        !IsPlausiblePtr((const void*)lockFn) ||
-        !IsPlausiblePtr((const void*)unlockFn)) return;
-    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
-    if (!locked || !IsPlausiblePtr(locked)) return;
+    /* 4) 两个按钮 (在栏区判定框之外, 命中判定排在栏区判定之前) */
+    SwsTwoBtnGeom(xStart, totW, w, yStart);
+    barX = s_LastX + SWS_ICON_W + 1;
+    /* 5) 悬停 (用刚落好的布局) + 提示框几何。提示框可能探出侧栏块之外
+     *    (下面那行、或翻上去时上面那行), 所以必须先量出它, 缓存矩形
+     *    四条边才够大。 */
+    hover = SwsHitItem(mx, my);
+    if (hover >= 0)
+    {
+        /* hover 是排序后下标 → 必须走 s_Order, 直接用 s_Items[hover] 会取到
+         * 另一个超武 (提示框显示错名字, 和高亮框错位同源)。 */
+        SwsItem* it = &s_Items[s_Order[hover]];
+        if (SwsTipPrepare(it->name))
+            SwsTipRect(w, h, it->x + SWS_ICON_W / 2, it->y + SWS_ICON_H,
+                       &tipX, &tipY, &tipW, &tipH);
+    }
+    /* 6) 缓存矩形 = 按钮行 ∪ 超武块 ∪ 滚动条 ∪ 提示框 (四条边都算) */
+    right = s_LastX + SWS_ICON_W;
+    if (bar) right = barX + barW;
+    if (s_BtnX + s_BtnW > right) right = s_BtnX + s_BtnW;
+    if (tipW > 0 && tipX + tipW > right) right = tipX + tipW;
+    if (right > w) right = w;
+    bottom = yStart + blockH;
+    if (tipW > 0 && tipY + tipH > bottom) bottom = tipY + tipH;
+    if (bottom > h) bottom = h;
+    if (tipW > 0 && tipX < firstX) firstX = tipX;
+    if (s_HidX < firstX) firstX = s_HidX;
+    if (firstX < 0) firstX = 0;
+    /* 条目高亮框是画在 it->x-1 / it->y-1 上的 1px 描边, 而最后一行那条下边
+     * 正好落在 yStart+blockH —— 都不在"块"的范围内, 所以左/下各再让 1px,
+     * 否则最外圈会少一像素。 */
+    if (firstX > 0) firstX--;
+    if (bottom < h) bottom++;
+    /* 提示框翻到图标上方时 (最后一行顶到屏幕底), 框顶同样在块外。 */
+    top = s_BtnY;
+    if (tipW > 0 && tipY < top) top = tipY;
+    if (!SwsCacheAlloc(right - firstX, bottom - top)) goto nogeo;
+    s_CchX = firstX; s_CchY = top;
+    /* 7) 发布几何: 点击/滚轮/吞没门都读这几个, 全部对应屏上这一帧 */
+    s_BoundX = xStart; s_BoundY = yStart; s_BoundW = totW; s_BoundH = blockH;
+    s_BoundsKnown = 1;
+    s_YStart = yStart; s_RowH = rowH; s_VisRows = maxRows;
 
     /* ---- 整块底框 (一次, 不是每列一次) ----
-     * 图标本身不吃"局部不透明度"之外的东西, 逐列画 4 块底框和画 1 块整的
+     * 图标不吃"局部不透明度"之外的东西, 逐列画 4 块底框和画 1 块整的
      * 视觉效果一样, 但少 3 次填充、少 3 份重叠边缘。 */
-    if (s_LastX > 0)
-    {
-        int ch = 0;
-        for (f = 0; f < 4; f++)
-            if (colCount[f] > 0)
-            {
-                int t = (colCount[f] < maxRows ? colCount[f] : maxRows) *
-                        rowH - s_Gap;
-                if (t > ch) ch = t;
-            }
-        if (ch > 0)
-            SwsFillLocked(locked, pitch, w, h, colX[0], yStart,
-                          s_LastX + SWS_ICON_W - colX[0], ch,
-                          0, 0, 0, SWS_BACKDROP_OP);
-    }
+    ch = 0;
+    for (f = 0; f < 4; f++)
+        if (colCount[f] > 0)
+        {
+            int t = (colCount[f] < maxRows ? colCount[f] : maxRows) * rowH - s_Gap;
+            if (t > ch) ch = t;
+        }
+    if (ch > 0)
+        SwsCFillA(xStart, yStart, totW, ch, 0, 0, 0, SWS_BACKDROP_OP);
+
+    /* 充能百分比走 GDI 槽 5 ([SWSidebar] FontPx 就是它的字号)。早先这里
+     * **没有** GdiEnsure, 直接拿 g_G 画 —— 也就是借用了上一个用过 GDI 的
+     * 模块 (通常是底电/超武面板) 的槽, 于是 FontPx 这个配置项其实一直没
+     * 生效, 字号还随别的模块变。 */
+    txtOk = GdiEnsure(s_FontPx, VecText_Bold(), 5, VecText_FontFace());
 
     /* ---- 图标 + 悬停高亮 ---- */
     for (i = 0; i < n; i++)
     {
         SwsItem* it = &s_Items[s_Order[i]];
-        void* ps = NULL;
+        int isHover = (i == hover);
         if (it->x < 0) continue;              /* 被滚动裁掉 */
-        if (it->pcxFile) ps = SwsPcxLiveSurf(it->pcxFile);
-        if (ps)
-        {
-            /* 优先在已持有的锁面里直接写像素; 布局对不上才退回引擎 blit */
-            if (!SwsPcxBlitLocked((unsigned short*)locked, pitch, w, h,
-                                  it->x, it->y, SWS_ICON_W, SWS_ICON_H, ps))
-            {
-                void* pcxInst = (void*)ADDR_PCX_INSTANCE;
-                if (pcxInst && IsPlausiblePtr(pcxInst))
-                {
-                    char rect[16];
-                    unlockFn(surf, NULL);
-                    *(int*)(rect + 0) = it->x; *(int*)(rect + 4) = it->y;
-                    *(int*)(rect + 8) = SWS_ICON_W; *(int*)(rect + 12) = SWS_ICON_H;
-                    FN_PCXBLIT(pcxInst, rect, surf, ps, PCX_TRANS_PARENT);
-                    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
-                    if (!locked || !IsPlausiblePtr(locked)) return;
-                }
-            }
-            /* 未就绪 (释放后充能中): 压暗。只对这类条目做, 通常 0~1 个。 */
-            if (!it->ready)
-                SwsFillLocked(locked, pitch, w, h, it->x, it->y, SWS_ICON_W,
-                              SWS_ICON_H, 0, 0, 0, 45);
-        }
-        /* 无 SidebarPCX 的超武 (it->shp) 什么都不画: SidebarImage 是引擎的
-         * XXICON 占位图, 画出来是紫球。要么在 rulesmo.ini 里补 SidebarPCX=,
+        /* 无 SidebarPCX 的超武什么都不画: SidebarImage 是引擎的 XXICON
+         * 占位图, 画出来是紫球。要么在 rulesmo.ini 里补 SidebarPCX=,
          * 要么在 [SWSidebar] 里给它负值隐藏。 */
-        /* 充能百分比: 画在图标底部 (有 PCX 图标才画, 否则只占位) */
         if (it->pcxFile)
         {
-            wchar_t st[8];
-            int sl = 0, sw, sx, ny, adv;
-            /* 必须清满整个数组: 只清前 4 个的话, 第 5 个是栈上垃圾, 非零时
-             * sl 会变长, RenderLine 就把 "100%" 后面的垃圾字节也画出来 ——
-             * 那就是一直去不掉的 '<' 碎片。 */
-            st[0] = st[1] = st[2] = st[3] = 0;
-            st[4] = st[5] = st[6] = st[7] = 0;
-            /* 就绪 (100%) 不显示任何字: 图标本身就是"可用"的意思, 再叠一层
-             * 100% 只是多一次 GDI 文本渲染, 还压住图标。 */
-            if (it->susp)
+            void* ps = SwsPcxLiveSurf(it->pcxFile);
+            if (ps)
             {
-                st[0] = 'H'; st[1] = 'o'; st[2] = 'l'; st[3] = 'd';
+                SwsCPcx(it->x, it->y, SWS_ICON_W, SWS_ICON_H, ps, isHover);
+                /* 未就绪 (释放后充能中): 压暗。只对这类条目做, 通常 0~1 个。
+                 * 悬停的那一个不压 —— 玩家正在看它, 让提示框和白框说话。 */
+                if (!it->ready && !isHover)
+                    SwsCFillA(it->x, it->y, SWS_ICON_W, SWS_ICON_H,
+                              0, 0, 0, 45);
             }
-            else if (!it->ready && it->total > 0)
+            /* 充能百分比: 画在图标顶部 (两趟都用同宽: 多画 2px 会切出字形
+             * overhang 的碎片, 形似 '<'; 微软雅黑 extent 非矩形)。 */
+            if (txtOk)
             {
-                int pct = 100 - (it->remain * 100) / it->total;
-                if (pct < 0) pct = 0;
-                if (pct > 99) pct = 99;      /* 满格就是就绪, 由上面分支处理 */
-                /* 按位数输出: 早先固定写三字符, 1% 就成了 "001%"。 */
-                if (pct >= 10)
+                wchar_t st[8];
+                int sl = 0, sw, sx, ny, adv;
+                /* 必须清满整个数组: 只清前 4 个的话, 第 5 个是栈上垃圾,
+                 * 非零时 sl 会变长, RenderLine 就把 "100%" 后面的垃圾字节
+                 * 也画出来 —— 那是一直去不掉的 '<' 碎片。 */
+                st[0] = st[1] = st[2] = st[3] = 0;
+                st[4] = st[5] = st[6] = st[7] = 0;
+                /* 就绪 (100%) 不显示任何字: 图标本身就是"可用"的意思, 再
+                 * 叠一层 100% 只是多一次 GDI 文本渲染, 还压住图标。 */
+                if (it->susp)
                 {
-                    st[0] = (wchar_t)('0' + (pct / 10) % 10);
-                    st[1] = (wchar_t)('0' + pct % 10);
-                    st[2] = '%';
+                    st[0] = 'H'; st[1] = 'o'; st[2] = 'l'; st[3] = 'd';
                 }
-                else
+                else if (!it->ready && it->total > 0)
                 {
-                    st[0] = (wchar_t)('0' + pct);
-                    st[1] = '%';
+                    int pct = 100 - (it->remain * 100) / it->total;
+                    if (pct < 0) pct = 0;
+                    if (pct > 99) pct = 99;   /* 满格就是就绪, 上面分支处理 */
+                    if (pct >= 10)            /* 按位数输出, 别让 1% 变 "001%" */
+                    {
+                        st[0] = (wchar_t)('0' + (pct / 10) % 10);
+                        st[1] = (wchar_t)('0' + pct % 10);
+                        st[2] = '%';
+                    }
+                    else
+                    {
+                        st[0] = (wchar_t)('0' + pct);
+                        st[1] = '%';
+                    }
+                }
+                while (sl < 7 && st[sl]) sl++;
+                adv = g_G->adv > 0 ? g_G->adv : s_FontPx + 2;
+                sw = sl ? RenderLine(st, sl) : 0;
+                if (sw > 0)
+                {
+                    sx = it->x + (SWS_ICON_W - sw) / 2;
+                    ny = it->y + 1;
+                    if (sx < it->x) sx = it->x;
+                    SwsCCov(g_G->bits, g_G->pitch, 4, sx + 1, ny + 1, sw, adv,
+                            0, 0, 0, 80 * s_Alpha / 100);
+                    SwsCCov(g_G->bits, g_G->pitch, 4, sx, ny, sw, adv,
+                            255, 255, 255, 100 * s_Alpha / 100);
                 }
             }
-            while (sl < 7 && st[sl]) sl++;
-            adv = g_G ? (g_G->adv > 0 ? g_G->adv : s_FontPx + 2) : s_FontPx + 2;
-            sw = sl ? RenderLine(st, sl) : 0;
-            if (sw > 0)
-            {
-                /* 顶部显示。两趟都用 sw 宽度: 多画 2px 会切出字形 overhang
-                 * 的碎片 (形似 '<'; 微软雅黑 extent 非矩形, 见 GdiText 注释)。
-                 * BlitCoverage 自己不乘 s_Alpha, 所以这里要预乘。 */
-                sx = it->x + (SWS_ICON_W - sw) / 2;
-                ny = it->y + 1;
-                if (sx < it->x) sx = it->x;
-                BlitCoverage(locked, pitch, w, h, sx + 1, ny + 1, sw, adv,
-                             0, 0, 0, 80 * s_Alpha / 100);
-                BlitCoverage(locked, pitch, w, h, sx, ny, sw, adv,
-                             255, 255, 255, 100 * s_Alpha / 100);
-            }
-        }
-        if (i == hover || it->swIdx == curSel)
-        {
-            const unsigned char* hc = (i == hover) ?
-                (const unsigned char*)"\xFF\xFF\xFF" : kSideCol[it->side];
-            SwsFillLocked(locked, pitch, w, h, it->x - 1, it->y - 1,
-                          SWS_ICON_W + 2, 1, hc[0], hc[1], hc[2], 220);
-            SwsFillLocked(locked, pitch, w, h, it->x - 1, it->y + SWS_ICON_H,
-                          SWS_ICON_W + 2, 1, hc[0], hc[1], hc[2], 220);
-            SwsFillLocked(locked, pitch, w, h, it->x - 1, it->y, 1, SWS_ICON_H,
-                          hc[0], hc[1], hc[2], 220);
-            SwsFillLocked(locked, pitch, w, h, it->x + SWS_ICON_W, it->y, 1,
-                          SWS_ICON_H, hc[0], hc[1], hc[2], 220);
         }
     }
 
     /* ---- 每列边框 (画在图标之后, 否则会被 60x48 的图标盖住) ---- */
     for (f = 0; f < 4; f++)
     {
-        int ch;
+        int ch2;
         const unsigned char* c;
         if (colCount[f] <= 0) continue;
         c = kSideCol[f];
-        ch = (colCount[f] < maxRows ? colCount[f] : maxRows) * rowH - s_Gap;
-        SwsFillLocked(locked, pitch, w, h, colX[f], yStart, SWS_ICON_W, 1,
-                      c[0], c[1], c[2], 150);
-        SwsFillLocked(locked, pitch, w, h, colX[f], yStart + ch - 1, SWS_ICON_W, 1,
-                      c[0], c[1], c[2], 150);
-        SwsFillLocked(locked, pitch, w, h, colX[f], yStart, 1, ch,
-                      c[0], c[1], c[2], 150);
-        SwsFillLocked(locked, pitch, w, h, colX[f] + SWS_ICON_W - 1, yStart, 1, ch,
-                      c[0], c[1], c[2], 150);
+        ch2 = (colCount[f] < maxRows ? colCount[f] : maxRows) * rowH - s_Gap;
+        SwsCFillA(colX[f], yStart, SWS_ICON_W, 1, c[0], c[1], c[2], 150);
+        SwsCFillA(colX[f], yStart + ch2 - 1, SWS_ICON_W, 1, c[0], c[1], c[2], 150);
+        SwsCFillA(colX[f], yStart, 1, ch2, c[0], c[1], c[2], 150);
+        SwsCFillA(colX[f] + SWS_ICON_W - 1, yStart, 1, ch2, c[0], c[1], c[2], 150);
+    }
+
+    /* ---- 条目高亮框: 悬停=白, 当前选中=阵营色 ----
+     * ⚠ 必须排在**每列边框之后**, 而且是独立一遍, 不能塞在图标循环里。
+     * 高亮框画在 it->x-1 .. it->x+ICON_W 上, 而 ColGap=0 时这两列正好压在
+     * 左右**邻列的外边框**上 (本列右边框在 x+59, 下一列左边框在 x+60)。
+     * 边框后画就把高亮框的左右两边盖掉一列, 看上去正是"框缺了一截、位置
+     * 错位"。放最后画, 整圈 62x50 的描边才完整。 */
+    for (i = 0; i < n; i++)
+    {
+        SwsItem* it = &s_Items[s_Order[i]];
+        const unsigned char* hc;
+        if (it->x < 0) continue;              /* 被滚动裁掉 */
+        if (i != hover && it->swIdx != curSel) continue;
+        hc = (i == hover) ? (const unsigned char*)"\xFF\xFF\xFF"
+                          : kSideCol[it->side];
+        SwsCFillA(it->x - 1, it->y - 1, SWS_ICON_W + 2, 1, hc[0], hc[1], hc[2], 220);
+        SwsCFillA(it->x - 1, it->y + SWS_ICON_H, SWS_ICON_W + 2, 1, hc[0], hc[1], hc[2], 220);
+        SwsCFillA(it->x - 1, it->y, 1, SWS_ICON_H, hc[0], hc[1], hc[2], 220);
+        SwsCFillA(it->x + SWS_ICON_W, it->y, 1, SWS_ICON_H, hc[0], hc[1], hc[2], 220);
     }
 
     /* ---- 滚动条: 参照战役框 (MOExperience.cpp DrawBox 战役分支) ----
      * 整块右侧一根: 4px 宽, 轨道 alpha 55 / 滑块 alpha 90, 压暗不抢眼。
      * 高度覆盖整个超武块, 滑块高度按最长列的条目数算。 */
-    if (s_BarValid)
+    if (bar)
     {
         int barH, barY, thumbH, thumbY, total;
         barY = yStart + 2;
@@ -2658,39 +2811,91 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
             thumbY = (s_MaxSk > 0)
                    ? barY + (barH - thumbH) * (s_MaxSk - s_Scroll) / s_MaxSk
                    : barY + barH - thumbH;
-            SwsFillLocked(locked, pitch, w, h, s_BarX, barY, s_BarW, barH,
-                          30, 30, 30, 55);
-            SwsFillLocked(locked, pitch, w, h, s_BarX, thumbY, s_BarW, thumbH,
-                          170, 170, 170, 90);
+            SwsCFillA(barX, barY, barW, barH, 30, 30, 30, 55);
+            SwsCFillA(barX, thumbY, barW, thumbH, 170, 170, 170, 90);
         }
     }
 
-    /* ---- 显隐按钮: 向右箭头 ▶ (收起), 贴在超武块右侧 ----
-     * 侧栏显示时用 ▶ (往右收); 隐藏时只留一个 ◀ (往左展开) 贴在屏幕右缘,
-     * 见 SWS_Draw 开头的 !s_Visible 分支 —— 箭头任何时候都不能藏,
-     * 否则藏起来之后就找不到再展开的地方了。 */
-    SwsDrawArrow(locked, pitch, w, h, s_BtnX, s_BtnY, s_BtnW, s_BtnH,
-                 1, mx, my);
-    /* ---- 隐藏重复按钮: 禁入圆牌, 紧挨在显隐按钮**左边** ----
-     * (几何与命中判定见 SwsTwoBtnGeom / SWS_Poll)。
-     *
-     * 位置注意: SWS_Draw 拿到的 surf 是**合成面**, 宽度 = 屏幕宽 - 原版侧栏
-     * 宽 (1920 时是 1752, 见日志 "draw: ok dual surf=1752x1080")。所以
-     * 侧栏块的右缘已经紧贴原版侧栏, 右边一个像素都放不下 —— 两个按钮只能
-     * 挂在块**上方**。曾经挂在右边, 结果画到合成面外面去了, 看着像"没有"。 */
-    dedupOn = s_DedupHide;
-    SwsDrawDedup(locked, pitch, w, h, s_HidX, s_HidY, s_BtnW, s_BtnH,
-                 dedupOn, mx, my);
+    /* ---- 显隐按钮 ▶ (收起) + 隐藏重复按钮 (禁入牌), 紧挨在显隐按钮**左边**。
+     * 箭头任何时候都不能藏, 否则藏起来之后就找不到再展开的地方了。 */
+    SwsDrawArrow(s_BtnX, s_BtnY, s_BtnW, s_BtnH, 1, btnHov == 1);
+    SwsDrawDedup(s_HidX, s_HidY, s_BtnW, s_BtnH, s_DedupHide, btnHov == 2);
 
-    /* ---- 悬停名字 (带底框, 跟随全局矢量字体) ----
+    /* ---- 悬停名字 (带底框, 跟随全局矢量字体, 挂在图标**下面**) ----
      * 隐藏重复按钮**不**出文字提示: 它的禁入牌 + 颜色已经说明状态, 而
      * 自己拼的中文字面量一旦字形链路有问题就是一片 '?' (踩过一次)。 */
     if (hover >= 0)
     {
         SwsItem* it = &s_Items[s_Order[hover]];
-    SwsDrawTip(locked, pitch, w, h, it->name, mx,
-                   it->y, it->y + SWS_ICON_H + 2);
+        SwsDrawTip(w, h, it->x + SWS_ICON_W / 2, it->y + SWS_ICON_H);
     }
-    unlockFn(surf, NULL);
 
+    s_CchOK = 1;
+    s_CchSig = sig; s_CchFrame = fr;
+    s_CchHover = hover; s_CchBtn = btnHov; s_CchSel = curSel;
+    return;
+
+nogeo:
+    /* 一个超武都没有 / 缓存分不出来: 整块不画, 两个按钮也就没画出来。
+     * s_HidValid 必须一起清掉, 否则 SWS_Poll 会拿上一帧的旧几何把点击判到
+     * "隐藏重复" 上。
+     * 指纹/帧号**照样记上**: 画不出来时 SWS_Draw 下一帧还会再进来, 不记就变成
+     * 每帧重试一次 (分配失败时还会每帧记一行日志)。记上之后退回 15 帧节流。 */
+    s_CchOK = 0;
+    s_BoundsKnown = 0;
+    s_HidValid = 0;
+    s_CchSig = sig; s_CchFrame = fr;
+    s_CchHover = hover; s_CchBtn = btnHov; s_CchSel = curSel;
+}
+
+void SWS_Draw(void* surf, int w, int h, int pitch)
+{
+    int mx = -1, my = -1;
+    int fr, hover = -1, btnHov, curSel = -9999, age;
+    unsigned sig;
+    unsigned char* vt;
+    unsigned char* locked;
+    SwsLockFn lockFn;
+    SwsUnlockFn unlockFn;
+
+    SwsEnsureInit();
+    if (!s_Enable) return;
+    if (!surf || !IsPlausiblePtr(surf)) return;
+    if (w <= 0 || h <= 0 || pitch <= 0) return;
+    /* 位深是 SwsPack/SwsOver 的前提 (565 还是 555), 必须先定下来。
+     * MessageDrawHook 本来就调过一次, 这里只是不依赖那个调用顺序。 */
+    if (!g_Calibrated) Calibrate();
+    GtMouseGameXY(&mx, &my);
+    fr = *(int*)ADDR_FRAME;
+    /* 悬停态用**屏上这一帧**的布局算 (也就是上次重建发布的那套), 所以
+     * "鼠标移到一个新图标上"这一下会立刻触发重建, 不会等节流。 */
+    btnHov = SwsHitBtn(mx, my);
+    if (s_Visible && s_CchOK)
+    {
+        hover = SwsHitItem(mx, my);
+        if (IsPlausiblePtr((void*)ADDR_CURSW)) curSel = *(int*)ADDR_CURSW;
+    }
+    sig = SwsSig(w, h, pitch);
+    age = fr - s_CchFrame;
+    if (fr < s_CchFrame) age = SWS_REBUILD_FRAMES;   /* 帧号回拨: 新开局/读档 */
+    if (!s_CchOK || sig != s_CchSig || hover != s_CchHover ||
+        btnHov != s_CchBtn || curSel != s_CchSel ||
+        age >= SWS_REBUILD_FRAMES)
+    {
+        if (s_Visible) SwsRebuild(w, h, mx, my, curSel, sig, fr, btnHov);
+        else           SwsRebuildCollapsed(w, h, sig, fr, btnHov);
+    }
+    if (!s_CchOK) return;
+    /* 每帧唯一的一次锁面 + 一次带 alpha 的拷贝 */
+    vt = *(unsigned char**)surf;
+    if (!vt || !IsPlausiblePtr(vt)) return;
+    lockFn = (SwsLockFn)(*(void**)(vt + VT_LOCK));
+    unlockFn = (SwsUnlockFn)(*(void**)(vt + VT_UNLOCK));
+    if (!lockFn || !unlockFn ||
+        !IsPlausiblePtr((const void*)lockFn) ||
+        !IsPlausiblePtr((const void*)unlockFn)) return;
+    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
+    if (!locked || !IsPlausiblePtr(locked)) return;
+    SwsCacheBlit(locked, pitch, w, h);
+    unlockFn(surf, NULL);
 }
