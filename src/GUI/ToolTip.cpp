@@ -304,7 +304,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl ToolTip_Extend(void* regs)
  *   ESI=面对象, pRect=ESP+0x34 (XYWH), pText=ESP+0x24 (LTRB)。
  * 钩子经 dist/MOExperience.dll.inj: 0x478FDC = ToolTip_Clamp, 5。
  * 偷的字节无 rel, 永远返回 0 跑原指令 (铁律安全)。 */
-#define ADDR_SURF_COMPOSITE 0x88731Cu
+/* ADDR_SURF_COMPOSITE / ADDR_VIEWBOUNDS 用 GdiText.h 的共享定义 */
 #define ADDR_VIEWBOUNDS 0x886FA0u
 
 extern "C" __declspec(dllexport) DWORD __cdecl ToolTip_Clamp(void* regs)

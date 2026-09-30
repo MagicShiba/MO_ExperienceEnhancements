@@ -18,11 +18,21 @@
  *
  * 引擎调用 (二进制实证过, v3/v6 已进游戏验证可用):
  *   IsMindControlled = 0x7105E0 (机码 8B 81 C0 02 00 00 / 85 C0 ...,
- *     return [ecx+0x2C0] || [ecx+0x2C4], 纯读)。
+ *     return [ecx+0x2C0] || byte[ecx+0x2C4], 纯读)。
  *   Select() = vtable+0x14C (UnselectAll=0x48DC90 机码逐个 call [vtable+0x150]
  *     即 Deselect, Select 为前一槽; YRpp 声明顺序一致)。
+ *   IsSelectable() = vtable+0x64 (实现 0x6F32D0, 纯读; 槽位锚点: 同表
+ *     +0x7C=IsSurfaced/+0xAC=GetRenderCoords/+0xB8=GetYSort/+0xE8=
+ *     SpawnParachuted 均与 YRpp 记的函数地址对上, +0x48=GetCoords)。
+ *   MindControlledByAUnit = +0x2C4 (bool 字节; 0x53B2A2 永久心控处
+ *     mov byte [esi+0x2C4],1, 0x6F8372 索敌处同查 +0x2C0/+0x2C4)。
  * 除此之外零引擎调用: 不扫三军数组, 不校准 Owner, 不碰模拟内存。
  * 选中是本机 UI 状态, 无模拟事件, 联机安全。
+ *
+ * 判定口径对齐 Phobos Select Captured Units (Commands/SelectCaptured.cpp:50):
+ *   IsMindControlled() && IsSelectable() && !MindControlledByAUnit
+ * → 排掉永久心控 (MCV/永久心灵支配者) 与引擎判不可选的 (工程兵/医疗兵等
+ *   IsSelectableCombatant=no, 建筑的 WhatAmI 判定也在引擎内自带)。
  *
  * 地址出处 (全只读, 写模拟一律禁止):
  *   IsAlive +0x90 / InLimbo +0x81 / IsSelected +0x83 / Health +0x6C
@@ -50,10 +60,13 @@
 #define OFF_INLIMBO    0x81u
 #define OFF_ISSELECTED 0x83u
 #define OFF_HEALTH     0x6Cu
+#define OFF_MCBYAUNIT  0x2C4u    /* TechnoClass::MindControlledByAUnit (bool 字节) */
 
-#define VT_SELECT (0x14Cu / 4u)      /* 见文件头推导 */
+#define VT_SELECT       (0x14Cu / 4u)   /* 见文件头推导 */
+#define VT_ISSELECTABLE (0x64u / 4u)    /* ObjectClass::IsSelectable */
 
 typedef int __attribute__((thiscall)) (*Fn_IsMindControlled)(void* self);
+typedef int __attribute__((thiscall)) (*Fn_IsSelectable)(void* self);
 typedef int __attribute__((thiscall)) (*Fn_Select)(void* self);
 
 #define FN_ISMC ((Fn_IsMindControlled)(void*)0x7105E0u)
@@ -80,8 +93,27 @@ static void MS_EnsureInit(void)
 
 /* ---------------- 判定 + 单步 ---------------- */
 
-/* 心控判定前置: 作战单位 + 存活 + 进图 + 有血。非作战单位 (如建筑) 直接
- * 判非心控 (不进引擎调用, 省一次调用也避开建筑 +0x2C0 野值误判)。 */
+/* 引擎可选性 (纯读调用, 对应 Phobos SelectCaptured 里的 pTechno->IsSelectable()):
+ * Health>0 && !InLimbo && WhatAmI!=Building && Type->IsSelectableCombatant
+ * && Owner->IsControlledByCurrentPlayer() (0x50B6F0: 联机比 CurrentPlayer
+ * 0xA83D4C, 单机读 House+0x1EC/+0x1ED)。心控时 Owner 已被改成控制方,
+ * 故心控单位能过这条。 */
+static int MS_IsSelectable(void* u)
+{
+    void** vt;
+    Fn_IsSelectable fn;
+    vt = *(void***)u;                     /* 调用方已验 u 合理 */
+    if (!vt || !IsPlausiblePtr(vt)) return 0;
+    fn = (Fn_IsSelectable)vt[VT_ISSELECTABLE];
+    /* 槽坏理论不可达 (OU_WhatAmI 已成功走过 +0x2C 槽): 当"可选"放行,
+     * 后续 MS_SelectOne 仍会自校验, 不会真选中。 */
+    if (!fn || !IsPlausiblePtr((const void*)fn)) return 1;
+    return fn(u) ? 1 : 0;
+}
+
+/* 心控判定前置: 作战单位 + 存活 + 进图 + 有血 + 非永久心控 + 引擎可选。
+ * 非作战单位 (如建筑) 直接判非心控 (不进引擎调用, 省一次调用也避开
+ * 建筑 +0x2C0 野值误判)。 */
 static int MS_IsMCd(void* u)
 {
     int w;
@@ -91,6 +123,8 @@ static int MS_IsMCd(void* u)
     if (!((unsigned char*)u)[OFF_ISALIVE]) return 0;
     if (((unsigned char*)u)[OFF_INLIMBO]) return 0;
     if (*(int*)((char*)u + OFF_HEALTH) <= 0) return 0;
+    if (((unsigned char*)u)[OFF_MCBYAUNIT]) return 0;   /* 永久心控不算 */
+    if (!MS_IsSelectable(u)) return 0;                 /* 引擎可选性 */
     return FN_ISMC(u) ? 1 : 0;             /* 心控判定 (只读调用) */
 }
 

@@ -74,6 +74,8 @@ typedef struct {
     int Render;
 } VTConfig;
 
+static int g_VtInit = 0;
+
 static VTConfig g_VT;
 static wchar_t g_VTFace[FONT_FACE_MAX];
 
@@ -1851,15 +1853,17 @@ int VecText_FontPx(void)
 }
 int VecText_Bold(void)
 {
-    return g_VT.Bold;
+	return g_VT.Bold;
 }
 
-void VecText_Install(void)
+void VecText_EnsureInit(void)
 {
     char b1[16], buf[192];
     unsigned p;
+    if (g_VtInit) return;
+    g_VtInit = 1;
     GtEnsureLog();
-    if (!g_Log) return;   /* 日志都打不开就不装钩 (无意义) */
+    if (!g_Log) return;   /* 日志都打不开就当没配置 (后续安装会自然跳过) */
     g_VT.Enable = GetPrivateProfileIntA(VT_SECTION, "Enable", 1, g_IniPath);
     OU_ReadString(VT_SECTION, "FontFace", "simhei.ttf",
                   g_VT.FontFace, sizeof(g_VT.FontFace));
@@ -1924,6 +1928,15 @@ void VecText_Install(void)
     UtoA(0u, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " v=99", sizeof(buf));   /* 发版自增, 日志对版本 */
     LogLine(buf);
+}
+
+void VecText_Install(void)
+{
+    char b1[16], buf[192];
+    unsigned p;
+    (void)b1; (void)buf; (void)p;
+    VecText_EnsureInit();
+    if (!g_Log) return;   /* 日志都打不开就不装钩 (无意义) */
     if (!g_VT.Enable) { LogLine("vtext: disabled"); return; }
     if (!BytesSame((unsigned char*)ADDR_BLIT, kWantBlit, 7))
     {

@@ -2703,7 +2703,7 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
         SwsCFillA(it->x + SWS_ICON_W, it->y, 1, SWS_ICON_H, hc[0], hc[1], hc[2], 220);
     }
 
-    /* ---- 滚动条: 参照战役框 (MOExperience.cpp DrawBox 战役分支) ----
+    /* ---- 滚动条: 参照战役框 (MsgText.cpp DrawBox 战役分支) ----
      * 整块右侧一根: 4px 宽, 轨道 alpha 55 / 滑块 alpha 90, 压暗不抢眼。
      * 高度覆盖整个超武块, 滑块高度按最长列的条目数算。 */
     if (bar)

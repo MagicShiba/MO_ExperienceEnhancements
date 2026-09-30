@@ -92,7 +92,7 @@ label 的 X/Y（`+0x24` 的 `+0x0C/+0x10`），Draw 只读 label 的 X/Y。
 **那段永远不执行**。`0x5D4A22` 要用 `[0x887314]` 那个面和 `0x4A61C0` 的
 8 个参数，单机路径上从没初始化过，强行进入必崩。
 
-**落位**（`ChatAnchor_CampBelow`，`MOExperience.cpp`）：
+**落位**（`MsgText_ChatAnchor`，`MsgText.cpp`）：
 
 - 底部模式（`CampBottom=1`）→ 贴战役框下沿（`surfH-CampBottomMargin+gap`），
   落在留出的底部间距里，位置不随消息条数变。
@@ -211,7 +211,7 @@ label 的 X/Y（`+0x24` 的 `+0x0C/+0x10`），Draw 只读 label 的 X/Y。
 - 斜坡：全程 500ms，步进按流逝毫秒算（`dt*100/500`），与帧率无关；
   长暂停（`dt>500`）直接追上目标。
 
-## 配置（[MOExperience]，改后重启）
+## 配置（[ChatEdit] Enable/FontFace/Bold 与 [MsgText] ChatBoxSP，改后重启）
 
 - `HoverMinOpacity=5`：悬停最低透明度 0~100（找触发区用）；0=沿用渐隐。
   启动横幅 `HovMinOp=` 回显。

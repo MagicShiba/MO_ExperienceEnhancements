@@ -22,13 +22,13 @@
  *     里); 顶部模式留在原生行原位, 不挪 (原生行本来就在 (3,0) 的左上角)。
  *     底板只按画出的内容宽, 不按原生输入域宽铺满 (原生 EditPos 在 (3,0)
  *     而 fieldW=整屏宽, 铺满就是顶上留一条黑杠)。
- *     GDI 槽 4 (字体与战役框同源: [MOExperience] FontFace/Bold 同解析)。
+ *     GDI 槽 4 (字体与战役框同源: [MsgText] FontFace/Bold 同解析)。
  *   粘贴: CF_UNICODETEXT; 复制/剪切写剪贴板 (全本地 Win32)。
  *   组字: 每帧 Imm 轮询组字串画出来+下划线 (全屏下系统组字窗不可见),
  *     组字中暂停导航/编辑轮询, 回车等转原生。
  *   代价: 方向键不再被吞, 打字时镜头可能跟着动一下。拿可见小瑕疵换掉
  *     "抢全系统键盘", 要彻底消掉得再钩游戏自己的方向键处理。
- * 开关 [MOExperience] ChatEdit=1 (0=全走原生, 原生行照常显示)。
+ * 开关 [ChatEdit] Enable=1 (0=全走原生, 原生行照常显示)。
  *
  * 构建见 构建.bat (32 位 mingw, 无 CRT, -limm32)。
  */
@@ -36,6 +36,7 @@
 #include <windows.h>
 #include <imm.h>
 #include "GdiText.h"
+#include "MsgText.h"
 #include "ChatEdit.h"
 
 #define CE_MSGLIST      0xA8BC60u
@@ -78,12 +79,12 @@
 #define CE_VT_UNLOCK    0x60u
 #define CE_VT_FILLRECT  0x1Cu
 
-#define CE_SECTION      "MOExperience"
+#define CE_SECTION      "ChatEdit"
 
-/* Syringe 传进来的寄存器块 (同 MOExperience.cpp 的用法) */
+/* Syringe 传进来的寄存器块 (同 MsgText.cpp 的用法) */
 #define CE_OFF_REG_ECX  0x20u
 
-/* 字体跟战役框 (同 [MOExperience] FontFace/Bold, 经 ResolveFontFace 解析;
+/* 字体跟战役框 (同 [MsgText] FontFace/Bold, 经 ResolveFontFace 解析;
  * 直接把 "msyh.ttc" 当字体名传 GDI 会回退到无 CJK 字形, 中文空白) */
 static wchar_t ce_Face[FONT_FACE_MAX];
 static int ce_Bold = 0;
@@ -157,7 +158,7 @@ static void CE_EnsureInit(void)
     ce_Init = 1;
     BuildPaths();
     GtEnsureLog();
-    ce_Enable = GetPrivateProfileIntA(CE_SECTION, "ChatEdit", 1, g_IniPath) ? 1 : 0;
+    ce_Enable = GetPrivateProfileIntA(CE_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
     /* 字体与战役框同源 (同键同解析, 显示天然一致) */
     GetPrivateProfileStringA(CE_SECTION, "FontFace", "msyh.ttc",
                              faceCfg, sizeof(faceCfg), g_IniPath);
@@ -721,7 +722,7 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     fieldW = CE_NativeFieldW();
     if (fieldW < 80 || fieldW > surfW) fieldW = (surfW - 16 > 80) ? surfW - 16 : 640;
     /* 位置: 底部模式 (CampBottom=1) 贴战役框下沿, 左侧与战役文本对齐
-     * (ChatAnchor_CampBelow); 顶部模式留在原生行原位不挪——战役框本来就在
+     * (MsgText_ChatAnchor); 顶部模式留在原生行原位不挪——战役框本来就在
      * 左上角, 输入框也留在 (3,0), 同位同层, 画序保证输入框在上面。
      * 兜底顺序: 对话框维护的 EditPos (+0x1C, 屏幕坐标) → label 自身 X/Y
      * (创建占位, 只在 EditPos 不可用时用) → 底部条带。 */
@@ -729,7 +730,7 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     {
         int ax = 0, ay = 0;
         ce_AtNative = 1;
-        if (ChatAnchor_CampBelow(surfW, surfH, lineH, &ax, &ay))
+        if (MsgText_ChatAnchor(surfW, surfH, lineH, &ax, &ay))
         {
             lx = ax; ly = ay;
             ce_AtNative = 0;

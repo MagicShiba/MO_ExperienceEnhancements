@@ -27,7 +27,7 @@
 
 #define TS_SECTION "TypeSelect"
 
-/* Syringe REGISTERS 布局 (YRpp Syringe.h, MOExperience.cpp 的
+/* Syringe REGISTERS 布局 (YRpp Syringe.h, MsgText.cpp 的
  * OFF_REG_ESP=0x14 / OFF_REG_ECX=0x20 可互证, EAX 紧跟 ECX 之后)。 */
 #define REG_OFF_EAX 0x24
 

@@ -1,8 +1,7 @@
 /* GdiText.cpp - 见 GdiText.h。
- * 全部由 MOExperience.cpp 原样移出 (行为不变), 外加:
- *   GtEnsureLog (幂等日志打开), GtUnpack16 (16 位像素拆 RGB),
- *   GtRenderGlyph (单字形光栅), Calibrate 首行幂等守卫,
- *   ResolveFontFace 多一个 fallback 参数。
+ * 全 DLL 共享底座: 无 CRT 工具 / 日志 / 字体解析 / GDI 光栅 / 16 位混合 /
+ * 游戏窗口与鼠标坐标 / 引擎时钟 / 画面 (DSURFACE) 虚表。
+ * 虚表槽号只有这一份, 各模块不要自己抄。
  */
 #include "GdiText.h"
 
@@ -106,6 +105,102 @@ void BuildPaths(void)
     AppendCStr(g_LogPath, k, "\\MOExperience.log", MAX_PATH_LEN);
     k = AppendCStr(g_IniPath, 0, exe, MAX_PATH_LEN);
     AppendCStr(g_IniPath, k, "\\MOExperience.ini", MAX_PATH_LEN);
+}
+
+/* ---------------- 游戏窗口与鼠标坐标 ----------------
+ * WWMouse 给的是窗口/客户区像素; 窗口与游戏分辨率不一致 (拉伸呈现) 时
+ * 必须换算, 否则命中判定整体偏移。
+ * 基准必须用整帧宽度 (Primary), 不能用 Composite: 1920x1080 下
+ * Composite 只有 1752 宽 (右侧 168 是独立侧栏面), 拿它当分母会把
+ * 鼠标 x 整体缩小 1752/1920, 触发区看起来向右偏。 */
+
+static HWND g_GameWnd = NULL;
+static int g_WinW = 0, g_WinH = 0;
+static int g_GameW = 0, g_GameH = 0;
+
+int GtGameW(void) { return g_GameW; }
+int GtGameH(void) { return g_GameH; }
+void GtSetGameSize(int w, int h) { g_GameW = w; g_GameH = h; }
+
+static int __stdcall GtEnumGameWnd(HWND h, LPARAM lp)
+{
+    DWORD pid = 0;
+    RECT rc;
+    (void)lp;
+    if (!IsWindowVisible(h)) return 1;
+    GetWindowThreadProcessId(h, &pid);
+    if (pid != GetCurrentProcessId()) return 1;
+    if (!GetClientRect(h, &rc)) return 1;
+    if (rc.right < 100 || rc.bottom < 100) return 1;
+    *(HWND*)lp = h;
+    return 0;
+}
+
+void GtRefreshWinSize(unsigned tick)
+{
+    static unsigned s_last = 0;
+    RECT rc;
+    if (tick - s_last < 60) return;
+    s_last = tick;
+    if (!g_GameWnd || !IsWindow(g_GameWnd))
+    {
+        g_GameWnd = NULL;
+        EnumWindows((WNDENUMPROC)GtEnumGameWnd, (LPARAM)&g_GameWnd);
+    }
+    if (g_GameWnd && GetClientRect(g_GameWnd, &rc) && rc.right > 100 && rc.bottom > 100)
+    {
+        if (rc.right != g_WinW || rc.bottom != g_WinH)
+        {
+            char wb[128], w1[16], w2[16];
+            unsigned q = 0;
+            g_WinW = rc.right; g_WinH = rc.bottom;
+            q = AppendCStr(wb, q, "win: client=", sizeof(wb));
+            UtoA((unsigned)g_WinW, w1); q = AppendCStr(wb, q, w1, sizeof(wb));
+            q = AppendCh(wb, q, 'x', sizeof(wb));
+            UtoA((unsigned)g_WinH, w2); q = AppendCStr(wb, q, w2, sizeof(wb));
+            LogLine(wb);
+        }
+    }
+}
+
+/* 前台判定: 窗口化切走时引擎停渲染, 焦点追踪日志靠它 (见 MsgText 悬停淡入) */
+int GtGameFocused(void)
+{
+    if (!g_GameWnd) return 0;
+    return (GetForegroundWindow() == g_GameWnd) ? 1 : 0;
+}
+
+int GtMouseGameXY(int* x, int* y)
+{
+    void* m = *(void**)0x00887640u;   /* WWMouse::Instance */
+    int mx, my;
+    static int s_mapLogged = 0;
+    if (!m || !IsPlausiblePtr(m)) return 0;
+    mx = *(int*)((char*)m + 0x1C);
+    my = *(int*)((char*)m + 0x20);
+    if (g_WinW > 100 && g_WinH > 100 && g_GameW > 100 && g_GameH > 100)
+    {
+        int sx = mx * g_GameW / g_WinW;
+        int sy = my * g_GameH / g_WinH;
+        if (!s_mapLogged)
+        {
+            char mb[160], m1[16], m2[16], m3[16], m4[16];
+            unsigned q = 0;
+            s_mapLogged = 1;
+            q = AppendCStr(mb, q, "mouse: raw=", sizeof(mb));
+            UtoA((unsigned)(mx < 0 ? 0 : mx), m1); q = AppendCStr(mb, q, m1, sizeof(mb));
+            q = AppendCh(mb, q, ',', sizeof(mb));
+            UtoA((unsigned)(my < 0 ? 0 : my), m2); q = AppendCStr(mb, q, m2, sizeof(mb));
+            q = AppendCStr(mb, q, " mapped=", sizeof(mb));
+            UtoA((unsigned)(sx < 0 ? 0 : sx), m3); q = AppendCStr(mb, q, m3, sizeof(mb));
+            q = AppendCh(mb, q, ',', sizeof(mb));
+            UtoA((unsigned)(sy < 0 ? 0 : sy), m4); q = AppendCStr(mb, q, m4, sizeof(mb));
+            LogLine(mb);
+        }
+        *x = sx; *y = sy;
+    }
+    else { *x = mx; *y = my; }
+    return 1;
 }
 
 void GtEnsureLog(void)
@@ -434,13 +529,118 @@ void ResolveFontFace(const char* cfg, const char* tag, wchar_t* out,
     /* 都没字形: 原样返回 (尽力), 行为不变 */
 }
 
+/* ---------------- 画面底座 (DSURFACE 虚表) ----------------
+ * 引擎面对象首成员是虚表指针; 所有调用都先过指针合理性判定, 半初始化面
+ * (loading 态) 的虚表是垃圾, 撞上去必崩, 故一律守卫后静默跳过。 */
+
+typedef int (__fastcall *GtGetIntFn)(void* s, void* edx);
+typedef int (__fastcall *GtFillFn)(void* s, void* edx, RectangleStruct*, ColorStruct*, int);
+typedef void* (__fastcall *GtLockFn)(void* s, void* edx, int, int);
+typedef int (__fastcall *GtUnlockFn)(void* s, void* edx);
+
+static void* GtVtable(void* surf, unsigned vtOff)
+{
+    unsigned char* vt;
+    if (!surf || !IsPlausiblePtr(surf)) return NULL;
+    vt = *(unsigned char**)surf;
+    if (!vt || !IsPlausiblePtr(vt)) return NULL;
+    return *(void**)(vt + vtOff);
+}
+
+int GtSurfGet(void* surf, unsigned vtOff)
+{
+    GtGetIntFn fn = (GtGetIntFn)GtVtable(surf, vtOff);
+    if (!fn) return -1;
+    return fn(surf, NULL);
+}
+
+void GtFillRectTrans(void* surf, RectangleStruct* r, ColorStruct* c, int opacity)
+{
+    GtFillFn fn = (GtFillFn)GtVtable(surf, GtVT_FILL_RECT_TRANS);
+    if (!fn) return;
+    fn(surf, NULL, r, c, opacity);
+}
+
+unsigned char* GtLock(void* surf)
+{
+    GtLockFn fn = (GtLockFn)GtVtable(surf, GtVT_LOCK);
+    unsigned char* p;
+    if (!fn) return NULL;
+    if (!IsPlausiblePtr((const void*)fn)) return NULL;
+    p = (unsigned char*)fn(surf, NULL, 0, 0);
+    return (p && IsPlausiblePtr(p)) ? p : NULL;
+}
+
+void GtUnlock(void* surf)
+{
+    GtUnlockFn fn = (GtUnlockFn)GtVtable(surf, GtVT_UNLOCK);
+    if (!fn) return;
+    if (!IsPlausiblePtr((const void*)fn)) return;
+    fn(surf, NULL);
+}
+
+void GtDrawOutline(void* surf, int x, int y, int w, int h,
+                   unsigned char r, unsigned char g, unsigned char b, int op)
+{
+    RectangleStruct e;
+    ColorStruct c;
+    if (w < 8 || h < 8) return;
+    c.R = r; c.G = g; c.B = b;
+    e.X = x; e.Y = y; e.Width = w; e.Height = 2;
+    GtFillRectTrans(surf, &e, &c, op);
+    e.Y = y + h - 2;
+    GtFillRectTrans(surf, &e, &c, op);
+    e.Y = y + 2; e.Height = h - 4; e.Width = 2;
+    GtFillRectTrans(surf, &e, &c, op);
+    e.X = x + w - 2;
+    GtFillRectTrans(surf, &e, &c, op);
+}
+
+int GtBitLineHeight(void)
+{
+    void* font = *(void**)ADDR_BITFONT_INSTANCE;
+    int h = font ? *(int*)((char*)font + FONT_OFF_HEIGHT) : 14;
+    if (h < 6 || h > 64) h = 14;
+    return h;
+}
+
+int GtScreenW(void)
+{
+    RectangleStruct* vb = (RectangleStruct*)ADDR_SURF_VIEWBOUNDS;
+    return (vb && vb->Width > 200) ? vb->Width : 640;
+}
+
+/* ---------------- 游戏时钟 (引擎式过期的时间基准) ----------------
+ * 反汇编实证 (AddMessage 0x5D3DC0 / Manage 0x5D4441):
+ *   时钟 = [0x887340] + (Tick() - [0x887338]), Tick = timeGetTime()>>4 (毫秒/16),
+ *   [0x887338]==-1 时不做 Tick 补偿 (暂停/未启动状态)。
+ * 这就是不限速下原版消息"活得更久"的原因: 超时是墙钟, 不是逻辑帧。 */
+
+#define ADDR_TICK_FN   0x006C8C40u
+#define ADDR_CLK_REF   0x00887338u
+#define ADDR_CLK_BASE  0x00887340u
+#define ADDR_CLK_ARG   0x0088733Cu
+
+typedef unsigned (__fastcall *GtTickFn)(void* a, void* edxUnused);
+
+unsigned GtTickNow(void)
+{
+    static GtTickFn fn = NULL;
+    if (!fn) fn = (GtTickFn)ADDR_TICK_FN;
+    return fn((void*)ADDR_CLK_ARG, NULL);
+}
+
+unsigned GtClockNow(void)
+{
+    unsigned ref = *(unsigned*)ADDR_CLK_REF;
+    unsigned b = *(unsigned*)ADDR_CLK_BASE;
+    if (ref != 0xFFFFFFFFu) b += GtTickNow() - ref;
+    return b;
+}
+
 /* ---------------- 像素格式校准 ----------------
  * 在 Temp 面上 FillRect 纯红再 GetPixel 回读, 判定 565 还是 555。
  * 只做一次, 结果记入日志。 */
-
-#define ADDR_DSURFACE_TEMP       0x00887314u
-#define VT_FILL_RECT             0x14
-#define VT_GET_PIXEL             0x28
 
 int g_RBits = 5, g_GBits = 6, g_BBits = 5;  /* 默认 565 */
 int g_Calibrated = 0;
@@ -461,14 +661,14 @@ void Calibrate(void)
 
     if (g_Calibrated) return;
 
-    tmp = *(void**)ADDR_DSURFACE_TEMP;
+    tmp = *(void**)ADDR_SURF_TEMP;
     if (!tmp || !IsPlausiblePtr(tmp)) { LogLine("cal: no temp surface, assume 565"); g_Calibrated = 1; return; }
     vt = *(unsigned char**)tmp;
     if (!vt || !IsPlausiblePtr(vt)) { LogLine("cal: bad temp vtable, assume 565"); g_Calibrated = 1; return; }
 
     rc.X = 0; rc.Y = 0; rc.Width = 4; rc.Height = 4;
-    fill = (FillFn)(*(void**)(vt + VT_FILL_RECT));
-    getpx = (GetPxFn)(*(void**)(vt + VT_GET_PIXEL));
+    fill = (FillFn)(*(void**)(vt + GtVT_FILL_RECT));
+    getpx = (GetPxFn)(*(void**)(vt + GtVT_GET_PIXEL));
     if (!fill || !getpx) { LogLine("cal: no fill/getpx, assume 565"); g_Calibrated = 1; return; }
 
     fill(tmp, NULL, &rc, 0x000000FFu);   /* COLORREF 纯红 */
