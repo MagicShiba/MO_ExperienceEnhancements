@@ -36,3 +36,8 @@
 ; 超武侧栏点击吞没 (DisplayClass::ProcessClickCoords 内, Phobos SkipOnNewButtons 同点;
 ; 落栏内跳 0x6925FC 防误下单, 余者跑原版, 见 SWSBar.cpp)
 0x692419 = SWS_ClickGate, 7
+
+; 维修简化: 维修快捷键 ToggleRepariModeCommandClass::Execute 吞 Ctrl (落 ret 4)
+0x536FA0 = RepairAll_HotKey, 7
+; 侧栏维修图标 (egui_BUTTON_REPAIR 0x8065 分支) 吞 Ctrl (落分支公共尾 jmp)
+0x6A78D9 = RepairAll_Button, 6

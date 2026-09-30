@@ -29,12 +29,21 @@ int OU_Enqueue(char ev[EVT_SIZE])
     for (i = 0; i < EVT_SIZE; i++)
         ((char*)(ADDR_OUT_BUF + next * EVT_SIZE))[i] = ev[i];
     snd = *(Fn_SndCb*)0x7E1530u;
+    /* 这条内联 "call *%1" 以前只声明了 ecx/edx/cc/memory 被破坏, **漏了
+     * ebx/esi/edi/ebp** —— 而下面第 38/39 行紧接着就用 ebx 算索引、用 esi
+     * 写 OutList_Count。真实 call 是会改这四个 callee-saved 寄存器的, 于是
+     * 编译器以为它们还是自己的值就直接用, 实际写进去的是被 callee 改过的
+     * 垃圾 → OutList_Count / OutList_Next 被写坏, 引擎随后按垃圾账本去处理
+     * 事件, 就会跳到野地址 (实测 0xC0000005, EIP 落在非代码区)。
+     * 补上 clobber 即可: 编译器会自己把它们 spill/reload。
+     * 同一个坑 SWSBar.cpp 早就踩过并记在 notes/智能中键.md, 那边是手工
+     * 存取绕开的, 这里直接声明干净。 */
     __asm__ volatile (
         "call *%1\n\t"
         "movl %%eax, %0"
         : "=r" (eaxAfter)
         : "r" (snd)
-        : "ecx", "edx", "cc", "memory");
+        : "ecx", "edx", "ebx", "esi", "edi", "ebp", "cc", "memory");
     *(unsigned*)(ADDR_OUT_PAR + next * 4u) = eaxAfter;
     *(unsigned*)ADDR_OUT_NEXT = (next + 1u) & 0x7Fu;
     *(unsigned*)ADDR_OUT_COUNT = count + 1u;

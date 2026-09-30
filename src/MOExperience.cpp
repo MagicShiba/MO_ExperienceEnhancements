@@ -33,8 +33,9 @@
 #include "OrderUtil.h"
 #include "ChatEdit.h"
 #include "SWSBar.h"
+#include "RepairAll.h"
 
-#define MOE_VERSION   "0.2.154a"
+#define MOE_VERSION   "0.2.162a"
 #define MOE_SECTION   "MOExperience"
 
 /* ---------------- 地址 ---------------- */
@@ -1926,6 +1927,7 @@ static void PowerDrawBoth(void)
     DeployPreview_Poll(); /* 单基地车裸中键点按: 开过去+到位自动展开 (预览框见渲染) */
     MindSelect_Poll(); /* Shift+P 一步选中被心控单位 (开关关/无组合键时直接返回) */
     SWS_Poll(); /* 超武侧栏切换+扫描 (开关关/隐藏时直接返回, 只读) */
+    RepairAll_Poll(); /* 建筑维修简化 (Mode=0 时直接返回; 只读扫描+Repair 事件入队) */
     EnsureInit();
     if (!g_Cfg.Enable || !g_Cfg.PowerBottom) return;
     /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;
