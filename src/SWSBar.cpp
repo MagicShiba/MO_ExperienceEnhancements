@@ -1,53 +1,31 @@
 /* SWSBar.cpp - 超武侧栏 (Phobos SuperWeaponSidebar 移植简化版)。
  *
- * Phobos 原理 (见 notes/超武侧栏.md, references/Phobos/src/Ext/Sidebar/SWSidebar):
- *   Gadget 按钮列 (SWColumnClass/SWButtonClass) + 开关掣, 按
- *   SuperWeaponSidebar.Allow/Significance/RequiredHouses 过滤,
- *   按 PriorityHouses + BuildType::SortsBefore 排序, 左键打靶/右键取消,
- *   背景全套 PCX (On/Off/Top/Center/Bottom), 左侧停靠。
+ * 原理与全部设计取舍见 notes/超武侧栏.md, 这里只留"读代码时必须知道"的。
+ *
  * 本移植只取最小可用 (Ares 不动, 不建 Gadget, 不碰模拟):
- *   - 数据: 只读扫 SuperClass::Array (Owner==本家 && IsPresent),
- *     纯本地过滤+排序, 不写任何引擎/Gadget 状态 (联机安全)。
- *   - 分组: 右侧 4 列 (0=盟军 1=苏联 2=厄普西隆 3=焚风), 空列隐藏;
- *     归属先查内建表 (rulesmo.ini 离线推导: 授予建筑 Owner/Prerequisite
- *     链, 96 个), 查不到落玩家阵营列 (PlayerSideIndex, 未知回 0 列)。
- *   - 排序/隐藏: 单节 [SWSidebar] 内以超武 ID 为键、整数为值:
- *     负数=隐藏, 0=默认显示 (优先级 1000), 正数=优先级 (越小越靠前);
- *     同优先级按 ArrayIndex。缺键=默认显示。
- *     (超武与支援技能同注册类型, 不区分, IsPresent 即显示。)
- *   - 绘制: 图标盒 (60x48, Phobos cameo 同尺寸) + 阵营色边框 +
- *     名/状态两行 GDI 字 + 底部进度条, 整体透明度 Opacity 可调;
- *     不需要 Phobos 那套 PCX UI 资源。
- *   - 图标: MO 的超武图标是 PCX (rulesmo.ini 里 SidebarPCX=xxx.pcx, 打包在
- *     MIX 里), 不是 SHP —— SidebarImage 指向引擎的 XXICON.SHP 占位引用,
- *     画出来是 11 个一样的紫球。走引擎现成设施:
- *     INI_Rules(0x887048)->ReadString(0x528A10) 读 SidebarPCX=,
- *     PCX::Instance(0xAC4848, this 即该地址) GetSurface(0x6BA140) /
- *     ForceLoadFile(0x6B9D00), BlitToSurface(0x6BA580, 色键
- *     COLOR_PURPLE=0xF81F) 贴到 SWS_Draw 收到的 surf 上。
- *     三条命门: GetSurface 未加载时给的是占位图(必须先 LoadFile);
- *     BSurface* 不可跨帧缓存(切页/重载美术会失效); 目标面不能用硬编码
- *     0x88731C (本机 Ares 构建该处虚表为 NULL, 调用即跳 0 崩溃)。
- *     无 PCX 时才回退 SHP (跟随 Data / GetData, 见笔记)。
- *   - 交互: ToggleKey 切换显隐 (隐藏即不占空间: 不画+不吞点击);
- *     左键图标=选中打靶 (只写 Display 侧 UI 态 CurrentSWTypeIndex,
- *     与 Phobos targeting 分支同义, 非模拟), 右键栏内=取消 (-1);
- *     点击吞没经 0x692419 门 (Phobos SkipOnNewButtons 同点同去向),
- *     防误下单。Action==None 的直发类 (空降/空投等) 本版也只进打靶
- *     ( limitation, 见笔记)。
- *   - 防御支援页去重 (DedupDefensePage): 侧栏有的超武不再在游戏自带的
- *     防御页 (页签 1) 里重复出现。钩 SidebarClass::AddCameo 入口
- *     0x6A6316 拦掉新增 (Phobos 同点), 已经进去的则直接改 Ares 的
- *     RulesExt::TabCameos[1] 搬出来 (引擎自己只删 IsPresent==0 的,
- *     而且 Ares 把容器换成了 Ares.dll 里的 DynamicVectorClass)。
- *     显隐箭头左边有个"禁入牌"按钮在两者之间切换。整段细节见
- *     notes/超武侧栏.md "隐藏防御支援页里的重复超武"。
+ *   - 数据: 只读扫 SuperClass::Array (Owner==本家 && IsPresent), 纯本地
+ *     过滤+排序, 不写任何引擎/Gadget 状态 (联机安全)。
+ *   - 分组: 右侧 4 列 (盟/苏/厄/焚风), 空列隐藏; 归属查内建表 (96 个, 由
+ *     rulesmo.ini 的授予建筑 Owner/Prerequisite 链离线推导), 查不到落玩家阵营。
+ *   - 排序/隐藏: [SWSidebar] 单节, 以超武 ID 为键: 负数=隐藏, 0=默认
+ *     (优先级 1000), 正数=优先级 (越小越靠前); 缺键=默认显示。
+ *   - 绘制: 图标盒 60x48 + 阵营色边框 + GDI 名/状态两行字 + 底部进度条,
+ *     整体 Opacity 可调; 不需要 Phobos 那套 PCX UI 资源。
+ *   - 图标: MO 的超武图标是 PCX (rulesmo.ini 的 SidebarPCX=), 不是 SHP ——
+ *     SidebarImage 指向引擎 XXICON.SHP 占位引用, 画出来是 11 个一样的紫球。
+ *     走 INI_Rules->ReadString 读 SidebarPCX= + PCX::Instance 的
+ *     GetSurface/ForceLoadFile 贴图; 无 PCX 才回退 SHP。
+ *   - 交互: ToggleKey 切换显隐 (隐藏即不占空间: 不画+不吞点击); 左键图标=
+ *     选中打靶 (只写 CurrentSWTypeIndex, 与 Phobos targeting 分支同义, 非模拟),
+ *     右键栏内=取消; 点击吞没经 0x692419 门防误下单。
+ *   - 防御支援页去重: 侧栏有的超武不在游戏自带的防御页 (页签 1) 里重复出现,
+ *     显隐箭头左边有个"禁入牌"按钮切换。见下面"隐藏防御支援页里的重复超武"。
  *
  * 地址 (YRpp 交叉验证, 全部只读, 首帧探针日志自证):
- *   SuperClass::Array 0xA83CB8 (Items+0/Count+0xC, 同 BuildQueue 厂表惯例);
- *   SuperWeaponTypeClass::Array 0xA8E330 (同上);
+ *   SuperClass::Array 0xA83CB8 (Items+0/Count+0xC);
+ *   SuperWeaponTypeClass::Array 0xA8E330;
  *   Super: Type+0x1C Owner+0x20 RechargeTimer+0x24(Start)/+0x2C(Left)
- *     IsPresent+0x61 IsReady+0x63 IsSuspended+0x64 (头文件逐字节累加);
+ *     IsPresent+0x61 IsReady+0x63 IsSuspended+0x64;
  *   SWType: ID+0x18 UIName+0x54 ArrayIndex+0x8C RechargeTime+0xA4;
  *   CurrentPlayer *(0xA83D4C); CurrentFrame *(0xA8ED84);
  *   Scenario PlayerSideIndex *(*(0xA8B230)+0x34B8);
@@ -119,12 +97,18 @@ typedef void (__fastcall *SwsDrawShapeFn)(void* surf, void* pal, void* shp,
 
 static int s_Init = 0;
 static int s_Enable = 1;
-static int s_Opacity = 60;
-static int s_Alpha = 100;   /* 侧栏整体透明度 0~100 */
+/* 侧栏**唯一**的透明度旋钮 0~100。作用于底框/边框/滚动条/按钮/文字/进度条/图标。
+ * 曾另有一个只管底框的 `Opacity`, 与本项表达同一件事 (侧栏有多透明), 两个旋钮
+ * 能配出"半透明图标浮在不透明黑底上"这种自相矛盾的组合, 已合并。 */
+static int s_Alpha = 100;
 /* 图标盒固定 60x48 (Phobos 原版 cameo 尺寸)。曾做成 IconW/IconH 配置项,
  * 但 PCX 是固定尺寸源资源, 缩放后目标矩形只按屏幕边界裁剪、不按图标盒裁剪,
  * 非默认尺寸会溢出格子与底框错位 —— 故去掉, 直接定常量。 */
 #define SWS_ICON_W 60
+/* 整块底框自身的不透明度。侧栏只有一个透明度旋钮 (`[SWSidebar] Alpha`), 这个
+ * 底框的浓度是固定的观感选择 —— 图标不吃逐元素不透明度, 所以"整块画一次黑底"
+ * 和"逐列各画一次"效果一样, 不需要第二个旋钮。 */
+#define SWS_BACKDROP_OP 30
 #define SWS_ICON_H 48
 static int s_Gap = 2, s_ColGap = 6;
 static int s_RightMargin = 2;
@@ -142,20 +126,13 @@ static int s_Visible = 1;
 static int s_PrevTog = 0, s_PrevLB = 0, s_PrevRB = 0;
 /* 待上膛的超武, **等左键松开才写**。
  *
- * 为什么不按 Phobos 那样"按下就写": Phobos 的 SWButtonClass 是真 Gadget,
- * 构造时带 (GadgetFlag::LeftPress|GadgetFlag::RightPress), 引擎的
- * GadgetClass::Action 消费这次点击时会顺手清掉 MouseClass 的按键态, 所以
- * DisplayClass::ProcessClickCoords 根本看不到"左键按住"这件事。
- *
- * 我们是纯覆盖层+轮询, 引擎照常看到左键按住。而引擎放置超武的判据是
- * 0x692B06 读 Display+0x11B8 (CurrentSWTypeIndex): 一旦非 -1 且按键按住,
- * **当帧就在鼠标处释放** (实测日志: armed 紧跟着引擎自己发的
- * SpecialPlace, cell=236,141, IsExecuted=0x5A, 然后 sws: FIRED)。
- * 延一帧写不足以躲开 —— 那一帧按键还按着。
- *
- * 所以改成"按下只记录, 松开才写": 整段按住期间由 s_HoldSkip 吞掉引擎的
- * 地图点击, 等价于 Gadget 消费掉这次完整点击; 真正写 CurrentSWTypeIndex
- * 时按键已经松开, 引擎的"按住即释放"条件不可能成立。 */
+ * 引擎放置超武的判据是 0x692B06 读 Display+0x11B8 (CurrentSWTypeIndex):
+ * 一旦非 -1 且**当帧**按键按着, 就直接在鼠标处释放 —— 延一帧写躲不掉, 那一帧
+ * 按键还按着。所以改成"按下只记录, 松开才写": 整段按住期由 s_HoldSkip 吞掉引擎
+ * 的地图点击 (等价于 Gadget 消费掉这次完整点击), 真正写 CurrentSWTypeIndex 时
+ * 按键已松开, 引擎那个条件不可能成立。
+ * Phobos 不需要这套: 它的 SWButtonClass 是真 Gadget, GadgetClass::Action 消费
+ * 点击时会顺手清掉 MouseClass 的按键态, ProcessClickCoords 根本看不到"按住"。 */
 static int s_PendSel = -2;   /* -2 none, -1 cancel, >=0 SW ArrayIndex */
 static int s_SelDown = 0;    /* 选中的那一下左键是否还按着 (等松开才上膛) */
 static int s_ArmIdx = -1;    /* s_SelDown 期间记住的 swIdx */
@@ -293,6 +270,12 @@ typedef struct {
 static SwsItem s_Items[SWS_CAP];
 static int s_ItemN = 0;
 static wchar_t s_ItemNameBuf[24];   /* 从类型缓存带出来的悬停名字 */
+/* 排序结果缓存: 排序键 (阵营, ini 优先级, ArrayIndex) 全都来自 s_Items, 而
+ * s_Items 只有 SwsScan 会改 —— 也就是说这个顺序**与帧无关**, 原来每帧重排一次
+ * 是白做。SwsScan 结束时置脏, SWS_Draw 排一次就清掉。 */
+static int s_Order[SWS_CAP];
+static int s_OrderN = -1;           /* -1 = 还没排过 */
+static int s_OrderColCount[4];
 
 /* 侧栏主题色 (淡蓝): 箭头、箭头边框、文字描边统一用它, 方便一处改色。 */
 #define SWS_ACCENT_R 0xA5
@@ -403,6 +386,24 @@ static void SwsCopyName(wchar_t* dst, const wchar_t* src, int cap)
     dst[i] = 0;
 }
 
+/* 日志样板: "前缀 + 十进制" / "前缀 + 字符串"。省掉每处都开 buf/q 局部变量。 */
+static void LogI(const char* tag, int v)
+{
+    char b[80], n[16];
+    unsigned q;
+    UtoA((unsigned)v, n);
+    q = AppendCStr(b, 0, tag, sizeof(b));
+    AppendCStr(b, q, n, sizeof(b));
+    LogLine(b);
+}
+static void LogS(const char* tag, const char* s)
+{
+    char b[96];
+    unsigned q = AppendCStr(b, 0, tag, sizeof(b));
+    AppendCStr(b, q, s, sizeof(b));
+    LogLine(b);
+}
+
 /* ---------------- 配置加载 (一次, 重启生效) ---------------- */
 
 /* 键长 (volatile 逐字节: 防编译器把循环认成 strlen 习语,
@@ -431,7 +432,7 @@ static void SwsLoadIniList(void)
         int isGlobal = 0;
         if (L == 0) break;
         isGlobal =
-            SwsStrEq(k, "Enable") || SwsStrEq(k, "Opacity") ||
+            SwsStrEq(k, "Enable") ||
             SwsStrEq(k, "ToggleKey") ||
             SwsStrEq(k, "Gap") || SwsStrEq(k, "ColGap") ||
             SwsStrEq(k, "RightMargin") ||
@@ -464,7 +465,6 @@ static void SwsEnsureInit(void)
     BuildPaths();
     GtEnsureLog();
     s_Enable = GetPrivateProfileIntA(SWS_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    s_Opacity = GetPrivateProfileIntA(SWS_SECTION, "Opacity", 60, g_IniPath);
     s_Gap = GetPrivateProfileIntA(SWS_SECTION, "Gap", 2, g_IniPath);
     s_ColGap = GetPrivateProfileIntA(SWS_SECTION, "ColGap", 0, g_IniPath);
     s_RightMargin = GetPrivateProfileIntA(SWS_SECTION, "RightMargin", 2, g_IniPath);
@@ -539,8 +539,6 @@ static void SwsEnsureInit(void)
     if (s_MaxRows > 40) s_MaxRows = 40;
     OU_ParseHotkey("F4", &s_ToggleHk);
     OU_ReadHotkey(SWS_SECTION, "ToggleKey", &s_ToggleHk);
-    if (s_Opacity < 0) s_Opacity = 0;
-    if (s_Opacity > 100) s_Opacity = 100;
     if (s_Gap < 0) s_Gap = 0;
     if (s_Gap > 16) s_Gap = 16;
     if (s_ColGap < 0) s_ColGap = 0;
@@ -551,8 +549,8 @@ static void SwsEnsureInit(void)
     p = 0;
     p = AppendCStr(buf, p, "sws: en=", sizeof(buf));
     p += UtoA((unsigned)s_Enable, buf + p);
-    p = AppendCStr(buf, p, " op=", sizeof(buf));
-    p += UtoA((unsigned)s_Opacity, buf + p);
+    p = AppendCStr(buf, p, " a=", sizeof(buf));
+    p += UtoA((unsigned)s_Alpha, buf + p);
     p = AppendCStr(buf, p, " iniN=", sizeof(buf));
     p += UtoA((unsigned)s_IniN, buf + p);
     p = AppendCStr(buf, p, " rows=", sizeof(buf));
@@ -574,13 +572,6 @@ static void* s_PrevHouseItems = NULL;
 static int s_PrevHouseCount = 0;
 static void* s_PrevCur = NULL;
 static int s_StableInit = 0;
-
-static void* s_RawCur = NULL;
-static void* s_RawSupItems = NULL;
-static int s_RawSupCount = 0;
-static void* s_RawHouseItems = NULL;
-static int s_RawHouseCount = 0;
-static int s_RawInit = 0;
 
 /* ArrayIndex by ID match against the SuperWeaponType array.
  * Read-only walk of a validated container; no writes, no engine calls. */
@@ -613,24 +604,18 @@ static int SwsArrayIndexOf(void* type, const char* id)
 
 
 /* ---------------- 超武图标: 全部走引擎现成设施 ----------------
- * 调研结论 (YRpp/Phobos):
- *  - SuperWeaponTypeClass::SidebarImage 在 +0xB8 (zero_E4 字段名自证)。
- *    它通常是 Type==0xFFFF 的 SHPReference; Phobos SWButtonClass.cpp:46-64
- *    是把引用"原样"交给 DrawSHP 的, 不跟 Data、不调 GetData()。
- *    引用指向 XXICON.SHP (GameStrings @0x8204FC) 时就是引擎的占位图(紫球)。
- *  - MO 的超武图标是 PCX: rulesmo.ini 里 96 节用 SidebarPCX=xxx.pcx,
- *    磁盘上没有, 全在 MIX 里。所以:
- *      读键: CCINIClass::INI_Rules (0x887048, 游戏已加载好的 rules 对象,
- *            走 MIX) -> INIClass::ReadString (0x528A10, __thiscall)
- *      载图: PCX::Instance (0xAC4848) -> ForceLoadFile (0x6B9D00)
- *            -> GetSurface (0x6BA140)   [引擎自带 PCX 解码, 16bpp]
- *      贴图: PCX::BlitToSurface (0x6BA580, 色键 COLOR_PURPLE)
- *    即 Phobos 用的正是这套 (Utilities/Constructs.cpp:120-169), 我们不自己解 PCX。 */
+ * MO 的超武图标是 PCX (rulesmo.ini 里 96 节用 SidebarPCX=xxx.pcx, 磁盘上没有,
+ * 全在 MIX 里)。`SidebarImage`(+0xB8) 通常是 Type==0xFFFF 的 SHPReference,
+ * 指向 XXICON.SHP 时就是引擎占位图 (紫球) —— 所以只把它当 SHP 兜底。
+ * PCX 走引擎自己的设施 (与 Phobos Utilities/Constructs.cpp 同一套):
+ *   读键: CCINIClass::INI_Rules (0x887048) -> INIClass::ReadString (0x528A10)
+ *   载图: PCX::Instance (0xAC4848) -> ForceLoadFile (0x6B9D00) -> GetSurface
+ *   贴图: PCX::BlitToSurface (0x6BA580, 色键 COLOR_PURPLE)
+ * 两条命门: GetSurface 未加载时给的是占位图 (必须先 ForceLoadFile);
+ * BSurface* 不可跨帧缓存 (切页签/重载美术会失效), 所以 surface 每帧现取。 */
 
-/* 读 rules 键: 用游戏现成的 ini 对象 CCINIClass::INI_Rules (0x887048) +
- * INIClass::ReadString。Ares 3.0 在 0x528A10 上挂了 INIClass_GetString
- * (inline 5B JMP), 但那是 drop-in 替换 —— Ares 自己读 SidebarPCX= 也走
- * 这一个对象同一个函数, 语义一致。 */
+/* Ares 3.0 在 0x528A10 上挂了 INIClass_GetString (inline 5B JMP), 那是 drop-in
+ * 替换 —— Ares 自己读 SidebarPCX= 也走这一个对象同一个函数, 语义一致。 */
 typedef int (__thiscall *SwsIniReadStringFn)(void* ini, const char* section,
     const char* key, const char* def, char* buf, unsigned size);
 #define FN_INIREADSTR ((SwsIniReadStringFn)(void*)0x528A10u)
@@ -738,34 +723,13 @@ static int SwsManualFireOk(const char* id)
  * 重载美术时释放并重建 PCX surface, 跨帧持有它的指针 = 野指针 (表现为
  * 图画成紫球, 切页时崩溃)。surface 每帧现取。 */
 /* ---------------- 行为旗标 (从 rules INI 读, 不猜结构偏移) ----------------
- * Ares 侧栏点击钩子 (src/Ext/SWType/Hooks.cpp, SidebarClass_ProcessClickCoords
- * @0x6AAEDF) 的原始判据是:
- *
- *   if(pSuper->Type->Action == Action::None || pData->SW_UseAITargeting) {
- *       R->EAX(HouseClass::CurrentPlayer);
- *       return 0x6AAF10;   // 不用玩家选格, 当场发射
- *   }
- *
- * 而 `Action=Custom` 在 Ares 的 SWType/Body.cpp 里被改写成
- * `Actions::SuperWeaponAllowed` (=0x7F), **不是** None:
- *
- *   if(exINI.ReadString(section,"Action") && !_strcmpi(exINI.value(),"Custom"))
- *       pThis->Action = Actions::SuperWeaponAllowed;
- *
- * MO 的六个超武 (Blasticade/PsychicFlash/HunterSeeker/EliteReserves/
- * Nanocharge/GearChange) 全部是 `Action=Custom`, 所以按 `Action==0` 判
- * "点击即生效" 是判错对象的。
- *
- * 关键: 这两个判据**都能从 rules INI 直接读到**, 根本不用去猜
- * SuperWeaponTypeClass 的字段偏移:
- *   - `Action=`          写 None 才是真·无需选格; 写 Custom 不是
- *   - `SW.UseAITargeting=yes` 手册明说: "人类玩家点击图标时自动发射超武,
- *                         而不需要手动选择目标"
- * MO 里只有 EliteReservesSpecial 满足 (`SW.UseAITargeting=yes`)。
- *
- * 另外长期生效类 (UseChargeDrain=yes: 爆裂屏障/心灵之火) 只能读到 drain 标志,
- * 用来把它们从侧栏过滤掉 (原因见扫描处那段注释)。
- */
+ * "点击即生效" 的判据**必须**读 ini, 不能看 `Type->Action == Action::None`:
+ * Ares 把 `Action=Custom` 改写成 `Actions::SuperWeaponAllowed` (0x7F) 而不是
+ * None, 而 MO 六个超武全是 Custom —— 按 Action==0 判会判错对象。
+ * 真正成立的两个键: `Action=None` 与 `SW.UseAITargeting=yes` (手册: 点击图标
+ * 自动发射, 无需选目标)。Ares 的 `Type=<NewSWType>` 另有两类把 Action 写成
+ * None (HunterSeeker / Battery), 也算。推导过程见笔记。
+ * `UseChargeDrain=yes` 是长期生效类, 只用来把它们从侧栏过滤掉。 */
 typedef struct {
     char id[32];
     int instant;    /* 1 = 点击即发射, 无需选格 */
@@ -817,16 +781,9 @@ static SwsBehavior* SwsBehaviorOf(const char* id)
         if (SwsStrEq(act, "None")) s_Beh[slot].instant = 1;
         /* 手册: SW.UseAITargeting=yes -> 点击图标自动发射, 不需选目标 */
         if (SwsIniYes(rules, id, "SW.UseAITargeting")) s_Beh[slot].instant = 1;
-        /* Type=<Ares NewSWType>: 决定这条超武走哪个 Ares 实现。逐个查过
-         * ares(Antares)/src/Misc/SWTypes 下逐个 .cpp, 只有这几个把
-         * `pSW->Action = Action::None` 写进了 SuperWeaponTypeClass:
-         *   HunterSeeker  -> MO 的 工厂停产维护 / 纳米回复场 / 猎杀机器人
-         *   Battery       -> MO 的 心灵之火 (PsychicFlash)
-         *   EMPulse/Reveal/SonarPulse 是**条件**赋值 (看 ini 参数), 不能算
-         * Firestorm (爆裂屏障) **没有**这个赋值, 保持 SuperWeaponAllowed,
-         * 所以它确实需要玩家选格 -> 点两次才是对的。
-         * 这条判据和"运行时读 type+0xBC 的 Action==0"是同一件事的两个来源,
-         * 两个都判, 谁先到算谁; 目的是别再漏掉 Battery 这类。 */
+        /* Type=<Ares NewSWType>: 只有 HunterSeeker 与 Battery 在各自的
+         * src/Misc/SWTypes 下把 `pSW->Action = Action::None` 写死了
+         * (Firestorm 没有, 所以爆裂屏障确实要选格, 点两次才对)。 */
         typ[0] = 0;
         FN_INIREADSTR(rules, id, "Type", "", typ, (unsigned)sizeof(typ));
         if (SwsStrEq(typ, "HunterSeeker") || SwsStrEq(typ, "Battery"))
@@ -945,44 +902,23 @@ static void SwsFillType(SwsTypeCache* tc, void* type, const char* id)
             tc->name[k] = 0;
         }
         /* 缺 SidebarPCX 的超武: 一次性记下来, 便于查它们的图标 */
-        if (!tc->pcxFile)
-        {
-            char sb[128];
-            unsigned q2 = AppendCStr(sb, 0, "sws: nopcx ", sizeof(sb));
-            q2 = AppendCStr(sb, q2, id, sizeof(sb));
-            LogLine(sb);
-        }
+        if (!tc->pcxFile) LogS("sws: nopcx ", id);
     }
-    /* "点击即生效" 的判据取自 rules INI, 不再用 `Action==0` —— 那个判据是错的
-     * (见 SwsBehaviorOf 注释): Action=Custom 会被 Ares 改写成 0x7F, 而 MO 这几个
-     * 全是 Custom。真正的判据是 `Action=None` 或 `SW.UseAITargeting`。 */
+    /* "点击即生效" 读 rules INI, 理由见 SwsBehaviorOf 上方注释 */
     bh = SwsBehaviorOf(id);
     tc->instant = bh ? bh->instant : 0;
-    /* 火风暴类长期生效超武 (UseChargeDrain=yes: 爆裂屏障/心灵之火)
-     * **不显示也不处理** —— 决定放弃了。
-     *
-     * 为什么放弃 (结论已查实, 见 notes/超武侧栏.md):
-     *   Ares 的 ChargeDrain 开关状态机只接在 SuperClass::ClickFire,
-     *   而 SpecialPlace 事件走的是 Fire_SW -> Launch -> Activate,
-     *   两条入口不相交 —— 事件能把效果打出去, 但 ChargeDrainState
-     *   永远停在 Ready, 侧栏显示不出 "生效中"。Phobos 也没接这条
-     *   (它的 LaunchSuper 与 Ares 逐条同构), 没有现成实现可抄。
-     *   要真修就得写引擎的 ChargeDrainState, 而那需要
-     *   HouseClass::Supers 的偏移; 从 YRpp 头推导时出现 40 处尺寸
-     *   未知成员, 推导值与先前估值差 0x204, 不可信 —— 拿猜的偏移
-     *   写引擎结构迟早崩游戏。
-     *   代价远大于收益 (两个超武), 所以过滤掉。
-     * [SWSidebar] DrainSupers=1 可以临时放回来试。 */
+    /* 火风暴类长期生效超武 (UseChargeDrain=yes) 决定放弃显示: Ares 的
+     * ChargeDrain 状态机只接在 SuperClass::ClickFire, 而我们走 SpecialPlace
+     * 事件 (Fire_SW->Launch->Activate), 两条入口不相交 —— 效果能打出去但
+     * ChargeDrainState 永远停在 Ready, 显示不出"生效中"。Phobos 也没接这条。
+     * 推导过程见笔记。[SWSidebar] DrainSupers=1 可临时放回来试。 */
     if (bh && bh->drain && !s_ShowDrain)
     {
         static int s_DrainHidden = 0;
         tc->hide = 1;
         if (s_DrainHidden < 16)
         {
-            char sb[96];
-            unsigned q2 = AppendCStr(sb, 0, "sws: hide drain ", sizeof(sb));
-            q2 = AppendCStr(sb, q2, id, sizeof(sb));
-            LogLine(sb);
+            LogS("sws: hide drain ", id);
             s_DrainHidden++;
         }
     }
@@ -1029,46 +965,8 @@ static void SwsScan(void)
     int pside;
     s_ItemN = 0;
     s_BoundValid = 0;
-    /* 以下全是固定地址字读取, 不碰数组内容, 任何状态下安全。
-     * 五元组变化即记一行 (诊断卡点用), 先记再过门。 */
+    /* 以下全是固定地址字读取, 不碰数组内容, 任何状态下安全。 */
     cur = *(void**)ADDR_CURPLAYER;
-    items = IsPlausiblePtr((void*)ADDR_SUPER_ARR) ?
-        ARR_ITEMS(ADDR_SUPER_ARR) : NULL;
-    count = IsPlausiblePtr((void*)ADDR_SUPER_ARR) ?
-        ARR_COUNT(ADDR_SUPER_ARR) : 0;
-    hItems = IsPlausiblePtr((void*)ADDR_HOUSE_ARR) ?
-        ARR_ITEMS(ADDR_HOUSE_ARR) : NULL;
-    hCount = IsPlausiblePtr((void*)ADDR_HOUSE_ARR) ?
-        ARR_COUNT(ADDR_HOUSE_ARR) : 0;
-    if (!s_RawInit || cur != s_RawCur || items != (void**)s_RawSupItems ||
-        count != s_RawSupCount || hItems != (void**)s_RawHouseItems ||
-        hCount != s_RawHouseCount)
-    {
-        char b1[16], b2[16], b3[16], b4[16], b5[16], buf[176];
-        unsigned p = 0;
-        s_RawCur = cur;
-        s_RawSupItems = items;
-        s_RawSupCount = count;
-        s_RawHouseItems = hItems;
-        s_RawHouseCount = hCount;
-        s_RawInit = 1;
-        p = AppendCStr(buf, p, "sws: raw cur=", sizeof(buf));
-        HtoA((unsigned)(size_t)cur, b1);
-        p = AppendCStr(buf, p, b1, sizeof(buf));
-        p = AppendCStr(buf, p, " sup=", sizeof(buf));
-        HtoA((unsigned)(size_t)items, b2);
-        p = AppendCStr(buf, p, b2, sizeof(buf));
-        p = AppendCh(buf, p, '/', sizeof(buf));
-        UtoA((unsigned)count, b3);
-        p = AppendCStr(buf, p, b3, sizeof(buf));
-        p = AppendCStr(buf, p, " house=", sizeof(buf));
-        HtoA((unsigned)(size_t)hItems, b4);
-        p = AppendCStr(buf, p, b4, sizeof(buf));
-        p = AppendCh(buf, p, '/', sizeof(buf));
-        UtoA((unsigned)hCount, b5);
-        p = AppendCStr(buf, p, b5, sizeof(buf));
-        LogLine(buf);
-    }
     if (!cur || !IsPlausiblePtr(cur)) return;
     if (!IsPlausiblePtr((void*)ADDR_SUPER_ARR)) return;
     items = ARR_ITEMS(ADDR_SUPER_ARR);
@@ -1079,188 +977,24 @@ static void SwsScan(void)
     hCount = ARR_COUNT(ADDR_HOUSE_ARR);
     if (!hItems || !IsPlausiblePtr(hItems) || hCount <= 0 || hCount > 64)
         return;
+    /* 数组换了 (开局/重开) 的那一轮只缓存、本轮不扫, 下一轮才真扫。 */
     if (!s_StableInit || items != (void**)s_PrevSupItems ||
         count != s_PrevSupCount || hItems != (void**)s_PrevHouseItems ||
         hCount != s_PrevHouseCount || cur != s_PrevCur)
-    {   /* 五元组变化: 只缓存, 本轮不碰任何数组内容 */
+    {
         s_PrevSupItems = items;
         s_PrevSupCount = count;
         s_PrevHouseItems = hItems;
         s_PrevHouseCount = hCount;
         s_PrevCur = cur;
         s_StableInit = 1;
-        {   /* 诊断: 每个新状态记一行, 看扫描卡在哪 (只在变化时记, 不刷屏) */
-            char b1[16], b2[16], b3[16], b4[16], b5[16], buf[160];
-            unsigned p = 0;
-            p = AppendCStr(buf, p, "sws: tri sup=", sizeof(buf));
-            HtoA((unsigned)(size_t)items, b1);
-            p = AppendCStr(buf, p, b1, sizeof(buf));
-            p = AppendCh(buf, p, '/', sizeof(buf));
-            UtoA((unsigned)count, b2);
-            p = AppendCStr(buf, p, b2, sizeof(buf));
-            p = AppendCStr(buf, p, " house=", sizeof(buf));
-            HtoA((unsigned)(size_t)hItems, b3);
-            p = AppendCStr(buf, p, b3, sizeof(buf));
-            p = AppendCh(buf, p, '/', sizeof(buf));
-            UtoA((unsigned)hCount, b4);
-            p = AppendCStr(buf, p, b4, sizeof(buf));
-            p = AppendCStr(buf, p, " cur=", sizeof(buf));
-            HtoA((unsigned)(size_t)cur, b5);
-            p = AppendCStr(buf, p, b5, sizeof(buf));
-            LogLine(buf);
-        }
         return;
     }
-    {   /* 入局检查: 只做指针比对, 不解引用对象 */
-        int found = 0;
-        for (i = 0; i < hCount; i++)
-            if (hItems[i] == cur) { found = 1; break; }
-        if (!found) return;
-    }
+    /* 入局检查: 只做指针比对, 不解引用对象 */
+    for (i = 0; i < hCount; i++)
+        if (hItems[i] == cur) break;
+    if (i >= hCount) return;
     pside = SwsPlayerSide();
-    {   /* 诊断计数: 每个稳定三元组记一次各阶段通过数 (只记一次, 不刷屏) */
-        static void* s_StatSup = NULL;
-        static int s_StatCnt = 0;
-        static void* s_StatCur = NULL;
-        if (s_StatSup != items || s_StatCnt != count || s_StatCur != cur)
-        {
-        int cSup = 0, cType = 0, cOwn = 0, cPres = 0, cFlag = 0;
-        int cId = 0, cIdx = 0, j;
-        s_StatSup = items;
-        s_StatCnt = count;
-        s_StatCur = cur;
-        {   /* Type/Owner 偏移自举: 建 type 集 (135) + house 集 (本家及同表),
-             * 扫 sup +0x00~+0x80 逐字命中, 自动定偏。 */
-            void* tset[256];
-            void* hset[72];
-            int tn = 0, hn = 0, j, k, m;
-            void** titems;
-            int tcount;
-            static int s_WinDone = 0;
-            int thits[33];
-            int hhits[33];
-            for (j = 0; j < 33; j++) thits[j] = hhits[j] = 0;
-            if (IsPlausiblePtr((void*)ADDR_SWTYPE_ARR))
-            {
-                titems = ARR_ITEMS(ADDR_SWTYPE_ARR);
-                tcount = ARR_COUNT(ADDR_SWTYPE_ARR);
-                if (titems && IsPlausiblePtr(titems) && tcount > 0 && tcount <= 1000)
-                {
-                    for (j = 0; j < tcount && tn < 256; j++)
-                    {
-                        void* t = titems[j];
-                        if (t && IsPlausiblePtr(t)) tset[tn++] = t;
-                    }
-                }
-            }
-            if (hItems && hn < 72)
-            {
-                for (j = 0; j < hCount && hn < 72; j++)
-                {
-                    void* hh2 = hItems[j];
-                    if (hh2 && IsPlausiblePtr(hh2)) hset[hn++] = hh2;
-                }
-            }
-            for (j = 0; j < count && j < 4096; j++)
-            {
-                void* s2 = items[j];
-                if (!s2 || !IsPlausiblePtr(s2)) continue;
-                for (k = 0; k < 33; k++)
-                {
-                    void* w = *(void**)((char*)s2 + k * 4);
-                    if (!w || !IsPlausiblePtr(w)) continue;
-                    for (m = 0; m < tn; m++)
-                        if (tset[m] == w) { thits[k]++; break; }
-                    for (m = 0; m < hn; m++)
-                        if (hset[m] == w) { hhits[k]++; break; }
-                }
-            }
-            {
-                char sb[256], hx[16];
-                unsigned q = 0;
-                q = AppendCStr(sb, q, "sws: win tN=", sizeof(sb));
-                UtoA((unsigned)tn, hx);
-                q = AppendCStr(sb, q, hx, sizeof(sb));
-                q = AppendCStr(sb, q, " hN=", sizeof(sb));
-                UtoA((unsigned)hn, hx);
-                q = AppendCStr(sb, q, hx, sizeof(sb));
-                for (k = 0; k < 33; k++)
-                {
-                    if (thits[k] <= 0 && hhits[k] <= 0) continue;
-                    q = AppendCStr(sb, q, " +", sizeof(sb));
-                    HtoA((unsigned)(k * 4), hx);
-                    q = AppendCStr(sb, q, hx, sizeof(sb));
-                    q = AppendCStr(sb, q, "T", sizeof(sb));
-                    UtoA((unsigned)thits[k], hx);
-                    q = AppendCStr(sb, q, hx, sizeof(sb));
-                    q = AppendCh(sb, q, 'H', sizeof(sb));
-                    UtoA((unsigned)hhits[k], hx);
-                    q = AppendCStr(sb, q, hx, sizeof(sb));
-                    if (q > 200) break;
-                }
-                LogLine(sb);
-            }
-(void)s_WinDone;
-        }
-        for (j = 0; j < count && j < 4096; j++)
-        {
-            void* s2 = items[j];
-            void* t2;
-            void* o2;
-            const char* id2;
-            int ix2;
-            if (!s2 || !IsPlausiblePtr(s2)) continue;
-            cSup++;
-            t2 = *(void**)((char*)s2 + OFF_SUP_TYPE);
-            o2 = *(void**)((char*)s2 + OFF_SUP_OWNER);
-            if (!t2 || !IsPlausiblePtr(t2)) continue;
-            cType++;
-            if (!o2 || !IsPlausiblePtr(o2) || o2 != cur) continue;
-            cOwn++;
-            if (*(unsigned char*)((char*)s2 + OFF_SUP_PRESENT) != 1) continue;
-            cPres++;
-            if (*(unsigned char*)((char*)s2 + OFF_SUP_READY) > 1 ||
-                *(unsigned char*)((char*)s2 + OFF_SUP_SUSPEND) > 1) continue;
-            cFlag++;
-            id2 = (const char*)t2 + OFF_SWT_ID;
-            if (!SwsIdOk(id2)) continue;
-            cId++;
-            ix2 = *(int*)((char*)t2 + OFF_SWT_ARRIDX);
-            if (ix2 < 0 || ix2 > 1000) continue;
-            cIdx++;
-        }
-        {
-            char b1[16], b2[16], b3[16], b4[16], b5[16], b6[16];
-            char b7[16], buf[192];
-            unsigned q = 0;
-            q = AppendCStr(buf, q, "sws: stat n=", sizeof(buf));
-            UtoA((unsigned)count, b1);
-            q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCStr(buf, q, " sup=", sizeof(buf));
-            UtoA((unsigned)cSup, b2);
-            q = AppendCStr(buf, q, b2, sizeof(buf));
-            q = AppendCStr(buf, q, " typ=", sizeof(buf));
-            UtoA((unsigned)cType, b3);
-            q = AppendCStr(buf, q, b3, sizeof(buf));
-            q = AppendCStr(buf, q, " own=", sizeof(buf));
-            UtoA((unsigned)cOwn, b4);
-            q = AppendCStr(buf, q, b4, sizeof(buf));
-            q = AppendCStr(buf, q, " pres=", sizeof(buf));
-            UtoA((unsigned)cPres, b5);
-            q = AppendCStr(buf, q, b5, sizeof(buf));
-            q = AppendCStr(buf, q, " flg=", sizeof(buf));
-            UtoA((unsigned)cFlag, b6);
-            q = AppendCStr(buf, q, b6, sizeof(buf));
-            q = AppendCStr(buf, q, " id=", sizeof(buf));
-            UtoA((unsigned)cId, b7);
-            q = AppendCStr(buf, q, b7, sizeof(buf));
-            q = AppendCStr(buf, q, " idx=", sizeof(buf));
-            UtoA((unsigned)cIdx, b1);
-            q = AppendCStr(buf, q, b1, sizeof(buf));
-            LogLine(buf);
-        }
-        }   /* end once-per-triple stat */
-    }
     for (i = 0; i < count && n < SWS_CAP; i++)
     {
         void* sup = items[i];
@@ -1284,10 +1018,8 @@ static void SwsScan(void)
         id = (const char*)type + OFF_SWT_ID;
         if (!SwsIdOk(id)) continue;
         {
-            /* 按类型指针缓存: ArrayIndex(按 ID 反查类型数组, 不能用猜的字段
-             * 偏移 —— 曾读出 135 = 类型总数, 写进 CurrentSWTypeIndex 会让
-             * 引擎 Supers[] 越界并当场清掉选中)、阵营归类、ini 优先级/隐藏、
-             * SW.ManualFire、SidebarPCX 文件名、悬停名字。类型对象静态, 只算一次。
+            /* 按类型指针缓存 (ArrayIndex 按 ID 反查类型数组, 不能用猜的字段
+             * 偏移)、阵营、ini 优先级/隐藏、SW.ManualFire、SidebarPCX、悬停名。
              * 声明在外面: 下面填 s_Items[n] 时还要用它取名字。 */
             SwsTypeCache* tc = SwsTypeEntry(type, id);
             if (!tc) continue;
@@ -1302,8 +1034,7 @@ static void SwsScan(void)
             prio = tc->prio;
             pcxFile = tc->pcxFile;
             instant = tc->instant;
-            /* 名字在这里一并带出来 (它属于类型, 不属于本次的条目下标)。
-             * 出了这个块就再也拿不到 tc 了。 */
+            /* 名字属于类型, 不属于本次的条目下标; 出了这个块就再也拿不到 tc */
             SwsCopyName(s_ItemNameBuf, tc->name, 24);
         }
         total = *(int*)((char*)type + OFF_SWT_RECH);
@@ -1325,25 +1056,6 @@ static void SwsScan(void)
         SwsCopyId(s_Items[n].id, id);
         /* 名字随条目一起搬, 保证悬停提示和图标永远对应同一个超武 */
         SwsCopyName(s_Items[n].name, s_ItemNameBuf, 24);
-        /* 一次性记下"点击即生效"的那些: 之前"点了没反应"就有两种可能
-         * (没被判成 instant / 判成了但释放方式不对), 这行日志能一次分开。
-         * 顺带记 swIdx: 引擎自己发的 SpecialPlace 用的是 id=73/100, 而我们
-         * 推的是 102/47 —— 必须把 id 和名字对齐才能确认 ID 语义。 */
-        if (instant)
-        {
-            static int s_InstLogged = 0;
-            if (s_InstLogged < 24)
-            {
-                char sb[128], t1[16];
-                unsigned q2 = AppendCStr(sb, 0, "sws: instant type ", sizeof(sb));
-                q2 = AppendCStr(sb, q2, id, sizeof(sb));
-                q2 = AppendCStr(sb, q2, " idx=", sizeof(sb));
-                UtoA((unsigned)swIdx, t1);
-                q2 = AppendCStr(sb, q2, t1, sizeof(sb));
-                LogLine(sb);
-                s_InstLogged++;
-            }
-        }
         s_Items[n].ready = (ready == 1 && susp == 0) ? 1 : 0;
         s_Items[n].susp = (susp == 1) ? 1 : 0;
         s_Items[n].remain = remain;
@@ -1352,37 +1064,11 @@ static void SwsScan(void)
         n++;
     }
     s_ItemN = n;
-    {
-        static void* s_GotSup = NULL;
-        static int s_GotCnt = 0;
-        static void* s_GotCur = NULL;
-        if (s_GotSup != items || s_GotCnt != count || s_GotCur != cur)
-        {
-            int m, shn = 0;
-            char b1[16], b2[16], buf[96];
-            unsigned q = 0;
-            s_GotSup = items; s_GotCnt = count; s_GotCur = cur;
-            for (m = 0; m < n; m++) if (s_Items[m].shp) shn++;
-            q = AppendCStr(buf, q, "sws: got ", sizeof(buf));
-            UtoA((unsigned)n, b1);
-            q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCStr(buf, q, " shp=", sizeof(buf));
-            UtoA((unsigned)shn, b2);
-            q = AppendCStr(buf, q, b2, sizeof(buf));
-            LogLine(buf);
-        }
-    }
+    s_OrderN = -1;      /* 条目变了, 排序缓存作废 (见 s_Order 声明处) */
     if (!s_ScanLogged && n > 0)
     {
-        char b1[16], buf[128];
-        unsigned p = 0;
         s_ScanLogged = 1;
-        p = AppendCStr(buf, p, "sws: scan ok n=", sizeof(buf));
-        p += UtoA((unsigned)n, buf + p);
-        p = AppendCStr(buf, p, " e0=", sizeof(buf));
-        UtoA((unsigned)s_Items[0].swIdx, b1);
-        p = AppendCStr(buf, p, b1, sizeof(buf));
-        LogLine(buf);
+        LogI("sws: scan ok n=", n);
     }
 }
 
@@ -1391,30 +1077,22 @@ static void SwsScan(void)
  * 目标: 侧栏上有的超武, 防御支援页 (游戏自带的 4 页签条第 1 页) 里**不再**
  * 出现; 侧栏上没有的 (ini 隐藏 / SW.ManualFire=no / 火风暴类), 防御页照旧。
  *
- * 为什么要动到游戏内部:
- *   - 引擎只往页签**加** cameo (SidebarClass::AddCameo 0x6A6300), 从不因为
- *     "它已经在超武侧栏上显示了" 而拒绝。已经躺在页签里的那些不会自己消失:
- *     引擎唯一的移除路径是 StripClass::RecheckCameo(0x6AA600), 而它只删
- *     "IsPresent 已经为 0" 的条目 —— 我们的超武都还在, 所以它不会动它们。
- *   - 而且在 Ares 上, 条目根本不在 StripClass::Cameos[75] 里了: Ares 3.0
- *     把增删/绘制/点击/排序全换成自己 .data 段里的
- *     DynamicVectorClass<BuildType> RulesExt::TabCameos[4]
- *     (见 ares(Antares)/src/Ext/Rules/Hooks.CameoList.cpp), 并且没有导出任何
- *     "删某个 cameo" 的接口。所以要把一个**还在**的超武从防御页拿掉, 只能
- *     直接改这个数组 —— 这也是唯一有模拟风险的写操作, 全部本地 UI 数据,
- *     不碰 SuperClass/EventClass, 联机安全。
+ * 为什么要动到游戏内部: 引擎只往页签**加** cameo, 从不因为"它已经在超武
+ * 侧栏上显示了"而拒绝; 唯一的移除路径 RecheckCameo(0x6AA600) 只删
+ * IsPresent==0 的条目, 而我们的超武都还在。而且 Ares 3.0 把容器整个换成
+ * .data 段里的 DynamicVectorClass<BuildType> RulesExt::TabCameos[4],
+ * 没有导出任何"删某个 cameo"的接口 —— 只能直接改这个数组。这也是唯一
+ * 有模拟风险的写操作, 但全是本地 UI 数据, 不碰 SuperClass/EventClass。
  *
- * 两个方向刻意不对称 (踩过坑才这么定的):
- *   - **搬出**要改 Ares 那个数组, 所以得先反查它的地址并逐次校验容器。
- *   - **搬回**不碰那个数组, 只调引擎自己的 AddCameo —— 它自带查重, 对
- *     "已经在页里"的超武重复调用是无害的空操作。这么一来"切回显示"就不
- *     依赖任何反查出来的地址, 不会因为容器校验不过而**静默失败**。
+ * 两个方向刻意不对称: **搬出**改 Ares 那个数组 (要先反查地址 + 逐次校验
+ * 容器); **搬回**只调引擎自己的 AddCameo (自带查重, 对已在页里的重复
+ * 调用是无害空操作) —— 于是"切回显示"不依赖任何反查出来的地址, 不会因为
+ * 容器校验不过而**静默失败**。
  *
- * 曾经还在 `SidebarClass::AddCameo` 入口 (0x6A6316) 钩了个拦截门想"挡住
- * 新增", 但它装上之后**一次都没被调用过** (跑过好几局, 诊断日志一行都没有,
- * 而 76 条确实能搬出来 —— 说明超武 cameo 是从别的路进页签的, 没走
- * AddCameo)。既然拦不住, 就不留这个死钩子, 改由 `SwsDedupSync` 每 5 帧复查
- * 一遍: 新冒进来的下一次复查就被搬走。机制少一个, 也少占 6 字节。 */
+ * 曾经还在 AddCameo 入口 (0x6A6316) 钩了个拦截门想"挡住新增", 但它装上
+ * 之后**一次都没被调用过** (诊断日志零行, 而 76 条确实搬得出来) —— 超武
+ * cameo 是从别的路进页签的。既然拦不住就不留死钩子, 改由 SwsDedupSync
+ * 每 5 帧复查一遍。推导过程见笔记。 */
 
 /* SidebarClass 侧栏几何 (gamemd 反汇编实证, 注意与 YRpp 头文件差 4 字节:
  *  头文件说 Tabs[0] 是首字段, 实际 +0x1544; 头文件说 CameoCount +0x50,
@@ -1456,31 +1134,20 @@ static void SwsScan(void)
  * 拿来当定位指纹 (终身不变, 见下面 SwsAresFindTabCameos 的判据 2)。 */
 #define TABCAM_INC      100
 
-/* 页签 i 的 CameoCount 实时值 (Ares 与 TabCameos[i].Count 始终同步)。
+/* 页签 i 的 CameoCount 实时值。
  *
- *   MouseClass / SidebarClass / DisplayClass  ——  **同一个静态对象, 地址就是
- *   0x87F7E8 本身** (原版代码直接 `mov ecx,0x87f7e8` 当 this 用, 所以这里
- *   **不能**写 `*(void**)ADDR_SIDEBAR` —— 那样读到的是对象的**虚表指针**,
- *   一个 .text 代码地址。于是: 偏移全算错、`CameoCount` 读出来是代码字节,
- *   最惨的是拿它当 `this` 去调 `UpdateScrollButtons` / `SetTab` → 直接崩。
- *   (Ares 那句 `add eax,0x880d2c` = 0x87f7e8 + 0x1544, 一句话证实了这点。)
+ *   MouseClass / SidebarClass / DisplayClass —— **同一个静态对象, 地址就是
+ *   0x87F7E8 本身** (原版直接 `mov ecx,0x87f7e8` 当 this 用)。所以这里
+ *   **不能**写 `*(void**)ADDR_SIDEBAR` —— 那样读到的是虚表指针 (一个 .text
+ *   代码地址), 偏移全算错, 拿它当 `this` 调引擎函数直接崩。
  *
- *   StripClass::Index       = pStrip + 0x38
- *   StripClass::TopRowIndex = pStrip + 0x44
- *   StripClass::CameoCount  = pStrip + 0x54
- *   SidebarClass::Tabs      = pThis  + 0x1544, 步长 0xF94
+ *   StripClass::Index +0x38 / TopRowIndex +0x44 / CameoCount +0x54
+ *   SidebarClass::Tabs = pThis + 0x1544, 步长 0xF94
  *
- * 这套偏移是**从 Ares.dll 自己的代码里读出来的**, 不是猜的:
- *   `SidebarClass_AddCameo_SkipSizeCheck` (钩 0x6A63B7) 里有
- *     imul eax, ebx, 0xf94 / add eax, 0x880d2c
- *   而 0x880d2c = 0x87f7e8 + 0x1544, 一步到位;
- *   `StripClass_RecheckCameos` 里是 `cmp dword [edi+0x54],0` /
- *   `mov eax,[edi+0x38]` / `imul eax,[edi+0x44],0x68`。
- * (`0x68` = 2 * sizeof(BuildType) = 2 * 0x34, 因为锚点取的是
- *  `Items[2 * TopRowIndex]`, 一行两个 cameo。)
- *
- * 注意 YRpp 头文件里这几个字段都比实际值小 4 (CameoCount 写 0x50 / 实际 0x54,
- * Cameos 写 0x54 / 实际 0x58) —— **以 Ares.dll 的代码为准, 别以头文件为准**。 */
+ * 偏移**从 Ares.dll 自己的代码里读出来**: SkipSizeCheck 里有
+ * `imul eax,ebx,0xf94` / `add eax,0x880d2c`, 而 0x880d2c = 0x87f7e8+0x1544;
+ * RecheckCameos 里是 `cmp [edi+0x54],0` / `mov eax,[edi+0x38]`。
+ * YRpp 头文件里这几个字段都比实际值小 4 —— **以 Ares.dll 代码为准**。 */
 static int SwsStripCameoCount(int tab)
 {
     unsigned addr;
@@ -1540,30 +1207,23 @@ static int SwsDVecOk(const unsigned char* v, const unsigned char* lo,
 
 /* 定位 Ares 的 RulesExt::TabCameos[4] —— **从 Ares 自己的代码里读地址**。
  *
- * 为什么不用"扫 .data 段找 4 连的 DynamicVectorClass": 那条路依赖
- * `StripClass::CameoCount` 互证, 而那条互证在本机对不上 (读出来是垃圾),
- * 于是永远命中 0 个。改成一劳永逸的办法:
+ * 不用"扫 .data 段找 4 连的 DynamicVectorClass": 那条路依赖
+ * `StripClass::CameoCount` 互证, 而这条互证在本机对不上, 于是永远命中 0 个。
+ * 改从 Ares 导出的 `SidebarClass_AddCameo_SkipSizeCheck` (钩 0x6A63B7)
+ * 开头几十字节里抓这两条 (实测反汇编):
+ *     8B 04 CD <disp32>     mov eax, [ecx*8 + TabCameos[0].Items]
+ *     6B 0C CD <disp32> 34  imul ecx, [ecx*8 + TabCameos[0].Count], 0x34
+ * 两个 disp32 都是编译期写死的绝对地址, 于是
+ *     TabCameos = (Items 的 disp32) - 4, 两条互证 (Count 的 disp32) - 0x10
+ * 定位跟着 Ares 的代码走: 不扫数据段、不会误命中别的容器、ASLR 后依然对。
+ * 找不到 / 两条对不上 / 容器不自洽一律 fail-closed。
  *
- * Ares 导出的 `SidebarClass_AddCameo_SkipSizeCheck` (钩 0x6A63B7) 开头
- * 几十字节里有这两条 (实测反汇编):
- *     8B 04 CD <disp32>              mov eax, [ecx*8 + TabCameos[0].Items]
- *     6B 0C CD <disp32> 34           imul ecx, [ecx*8 + TabCameos[0].Count], 0x34
- * 两个 disp32 都是**编译期写死的绝对地址** (Ares 自己就这么索引它的), 所以:
- *     TabCameos = (Items 的 disp32) - 4        (Items 在容器 +0x04)
- *     两条互证: (Count 的 disp32) - 0x10 == TabCameos
- * 这样定位跟着 Ares 的代码走: 不用扫数据段、不会误命中别的
- * DynamicVectorClass、ASLR 重定位后依然对 (那条指令里的绝对地址会一起被
- * 重定位)。找不到 / 两条对不上 / 容器不自洽, 一律 fail-closed。
+ * 只在确实在跑一局时才找: CurrentPlayer 有效 + 帧号走过 60 (主菜单里容器
+ * 还没建好)。试一次就够 —— 上面两个前置条件已保证时机, 而那条指令永远在。
  *
- * 只在**确实在跑一局**时才找: `HouseClass::CurrentPlayer` 有效, 且帧号已经
- * 走过 60 (主菜单/加载界面里容器还没建好)。
- *
- * > ⚠ **不要用 `Unsorted::ScenarioInit` (0xA8E7AC) 做这个判断**。它的名字
- * > 像是"场景初始化中", 实际既不是 0/1 标志也不是可靠的非零标志:
- * > gamemd 里有 `inc dword [0xA8E7AC]` (0x442FF7 / 0x44E6ED) 说明它是个
- * > 计数器, 而实战中它又长期是 **0**。先后试过 `!= 1` 和 `!= 0`, 两次都
- * > 让定位器一次都没跑过 —— 而失败路径不记日志, 表现就是"按钮点了
- * > 没反应, 日志里一行 dedup 都没有"。 */
+ * > ⚠ **不要用 `Unsorted::ScenarioInit` (0xA8E7AC) 做"在跑一局"判断**。名字
+ * > 像是"场景初始化中", 实际是计数器 (gamemd 里有 `inc dword [0xA8E7AC]`)
+ * > 且实战中长期为 0, 两种判法都让定位器一次都没跑过。 */
 #define ARES_SKIPCHECK "SidebarClass_AddCameo_SkipSizeCheck"
 #define ARES_SCAN_SPAN 0x60u
 static unsigned char* SwsAresFindTabCameos(void)
@@ -1638,16 +1298,7 @@ static unsigned char* SwsAresFindTabCameos(void)
     }
     return s_TabCam;
 fail:
-    {
-        char sb[64], b1[16];
-        unsigned q = AppendCStr(sb, 0, "sws: dd off got=", sizeof(sb));
-        UtoA((unsigned)gotItems, b1);
-        q = AppendCStr(sb, q, b1, sizeof(sb));
-        q = AppendCh(sb, q, '/', sizeof(sb));
-        UtoA((unsigned)gotCnt, b1);
-        AppendCStr(sb, q, b1, sizeof(sb));
-        LogLine(sb);
-    }
+    LogS("sws: dd off got=", gotItems ? (gotCnt ? "1/1" : "1/0") : "0/0");
     s_Failed = 1;
     return NULL;
 }
@@ -1834,9 +1485,11 @@ static int SwsDedupSync(void)
     int want, r;
     SwsEnsureInit();
     if (!s_Enable) { s_DedupDirty = 0; return 0; }
-    /* 侧栏整个收起 (F4) 时不隐藏: 否则防御页空着、侧栏也没有, 超武就彻底
-     * 没法用了。收起 = 恢复原样, 展开 = 重新隐藏。 */
-    want = (s_DedupHide && s_Visible) ? 1 : 0;
+    /* 目标态**只看去重开关**, 与侧栏显隐无关: 收起 (F4) 时保持防御页当前的
+     * 显隐状态, 不去动它。防御页是引擎自己的页签, 收起侧栏并不会让它失效,
+     * 所以"侧栏藏了就把防御页放出来"是没有必要的 —— 反而会让玩家按 F4 收起
+     * 侧栏时, 刚去重掉的图标莫名其妙全回来了。 */
+    want = s_DedupHide ? 1 : 0;
     if (want == s_DedupDone && !s_DedupDirty) return 0;
     if (want && !SwsAresFindTabCameos()) { s_DedupDirty = 0; return 0; }
     r = want ? SwsDedupRemove() : SwsDedupRestore();
@@ -1862,12 +1515,11 @@ static int SwsDedupSync(void)
     /* 只在真动了东西 / 目标态翻转时记一行, 免得复查每 5 帧刷一行 */
     if (r > 0 || want != s_DedupDone)
     {
-        char sb[64], b1[16];
+        char sb[64], n[16];
         unsigned q = AppendCStr(sb, 0, "sws: dd ", sizeof(sb));
-        q = AppendCStr(sb, q, want ? "hide " : "show ", sizeof(sb));
-        q = AppendCStr(sb, q, "n=", sizeof(sb));
-        UtoA((unsigned)r, b1);
-        AppendCStr(sb, q, b1, sizeof(sb));
+        q = AppendCStr(sb, q, want ? "hide n=" : "show n=", sizeof(sb));
+        UtoA((unsigned)r, n);
+        AppendCStr(sb, q, n, sizeof(sb));
         LogLine(sb);
     }
     s_DedupDone = want;
@@ -1911,20 +1563,14 @@ void SWS_Poll(void)
 {
     int tog, lb, rb;
     /* ---- 帧门: 这个函数挂在 0x4F42F0, 而那个地址**不是**每帧一次 ----
-     *
      * gamemd 里 `call 0x4F42F0` 有 113 个静态调用点, 散在 AI / 对象 / 渲染 /
-     * 消息代码里, 其中多处位于逐对象循环内。日志实测: 12,540 个渲染帧里
-     * SWS_Poll 被调了 1,782,420 次 = **每渲染帧约 142 次** (区间 47~225)。
-     *
-     * 于是"每 15 帧扫一次表"实际是每 0.25 秒一次, "每 60 帧记一行日志"实际
-     * 是每渲染帧 2.4 行 —— 当初日志 30,688 行里 29,707 行是 sws: poll 就是这么来的。
-     * 每帧 142 次 GetAsyncKeyState + 2 次 QPC, 以及当初每次 Poll 都跑的
-     * SwsFireWatch (78 条/次 ≈ 1.1 万次迭代/帧), 全是白烧。
-     *
-     * 这里用引擎帧号 0xA8ED84 变化做门, 同一个渲染帧内只真跑一次。
-     * 帧号在输入处理之后才推进, 而 0x4F42F0 的第一次调用发生在帧首, 所以
-     * 用"与上次相同则跳过"即可, 不必关心它到底推进几次。
-     */
+     * 消息代码里, 多处位于逐对象循环内。日志实测: 12,540 个渲染帧里 SWS_Poll
+     * 被调了 1,782,420 次 = **每渲染帧约 142 次** (区间 47~225)。
+     * 于是"每 60 帧记一行"实际是每渲染帧 2.4 行 (当初 30,688 行日志里 29,707
+     * 行是 sws: poll), 每帧 142 次 GetAsyncKeyState + 2 次 QPC 全是白烧。
+     * 这里用引擎帧号 0xA8ED84 变化做门, 同一渲染帧内只真跑一次 (帧号在输入
+     * 处理之后才推进, 而 0x4F42F0 首次调用在帧首, 所以"与上次相同则跳过"
+     * 即可, 不必关心它推进几次)。 */
     {
         static int s_LastFrame = -1;
         int fr = *(int*)ADDR_FRAME;
@@ -1943,15 +1589,12 @@ void SWS_Poll(void)
     s_PrevTog = tog;
     if (!s_Visible)
     {
-        /* 隐藏时仍采样键态, 防切回瞬间残留边沿误触。
-         * 同时**保留显隐箭头的点击** —— 箭头在隐藏时依然画在屏幕右缘,
-         * 不处理的话就成了"看得见但点不动", 侧栏再也展不开。
-         *
-         * 边沿判定必须用**和可见分支同一份** s_PrevLB。早先这里另开了一个
-         * s_HidPrevLB, 而可见分支点箭头后是 `return` 直接跳走的, 根本没更新
-         * s_PrevLB —— 于是下一帧进入本分支时 s_PrevLB 还是 0, 而按键确实按着,
-         * 就伪造出一个"新按下沿", 刚收起的侧栏立刻又弹回来, 表现就是
-         * "点一下只闪一下, 第二次点才生效"。 */
+        /* 隐藏时仍采样键态, 防切回瞬间残留边沿误触。同时**保留显隐箭头的点击**
+         * —— 箭头隐藏时依然画在屏幕右缘, 不处理就成了"看得见但点不动"。
+         * 边沿必须用**和可见分支同一份** s_PrevLB: 曾另开 s_HidPrevLB, 而可见
+         * 分支点箭头后直接 return 跳走、根本没更新 s_PrevLB, 于是下一帧进来时
+         * s_PrevLB 还是 0 而按键按着, 伪造出一个新按下沿, 刚收起的侧栏立刻又
+         * 弹回来 (症状: 点一下只闪一下)。 */
         {
             int lb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
             int rb = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 1 : 0;
@@ -2205,18 +1848,13 @@ extern "C" __declspec(dllexport) unsigned __cdecl SWS_ClickGate(void* regs)
 }
 
 /* ---------------- 即时超武: SpecialPlace 事件 (联机安全) ----------------
- * Action==None 的超武是"点了就放", Phobos 不写 CurrentSW, 而是往
- * EventClass::OutList 塞一个 SpecialPlace 事件 (见 Phobos
- * src/Ext/Sidebar/SWSidebar/SWButtonClass.cpp LaunchSuper):
- *
+ * "点了就放" 的超武不写 CurrentSW (那只是本地 UI 态, 引擎当帧并不释放, 点了
+ * 没反应, 而且直接改模拟状态会破坏联机同步), 而是照 Phobos LaunchSuper 往
+ * EventClass::OutList 塞一个 SpecialPlace 事件:
  *   EventClass::OutList.Add(EventClass(pCurrent->ArrayIndex,
  *       EventType::SpecialPlace, swIndex, CellStruct::Empty));
- *
- * 写 CurrentSW 只是本地 UI 状态, 引擎当帧并不会释放, 所以点了没反应;
- * 而且直接改模拟状态会破坏联机同步。这里完全照 Phobos 的做法, 并且
  * 复用 BuildQueue.cpp 里已验证的 OutList 追加 (0x4C6B60 ctor + 计数推进),
- * 保持和原版同序 —— 引擎在 DoList 里统一执行, 联机由 Mega/Connect 广播。
- *
+ * 保持与原版同序 —— 引擎在 DoList 里统一执行, 联机由 Mega/Connect 广播。
  * SwPush 返回 1=已入队, 0=队列满发不出去。 */
 #define SWS_ADDR_CURPLAYER  0xA83D4Cu   /* HouseClass* CurrentPlayer */
 #define SWS_OFF_HOUSE_INDEX 0x30u       /* HouseClass::ArrayIndex */
@@ -2281,24 +1919,6 @@ static int SwsPushSpecialPlace(int swIdx)
 
     *(unsigned*)SWS_ADDR_OUT_NEXT = (next + 1u) & (SWS_EVT_SLOTS_N - 1u);
     *(unsigned*)SWS_ADDR_OUT_COUNT = count + 1u;
-    /* 记下自己塞进去的那一条 (houseIdx/swIdx), 用来和抓包日志里引擎自己
-     * 产生的 SuperWeapon 事件逐字节对比 —— 别再靠"应该对吧"来判断。 */
-    {
-        /* 我们构造出来的事件前 16 字节, 便于和抓包日志里引擎发的对照。 */
-        char sb[256], hb[4];
-        unsigned q = AppendCStr(sb, 0, "sws: push h=", sizeof(sb));
-        UtoA((unsigned)houseIdx, hb);
-        q = AppendCStr(sb, q, hb, sizeof(sb));
-        q = AppendCStr(sb, q, " id=", sizeof(sb));
-        UtoA((unsigned)swIdx, hb);
-        q = AppendCStr(sb, q, hb, sizeof(sb));
-        for (i = 0; i < 16; i++)
-        {
-            if (i && (i % 8) == 0) q = AppendCh(sb, q, ' ', sizeof(sb));
-            q = AppendCStr(sb, q, hb, sizeof(sb));
-        }
-        LogLine(sb);
-    }
     return 1;
 }
 
@@ -2306,26 +1926,16 @@ static int SwsPushSpecialPlace(int swIdx)
 
 
 /* ---- PCX 逐像素贴图 (不走引擎 BlitToSurface) ----
- * 引擎 BlitToSurface 每调一次就锁/解锁一次合成面, N 个条目 = N 次锁面。
- * 所以改成在下面那次锁面里直接写像素。
+ * BlitToSurface 每调一次就锁/解锁一次合成面 (N 个条目 = N 次锁面), 所以改成在
+ * 下面那次锁面里直接写像素。
  *
- * BSurface 布局 (gamemd.exe 0x6B9D00 的构造函数据实, 与 YRpp Surface.h:144 一致):
- *   +0x00 void* vptr          (BSurface 虚表 0x7E2070)
- *   +0x04 int   Width
- *   +0x08 int   Height
- *   +0x0C int   LockLevel
- *   +0x10 int   BytesPerPixel  (=2, 16bpp RGB565)
- *   +0x14 void* Buffer         (WORD*, 紧排, 行距 = Width*2)
- *   +0x18 int   Size           (= Width*Height*2)
- *   +0x1C bool  Allocated
- *   sizeof == 0x20, alignof == 4
- *
- * 早先这里写的是 0x88/0x8C/0x94/0x98 —— 那是把**虚表大小** (34*4=0x88) 当成了
- * 字段偏移, 实际对象只有 0x20 字节。于是每次都在下面的校验处提前 return 0,
- * 图标一直退回引擎 BlitToSurface, 而那条路是整块覆盖、100% 不透明, 根本不
- * 认 s_Alpha —— 现象就是"Alpha 对底框/边框有效, 对图标完全无效"。
- *
- * 布局对不上仍然返回 0, 由调用方退回引擎 blit, 保证不会画不出来。 */
+ * BSurface 布局 (gamemd 0x6B9D00 构造函数实证, 与 YRpp Surface.h:144 一致):
+ *   +0x00 vptr / +0x04 Width / +0x08 Height / +0x0C LockLevel /
+ *   +0x10 BytesPerPixel(=2) / +0x14 Buffer(WORD*, 行距=Width*2) /
+ *   +0x18 Size(=W*H*2) / +0x1C Allocated;  sizeof 0x20
+ * 曾把这几个偏移写成 0x88/0x8C/0x94/0x98 —— 那是把**虚表大小** (34*4=0x88) 当
+ * 成了字段偏移, 于是每次都在校验处提前 return 0, 图标退回整块覆盖的引擎 blit
+ * (那条路 100% 不透明、不认 s_Alpha)。布局对不上仍返回 0 让调用方兜底。 */
 static int SwsPcxBlitLocked(unsigned short* dstBase, int pitch,
                             int surfW, int surfH,
                             int dx, int dy, int dw, int dh, void* psurf)
@@ -2343,53 +1953,43 @@ static int SwsPcxBlitLocked(unsigned short* dstBase, int pitch,
     if (!src || !IsPlausiblePtr((void*)src)) return 0;
     /* Size 自洽校验: Buffer 至少得有这么多字节, 挡掉读到野指针 */
     if (*(int*)((char*)psurf + 0x18) != pw * ph * 2) return 0;
+    /* 目标矩形左右各夹一次, 内层循环里不再逐像素判越界 (整块面可能被裁掉)。
+     * 这是最热的循环 (78 个条目 x 60x48), 所以 Alpha 的混合系数也**提到
+     * 循环外**预先算好 —— 原来每个像素做 3 次除以 100。 */
     {
-        static int s_Logged = 0;
-        if (!s_Logged)
+        int x0 = (dx < 0) ? 0 : dx;
+        int x1 = dx + dw;
+        int kA = s_Alpha, kB = 100 - s_Alpha;
+        if (x1 > surfW) x1 = surfW;
+        if (x1 <= x0) return 1;
+        for (y = 0; y < dh; y++)
         {
-            char sb[160], b1[16], b2[16], b3[16], b4[16];
-            unsigned q = AppendCStr(sb, 0, "sws: bsurf ", sizeof(sb));
-            UtoA((unsigned)pw, b1); q = AppendCStr(sb, q, b1, sizeof(sb));
-            q = AppendCh(sb, q, 'x', sizeof(sb));
-            UtoA((unsigned)ph, b2); q = AppendCStr(sb, q, b2, sizeof(sb));
-            q = AppendCh(sb, q, ' ', sizeof(sb));
-            UtoA((unsigned)bpp, b3); q = AppendCStr(sb, q, b3, sizeof(sb));
-            q = AppendCh(sb, q, ' ', sizeof(sb));
-            UtoA((unsigned)(size_t)src, b4); q = AppendCStr(sb, q, b4, sizeof(sb));
-            LogLine(sb);
-            s_Logged = 1;
-        }
-    }
-    for (y = 0; y < dh; y++)
-    {
-        int ty = dy + y;
-        int sy = (ph <= 1) ? 0 : (y * ph) / dh;
-        unsigned short* drow;
-        const unsigned short* srow;
-        if (ty < 0 || ty >= surfH) continue;
-        drow = dstBase + (size_t)ty * pitch / 2;
-        srow = src + (size_t)sy * pw;
-        for (x = 0; x < dw; x++)
-        {
-            int tx = dx + x;
-            int sx = (pw <= 1) ? 0 : (x * pw) / dw;
-            unsigned short c;
-            if (tx < 0 || tx >= surfW) continue;
-            c = srow[sx];
-            if (c == PCX_TRANS_PARENT) continue;   /* 色键 */
-            /* 整体透明度 <100 时不能直接覆盖: 要和底下的像素混合, 否则
-             * 图标会永远是 100% 不透明, Alpha 就只对底框/边框这些
-             * 走 SwsFillLocked 的元素生效。 */
-            if (s_Alpha >= 100) drow[tx] = c;
-            else
+            int ty = dy + y;
+            int sy = (ph <= 1) ? 0 : (y * ph) / dh;
+            unsigned short* drow;
+            const unsigned short* srow;
+            if (ty < 0 || ty >= surfH) continue;
+            drow = dstBase + (size_t)ty * pitch / 2;
+            srow = src + (size_t)sy * pw;
+            for (x = x0; x < x1; x++)
             {
-                unsigned short bgc = drow[tx];
-                int sr = c & 0x1F, sg = (c >> 5) & 0x3F, sb = (c >> 11) & 0x1F;
-                int br = bgc & 0x1F, bg = (bgc >> 5) & 0x3F, bb = (bgc >> 11) & 0x1F;
-                int nr = (sr * s_Alpha + br * (100 - s_Alpha)) / 100;
-                int ng = (sg * s_Alpha + bg * (100 - s_Alpha)) / 100;
-                int nb = (sb * s_Alpha + bb * (100 - s_Alpha)) / 100;
-                drow[tx] = (unsigned short)(nb << 11 | ng << 5 | nr);
+                int sx = (pw <= 1) ? 0 : ((x - dx) * pw) / dw;
+                unsigned short c = srow[sx];
+                if (c == PCX_TRANS_PARENT) continue;   /* 色键 */
+                /* 整体透明度 <100 时不能直接覆盖: 要和底下的像素混合, 否则
+                 * 图标会永远 100% 不透明, Alpha 就只对走 SwsFillLocked 的
+                 * 那些元素生效。 */
+                if (kA >= 100) drow[x] = c;
+                else
+                {
+                    unsigned short bgc = drow[x];
+                    int nr = ((c & 0x1F) * kA + (bgc & 0x1F) * kB) / 100;
+                    int ng = (((c >> 5) & 0x3F) * kA +
+                              ((bgc >> 5) & 0x3F) * kB) / 100;
+                    int nb = (((c >> 11) & 0x1F) * kA +
+                              ((bgc >> 11) & 0x1F) * kB) / 100;
+                    drow[x] = (unsigned short)(nb << 11 | ng << 5 | nr);
+                }
             }
         }
     }
@@ -2399,28 +1999,56 @@ static int SwsPcxBlitLocked(unsigned short* dstBase, int pitch,
 /* 锁面状态下的半透明填充 (替代每条目 6 次 FillRectTrans 虚表调用)
  * op 先乘上**侧栏整体透明度** s_Alpha: 这样底框/边框/滚动条/箭头这些各带
  * 自己的局部 alpha 的元素, 只要走这里就自动被整体透明度统一调制。 */
-/* 实际填充: 调用方已经把 s_Alpha 乘进去了, 这里不再管整体透明度。 */
+/* 实际填充。热路径 (整栏底框一帧一万多像素, 加上图标/边框/滚动条更多), 所以:
+ *   - 上下左右边界**各夹一次**到画布内, 内层循环里不再逐像素判越界;
+ *   - op==100 走直接写 (不调 Blend16), 全不透明的那些填充省掉逐像素混合。
+ * 绘制面可能被裁掉一部分, 所以夹取是必须的, 但夹一次就够。 */
 static void SwsFillCore(unsigned char* base, int pitch, int surfW, int surfH,
                         int x, int y, int rw, int rh,
                         unsigned char r, unsigned char g, unsigned char b,
                         int op)
 {
-    int yy, xx;
+    int yy, x0, x1;
     if (!base || rw <= 0 || rh <= 0) return;
-    if (op < 0) op = 0;
-    if (op > 100) op = 100;
     if (op <= 0) return;
-    for (yy = 0; yy < rh; yy++)
+    if (op > 100) op = 100;
+    x0 = (x < 0) ? 0 : x;
+    x1 = x + rw;
+    if (x1 > surfW) x1 = surfW;
+    if (x1 <= x0) return;
+    rw = x1 - x0;
+    if (y < 0) { rh += y; y = 0; }              /* 上边被裁: 同步减高度 */
+    if (y + rh > surfH) rh = surfH - y;
+    if (rh <= 0) return;
+    if (op >= 100)
     {
-        int ty = y + yy;
-        unsigned short* row;
-        if (ty < 0 || ty >= surfH) continue;
-        row = (unsigned short*)(base + (size_t)ty * pitch);
-        for (xx = 0; xx < rw; xx++)
+        /* 不透明 = 直接写目标色。位深是运行时探测的 (565 或 555, 见 GdiText),
+         * 所以照 Blend16 的同一套移位来压, 不能硬编码 RGB565。 */
+        unsigned rMax = (1u << g_RBits) - 1u;
+        unsigned gMax = (1u << g_GBits) - 1u;
+        unsigned bMax = (1u << g_BBits) - 1u;
+        unsigned short c = (unsigned short)
+            (((unsigned)r * rMax / 255u) << (g_GBits == 6 ? 11 : 10) |
+             ((unsigned)g * gMax / 255u) << 5 |
+             ((unsigned)b * bMax / 255u));
+        for (yy = 0; yy < rh; yy++)
         {
-            int tx = x + xx;
-            if (tx < 0 || tx >= surfW) continue;
-            row[tx] = Blend16(row[tx], r, g, b, (unsigned)op * 255 / 100);
+            unsigned short* row =
+                (unsigned short*)(base + (size_t)(y + yy) * pitch) + x0;
+            int xx;
+            for (xx = 0; xx < rw; xx++) row[xx] = c;
+        }
+        return;
+    }
+    {
+        unsigned a = (unsigned)op * 255 / 100;
+        for (yy = 0; yy < rh; yy++)
+        {
+            unsigned short* row =
+                (unsigned short*)(base + (size_t)(y + yy) * pitch) + x0;
+            int xx;
+            for (xx = 0; xx < rw; xx++)
+                row[xx] = Blend16(row[xx], r, g, b, a);
         }
     }
 }
@@ -2477,8 +2105,8 @@ static void SwsDrawArrow(unsigned char* base, int pitch, int surfW, int surfH,
     hov = (mx >= x && mx < x + bw && my >= y && my < y + bh);
 
     /* 1) 底板: 主题色压得很淡, 只为让按钮有个"面", 不再额外垫一圈黑底
-     *    (早先底板是纯黑往外扩 2px, 边框又是绿的, 结果看着就是"一层黑一层绿")。
-     *    底板和边框都走 SwsFillLocked, 所以自动吃到侧栏整体透明度 s_Alpha。 */
+     *    (曾底板纯黑外扩 2px 而边框是绿的, 看着就是"一层黑一层绿")。
+     *    底板/边框都走 SwsFillLocked, 自动吃到 s_Alpha。 */
     SwsFillLocked(base, pitch, surfW, surfH, x, y, bw, bh,
                   SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, hov ? 70 : 45);
 
@@ -2514,14 +2142,13 @@ static void SwsDrawArrow(unsigned char* base, int pitch, int surfW, int surfH,
 }
 
 /* ---- 两个按钮的公共几何 ----
- * 挂在超武块**上方** 2px 的一行, 右对齐到块的右缘, 从右往左是
- * [显隐][空 3][隐藏重复]。所以超武块要多让出 18px 的顶部空间, 而
- * **不用**在右边留位 (侧栏右边是原版侧栏的地盘)。
- *
- * 位置必须由绘制期统一发布, 因为 SWS_Poll 的点击命中读的就是这几个值 ——
- * 两个按钮都在栏区判定框 (s_BoundX/Y/W/H) **之外**(块顶之上), 所以命中
- * 判定要排在栏区判定**之前**, 否则永远点不到 (曾经就因为这个位置而
- * "看得见点不动")。 */
+ * 挂在超武块**上方** 2px 的一行, 右对齐到块右缘, 从右往左
+ * [显隐][空 3][隐藏重复]; 所以块要多让出 18px 顶部空间, 而**不用**在右边留位。
+ * ⚠ 只能挂块上方: SWS_Draw 拿到的是**合成面**, 宽 = 屏幕宽 − 原版侧栏宽
+ * (日志 1752 = 1920-168), 块右缘已紧贴原版侧栏, 挂右边 x 会算到面外被丢掉。
+ * 位置由绘制期统一发布, 因为 SWS_Poll 的命中读的就是这几个值 —— 两个按钮都在
+ * 栏区判定框 (s_BoundX/Y/W/H) **之外**(块顶之上), 命中判定必须排在栏区判定
+ * **之前**, 否则永远点不到。 */
 #define SWS_BTN_W  20      /* 宽>高, 好点中 */
 #define SWS_BTN_H  16
 #define SWS_BTN_GAP 3
@@ -2605,20 +2232,14 @@ static void SwsDrawDedup(unsigned char* base, int pitch, int surfW, int surfH,
 }
 
 /* ---- 悬停提示框: 半透明黑底 + 主题色边框 + 白字 ----
- * ax = 水平锚点, ayUp = 提示要挂的那个东西的**上**边, ayDn = 它的**下**边
- * (挂上面放不下就自动改挂下面)。
- *
- * 刻意**不吃**侧栏整体透明度 s_Alpha: 用 SwsFillRawLocked 而不是
- * SwsFillLocked, 文字的 BlitCoverage 也直接给 100/85 而不是乘 s_Alpha。
- * 提示框是玩家**此刻正在读**的信息, 侧栏整体调到 Alpha=30 时它要是也跟着
- * 淡到 30%, 就看不清是哪个超武了。它是侧栏里唯一无视 Alpha 的元素。
- *
- * 顺带记一下两个绘制函数的约定是相反的 (踩过):
- *   SwsFillLocked  内部乘 s_Alpha -> 只能给原始不透明度
- *   BlitCoverage   不乘 s_Alpha   -> 调用方才预乘
- * 早先提示框给 SwsFillLocked 传了 70 * s_Alpha / 100, 等于乘两次,
- * Alpha=30 时底框实际只剩 6%, 几乎看不见。
- * 字体跟随全局矢量字体设置 ([VecText] FontFace/FontPx/Bold)。 */
+ * ax = 水平锚点, ayUp = 提示所挂东西的**上**边, ayDn = **下**边 (上面放不下
+ * 就自动改挂下面)。
+ * 刻意**不吃**侧栏整体透明度 (用 SwsFillRawLocked 而非 SwsFillLocked, 文字
+ * BlitCoverage 直接给 100/85): 提示框是玩家此刻正在读的信息, 侧栏调到 Alpha=30
+ * 时它跟着淡到 30% 就看不清是哪个超武了 —— 它是唯一无视 Alpha 的元素。
+ * ⚠ 两个绘制函数的约定**相反**: SwsFillLocked 内部乘 s_Alpha (只能给原始
+ * 不透明度), BlitCoverage 不乘 (调用方才预乘)。曾给前者传 70*s_Alpha/100, 等于
+ * 乘两次, Alpha=30 时底框只剩 6%。 */
 static void SwsDrawTip(unsigned char* locked, int pitch, int w, int h,
                        const wchar_t* nm, int ax, int ayUp, int ayDn)
 {
@@ -2662,7 +2283,6 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
      *   - 悬停项: 高亮框 + 名字文本
      * 之前每条目 6 次填充 + 未就绪罩 + 状态字渲染, 64 个条目时是主要开销。
      */
-    int order[SWS_CAP];
     int colCount[4] = { 0, 0, 0, 0 };
     int colX[4] = { 0, 0, 0, 0 };
     int i, n, f, totW, xStart, yStart, rowH, maxRows, blockH;
@@ -2717,26 +2337,33 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
     s_HidValid = 0;
     if (n <= 0 || n > SWS_CAP) return;
 
-    /* ---- 排序: 阵营 -> ini 优先级 -> ArrayIndex ---- */
-    for (i = 0; i < n; i++) order[i] = i;
-    for (i = 1; i < n; i++)
+    /* ---- 排序: 阵营 -> ini 优先级 -> ArrayIndex ----
+     * 结果缓存在 s_Order 里, 只在 SwsScan 改过 s_Items 之后重排一次。 */
+    if (s_OrderN != n)
     {
-        int t = order[i], k = i - 1;
-        while (k >= 0)
+        for (f = 0; f < 4; f++) s_OrderColCount[f] = 0;
+        for (i = 0; i < n; i++) s_Order[i] = i;
+        for (i = 1; i < n; i++)
         {
-            SwsItem* a = &s_Items[order[k]];
-            SwsItem* b = &s_Items[t];
-            int gt = 0;
-            if (a->side != b->side) gt = a->side > b->side;
-            else if (a->prio != b->prio) gt = a->prio > b->prio;
-            else gt = a->swIdx > b->swIdx;
-            if (!gt) break;
-            order[k + 1] = order[k];
-            k--;
+            int t = s_Order[i], k = i - 1;
+            while (k >= 0)
+            {
+                SwsItem* a = &s_Items[s_Order[k]];
+                SwsItem* b = &s_Items[t];
+                int gt = 0;
+                if (a->side != b->side) gt = a->side > b->side;
+                else if (a->prio != b->prio) gt = a->prio > b->prio;
+                else gt = a->swIdx > b->swIdx;
+                if (!gt) break;
+                s_Order[k + 1] = s_Order[k];
+                k--;
+            }
+            s_Order[k + 1] = t;
         }
-        order[k + 1] = t;
+        for (i = 0; i < n; i++) s_OrderColCount[s_Items[s_Order[i]].side]++;
+        s_OrderN = n;
     }
-    for (i = 0; i < n; i++) colCount[s_Items[order[i]].side]++;
+    for (f = 0; f < 4; f++) colCount[f] = s_OrderColCount[f];
     maxRows = 0;
     for (f = 0; f < 4; f++)
     {
@@ -2789,7 +2416,7 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
         int rows[4] = { 0, 0, 0, 0 };
         for (i = 0; i < n; i++)
         {
-            SwsItem* it = &s_Items[order[i]];
+            SwsItem* it = &s_Items[s_Order[i]];
             int r = rows[it->side] - s_Scroll;
             it->x = colX[it->side];
             it->y = yStart + r * rowH;
@@ -2803,29 +2430,26 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
      * 右对齐到块的右缘。挂块顶上方是落在栏区判定框之外的, 所以 SWS_Poll 里
      * 它们的命中判定必须排在栏区判定**之前** (见 SwsTwoBtnGeom 注释)。 */
     SwsTwoBtnGeom(xStart, totW, w, yStart);
+    /* 每局一行: 布局上限 / 一屏行数 / 四列各几条 / 总条数。侧栏"看着空"时
+     * 先看这里, 就能分清是没扫到条目还是被 maxRows 卡住了。 */
     {
         static int s_LayLog = 0;
         if (!s_LayLog)
         {
-            char sb[160], b1[16], b2[16], b3[16], b4[16], b5[16], b6[16];
+            char sb[96], b1[16];
             unsigned q = AppendCStr(sb, 0, "sws: lay cap=", sizeof(sb));
             UtoA((unsigned)s_MaxRows, b1);
             q = AppendCStr(sb, q, b1, sizeof(sb));
             q = AppendCStr(sb, q, " vis=", sizeof(sb));
-            UtoA((unsigned)maxRows, b2);
-            q = AppendCStr(sb, q, b2, sizeof(sb));
+            UtoA((unsigned)maxRows, b1);
+            q = AppendCStr(sb, q, b1, sizeof(sb));
             q = AppendCStr(sb, q, " cnt=", sizeof(sb));
-            UtoA((unsigned)colCount[0], b3);
-            q = AppendCStr(sb, q, b3, sizeof(sb));
-            q = AppendCh(sb, q, '/', sizeof(sb));
-            UtoA((unsigned)colCount[1], b4);
-            q = AppendCStr(sb, q, b4, sizeof(sb));
-            q = AppendCh(sb, q, '/', sizeof(sb));
-            UtoA((unsigned)colCount[2], b5);
-            q = AppendCStr(sb, q, b5, sizeof(sb));
-            q = AppendCh(sb, q, '/', sizeof(sb));
-            UtoA((unsigned)colCount[3], b6);
-            q = AppendCStr(sb, q, b6, sizeof(sb));
+            for (i = 0; i < 4; i++)
+            {
+                if (i) q = AppendCh(sb, q, '/', sizeof(sb));
+                UtoA((unsigned)colCount[i], b1);
+                q = AppendCStr(sb, q, b1, sizeof(sb));
+            }
             q = AppendCStr(sb, q, " n=", sizeof(sb));
             UtoA((unsigned)n, b1);
             q = AppendCStr(sb, q, b1, sizeof(sb));
@@ -2860,7 +2484,7 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
     GtMouseGameXY(&mx, &my);
     for (i = 0; i < n; i++)
     {
-        SwsItem* it = &s_Items[order[i]];
+        SwsItem* it = &s_Items[s_Order[i]];
         if (it->x < 0) continue;                 /* 被滚动裁掉 */
         if (mx >= it->x && mx < it->x + SWS_ICON_W &&
             my >= it->y && my < it->y + SWS_ICON_H)
@@ -2881,21 +2505,29 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
     locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
     if (!locked || !IsPlausiblePtr(locked)) return;
 
-    /* ---- 每列一个底框 (图标之前) ---- */
-    for (f = 0; f < 4; f++)
+    /* ---- 整块底框 (一次, 不是每列一次) ----
+     * 图标本身不吃"局部不透明度"之外的东西, 逐列画 4 块底框和画 1 块整的
+     * 视觉效果一样, 但少 3 次填充、少 3 份重叠边缘。 */
+    if (s_LastX > 0)
     {
-        int ch;
-        if (colCount[f] <= 0) continue;
-        /* 底框只画可见行数 (超出部分不显示) */
-        ch = (colCount[f] < maxRows ? colCount[f] : maxRows) * rowH - s_Gap;
-        SwsFillLocked(locked, pitch, w, h, colX[f], yStart, SWS_ICON_W, ch,
-                      0, 0, 0, s_Opacity);
+        int ch = 0;
+        for (f = 0; f < 4; f++)
+            if (colCount[f] > 0)
+            {
+                int t = (colCount[f] < maxRows ? colCount[f] : maxRows) *
+                        rowH - s_Gap;
+                if (t > ch) ch = t;
+            }
+        if (ch > 0)
+            SwsFillLocked(locked, pitch, w, h, colX[0], yStart,
+                          s_LastX + SWS_ICON_W - colX[0], ch,
+                          0, 0, 0, SWS_BACKDROP_OP);
     }
 
     /* ---- 图标 + 悬停高亮 ---- */
     for (i = 0; i < n; i++)
     {
-        SwsItem* it = &s_Items[order[i]];
+        SwsItem* it = &s_Items[s_Order[i]];
         void* ps = NULL;
         if (it->x < 0) continue;              /* 被滚动裁掉 */
         if (it->pcxFile) ps = SwsPcxLiveSurf(it->pcxFile);
@@ -2922,11 +2554,9 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
                 SwsFillLocked(locked, pitch, w, h, it->x, it->y, SWS_ICON_W,
                               SWS_ICON_H, 0, 0, 0, 45);
         }
-        else if (it->shp)
-        {
-            /* 无 SidebarPCX 的超武: SidebarImage 是引擎的 XXICON 占位图,
-             * 画出来是紫球, 所以不画 (可在 [SWSidebar] 里用负值隐藏)。 */
-        }
+        /* 无 SidebarPCX 的超武 (it->shp) 什么都不画: SidebarImage 是引擎的
+         * XXICON 占位图, 画出来是紫球。要么在 rulesmo.ini 里补 SidebarPCX=,
+         * 要么在 [SWSidebar] 里给它负值隐藏。 */
         /* 充能百分比: 画在图标底部 (有 PCX 图标才画, 否则只占位) */
         if (it->pcxFile)
         {
@@ -3057,7 +2687,7 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
      * 自己拼的中文字面量一旦字形链路有问题就是一片 '?' (踩过一次)。 */
     if (hover >= 0)
     {
-        SwsItem* it = &s_Items[order[hover]];
+        SwsItem* it = &s_Items[s_Order[hover]];
     SwsDrawTip(locked, pitch, w, h, it->name, mx,
                    it->y, it->y + SWS_ICON_H + 2);
     }
