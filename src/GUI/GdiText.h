@@ -126,6 +126,8 @@ extern GdiSlot* g_G;      /* 当前槽 (GdiEnsure 成功后指向它) */
 /* 槽号: 0=战役框, 1=提示框, 2=全局文本 (VecText), 3=超武面板/底电,
  * 4=聊天输入, 5=超武侧栏充能百分比, 6=超武侧栏悬停名 (5/6 分槽是因为两者
  * 字号来源不同, 共用一槽会让 GdiEnsure 每次拆了重建)。 */int GdiEnsure(int fontPx, int bold, int slot, const wchar_t* face);
+/* 单字前进宽 (字体自己的 ABC 全宽); 需先 GdiEnsure, 失败 0 */
+int GtCharAdv(wchar_t ch);
 /* 量一段文本在 maxW 内能放几个字符 */
 int CharsFit(const wchar_t* text, int len, int maxW);
 /* 把一行画进 DIB (黑底白字), 返回实际像素宽; 覆盖率=红色通道 */

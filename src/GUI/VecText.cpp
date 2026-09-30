@@ -23,6 +23,9 @@
 #include "OrderUtil.h"
 #include "Icon.h"
 
+#define VC_MAXW 32
+#define VC_MAXH 32
+
 /* 后定义的前置声明 (GetDim 高度调整在后用 VecTipStep, 定义在 DrawText 入口前) */
 static int VecPickPx(void* t);
 /* VT_SECTION 见 VecText.h (MOExperience 读电力键共用)。 */
@@ -66,8 +69,12 @@ typedef struct {
     int MenuTake;   /* 1=菜单按钮整体替换 (禁用原字形, 全墨水自定义绘制) */
     int DigitTrack; /* 数字字距微调像素 (负=收紧, 正=放松, 只影响 0-9 步进) */
     int TipBox;     /* 1=电力提示定制盒 (按列调映射补齐, 与引擎同 tone) */
-    int BriefBox;   /* 1=简报正文盒加高 (界面适配字体), 0=保持原版盒子 */
-    int BriefClip;  /* 1=简报裁剪底边跟盒子走 (面板子面切，需配合 BriefBox) */
+    int BriefLine;  /* 简报行距 (百分比, 130=1.3 倍字号; 0=退回跟格高) */
+    int BriefOwn;   /* 1=简报正文自绘 (行距/字距/换行全自己排), 0=全交引擎 */
+    int BriefTrack; /* 简报字距 (像素, 加在全角格宽上) */
+    int BriefMark;  /* 1=自绘块外面描边框 (排查接管范围) */
+    int BriefWidth; /* 简报正文盒宽 (0=沿用引擎给的 453) */
+    int BriefAdv;   /* 格宽基准: 0=字号+字距, 1=引擎原始字宽+字距 */
     int Bold;
     int VShift;     /* 字形垂直偏移 (像素, 正=下移) */
     int LogDetail;  /* 1=记 gdi 逐字光栅日志; 0=只记关键 (默认) */
@@ -83,6 +90,10 @@ static wchar_t g_VTFace[FONT_FACE_MAX];
  * 1=!t 2=adv/h 3=!buf 4=pitch 5=B<Tp 6=VecGlyph返回NULL;
  * 10=!t 11=px越界 12=!GdiEnsure 13=gw/h 14=outH 15=winTop 16=off+inkW */
 static int g_VecWhy = 0;
+/* 自然摆位模式: 简报正文自绘时置 1, 字形一律摆在字体自己的左边距 (abcA)
+ * 上。进字形缓存键, 免得跟其它文本共用一条缓存 (同 adv 下两种摆法
+ * 结果不同)。 */
+static int g_VecNat = 0;
 
 /* thiscall (ECX=this): __fastcall 占位 (this, edxUnused) + 栈上 4 参数,
  * 编译器生成 ret 0x10, 与原 Blit 尾完全一致, JMP 钩可直接跳入。 */
@@ -143,58 +154,384 @@ static int VecNormC(int v)
 
 /* DrawText 字形计数 / 行跨度 (探针已删, 只留正文盒判据) */
 static int g_DTDepth = 0;
-static int g_DTBrief = 0;
 /* 简报正文盒内 (引擎按自有宽度换行): 步进保持原笔位, 不加宽 */
 static int g_DTBody = 0;
 
-/* 简报正文盒 (0x621144 那次大 DrawText): 实测 442 字左右塞进
- * (652,313,453,432), 约 23 行 x 19 = 437px, 底边超出盒底被切,
- * 原版矮墨水蹭过去看不见, 满格墨水脚被吃 -> "最后一行不全"。
- * 修法: 只加高 432->470, 宽度保持 453 不动。
- * 教训: W 试过 453->540, 行是变长了, 但右侧被面板底面切掉
- * (文字画在一块 453 宽的面板子面上, 不是画在屏幕上;
- * 加宽文字不加宽面板 = 右边被吃, 还丢字)。
- * 真要加宽得改面板控件本身, 那是另一项大工程, 先保正确。
- * 盒底 783 < 1080, 下面全是黑边, 零风险。 */
-#define BRIEF_X 652
-#define BRIEF_Y 313
-#define BRIEF_W 453
-#define BRIEF_H 432
-#define BRIEF_W2 453
-#define BRIEF_H2 470
+/* ---------------- 简报正文自绘的状态 ----------------
+ * 引擎那次 DrawText 传进来的 x/y/w 就是正文盒位置, 自绘直接拿来折行;
+ * 不再改盒高盒宽 (行数由屏高决定, 文字超出面板部分落在黑边上)。
+ * 裁剪底边放开上限: 屏高 1080 留 80 余量, 别顶到边。 */
+#define BRIEF_BOTTOM_MAX 1000
 
-static int g_VBoxLogged = 0;
+/* fnt 格高, 行距下限 (字体标定时定下, 见 VecPxCalibrate) */
+static int g_BriefOrigH = 0;
 
-static void VecBriefBox(int* aX, int* aY, int* aW, int* aH)
+/* 行距 = 字号 × BriefLine% , 下限格高, 上限 VC_MAXH (行框上限)。 */
+static int VecBriefLineH(int px)
 {
-    char b1[16], buf[128];
-    unsigned p;
-    if (!g_VT.BriefBox) return;
-    if (*aX != BRIEF_X || *aY != BRIEF_Y || *aW != BRIEF_W || *aH != BRIEF_H)
-        return;
-    *aW = BRIEF_W2;
-    *aH = BRIEF_H2;
-    if (g_VBoxLogged) return;
-    g_VBoxLogged = 1;
-    p = 0;
-    p = AppendCStr(buf, p, "vbox: brief body ", sizeof(buf));
-    UtoA((unsigned)BRIEF_W, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCh(buf, p, 'x', sizeof(buf));
-    UtoA((unsigned)BRIEF_H, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " -> ", sizeof(buf));
-    UtoA((unsigned)BRIEF_W2, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCh(buf, p, 'x', sizeof(buf));
-    UtoA((unsigned)BRIEF_H2, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    LogLine(buf);
+    int h = (g_BriefOrigH > 0) ? g_BriefOrigH : px;
+    if (g_VT.BriefLine > 0)
+    {
+        int v = (px * g_VT.BriefLine + 50) / 100;
+        if (v > h) h = v;
+    }
+    if (h > VC_MAXH) h = VC_MAXH;
+    if (h < 8) h = 8;
+    return h;
 }
+
+/* 跨钩状态: DrawText 入口存, Blit 入口用。
+ * 面必须等引擎自己绑 —— 0x4348F0 (装面, 填 font+0x0C/+0x10/+0x30) 在
+ * DrawText 内部第 0x28 字节处才调, 进钩那一刻 font+0x0C 还是 NULL, 自己
+ * 绑面就得自己解, 而面是 Lock 着的。所以引擎那次照跑, 只在 Blit 钩里抢
+ * 第一个字的位置把整块画掉, 之后这一次的逐字绘制全抑制。
+ * g_BriefState: 0=未定 1=已接管(抑制后续逐字) 2=自绘不可用(不抑制)。 */
+static wchar_t* g_BriefStr = NULL;
+static int g_BriefX = 0, g_BriefY = 0, g_BriefW = 0, g_BriefH = 0;
+static int g_BriefState = 0;
+static int g_BriefOwnLogged = 0;   /* 自绘接管只记一次 */
+static int g_BriefWhyLogged = 0;   /* 退回引擎原因只记一次 */
 
 /* ---------------- Blit 层超武区接管已删除 ----------------
  * SuperPx 经游戏内验证无可见作用 (置 0 对比无变化): 列表行经 Print->Simple_
  * 已被 SWPanel 整块收集+隐藏, DrawText 系叠字未观测到漏网。整机移除
  * (VecSWRegion/深度计数/swForce/失败诊断), 右侧区文字走通用 Render 路径。 */
 static int VecPickPx(void* t);
+static int VecMeasure(void* t, wchar_t wch, int* ph);
+static void VecBriefProbeW(wchar_t wch, int oa, int cw, int full);
+/* 简报单字格宽 = 字体自己的前进宽 + 字距 (一切正常排版的做法) */
+static int VecBriefCellW(void* font, wchar_t ch, int px, int tr);
 static int VecRender(void* t, wchar_t wch, int adv, int h, int x, int y,
                      int colorW, int px, int yOff);
+
+/* ---------------- 简报正文自绘 ----------------
+ * 引擎那次 DrawText (0x621144 -> 0x434CD0) 的换行、行高、字宽全绑死在
+ * fnt 度量上, 三个互相牵制, 调哪个都会连带出问题 (实测):
+ *   行高 font+0x1C   (0x434EC2  mov eax,[ecx+0x1C] / add edx,eax)
+ *   字宽 idata+0x1C  (0x4346C0  add eax,[ecx+0x1C])
+ *   换行按字宽在盒宽内累加, 盒高按行高切行
+ * 行高能单独临时改 (见 VecDrawTextEntry), 字宽一动换行就跟着错, 想加
+ * 字距必然撑出 453 宽的盒子。所以这里整个接管: 引擎那次调用不执行, 自己
+ * 按矢量墨水排版 —— 行高跟 BriefLine, 字距跟 BriefTrack, 换行按墨水宽,
+ * 空行原样保留。行数不再受盒高限制 (盒高 432 装不下 21 行, 原版就是靠
+ * 面板裁剪漏掉末行), 只受屏高限制。
+ * 面的取法与引擎一致 (0x4348F0 装裁剪那套): 像素缓冲 font+0x0C、
+ * 行距 font+0x10、裁剪 LTRB = font+0x30/+0x34/+0x38/+0x3C。
+ * 颜色取 font+0x24 (0x434D13 读的就是它, Blit 层同源)。
+ * 返回 0 = 已接管 (引擎不再画), -1 = 不可靠, 调用方照旧走引擎, 绝不画半截。 */
+#define BRIEF_MAXCH 4096
+/* 灰框与文字之间留的空白 (像素) */
+#define BRIEF_PAD 20                     /* 灰框内缘与文字之间的空白 */
+
+/* 裁剪底放开的上限: 窗口高减一。裁剪被改过后 font+0x3C 不再是面高, 问面
+ * 自己要 vtable 调用 (0x4348F0 装裁剪时取高就是那么取的), 但那是别人的
+ * 虚表, 猜错就是崩, 不如直接用窗口高反正只会少放不会多放。 */
+static int VecBriefMaxY(void)
+{
+    int h = GtGameH();
+    if (h < 64 || h > 8192) return -1;
+    return h - 1;
+}
+
+/* 文本边界标记: 外圈粗线 + 内圈细线, 中间留一道空隙, 深灰不抢正文。
+ * 直接写像素缓冲, 逐点过裁剪与面界。 */
+#define BRIEF_MARK_RGB 0x40      /* 深灰 */
+#define BRIEF_MARK_OUT  2        /* 外线宽 */
+#define BRIEF_MARK_GAP  2        /* 内外之间的空隙 */
+#define BRIEF_MARK_IN   1        /* 内线宽 */
+
+static void VecBriefRect(unsigned short* buf, int pitchW, const int* LTRB,
+                         int x0, int y0, int x1, int y1, int thick)
+{
+    unsigned short* row;
+    int lef = LTRB[0], top = LTRB[1], rig = LTRB[2], bot = LTRB[3];
+    int i, t, sx, sy;
+    if (x1 < x0) { i = x0; x0 = x1; x1 = i; }
+    if (y1 < y0) { i = y0; y0 = y1; y1 = i; }
+    if (lef < 0) lef = 0;
+    if (top < 0) top = 0;
+    if (rig > pitchW - 1) rig = pitchW - 1;
+    if (bot > pitchW - 1) bot = pitchW - 1;
+    for (i = 0; i < 2; i++)                       /* 上下两条 */
+    {
+        sy = i ? y1 : y0;
+        row = buf + sy * pitchW;
+        for (t = 0; t < thick; t++, sy++)
+        {
+            if (sy < top || sy > bot) continue;
+            for (sx = x0; sx <= x1; sx++)
+                if (sx >= lef && sx <= rig)
+                    row[sx] = Blend16(row[sx], BRIEF_MARK_RGB,
+                                       BRIEF_MARK_RGB, BRIEF_MARK_RGB, 255);
+        }
+    }
+    for (i = 0; i < 2; i++)                       /* 左右两条 */
+    {
+        sx = i ? x1 : x0;
+        for (t = 0; t < thick; t++, sx++)
+        {
+            if (sx < lef || sx > rig) continue;
+            for (sy = y0; sy <= y1; sy++)
+                if (sy >= top && sy <= bot)
+                    buf[sy * pitchW + sx] =
+                        Blend16(buf[sy * pitchW + sx], BRIEF_MARK_RGB,
+                                BRIEF_MARK_RGB, BRIEF_MARK_RGB, 255);
+        }
+    }
+}
+
+static void VecBriefMark(unsigned short* buf, int pitchW, const int* LTRB,
+                         int x0, int y0, int x1, int y1)
+{
+    int d = BRIEF_MARK_OUT + BRIEF_MARK_GAP;
+    VecBriefRect(buf, pitchW, LTRB, x0, y0, x1, y1, BRIEF_MARK_OUT);
+    if (x1 - d <= x0 + d || y1 - d <= y0 + d) return;   /* 太小就不画内框 */
+    VecBriefRect(buf, pitchW, LTRB, x0 + d, y0 + d, x1 - d, y1 - d,
+                 BRIEF_MARK_IN);
+}
+
+/* 退回引擎的一次性原因日志 (why 见下), 免得只看到"没变化"没处查。 */
+static void VecBriefWhy(int why, int v)
+{
+    char b1[16], buf[96];
+    unsigned q = 0;
+    if (g_BriefWhyLogged) return;
+    g_BriefWhyLogged = 1;
+    q = AppendCStr(buf, q, "brief: own skip why=", sizeof(buf));
+    UtoA((unsigned)why, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+    q = AppendCh(buf, q, ' ', sizeof(buf));
+    UtoA((unsigned)v, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+    LogLine(buf);
+}
+
+/* 单字格宽 = 字体自己的前进宽 (ABC 全宽) + 字距。
+ * 这才是一切正常排版的做法 (GDI DrawText / DirectWrite / 浏览器都是
+ * 逐字取 advance 再加 letter-spacing):
+ *   汉字/CJK 标点 = 1 em (18px), 拉丁按字形比例, 空格窄。
+ * 用统一格宽 (或引擎 fnt 宽度表) 排 CJK 混排, 宽窄不一的字就会
+ * 间距忽大忽小 —— fnt 那张表是 16x16 点阵时代的产物, 逐字不同。 */
+static int VecBriefCellW(void* font, wchar_t ch, int px, int tr)
+{
+    int ga;
+    if (Icon_Is((unsigned)ch))
+    {
+        int ia = Icon_Advance((unsigned)ch);
+        if (ia > 0) return ia;
+    }
+    ga = GtCharAdv(ch);
+    if (ga <= 0 || ga > 64) ga = px;   /* 字体没这个字: 退回字号 */
+    if (ga < 1) ga = 1;
+    return ga + tr;
+}
+
+static int VecBriefBody(void* font, const wchar_t* s,
+                       int x, int y, int w)
+{
+    int px, lh, tr, adv, color, cx, cy, lines, seg, per, want, oldB, n, oa;
+    int pitchW, maxCx, maxY, oldL, oldT, oldR;
+    int* LTRB;
+    const wchar_t* p;
+
+    if (!font || !IsPlausiblePtr(font)) { VecBriefWhy(1, 0); return -1; }
+    if (!s || !IsPlausiblePtr((void*)s)) { VecBriefWhy(2, 0); return -1; }
+    if (!*(unsigned short**)((char*)font + 0x0C)) { VecBriefWhy(3, 0); return -1; }
+    pitchW = *(int*)((char*)font + 0x10);
+    if (pitchW < 1024) { VecBriefWhy(4, pitchW); return -1; }
+    if (w < 64) { VecBriefWhy(5, w); return -1; }
+    /* 盒宽: BriefWidth>0 用配置值。引擎给的 453 是面板子面宽, 放宽就得
+     * 同步放开右裁剪 (下面一起做), 否则字画出去被切。 */
+    if (g_VT.BriefWidth > 0 && g_VT.BriefWidth < 4096)
+        w = g_VT.BriefWidth;
+    px = VecPickPx(font);
+    if (px < 8 || px > 40) { VecBriefWhy(6, px); return -1; }
+    lh = VecBriefLineH(px);
+    tr = g_VT.BriefTrack;
+    if (tr < 0) tr = 0;
+    if (tr > VC_MAXW - px) tr = VC_MAXW - px;
+    adv = px + tr;                       /* 全角格宽 = 字号 + 字距 */
+    color = (int)(*(unsigned short*)((char*)font + 0x24));
+    maxY = VecBriefMaxY();
+    if (maxY < 0) { VecBriefWhy(7, 0); return -1; }
+    per = w / adv;
+    if (per < 1) { VecBriefWhy(8, per); return -1; }
+    /* GDI 面必须先备好 (逐字取前进宽要用), slot 2 与字形光栅同一个 */
+    if (!GdiEnsure(px, g_VT.Bold, 2, g_VTFace)) { VecBriefWhy(9, 0); return -1; }
+
+    /* 行数预估: 与下面折行同一套规则逐字跑一遍 (向上取整, 宁可多留裁剪
+     * 高度)。格宽逐字不同, 不能用"盒宽/格宽"一次除完。 */
+    lines = 1;
+    cx = x;
+    for (p = s; *p && lines < BRIEF_MAXCH; p++)
+    {
+        if (*p == 0x0A) { cx = x; lines++; continue; }
+        seg = VecBriefCellW(font, *p, px, tr);
+        if (cx + seg > x + w) { cx = x; lines++; }
+        cx += seg;
+    }
+
+    /* 面板子面裁剪底在 745, 装不下加高后的正文, 放到底再画完还原。
+     * 上限取屏高 (BRIEF_BOTTOM_MAX) 与面高两者小的那个。 */
+    /* 裁剪四边都要放: 面板子面的裁剪正好卡在盒子原点 (652,313) 与右缘,
+     * 只放底边的话左/上/右三边都画不出来 (实测边框只有右边和下边)。
+     * 画完原样还原。pitchW >= 1024 已是整屏面, 放开左右下三边安全;
+     * 上边只放到 y-4, 绝不到 0。 */
+    LTRB = (int*)((char*)font + 0x30);
+    oldL = LTRB[0]; oldT = LTRB[1]; oldR = LTRB[2]; oldB = LTRB[3];
+    /* 边框在文字外 BRIEF_PAD 像素, 裁剪必须再外放 BRIEF_PAD+4 才画得全
+     * (之前右边就是被自己开的裁剪切掉的: 裁剪放到 x+w, 边框画在 x+w+2)。 */
+    if (LTRB[0] > x - BRIEF_PAD - 4)
+        LTRB[0] = (x - BRIEF_PAD - 4 > 0) ? x - BRIEF_PAD - 4 : 0;
+    if (LTRB[1] > y - BRIEF_PAD - 4)
+        LTRB[1] = (y - BRIEF_PAD - 4 > 0) ? y - BRIEF_PAD - 4 : 0;
+    if (LTRB[2] < x + w + BRIEF_PAD + 4)
+        LTRB[2] = (x + w + BRIEF_PAD + 4 < pitchW)
+                  ? x + w + BRIEF_PAD + 4 : pitchW - 1;
+    want = y + lines * lh + BRIEF_PAD + 4;
+    if (want > BRIEF_BOTTOM_MAX) want = BRIEF_BOTTOM_MAX;
+    if (want > maxY) want = maxY;
+    if (LTRB[3] < want) LTRB[3] = want;
+
+    maxCx = x;
+    g_VecNat = g_VT.BriefOwn ? 1 : 0;
+    for (cx = x, cy = y, p = s; *p; p++)
+    {
+        int cw = adv;
+        if (*p == 0x0A) { cx = x; cy += lh; continue; }
+        if (Icon_Is((unsigned)*p))          /* PUA 内置图标, 走位图不走字 */
+        {
+            int ia = Icon_Advance((unsigned)*p);
+            if (ia <= 0) continue;         /* 不认的图标当空白, 不吞后文 */
+            Icon_Blit(font, (unsigned)*p, cx, cy, color, lh);
+            cx += ia;
+            if (cx > maxCx) maxCx = cx;
+            continue;
+        }
+        /* 逐字格宽。BriefAdv=1 (默认): 字体自己的前进宽 + 字距, 摆位
+         * 用字体自然位置 (g_VecNat), 与其它软件渲染同一段文字一致。
+         * BriefAdv=0: 退回统一 字号+字距 (汉字满格匀齐, 混排会不匀)。 */
+        oa = GtCharAdv(*p);
+        if (g_VT.BriefAdv && oa > 0)
+            cw = VecBriefCellW(font, *p, px, tr);
+        else
+            cw = adv;
+        if (cw > VC_MAXW) cw = VC_MAXW;     /* 字形缓存宽上限 */
+        VecBriefProbeW(*p, oa, cw, adv);
+        if (cx + cw > x + w) { cx = x; cy += lh; }
+        if (cy + lh > y + lines * lh + lh) break;   /* 兜底, 不该触发 */
+        /* 摆位格 = cw 去掉字距 (字体自然宽)。这样 VecGlyph 的自然摆位
+         * 落在 abcA 上, 字距是我们自己在笔位上加的, 不影响字形位置。 */
+        n = VecRender(font, *p, cw - tr, lh, cx, cy, color, px, 0);
+        if (n < 0) { cx += cw; continue; }  /* 单字画不出就跳过去, 别吞后文 */
+        cx = n + tr;
+        if (cx > maxCx) maxCx = cx;
+    }
+    g_VecNat = 0;
+    if (g_VT.BriefMark)
+        VecBriefMark(*(unsigned short**)((char*)font + 0x0C), pitchW, LTRB,
+                     x - BRIEF_PAD, y - BRIEF_PAD,
+                     maxCx + BRIEF_PAD, cy + lh + BRIEF_PAD);
+    LTRB[0] = oldL; LTRB[1] = oldT; LTRB[2] = oldR; LTRB[3] = oldB;
+    if (!g_BriefOwnLogged)
+    {
+        char b1[16], b2[16], buf[128];
+        unsigned q = 0;
+        g_BriefOwnLogged = 1;
+        q = AppendCStr(buf, q, "brief: own draw box=", sizeof(buf));
+        UtoA((unsigned)x, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCh(buf, q, ',', sizeof(buf));
+        UtoA((unsigned)y, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCh(buf, q, ' ', sizeof(buf));
+        UtoA((unsigned)w, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCh(buf, q, ' ', sizeof(buf));
+        UtoA((unsigned)lh, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, "px/char ", sizeof(buf));
+        UtoA((unsigned)adv, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " lines=", sizeof(buf));
+        UtoA((unsigned)lines, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+        q = AppendCStr(buf, q, " pitch=", sizeof(buf));
+        UtoA((unsigned)pitchW, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " maxY=", sizeof(buf));
+        UtoA((unsigned)maxY, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        LogLine(buf);
+    }
+    return 0;
+}
+
+/* 原始字宽采集: 前 8 个不同的字各记一条 (码位/原始宽/采用的格宽/满格宽),
+ * 用来核对"哪些字看起来偏窄"到底差在哪, 改 BriefAdv 时有据可依。 */
+static void VecBriefProbeW(wchar_t wch, int oa, int cw, int full)
+{
+    static unsigned seen[8];
+    static int seenN = 0;
+    char b1[16], buf[96];
+    unsigned q;
+    int i;
+    for (i = 0; i < seenN; i++) if (seen[i] == (unsigned)wch) return;
+    if (seenN >= 8) return;
+    seen[seenN++] = (unsigned)wch;
+    q = AppendCStr(buf, q = 0, "brief: w U+", sizeof(buf));
+    {
+        char hex[8];
+        int k, d, v = (int)((unsigned)wch >> 12);
+        for (k = 0; k < 4; k++) { d = v & 0xF; hex[k] = (char)(d < 10 ? '0' + d : 'A' + d - 10); v = (v << 4) & 0xF; }
+        hex[4] = 0;
+        q = AppendCStr(buf, q, hex, sizeof(buf));
+    }
+    q = AppendCStr(buf, q, " gdi=", sizeof(buf));
+    UtoA((unsigned)(oa > 0 ? oa : 0), b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+    q = AppendCStr(buf, q, " cell=", sizeof(buf));
+    UtoA((unsigned)cw, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+    q = AppendCStr(buf, q, " full=", sizeof(buf));
+    UtoA((unsigned)full, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+    LogLine(buf);
+}
+
+/* 简报相关 DrawText 的一次性普查: 每个 (调用者, x, y, w, h) 组合只记一条,
+ * 用来确认正文到底由哪几个调用画 (可能不止 0x621144 一处)。 */
+static void VecBriefProbe(unsigned caller, int x, int y, int w, int h,
+                             int txt, const char* tag)
+{
+    static unsigned seen[16][5];
+    static int seenN = 0;
+    char b1[16], buf[160];
+    unsigned q;
+    int i, len = 0;
+    const wchar_t* p = 0;
+    for (i = 0; i < seenN; i++)
+        if (seen[i][0] == caller && seen[i][1] == (unsigned)x &&
+            seen[i][2] == (unsigned)y && seen[i][3] == (unsigned)w &&
+            seen[i][4] == (unsigned)h)
+            return;
+    if (seenN < 16)
+    {
+        seen[seenN][0] = caller; seen[seenN][1] = (unsigned)x;
+        seen[seenN][2] = (unsigned)y; seen[seenN][3] = (unsigned)w;
+        seen[seenN][4] = (unsigned)h;
+        seenN++;
+    }
+    p = (const wchar_t*)(size_t)txt;
+    if (p && IsPlausiblePtr((void*)p))
+        while (len < 9999 && p[len]) len++;
+    else
+        p = 0;
+    q = 0;
+    q = AppendCStr(buf, q, "brief: dt ", sizeof(buf));
+    UtoA(caller, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+    q = AppendCh(buf, q, ' ', sizeof(buf));
+    UtoA((unsigned)x, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+    q = AppendCh(buf, q, ',', sizeof(buf));
+    UtoA((unsigned)y, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+    q = AppendCh(buf, q, ' ', sizeof(buf));
+    UtoA((unsigned)w, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+    q = AppendCh(buf, q, 'x', sizeof(buf));
+    UtoA((unsigned)h, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+    q = AppendCh(buf, q, ' ', sizeof(buf));
+    UtoA((unsigned)len, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+    q = AppendCh(buf, q, ' ', sizeof(buf));
+    q = AppendCStr(buf, q, tag, sizeof(buf));
+    LogLine(buf);
+}
+
 /* 原版格高 (idata Lines): FontPx 等比缩放字宽时的分母 (定义提前,
  * 接管渲染要用; 后面不再重复定义) */
 static int g_FontOrigH = 19;
@@ -407,21 +744,32 @@ int __fastcall VecDrawTextEntry(void* t, void* e,
      * 列表的隐藏/收集只在 Print 入口做, 高层级一次干掉, 不逐条;
      * 菜单按钮只立深度标志, 字形替换在 Blit 层做) */
     if (!g_OrigDrawText) { if (menuTake) g_MenuDepth--; return 0; }
+    /* 简报正文自绘 (BriefOwn=1, 默认): 引擎那次 DrawText 照跑, 只在 Blit 钩里
+     * 抢第一个字把整块重排画掉。放在 g_DTBody 之前, 自绘期间不立标志
+     * 门槛照旧: 调用者 0x621144 且盒够大。其余简报 DrawText 走普查日志,
+     * 确认正文是不是只由这一处画。 */
+    if (brief && caller == 0x621144u && a6 >= 400 && a7 >= 100)
+    {
+        /* 正文: 引擎照跑 (它负责绑面/裁剪/逐字 Blit), 我们只在 Blit 钩里
+         * 抢第一个字把整块自绘掉。见 g_BriefState 注释。 */
+        g_BriefStr = (wchar_t*)(size_t)a3;
+        g_BriefX = a4; g_BriefY = a5; g_BriefW = a6; g_BriefH = a7;
+        g_BriefState = 0;
+        VecBriefProbe(caller, a4, a5, a6, a7, a3,
+                      g_VT.BriefOwn ? "own" : "eng");
+    }
+    else if (brief)
+    {
+        VecBriefProbe(caller, a4, a5, a6, a7, a3, "eng");
+    }
     if (brief)
     {
-        /* 简报正文盒加高 (界面适配字体, 精确匹配才改) */
-        if (caller == 0x00621144u) VecBriefBox(&a4, &a5, &a6, &a7);
         g_DTDepth++;
         if (g_DTDepth == 1)
         {
-            g_DTBrief = 1;
             g_DTBody = (caller == 0x00621144u && a6 >= 400 && a7 >= 100);
         }
     }
-    /* 注: 曾试 DrawText 入口临时抬高 BitFont+0x1C 改行步进, 实证此处的
-     * t+0x1C 恒为 0 (不是行步进源, 真源在 DrawText 栈帧深处), 此路不通,
-     * 相关代码已删。行高以 GetDim 实测为准 (3 行 51px=17px/行, 图标 16px
-     * 装得下, 矢量墨水约 18px 仅 1px 可忽略)。 */
     r = g_OrigDrawText(t, NULL, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
     if (menuTake) g_MenuDepth--;
     if (brief)
@@ -429,7 +777,6 @@ int __fastcall VecDrawTextEntry(void* t, void* e,
         g_DTDepth--;
         if (g_DTDepth == 0)
         {
-            g_DTBrief = 0;
             g_DTBody = 0;
         }
     }
@@ -945,8 +1292,6 @@ static int VecMeasure(void* t, wchar_t wch, int* ph)
  * 与颜色无关 (灰度), 按 (wch, InternalData, adv) 命中。 */
 
 #define VC_MASK 511
-#define VC_MAXW 32
-#define VC_MAXH 32
 /* VecRender 失败哨兵: 不能用负 x 判失败 (离屏字 x+step 本就为负)。 */
 #define VC_FAIL (-1000000)
 
@@ -961,6 +1306,7 @@ typedef struct {
     int fullW;        /* 墨水右缘 (off+inkW): 数字按实际宽度回笔用 */
     int gdiW;         /* GDI 自然步进 (ABC 全宽, 含边距): 字间距用它才有缝 */
     int off, inkW;    /* 墨水在格内的摆位与宽度: 填充只包墨水用 */
+    int nat;         /* 摆位模式 (同 adv 下两种摆法不能共用缓存) */
     unsigned char cov[VC_MAXW * VC_MAXH];
 } VCEnt;
 
@@ -1018,56 +1364,6 @@ static void VecRefCalibrate(int px)
     CopyFace(g_RefFace, g_VTFace);
 }
 
-/* 几何补丁: 简报布局行步进跟 19 高字格。
- * 0x478D78 add ebp,0x10 / 0x478D94 sub eax,0x10: 原版 16,
- * 与 19 高 fnt 的 DrawText 换行 (BitFont+0x1C=19) 对齐, 防布局/绘制漂移。 */
-
-#define ADDR_BRIEF_STEP1   0x00478D78u
-#define ADDR_BRIEF_STEP2   0x00478D94u
-
-static int PatchImm8(unsigned at, unsigned char op0, unsigned char op1,
-                     int val, const char* tag)
-{
-    unsigned char* p = (unsigned char*)at;
-    DWORD old;
-    char b1[16], buf[128];
-    unsigned q;
-    if (val < 8 || val > 40) return 0;
-    if (p[0] != op0 || p[1] != op1)
-    {
-        q = 0;
-        q = AppendCStr(buf, q, "vstep: ", sizeof(buf));
-        q = AppendCStr(buf, q, tag, sizeof(buf));
-        q = AppendCStr(buf, q, " bytes mismatch, skip", sizeof(buf));
-        LogLine(buf);
-        return 0;
-    }
-    if (p[2] == (unsigned char)val) return 1;   /* 已是目标值 */
-    if (!VirtualProtect(p, 4, PAGE_EXECUTE_READWRITE, &old)) return 0;
-    p[2] = (unsigned char)val;
-    VirtualProtect(p, 4, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), p, 4);
-    q = 0;
-    q = AppendCStr(buf, q, "vstep: ", sizeof(buf));
-    q = AppendCStr(buf, q, tag, sizeof(buf));
-    q = AppendCStr(buf, q, "=", sizeof(buf));
-    UtoA((unsigned)val, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    LogLine(buf);
-    return 1;
-}
-
-static void VecBriefSteps(int lines)
-{
-    static int done = 0;
-    if (done) return;
-    done = 1;
-    /* 注意: 这里跟的是格高 Lines (布局行距), 不是 GDI 墨水字号。
-     * 原版二进制是 16 (配 16 高点阵); 改版 19 高 fnt 漏改了这两处,
-     * 按当前字体格高补上。BitFont+0x1C 换行=19 与 vrows 实测一致。 */
-    PatchImm8(ADDR_BRIEF_STEP1, 0x83, 0xC5, lines, "brief1");
-    PatchImm8(ADDR_BRIEF_STEP2, 0x83, 0xE8, lines, "brief2");
-}
-
 /* ---------------- 原版墨水盒 ----------------
  * 已删除 (改版 game.fnt 的墨水盒本身就是错位的, 照抄等于抄错)。
  * 原版哲学: 每个字在格内垂直居中, 与字体具体多高无关。
@@ -1113,7 +1409,7 @@ static int VecPxCalibrate(void* t)
         g_PxPxSrc = g_VT.FontPx;
         g_FontOrigH = origH;
         CopyFace(g_PxFace, g_VTFace);
-        VecBriefSteps(origH);
+        g_BriefOrigH = origH;
         return px;
     }
     origH = *(int*)((char*)idata + 0x0C);   /* Lines: 原字形数据行数 */
@@ -1148,7 +1444,7 @@ static int VecPxCalibrate(void* t)
     g_PxPxSrc = 0;
     g_FontOrigH = origH;
     CopyFace(g_PxFace, g_VTFace);
-    VecBriefSteps(origH);
+    g_BriefOrigH = origH;
     return px;
 }
 
@@ -1174,7 +1470,7 @@ static VCEnt* VecGlyph(void* t, wchar_t wch, int adv, int h, int px)
     if (!t || !IsPlausiblePtr(t)) { g_VecWhy = 10; return NULL; }
     if (px < 8 || px > 40) { g_VecWhy = 11; return NULL; }
     if (e->used && e->wch == wch && e->idata == idata && e->px == px &&
-        e->adv == adv && e->h == h)
+        e->adv == adv && e->h == h && e->nat == g_VecNat)
         return e;
     /* 未命中: GDI 单字光栅 (带边距), 掃出真实墨水盒再摆进格子 */
     if (!GdiEnsure(px, g_VT.Bold, 2, g_VTFace)) { g_VecWhy = 12; return NULL; }
@@ -1216,7 +1512,12 @@ static VCEnt* VecGlyph(void* t, wchar_t wch, int adv, int h, int px)
         if (GetCharABCWidthsW(g_G->dc, wch, wch, &abc))
         {
             gdiW = abc.abcA + abc.abcB + abc.abcC;
-            if (inkW > 0 && inkW * 3 <= adv * 2)
+            /* 自然模式: 一律摆在字体自己的左边距上。旧的 2/3 阈值靠 inkW
+             * 猜宽窄再决定"居中还是左对齐", 同一行里会忽左忽中 (用户报
+             * "务和目之间间距不正常"就是这类对齐错位)。 */
+            if (g_VecNat)
+                off = abc.abcA;
+            else if (inkW > 0 && inkW * 3 <= adv * 2)
             {
                 off = abc.abcA + (adv - gdiW) / 2;
                 if (off < 0) off = 0;
@@ -1224,6 +1525,7 @@ static VCEnt* VecGlyph(void* t, wchar_t wch, int adv, int h, int px)
             }
         }
     }
+    if (off < 0) off = 0;
     if (off + inkW > VC_MAXW) { g_VecWhy = 16; return NULL; }  /* 巨墨水走原版 */
     for (y = 0; y < outH; y++)
     {
@@ -1235,6 +1537,7 @@ static VCEnt* VecGlyph(void* t, wchar_t wch, int adv, int h, int px)
             dst[off + dx] = row[(L + dx) * 4 + 2];
     }
     e->used = 1; e->wch = wch; e->idata = idata; e->px = px; e->adv = adv; e->h = h;
+    e->nat = g_VecNat;
     e->outh = outH;
     e->fullW = off + inkW;
     e->gdiW = gdiW;
@@ -1389,7 +1692,12 @@ static MVEnt* VecMenuGlyph(void* t, wchar_t wch, int adv, int h, int px)
         if (GetCharABCWidthsW(g_G->dc, wch, wch, &abc))
         {
             gdiW = abc.abcA + abc.abcB + abc.abcC;
-            if (inkW > 0 && inkW * 3 <= adv * 2)
+            /* 自然模式: 一律摆在字体自己的左边距上。旧的 2/3 阈值靠 inkW
+             * 猜宽窄再决定"居中还是左对齐", 同一行里会忽左忽中 (用户报
+             * "务和目之间间距不正常"就是这类对齐错位)。 */
+            if (g_VecNat)
+                off = abc.abcA;
+            else if (inkW > 0 && inkW * 3 <= adv * 2)
             {
                 off = abc.abcA + (adv - gdiW) / 2;
                 if (off < 0) off = 0;
@@ -1494,19 +1802,6 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
     int eff, adv, h = 0, r, px, yOff;
     (void)edxUnused;
     if (!g_OrigBlit) return 0;   /* 不该发生, 守一下不断原版链 */
-    if (g_DTBrief && t && IsPlausiblePtr(t))
-    {
-        /* 简报裁剪底边跟盒子走: DrawText 的 H 参数改了, 但真正切行的是
-         * Lock 进 BitFont+0x30 的裁剪 (面板子面 745 底)。盒子加高后
-         * (底 783) 必须把裁剪底同步放开, 行才画得出来。
-         * 安全阀: 只放底边, 最多 +64; pitch < 1024 说明不是整屏面,
-         * 不碰 (防小面越界)。 */
-        int* LTRB = (int*)((char*)t + 0x30);
-        int pitchW = *(int*)((char*)t + 0x10);
-        if (g_VT.BriefClip && pitchW >= 1024 && LTRB[3] < 783 &&
-            LTRB[3] >= 700)
-            LTRB[3] = 783;
-    }
     /* TAB 走原版特殊公式, 缺字/度量失败也走原版 (保留 0x5555 兜底行为) */
     if (!t || !IsPlausiblePtr(t) || wc == 9)
         return g_OrigBlit(t, NULL, wch, x, y, color);
@@ -1531,6 +1826,17 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
     adv = VecMeasure(t, wc, &h);
     if (adv < 0)
         return g_OrigBlit(t, NULL, wch, x, y, color);
+    /* 简报正文自绘 (BriefOwn=1): 面到这里已经绑好了 (引擎 0x4348F0 装的),
+     * 借它的面把整块画掉, 并抑制这一次 DrawText 余下的逐字绘制。笔位照
+     * 原样还给引擎 (x+adv), 引擎版式照跑, 只是不再落墨。 */
+    if (g_DTBody && g_BriefState != 2)
+    {
+        if (g_BriefState == 1) return x + adv;
+        g_BriefState = 1;
+        if (VecBriefBody(t, g_BriefStr, g_BriefX, g_BriefY, g_BriefW) == 0)
+            return x + adv;
+        g_BriefState = 2;   /* 不可用: 这一字照原版画, 后面也不抑制 */
+    }
     int tx = x;
     int inTip = (g_LastTipX >= 0 && g_TipTot > 0 &&
                  tx >= g_LastTipX - g_TipTot - 16 &&
@@ -1874,8 +2180,12 @@ void VecText_EnsureInit(void)
     g_VT.MenuTake = GetPrivateProfileIntA(VT_SECTION, "MenuTake", 1, g_IniPath);
     g_VT.DigitTrack = GetPrivateProfileIntA(VT_SECTION, "DigitTrack", 0, g_IniPath);
     g_VT.TipBox = GetPrivateProfileIntA(VT_SECTION, "TipBox", 1, g_IniPath);
-    g_VT.BriefBox = GetPrivateProfileIntA(VT_SECTION, "BriefBox", 1, g_IniPath);
-    g_VT.BriefClip = GetPrivateProfileIntA(VT_SECTION, "BriefClip", 1, g_IniPath);
+    g_VT.BriefLine = GetPrivateProfileIntA(VT_SECTION, "BriefLine", 130, g_IniPath);
+    g_VT.BriefOwn = GetPrivateProfileIntA(VT_SECTION, "BriefOwn", 1, g_IniPath);
+    g_VT.BriefTrack = GetPrivateProfileIntA(VT_SECTION, "BriefTrack", 2, g_IniPath);
+    g_VT.BriefMark = GetPrivateProfileIntA(VT_SECTION, "BriefMark", 1, g_IniPath);
+    g_VT.BriefWidth = GetPrivateProfileIntA(VT_SECTION, "BriefWidth", 620, g_IniPath);
+    g_VT.BriefAdv = GetPrivateProfileIntA(VT_SECTION, "BriefAdv", 1, g_IniPath);
     g_VT.VShift = GetPrivateProfileIntA(VT_SECTION, "VShift", 0, g_IniPath);
     g_VT.LogDetail = GetPrivateProfileIntA(VT_SECTION, "LogDetail", 0, g_IniPath);
     g_VT.Render = GetPrivateProfileIntA(VT_SECTION, "Render", 0, g_IniPath);
@@ -1891,8 +2201,15 @@ void VecText_EnsureInit(void)
     if (g_VT.DigitTrack < -8) g_VT.DigitTrack = -8;
     if (g_VT.DigitTrack > 8) g_VT.DigitTrack = 8;
     g_VT.TipBox = g_VT.TipBox ? 1 : 0;
-    g_VT.BriefBox = g_VT.BriefBox ? 1 : 0;
-    g_VT.BriefClip = g_VT.BriefClip ? 1 : 0;
+    g_VT.BriefOwn = g_VT.BriefOwn ? 1 : 0;
+    if (g_VT.BriefTrack < 0) g_VT.BriefTrack = 0;
+    if (g_VT.BriefTrack > 12) g_VT.BriefTrack = 12;
+    g_VT.BriefMark = g_VT.BriefMark ? 1 : 0;
+    if (g_VT.BriefWidth < 0) g_VT.BriefWidth = 0;
+    if (g_VT.BriefWidth > 4000) g_VT.BriefWidth = 4000;
+    g_VT.BriefAdv = g_VT.BriefAdv ? 1 : 0;
+    if (g_VT.BriefLine < 0) g_VT.BriefLine = 0;
+    if (g_VT.BriefLine > 300) g_VT.BriefLine = 300;
     if (g_VT.VShift < -8) g_VT.VShift = -8;
     if (g_VT.VShift > 8) g_VT.VShift = 8;
     g_VT.LogDetail = g_VT.LogDetail ? 1 : 0;

@@ -853,6 +853,18 @@ int GdiEnsure(int fontPx, int bold, int slot, const wchar_t* face)
 }
 
 /* 量一段文本在 maxW 内能放几个字符 */
+/* 单字前进宽 (字体自己的度量, ABC 全宽 = A+B+C)。
+ * 这才是一切正常排版的基准: 汉字满格 1em、拉丁按字形比例、空格窄、
+ * 标点按字体给的自然位置。用 tmHeight 之类垂直度量当水平格宽是错的
+ * (msyh 18px 的 tmHeight≈24, 横向会散)。需先 GdiEnsure。 */
+int GtCharAdv(wchar_t ch)
+{
+    ABC abc;
+    if (!g_G || !g_G->dc) return 0;
+    if (!GetCharABCWidthsW(g_G->dc, ch, ch, &abc)) return 0;
+    return abc.abcA + abc.abcB + abc.abcC;
+}
+
 int CharsFit(const wchar_t* text, int len, int maxW)
 {
     int fit = 0;
