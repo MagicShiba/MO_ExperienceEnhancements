@@ -22,10 +22,13 @@ extern void* g_BlitSbTramp;
 void MOExperience_UpdateEntry(void);
 extern void* g_UpdateTramp;
 
-/* 消息框 Draw 内部钩 (0x5D4A94, 7B): 每帧消息渲染的唯一出口。
+/* 消息框 Draw 内部钩 (0x5D4A94, 7B): 各模块 *_Draw 的唯一出口 (链表非空时才跑)。
  * 依次调 MsgText / SWPanel / 超武侧栏 / 智能中键橡皮线 / 底部电量 /
  * 聊天输入框, 画完返回 0x5D4A9B (跳过原版绘制)。 */
 extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void* regs);
+/* 消息框 Draw 入口钩 (0x5D49A0, 6B): 每帧必跑; 引擎消息链表为空时
+ * (0x5D4A92 的 je 会跳过 0x5D4A94) 代跑整条链路。 */
+extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MsgListEntry(void* regs);
 /* 滚轮钩 (0x777998, 6B): 超武侧栏优先, 否则战役框历史。 */
 extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_WheelHook(void* regs);
 /* 侧栏滚动钩 (0x533F50, 5B): 悬停超武侧栏/战役框时跳过侧栏滚动。 */

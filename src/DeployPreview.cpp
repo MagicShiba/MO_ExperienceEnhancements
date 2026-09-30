@@ -3,7 +3,7 @@
  *
  * 预览: 物理中键按住时, 以光标格画展开后地基黄框 (引擎 CoordsToClient
  * 投影, 每角取其框内格高, 平地高地同式), 细框套目标格, 方便对墙对齐。
- * 落点 = 光标格 + (大地基 -1,-1) + ShiftX/ShiftY 微调, 预览=移动目标=
+ * 落点 = 光标格 + (大地基 -1,-1), 预览=移动目标=
  * 实际落点同一套数学 (TryToDeploy 0x7393C0 反汇编+运行时双确认)。
  *
  * 自动展开 ([DeployPreview] AutoDeploy=1): 选中含可展开单位 (UnitType+
@@ -61,8 +61,6 @@ typedef int (__fastcall *DP_UnlockFn)(void*, void*);
 
 static int g_DpInit = 0;
 static int g_DpEnable = 1;
-static int g_DpShiftX = 0;   /* 黄框整体按格平移 (实测校准用, -8~8) */
-static int g_DpShiftY = 0;
 static int g_DpAuto = 1;     /* 1=单基地车裸中键点按自动开过去+到位展开 */
 static int g_DpTimeoutMs = 45000;
 
@@ -74,12 +72,6 @@ static void DP_EnsureInit(void)
     BuildPaths();
     GtEnsureLog();
     g_DpEnable = GetPrivateProfileIntA(DP_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    g_DpShiftX = GetPrivateProfileIntA(DP_SECTION, "ShiftX", 0, g_IniPath);
-    g_DpShiftY = GetPrivateProfileIntA(DP_SECTION, "ShiftY", 0, g_IniPath);
-    if (g_DpShiftX < -8) g_DpShiftX = -8;
-    if (g_DpShiftX > 8) g_DpShiftX = 8;
-    if (g_DpShiftY < -8) g_DpShiftY = -8;
-    if (g_DpShiftY > 8) g_DpShiftY = 8;
     g_DpAuto = GetPrivateProfileIntA(DP_SECTION, "AutoDeploy", 1, g_IniPath) ? 1 : 0;
     to = GetPrivateProfileIntA(DP_SECTION, "DeployTimeout", 45, g_IniPath);
     if (to < 5) to = 5;
@@ -568,7 +560,6 @@ static int DP_MaxStep(int depN, const int depFw[], const int depFh[])
  * depN 输入车数, 返回铺好块数 (车按序认领前 nPlot 块)。 */
 static int DP_AssignPoint(int cx, int cy,
                           int depN, const int depFw[], const int depFh[],
-                          int shX, int shY,
                            int bases[][2], int dests[][2])
 {
     int step, n = 0;
@@ -578,10 +569,10 @@ static int DP_AssignPoint(int cx, int cy,
     if (!depFw || !depFh) return 0;
     step = DP_MaxStep(depN, depFw, depFh);
     g0 = (depFw[0] > 2 || depFh[0] > 2) ? 1 : 0;
-    bases[0][0] = cx - g0 + shX;
-    bases[0][1] = cy - g0 + shY;
-    dests[0][0] = cx + shX;
-    dests[0][1] = cy + shY;
+    bases[0][0] = cx - g0;
+    bases[0][1] = cy - g0;
+    dests[0][0] = cx;
+    dests[0][1] = cy;
     if (!DP_RectValid(bases[0][0], bases[0][1], depFw[0], depFh[0])) return 0;
     n = 1;
     for (r = 1; r <= 6 && n < depN; r++)
@@ -595,7 +586,7 @@ static int DP_AssignPoint(int cx, int cy,
                 if (++tries > 200) return n;
                 ax = cx + ox * step; ay = cy + oy * step;
                 gi = (depFw[n] > 2 || depFh[n] > 2) ? 1 : 0;
-                bx = ax - gi + shX; by = ay - gi + shY;
+                bx = ax - gi; by = ay - gi;
                 if (!DP_RectValid(bx, by, depFw[n], depFh[n])) continue;
                 hit = 0;
                 for (k = 0; k < n; k++)
@@ -607,7 +598,7 @@ static int DP_AssignPoint(int cx, int cy,
                 }
                 if (hit) continue;
                 bases[n][0] = bx; bases[n][1] = by;
-                dests[n][0] = ax + shX; dests[n][1] = ay + shY;
+                dests[n][0] = ax; dests[n][1] = ay;
                 n++;
             }
         }
@@ -620,7 +611,6 @@ static int DP_AssignPoint(int cx, int cy,
  * 每车按实际尺寸判交, 整块有效, 否则丢弃该车。 */
 static int DP_AssignStraight(int px, int py, int cx, int cy,
                              int depN, const int depFw[], const int depFh[],
-                             int shX, int shY,
                               int bases[][2], int dests[][2])
 {
     int step, n = 0, i;
@@ -646,7 +636,7 @@ static int DP_AssignStraight(int px, int py, int cx, int cy,
             double t = i * span + k;
             int tx = px + DP_Rnd(ux * t), ty = py + DP_Rnd(uy * t);
             int gi = (depFw[i] > 2 || depFh[i] > 2) ? 1 : 0;
-            int tbx = tx - gi + shX, tby = ty - gi + shY;
+            int tbx = tx - gi, tby = ty - gi;
             int q;
             if (!DP_RectValid(tbx, tby, depFw[i], depFh[i])) continue;
             for (q = 0; q < n; q++)
@@ -662,8 +652,8 @@ static int DP_AssignStraight(int px, int py, int cx, int cy,
         if (!ok) break;   /* 排不下: 后面的车顺延放弃 (调用方转散开) */
         {
             int gi = (depFw[i] > 2 || depFh[i] > 2) ? 1 : 0;
-            bases[n][0] = ax - gi + shX; bases[n][1] = ay - gi + shY;
-            dests[n][0] = ax + shX; dests[n][1] = ay + shY;
+            bases[n][0] = ax - gi; bases[n][1] = ay - gi;
+            dests[n][0] = ax; dests[n][1] = ay;
             n++;
         }
     }
@@ -676,7 +666,6 @@ static int DP_AssignStraight(int px, int py, int cx, int cy,
  * 每车按实际尺寸判交, 整块有效, 否则丢弃该车。 */
 static int DP_AssignLine(const int* nx, const int* ny, int nn, int ex, int ey,
                          int depN, const int depFw[], const int depFh[],
-                         int shX, int shY,
                               int bases[][2], int dests[][2])
 {
     int step, n = 0, i;
@@ -699,7 +688,7 @@ static int DP_AssignLine(const int* nx, const int* ny, int nn, int ex, int ey,
             int gi, tbx, tby, q;
             DP_ArcPos(nx, ny, nn, ex, ey, s, &tx, &ty);
             gi = (depFw[i] > 2 || depFh[i] > 2) ? 1 : 0;
-            tbx = tx - gi + shX; tby = ty - gi + shY;
+            tbx = tx - gi; tby = ty - gi;
             if (!DP_RectValid(tbx, tby, depFw[i], depFh[i])) continue;
             for (q = 0; q < n; q++)
             {
@@ -714,8 +703,8 @@ static int DP_AssignLine(const int* nx, const int* ny, int nn, int ex, int ey,
         if (!ok) break;   /* 排不下: 后面的车顺延放弃 (调用方转散开) */
         {
             int gi = (depFw[i] > 2 || depFh[i] > 2) ? 1 : 0;
-            bases[n][0] = ax - gi + shX; bases[n][1] = ay - gi + shY;
-            dests[n][0] = ax + shX; dests[n][1] = ay + shY;
+            bases[n][0] = ax - gi; bases[n][1] = ay - gi;
+            dests[n][0] = ax; dests[n][1] = ay;
             n++;
         }
     }
@@ -1025,25 +1014,25 @@ void DeployPreview_Poll(void)
         {
             nPlot = DP_AssignPoint(ccx, ccy, s_DpDepN0,
                                    s_DpDepFw, s_DpDepFh,
-                                   g_DpShiftX, g_DpShiftY, bases, dests);
+                                   bases, dests);
         }
         else if (OU_KeyDown(VK_SHIFT))
         {
             nPlot = DP_AssignStraight(apx, apy, ccx, ccy,
                                       s_DpDepN0, s_DpDepFw, s_DpDepFh,
-                                      g_DpShiftX, g_DpShiftY, bases, dests);
+                                      bases, dests);
         }
         else if (DP_ArcLen(s_DpNx, s_DpNy, s_DpNodeN, ccx, ccy) >= DP_DRAG_MINLEN)
         {
             nPlot = DP_AssignLine(s_DpNx, s_DpNy, s_DpNodeN, ccx, ccy,
                                   s_DpDepN0, s_DpDepFw, s_DpDepFh,
-                                  g_DpShiftX, g_DpShiftY, bases, dests);
+                                  bases, dests);
         }
         else
         {
             nPlot = DP_AssignPoint(ccx, ccy, s_DpDepN0,
                                    s_DpDepFw, s_DpDepFh,
-                                   g_DpShiftX, g_DpShiftY, bases, dests);
+                                   bases, dests);
         }
         for (k = 0; k < nPlot; k++)
         {
@@ -1178,9 +1167,9 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
     if (w <= 0 || h <= 0 || pitch <= 0) return;
     if (!DP_MouseCellZ(&mcx, &mcy, &mlz)) return;   /* 逻辑格+光标地面高度 */
     if (!DP_FootprintCached(&fw, &fh)) return;
-    /* 基点 = 光标格 + 引擎偏移 (大地基 -1,-1; 小地基 0) + 微调 */
-    if (fw > 2 || fh > 2) { bx = mcx - 1 + g_DpShiftX; by = mcy - 1 + g_DpShiftY; }
-    else { bx = mcx + g_DpShiftX; by = mcy + g_DpShiftY; }
+    /* 基点 = 光标格 + 引擎偏移 (大地基 -1,-1; 小地基 0) */
+    if (fw > 2 || fh > 2) { bx = mcx - 1; by = mcy - 1; }
+    else { bx = mcx; by = mcy; }
     if (!g_DpLoggedOnce)
     {
         char sb[160], t1[16], t2[16], t5[16], t6[16], t7[16], t8[16];
@@ -1227,25 +1216,25 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
             {
                 nPlot = DP_AssignPoint(ccx, ccy, s_DpDepN0,
                                        s_DpDepFw, s_DpDepFh,
-                                       g_DpShiftX, g_DpShiftY, bases, dests);
+                                       bases, dests);
             }
             else if (OU_KeyDown(VK_SHIFT))
             {
                 nPlot = DP_AssignStraight(apx, apy, ccx, ccy,
                                           s_DpDepN0, s_DpDepFw, s_DpDepFh,
-                                          g_DpShiftX, g_DpShiftY, bases, dests);
+                                          bases, dests);
             }
             else if (DP_ArcLen(s_DpNx, s_DpNy, s_DpNodeN, ccx, ccy) >= DP_DRAG_MINLEN)
             {
                 nPlot = DP_AssignLine(s_DpNx, s_DpNy, s_DpNodeN, ccx, ccy,
                                       s_DpDepN0, s_DpDepFw, s_DpDepFh,
-                                      g_DpShiftX, g_DpShiftY, bases, dests);
+                                      bases, dests);
             }
             else
             {
                 nPlot = DP_AssignPoint(ccx, ccy, s_DpDepN0,
                                        s_DpDepFw, s_DpDepFh,
-                                       g_DpShiftX, g_DpShiftY, bases, dests);
+                                       bases, dests);
             }
             /* 轨迹白线 (认领后 SmartOrder 熄火, 这里补上; 与裸中键同观感):
              * 节点格心连线 + 当前格心橡皮尾巴, 引擎投影吸格。 */

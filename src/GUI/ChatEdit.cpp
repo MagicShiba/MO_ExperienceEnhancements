@@ -1,7 +1,9 @@
-/* ChatEdit.cpp - 自定义聊天输入框 (原生 MessageListClass::Input 显示差、
- * 无光标移动/选中/粘贴)。
+/* ChatEdit.cpp - 聊天 (见 ChatEdit.h)。原生 MessageListClass::Input 显示差、
+ * 无光标移动/选中/粘贴, 且单机根本不建框。
  *
  * 做法 (战役框同管线: 自绘 + GDI, 只读查询 + 渲染面绘制, 联机安全):
+ *   聊天框: 对话框四处 session 检查各一钩, 跳过单人判定 (Phobos
+ *     AllowChatBoxInSinglePlayer 同原理, 见 notes/ChatBox参考.md)。
  *   输入: 运行时补丁 MessageListClass::Input (0x5D4510, 5B 无 rel,
  *     跳回 0x5D4515), 同签名 __fastcall 替换。字符/退格/回车/Esc/Ctrl 组合
  *     自己处理后消费 (*keySlot=0, return 0), 其余走跳板跑原生。
@@ -22,13 +24,12 @@
  *     里); 顶部模式留在原生行原位, 不挪 (原生行本来就在 (3,0) 的左上角)。
  *     底板只按画出的内容宽, 不按原生输入域宽铺满 (原生 EditPos 在 (3,0)
  *     而 fieldW=整屏宽, 铺满就是顶上留一条黑杠)。
- *     GDI 槽 4 (字体与战役框同源: [MsgText] FontFace/Bold 同解析)。
+ *     字体/字号/粗体取战役框 (MsgText_CampStyle), 输入框与消息同一套字。
  *   粘贴: CF_UNICODETEXT; 复制/剪切写剪贴板 (全本地 Win32)。
  *   组字: 每帧 Imm 轮询组字串画出来+下划线 (全屏下系统组字窗不可见),
  *     组字中暂停导航/编辑轮询, 回车等转原生。
  *   代价: 方向键不再被吞, 打字时镜头可能跟着动一下。拿可见小瑕疵换掉
  *     "抢全系统键盘", 要彻底消掉得再钩游戏自己的方向键处理。
- * 开关 [ChatEdit] Enable=1 (0=全走原生, 原生行照常显示)。
  *
  * 构建见 构建.bat (32 位 mingw, 无 CRT, -limm32)。
  */
@@ -79,20 +80,22 @@
 #define CE_VT_UNLOCK    0x60u
 #define CE_VT_FILLRECT  0x1Cu
 
-#define CE_SECTION      "ChatEdit"
-
 /* Syringe 传进来的寄存器块 (同 MsgText.cpp 的用法) */
 #define CE_OFF_REG_ECX  0x20u
 
-/* 字体跟战役框 (同 [MsgText] FontFace/Bold, 经 ResolveFontFace 解析;
- * 直接把 "msyh.ttc" 当字体名传 GDI 会回退到无 CJK 字形, 中文空白) */
-static wchar_t ce_Face[FONT_FACE_MAX];
+/* 文字样式跟战役框 (同 [MsgText] FontFace/FontHeight/Bold, 经 MsgText_CampStyle
+ * 取已解析结果; 直接把 "msyh.ttc" 当字体名传 GDI 会回退到无 CJK 字形, 中文空白)。
+ * ce_Px=0 表示跟游戏点阵字高。配置只读一次, 存一份给按键级度量用。 */
+static const wchar_t* ce_Face = L"Microsoft YaHei";
+static int ce_Px = 0;
 static int ce_Bold = 0;
 
 /* ---------------- 状态 ---------------- */
 
 static int ce_Init = 0;
 static int ce_Enable = 1;
+static int ce_ChatBoxSP = 1;   /* 单人也建原生聊天框 */
+static int ce_ChatNameSP = 0;  /* 单人消息也显示 "名字: " */
 static int ce_Active = 0;
 /* 落位只记一次 (排查用: 见 CE_LogWhere) */
 static int ce_AnchorLogged = 0;
@@ -153,19 +156,27 @@ static int CE_SafeRange(const void* p, unsigned n)
 
 static void CE_EnsureInit(void)
 {
-    char faceCfg[64];
     if (ce_Init) return;
     ce_Init = 1;
     BuildPaths();
     GtEnsureLog();
-    ce_Enable = GetPrivateProfileIntA(CE_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    /* 字体与战役框同源 (同键同解析, 显示天然一致) */
-    GetPrivateProfileStringA(CE_SECTION, "FontFace", "msyh.ttc",
-                             faceCfg, sizeof(faceCfg), g_IniPath);
-    faceCfg[sizeof(faceCfg) - 1] = 0;
-    ResolveFontFace(faceCfg, "chatedit", ce_Face, L"Microsoft YaHei");
-    ce_Bold = GetPrivateProfileIntA(CE_SECTION, "Bold", 0, g_IniPath) ? 1 : 0;
-    LogLine(ce_Enable ? "chatedit: custom input ON" : "chatedit: custom input OFF");
+    ce_Enable = GetPrivateProfileIntA(MSG_SECTION, "ChatEdit", 1, g_IniPath) ? 1 : 0;
+    ce_ChatBoxSP = GetPrivateProfileIntA(MSG_SECTION, "ChatBoxSP", 1, g_IniPath) ? 1 : 0;
+    ce_ChatNameSP = GetPrivateProfileIntA(MSG_SECTION, "ChatNameSP", 0, g_IniPath) ? 1 : 0;
+    MsgText_CampStyle(&ce_Face, &ce_Px, &ce_Bold);
+    {
+        char sb[128], t1[16];
+        unsigned q = 0;
+        q = AppendCStr(sb, q, "chatedit: ", sizeof(sb));
+        q = AppendCStr(sb, q, ce_Enable ? "box ON" : "box OFF", sizeof(sb));
+        q = AppendCStr(sb, q, " ChatBoxSP=", sizeof(sb));
+        q += UtoA((unsigned)ce_ChatBoxSP, t1);
+        q = AppendCStr(sb, q, t1, sizeof(sb));
+        q = AppendCStr(sb, q, " ChatNameSP=", sizeof(sb));
+        UtoA((unsigned)ce_ChatNameSP, t1);
+        AppendCStr(sb, q, t1, sizeof(sb));
+        LogLine(sb);
+    }
 }
 
 static int CE_NativeIsEdit(void)
@@ -250,11 +261,17 @@ static int CE_LivePx(void)
     return px;
 }
 
+/* 有效字高: 战役框 FontHeight>0 用它, 否则跟游戏点阵字高 (与战役框同口径)。 */
+static int CE_FontPx(void)
+{
+    return ce_Px ? ce_Px : CE_LivePx();
+}
+
 /* 度量前固定切到输入槽 (Input 上下文里 g_G 可能指向战役/提示槽,
  * 用错槽预算就按错字体算; GdiEnsure 命中缓存时只是几次比较, 按键级无压力) */
 static int CE_EnsureFont(void)
 {
-    return GdiEnsure(CE_LivePx(), ce_Bold, CE_GDI_SLOT, ce_Face);
+    return GdiEnsure(CE_FontPx(), ce_Bold, CE_GDI_SLOT, ce_Face);
 }
 
 static int CE_BudgetOk(int newLen, int fieldW)
@@ -717,7 +734,8 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     int compX, compWsum, compFit, th, boxY;
     void* label;
     if (!surf || !IsPlausiblePtr(surf)) return 0;
-    lineH = bitLineH;
+    (void)bitLineH;
+    lineH = CE_FontPx();
     if (lineH < 8 || lineH > 64) lineH = 16;
     fieldW = CE_NativeFieldW();
     if (fieldW < 80 || fieldW > surfW) fieldW = (surfW - 16 > 80) ? surfW - 16 : 640;
@@ -1222,7 +1240,7 @@ void ChatEdit_Install(void)
     int rel, i;
     DWORD old;
     CE_EnsureInit();
-    /* ChatEdit=0 = 全走原生: 一个字节都不改。这里必须提前返回——Input 的
+    /* [MsgText] ChatEdit=0 = 全走原生: 一个字节都不改。这里必须提前返回——Input 的
      * 运行时补丁是**永久**的 (E9 直写 0x5D4510, 没有任何还原路径), 装了
      * 就等于接管了这个函数, "0=全走原生" 就不成立了。 */
     if (!ce_Enable)
@@ -1263,10 +1281,10 @@ void ChatEdit_Install(void)
  * **这个钩永远不返回 0** —— 这一点是全部要害。3 字节装不下 Syringe 的 5 字节
  * 跳转, return 0 走的是"回放被覆盖的字节", 而落回 0x5D49B7 时那里已经是跳转
  * 指令的位移字节: test/je 吃到垃圾 → 歪跳 0x5D4A8D → 原生行整段不画
- * (症状: ChatEdit=0 永远看不到原生框, 2026-09-29 查了九版都是这个)。
+ * (症状: [MsgText] ChatEdit=0 永远看不到原生框, 2026-09-29 查了九版都是这个)。
  * 自己读 [this+0x19] 判 IsEdit, 两个方向都给显式落点, 就完全不用回放了。
  *
- * 判决性实测 (0.2.152j, 摘掉本钩): ChatEdit=0 原生框**正常显示**。
+ * 判决性实测 (0.2.152j, 摘掉本钩): [MsgText] ChatEdit=0 原生框**正常显示**。
  * 证明 (1) 是本钩拦的, 不是引擎单机不画; (2) 0x5D49BF..0x5D4A8C 这段在单机
  * 下跑得好好的。所以本钩只要把"进入"落点给对, 0 就等于原生。
  *
@@ -1301,6 +1319,60 @@ extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_HideNative(void* regs)
         LogLine(sb);
     }
     return CE_NATIVE_SKIP;   /* 0x5D4A8D */
+}
+
+/* ---------------- 单人聊天框 + 名字前缀 ---------------- */
+
+/* 单人聊天框 (Phobos AllowChatBoxInSinglePlayer 同原理, 见 notes/ChatBox参考.md):
+ * 对话框函数按 [SessionClass 0xA8B238]==0/5 判定单人并跳过聊天框四处逻辑。
+ * 开启时跳过 session 检查 (保留其余旗标检查), 返回 0 走原版。
+ *   0x55E477 (5B, mov eax,[sess]) → 0x55E48D (绕过 je, 进 0xA8BC79 检查)
+ *   0x55E62F (6B, cmp [sess],ebx) → 0x55E637 (跳过 je, 进 push/call)
+ *   0x55E693 (6B, cmp [sess],ebx) → 0x55E69B (跳过 je, 进 cmp esi,0x1b)
+ *   0x55E746 (5B, mov eax,[sess]) → 0x55E77B (绕过 je, 进 CurrentPlayer 分支) */
+#define ADDR_CHATSP_1      0x0055E48Du
+#define ADDR_CHATSP_2      0x0055E637u
+#define ADDR_CHATSP_3      0x0055E69Bu
+#define ADDR_CHATSP_4      0x0055E77Bu
+
+extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_ChatSp1(void* regs)
+{
+    static int s_logged = 0;
+    (void)regs;
+    CE_EnsureInit();
+    if (!ce_ChatBoxSP) return 0;
+    if (!s_logged) { s_logged = 1; LogLine("chatsp: singleplayer chatbox on"); }
+    return ADDR_CHATSP_1;
+}
+
+extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_ChatSp2(void* regs)
+{
+    (void)regs;
+    CE_EnsureInit();
+    if (!ce_ChatBoxSP) return 0;
+    return ADDR_CHATSP_2;
+}
+
+extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_ChatSp3(void* regs)
+{
+    (void)regs;
+    CE_EnsureInit();
+    if (!ce_ChatBoxSP) return 0;
+    return ADDR_CHATSP_3;
+}
+
+extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_ChatSp4(void* regs)
+{
+    (void)regs;
+    CE_EnsureInit();
+    if (!ce_ChatBoxSP) return 0;
+    return ADDR_CHATSP_4;
+}
+/* 单人消息是否显示 "名字: " 前缀 (消息排版侧问, 见 MsgText.cpp) */
+int ChatEdit_ShowNameSP(void)
+{
+    CE_EnsureInit();
+    return ce_ChatNameSP;
 }
 
 /* ---------------- 帧入口 ---------------- */

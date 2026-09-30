@@ -1,6 +1,7 @@
 /build
 /dist/*
 !/dist/MOExperience.dll.inj
+!/dist/MOExperience.ini
 /test/*.exe
 /test/*.o
 *.zip

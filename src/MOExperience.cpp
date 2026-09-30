@@ -300,8 +300,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     }
 
     if (!drew) { StatTick(tick, 1); return 0; }
-    StatTick(tick, 0);
-    if (s_firstDraw)
+    StatTick(tick, 0);    if (s_firstDraw)
     {
         char b1[16], b2[16], b3[16], buf[256];
         unsigned p = 0;
@@ -324,6 +323,30 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
         LogLine(buf);
     }
     return ADDR_AFTER_MSGLIST_DRAW;
+}
+
+/* ---------------- 消息帧兜底入口 (0x5D49A0, 6B) ----------------
+ * 0x5D4A94 那道钩不是"每帧都跑", 引擎有条件跳过它 (反汇编):
+ *   0x5D49B9  je  0x5D4A8D      ; [this+0x19] IsEdit 为 0 → 跳过原生行段
+ *   0x5D4A8D  mov ecx,[esi]     ; 消息链表头
+ *   0x5D4A92  je  0x5D4A9B      ; ★ 链表为空 → 直接返回, 0x5D4A94 走不到
+ * 引擎 Manage 会摘掉过期项, 所以没有活消息时 MessageDrawHook 一次都不跑,
+ * 上面 6 个 *_Draw 全部落空 (症状: 超武侧栏/超武信息只在冒出战役框或提示框
+ * 的那几帧出现)。本钩挂在 Draw 入口, 每帧必跑, 链表空时代跑整条链路。
+ * 绿框触发条不再单独画: MsgText_DrawFrame 内已有一份, 原来两处重复。 */
+extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MsgListEntry(void* regs)
+{
+    void* self;
+    /* this 在 Draw 入口即 ECX (thiscall), 从 regs+OFF_REG_ECX 取;
+     * 取不到/不可信时按"非空"处理 (保守留给 0x5D4A94, 绝不崩)。 */
+    self = regs ? *(void**)((char*)regs + OFF_REG_ECX) : NULL;
+    if (self && IsPlausiblePtr(self) && *(void**)self) return 0;
+    {
+        static int s_logged = 0;
+        if (!s_logged) { s_logged = 1; LogLine("green: engine list empty, render from entry"); }
+    }
+    MOExperience_MessageDrawHook(regs);
+    return 0;
 }
 
 /* ---------------- 滚轮 (0x777998, 6B) ----------------

@@ -80,8 +80,6 @@ typedef struct {
     int HintMaxWidth;  /* 0 = 自动 */
     int HintOpacity;   /* 底板不透明度 0~100; 0=不画底板但文字阴影照画 */
     int HintTimeoutMul;/* 提示显示时长倍率 (1=原版速度) */
-    int ChatBoxSP;     /* 1=单人模式也建聊天框 (Phobos AllowChatBoxInSinglePlayer 同原理) */
-    int ChatNameSP;    /* 1=单机也显示 "名字: " 前缀 (默认0=单机只显示正文, 联机恒显示) */
 } MsgTextConfig;
 
 static MsgTextConfig g_Cfg;
@@ -336,8 +334,6 @@ static void MsgText_LoadConfig(void)
     g_Cfg.HintMaxWidth= GetPrivateProfileIntA(MSG_SECTION, "HintMaxWidth", 320, g_IniPath);
     g_Cfg.HintOpacity = GetPrivateProfileIntA(MSG_SECTION, "HintOpacity", 45, g_IniPath);
     g_Cfg.HintTimeoutMul = GetPrivateProfileIntA(MSG_SECTION, "HintTimeoutMul", 2, g_IniPath);
-    g_Cfg.ChatBoxSP = GetPrivateProfileIntA(MSG_SECTION, "ChatBoxSP", 1, g_IniPath);
-    g_Cfg.ChatNameSP = GetPrivateProfileIntA(MSG_SECTION, "ChatNameSP", 0, g_IniPath);
 
     g_Cfg.Enable = g_Cfg.Enable ? 1 : 0;
     g_Cfg.LogMessages = g_Cfg.LogMessages ? 1 : 0;
@@ -384,8 +380,6 @@ static void MsgText_LoadConfig(void)
     if (g_Cfg.HintOpacity > 100) g_Cfg.HintOpacity = 100;
     if (g_Cfg.HintTimeoutMul < 1) g_Cfg.HintTimeoutMul = 1;
     if (g_Cfg.HintTimeoutMul > 10) g_Cfg.HintTimeoutMul = 10;
-    g_Cfg.ChatBoxSP = g_Cfg.ChatBoxSP ? 1 : 0;
-    g_Cfg.ChatNameSP = g_Cfg.ChatNameSP ? 1 : 0;
 }
 
 static int g_InitDone = 0;
@@ -430,16 +424,19 @@ void MsgText_EnsureInit(void)
     p = AppendCStr(buf, p, " HovMinOp=", sizeof(buf));
     p += UtoA((unsigned)g_Cfg.HoverMinOpacity, buf + p);
     LogLine(buf);
-    p = 0;
-    p = AppendCStr(buf, p, "config: ChatBoxSP=", sizeof(buf));
-    p += UtoA((unsigned)g_Cfg.ChatBoxSP, buf + p);
-    p = AppendCStr(buf, p, " ChatNameSP=", sizeof(buf));
-    p += UtoA((unsigned)g_Cfg.ChatNameSP, buf + p);
-    p = AppendCStr(buf, p, " (0=单机不显示名字, 联机恒显示)", sizeof(buf));
-    LogLine(buf);
     /* 字体解析放日志打开之后, 解析结果才能记入日志 */
     ResolveFontFace(g_Cfg.FontFace, "camp", g_CampFace, L"Microsoft YaHei");
     ResolveFontFace(g_Cfg.HintFontFace, "hint", g_HintFace, L"Microsoft YaHei");
+}
+
+/* 战役框文字样式 (ChatEdit 的输入框同源, 不另设字体键)。
+ * *face=已解析的字体名, *px=字高 (<=0 表示跟游戏点阵), *bold=1/0。 */
+void MsgText_CampStyle(const wchar_t** face, int* px, int* bold)
+{
+    MsgText_EnsureInit();
+    if (face) *face = g_CampFace[0] ? g_CampFace : L"Microsoft YaHei";
+    if (px) *px = g_Cfg.FontHeight;
+    if (bold) *bold = g_Cfg.Bold;
 }
 
 /* ---------------- 排版与绘制 ---------------- */
@@ -651,7 +648,7 @@ static int PickLines(MsgRing* R, int wantSp, int ignoreTimeout, unsigned tmoMul,
 {
     int picked = 0, rows = 0, i, k, total = 0;
     /* 名字前缀: 联机恒显示 (要区分发言者), 单机默认不显示 (只有自己一个名字, 是噪音)。 */
-    int showName = GameIsMultiplayer() || g_Cfg.ChatNameSP;
+    int showName = GameIsMultiplayer() || ChatEdit_ShowNameSP();
     for (i = R->count - 1; i >= 0 && picked < MAX_PICKED && rows < rowBudget; i--)
     {
         ChatMsg* m = MsgAt(R, i);
@@ -940,70 +937,6 @@ static int MouseInTriggerRect(int mx, int my, int bitLineH, int screenW, int sur
     CampTriggerRect(bitLineH, screenW, surfH, &tr);
     return (mx >= tr.X - 4 && mx < tr.X + tr.Width + 6 &&
             my >= tr.Y - 4 && my < tr.Y + tr.Height + 4);
-}
-
-/* 引擎消息链表是否非空: 反汇编实证 (0x5D4A8D):
- *   mov ecx,[esi]; test ecx,ecx; je return —— this[0] 为空直接返回,
- *   全程跳过 0x5D4A94 老钩。引擎 Manage 会摘掉过期项, 链表空后老钩
- *   再也不触发, 悬停也就展不开历史 (必须等一条新消息)。
- * this 在 Draw 入口即 ECX (thiscall), 从 regs+OFF_REG_ECX 取。
- * 拿不到/不可信时按"非空"返回 (保守走老路, 绝不崩)。 */
-static int EngineListAlive(void* regs)
-{
-    void* self;
-    if (!regs) return 1;
-    self = *(void**)((char*)regs + OFF_REG_ECX);
-    if (!self || !IsPlausiblePtr(self)) return 1;
-    return (*(void**)self != NULL);
-}
-
-/* 绿框入口钩 (0x5D49A0, 6B): MessageListClass::Draw 入口, 每帧都跑。
- * 反汇编实证: 0x5D4A94 的老钩在链表为空时根本走不到——Draw 入口先测
- * 0x19(%esi) 为零则 je 到 0x5D4A8D, 再测 (%esi) 为空则 je 到返回,
- * 全程跳过 0x5D4A94。所以零消息时老钩不触发, 绿框必须先有一条消息。
- * 绿框只是触发区的可视化 (不带文本), 受 ShowHotZone 开关:
- * 1=画出, 0=隐藏但触发判定仍然有效。返回 0 跑原版。
- * 附加职责: 引擎链表为空 (this[0]==NULL) 时老钩走不到, 在此直接调
- * 老钩的完整渲染, 悬停随时能展历史, 不再依赖新消息到来。 */
-extern "C" __declspec(dllexport) DWORD __cdecl MsgText_GreenHook(void* regs)
-{
-    void* surf;
-    (void)regs;
-    MsgText_EnsureInit();
-    if (!g_Cfg.Enable) return 0;
-    surf = *(void**)ADDR_SURF_COMPOSITE;
-    if (!surf) return 0;
-    /* 绿框可视化受 ShowHotZone 开关 (0=隐藏, 但触发判定不受影响) */
-    if (g_Cfg.ShowHotZone)
-    {
-        int bitLineH, screenW, surfH;
-        RectangleStruct zr;
-        ColorStruct zc;
-        bitLineH = GtBitLineHeight();
-        screenW = GtScreenW();
-        surfH = GtSurfGet(surf, GtVT_GET_HEIGHT);
-        if (surfH <= 0) return 0;
-        /* 触发条: 与顶部文本左右对齐、1 行高 (几何见 CampTriggerRect), 不带文本 */
-        CampTriggerRect(bitLineH, screenW, surfH, &zr);
-        zc.R = 0; zc.G = 255; zc.B = 0;
-        GtFillRectTrans(surf, &zr, &zc, 30);
-        GtDrawOutline(surf, zr.X, zr.Y, zr.Width, zr.Height, 0, 255, 0, 90);
-    }
-    /* 引擎链表为空时老钩 (0x5D4A94) 走不到, 历史只能在这里画:
-     * 直接调老钩的完整渲染 (悬停/活消息/提示都在里面), 返回值丢弃,
-     * 本钩固定返回 0 跑原版, 原版随后无害地提前返回。 */
-    if (!EngineListAlive(regs))
-    {
-        static int s_logged = 0;
-        int surfH;
-        if (!s_logged) { s_logged = 1; LogLine("green: engine list empty, render from entry"); }
-        surfH = GtSurfGet(surf, GtVT_GET_HEIGHT);
-        if (surfH > 0)
-            MsgText_DrawFrame(surf, GtBitLineHeight(), GtScreenW(),
-                              GtSurfGet(surf, GtVT_GET_WIDTH), surfH,
-                              GtSurfGet(surf, GtVT_GET_PITCH));
-    }
-    return 0;
 }
 
 /* 渲染期主体: 战役框可见性/淡入淡出 + 触发条绿框 + 战役框 + 提示框。
@@ -1313,50 +1246,4 @@ int MsgText_OverCamp(int mx, int my)
     if (!g_Cfg.Enable || !g_CampValid) return 0;
     if (!MouseInCampRect(mx, my)) return 0;
     return 1;
-}
-
-/* 单人聊天框 (Phobos AllowChatBoxInSinglePlayer 同原理, 见 notes/ChatBox参考.md):
- * 对话框函数按 [SessionClass 0xA8B238]==0/5 判定单人并跳过聊天框四处逻辑。
- * 开启时跳过 session 检查 (保留其余旗标检查), 返回 0 走原版。
- *   0x55E477 (5B, mov eax,[sess]) → 0x55E48D (绕过 je, 进 0xA8BC79 检查)
- *   0x55E62F (6B, cmp [sess],ebx) → 0x55E637 (跳过 je, 进 push/call)
- *   0x55E693 (6B, cmp [sess],ebx) → 0x55E69B (跳过 je, 进 cmp esi,0x1b)
- *   0x55E746 (5B, mov eax,[sess]) → 0x55E77B (绕过 je, 进 CurrentPlayer 分支) */
-#define ADDR_CHATSP_1      0x0055E48Du
-#define ADDR_CHATSP_2      0x0055E637u
-#define ADDR_CHATSP_3      0x0055E69Bu
-#define ADDR_CHATSP_4      0x0055E77Bu
-
-extern "C" __declspec(dllexport) DWORD __cdecl MsgText_ChatSp1(void* regs)
-{
-    static int s_logged = 0;
-    (void)regs;
-    MsgText_EnsureInit();
-    if (!g_Cfg.ChatBoxSP) return 0;
-    if (!s_logged) { s_logged = 1; LogLine("chatsp: singleplayer chatbox on"); }
-    return ADDR_CHATSP_1;
-}
-
-extern "C" __declspec(dllexport) DWORD __cdecl MsgText_ChatSp2(void* regs)
-{
-    (void)regs;
-    MsgText_EnsureInit();
-    if (!g_Cfg.ChatBoxSP) return 0;
-    return ADDR_CHATSP_2;
-}
-
-extern "C" __declspec(dllexport) DWORD __cdecl MsgText_ChatSp3(void* regs)
-{
-    (void)regs;
-    MsgText_EnsureInit();
-    if (!g_Cfg.ChatBoxSP) return 0;
-    return ADDR_CHATSP_3;
-}
-
-extern "C" __declspec(dllexport) DWORD __cdecl MsgText_ChatSp4(void* regs)
-{
-    (void)regs;
-    MsgText_EnsureInit();
-    if (!g_Cfg.ChatBoxSP) return 0;
-    return ADDR_CHATSP_4;
 }
