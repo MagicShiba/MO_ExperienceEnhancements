@@ -7,7 +7,7 @@
  */
 #pragma once
 
-#define MOE_VERSION "0.2.162a"
+#define MOE_VERSION "0.2.163"
 
 /* 一次性初始化: 建日志路径 + 各模块首次载入配置。幂等, 各入口都先调它。 */
 void MOE_EnsureInit(void);
@@ -15,7 +15,8 @@ void MOE_EnsureInit(void);
 /* 帧准备钩入口 (naked): 每循环必跑, 底部电量"始终绘制"靠它。 */
 void MOExperience_PrepareEntry(void);
 extern void* g_PrepareTramp;
-/* 上屏入口钩入口 (naked): 每次条带呈现前先恢复底部电量。 */
+/* 上屏入口钩入口 (naked): 每次条带呈现前先恢复底部电量; FullMap 开启时
+ * 接管这一次 blit (只呈小地图) 并按原版 ret 4 收尾, 跳过整条侧栏。 */
 void MOExperience_BlitSbEntry(void);
 extern void* g_BlitSbTramp;
 /* 呈现入口钩入口 (naked): 保留安装 (进出栈平衡), 当前不再绘制。 */

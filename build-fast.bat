@@ -19,7 +19,7 @@ if /i "%~1"=="/clean" (
 
 set NEEDFULL=0
 if not exist obj mkdir obj
-for %%N in (MOExperience GdiText MsgText SWPanel PowerDisplay VecText ToolTip ChatEdit TypeSelect AirWay BuildQueue PatrolCircle SmartOrder TreeChop FuzzyAttack SmartArea OrderUtil MindSelect DeployPreview SWSBar RepairAll Icon) do (
+for %%N in (MOExperience GdiText MsgText SWPanel PowerDisplay VecText ToolTip ChatEdit FullMap TypeSelect AirWay BuildQueue PatrolCircle SmartOrder TreeChop FuzzyAttack SmartArea OrderUtil MindSelect DeployPreview SWSBar RepairAll Icon) do (
   if not exist "obj\%%N.o" set NEEDFULL=1
 )
 if "%NEEDFULL%"=="1" (
@@ -51,7 +51,7 @@ if not exist obj\compiled.flag (
 )
 
 echo [ld] linking
-g++ -shared -o dist\MOExperience.dll obj\MOExperience.o obj\GdiText.o obj\MsgText.o obj\SWPanel.o obj\PowerDisplay.o obj\VecText.o obj\TypeSelect.o obj\AirWay.o obj\BuildQueue.o obj\PatrolCircle.o obj\SmartOrder.o obj\TreeChop.o obj\FuzzyAttack.o obj\SmartArea.o obj\OrderUtil.o obj\MindSelect.o obj\DeployPreview.o obj\ToolTip.o obj\ChatEdit.o obj\SWSBar.o obj\RepairAll.o obj\Icon.o ^
+g++ -shared -o dist\MOExperience.dll obj\MOExperience.o obj\GdiText.o obj\MsgText.o obj\SWPanel.o obj\PowerDisplay.o obj\VecText.o obj\TypeSelect.o obj\AirWay.o obj\BuildQueue.o obj\PatrolCircle.o obj\SmartOrder.o obj\TreeChop.o obj\FuzzyAttack.o obj\SmartArea.o obj\OrderUtil.o obj\MindSelect.o obj\DeployPreview.o obj\ToolTip.o obj\ChatEdit.o obj\FullMap.o obj\SWSBar.o obj\RepairAll.o obj\Icon.o ^
   -nostdlib -lkernel32 -luser32 -lgdi32 -limm32 -lgcc ^
   -Wl,--enable-stdcall-fixup -Wl,--no-insert-timestamp -Wl,--entry,_DllMain@12
 if errorlevel 1 exit /b 1

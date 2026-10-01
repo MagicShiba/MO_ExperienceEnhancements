@@ -19,6 +19,7 @@
 
 #include <windows.h>
 #include "GdiText.h"
+#include "FullMap.h"
 #include "OrderUtil.h"
 #include "VecText.h"
 #include "AirWay.h"
@@ -68,6 +69,7 @@ void MOE_EnsureInit(void)
     MsgText_EnsureInit();
     SWPanel_EnsureInit();
     PowerDisplay_EnsureInit();
+    FM_EnsureInit();
 }
 
 /* ---------------- 渲染回退原因统计 ----------------
@@ -131,6 +133,9 @@ static void PowerDrawBoth(void)
     SWS_Poll(); /* 超武侧栏切换+扫描 (开关关/隐藏时直接返回, 只读) */
     RepairAll_Poll(); /* 建筑维修简化 (Mode=0 时直接返回; 只读扫描+Repair 事件入队) */
     MOE_EnsureInit();
+    /* 撑满视口 + 摘侧栏 gadget (隐藏原版建造栏时必须每循环都跑, 引擎每次
+     * 切页/改视口都会把按钮重新挂回去)。 */
+    FM_Poll();
     /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;
      * 侧栏不呈现时 BlitSidebar 不跑, 字不会冒出来。 */
     PowerDisplay_DrawSb();
@@ -159,15 +164,27 @@ __attribute__((naked)) void MOExperience_PrepareEntry(void)
  * 与层/时机无关。故在呈现入口先恢复: 每次上屏前字已在侧栏面里,
  * 呈出的每一帧都带字, 结构上不再有"被盖帧"。
  * Entry 同 prepare 钩形 (naked + 尾跳跳板, 栈形 [ret][force], 原 ret 4)。
- * 不碰光标/脏旗, 无拖影。 */
+ * 不碰光标/脏旗, 无拖影。
+ *
+ * FullMap 开启时多一条路: FM_BlitSb 自己只把小地图那一小块 blit 上去, 并把
+ * 跳板指针换成本 DLL 里一个只含 `ret 4` 的小函数 -> 原版那条"整条侧栏"blit
+ * 完全不跑, 面板连同电力条一起消失。接管时补上原版尾声的三个脏标记
+ * (0xB0B519=1 / 0xB0B518=0 / this+0x53A8=0)。
+ * ★ 裸钩本身一个字都不改: 换的是 g_BlitSbTramp 的指向, 汇编层与改动前
+ *   逐字节相同 (上一版动过这层, 结果默认路径直接崩)。 */
 #define ADDR_BLITSB        0x6A70E0u
 
 void* g_BlitSbTramp = NULL;
 
+/* FullMap 接管时用的出口: 原版尾声等价物 + ret 4 (原 ret 4, 参数栈形一致)。
+ * 只做"脏标记 + 返回", 不碰任何寄存器。 */
+
 static void BlitSbEntryDraw(void)
 {
+    void* tramp = (void*)(size_t)FM_BlitSb();   /* 0 = 不接管, 返回引擎跳板 */
     MOE_EnsureInit();
     PowerDisplay_DrawSb();
+    if (tramp) g_BlitSbTramp = tramp;
 }
 
 static void* g_CallBlitSb = (void*)BlitSbEntryDraw;
@@ -185,21 +202,16 @@ __attribute__((naked)) void MOExperience_BlitSbEntry(void)
         : "memory", "cc");
 }
 
-/* ---------------- 呈现入口钩 (已退役为空操作) ----------------
- * GScreenClass::UpdatePrimarySurface=0x4F4780 钩子保留安装 (进出栈平衡),
- * 但不再绘制: 往呈现面直画层级盖过鼠标、侧栏不呈现时仍冒字,
- * 故只画侧栏面、随条带上屏。 */
+/* ---------------- 呈现入口钩 (空操作, 只保栈形平衡) ----------------
+ * GScreenClass::UpdatePrimarySurface=0x4F4780。FullMap 的小地图改成画进
+ * Composite 之后这条钩已无用途, 保留安装只是不改变进出栈形。
+ * 首7B = 83 EC 5C 8B 44 24 60, 跳板抄7B 跳回 0x4F4787。 */
 void* g_UpdateTramp = NULL;
 
 static void DrawPresentArg(void* surf)
 {
     (void)surf;
-    /* 退役: 不再往呈现面直画 (盖鼠标 + 侧栏隐藏仍冒字), 保持空操作。
-     * 钩子保留安装 (进出栈平衡), 但不再绘制。 */
-    MOE_EnsureInit();
-    return;
 }
-
 static void* g_CallUpdate = (void*)DrawPresentArg;
 __attribute__((naked)) void MOExperience_UpdateEntry(void)
 {
@@ -285,7 +297,12 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
         DeployPreview_Draw(surf, surfW, surfH, surfPitch);
     }
 
-    /* 5 底部电量: 只画侧栏面 (总开关 PowerBottom=0 即关)。
+    /* 5 小地图 (FullMap): 直接画进 Composite。地图铺满后每帧都会盖掉右上角,
+     * 而侧栏条带的上屏时机并不保证跟着地图呈现, 所以不靠 BlitSidebar ——
+     * 画进 Composite 就成了画面的一部分, 跟着一起被呈现, 不闪。 */
+    if (FM_DrawRadarTo(surf)) drew = 1;
+
+    /* 6 底部电量: 只画侧栏面 (总开关 PowerBottom=0 即关)。
      * 随 BlitSidebar 条带上屏, 层级在鼠标之下, 侧栏不画即不显示。 */
     {
         int pwr = PowerDisplay_DrawSb();
@@ -293,7 +310,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
         if (pwr == 1) drew = 1;
     }
 
-    /* 6 自定义聊天输入框: 盖住原生输入行, 顶层 (未激活即无操作) */
+    /* 7 自定义聊天输入框: 盖住原生输入行, 顶层 (未激活即无操作) */
     {
         int ced = ChatEdit_Frame(surf, bitLineH, screenW, surfW, surfH, surfPitch);
         if (ced == 1) drew = 1;
@@ -394,6 +411,7 @@ extern "C" __declspec(dllexport) BOOL __stdcall DllMain(HINSTANCE h, DWORD reaso
         VecText_Install();
         AirWay_Install();
         ChatEdit_Install();
+        FM_Install();
     }
     return TRUE;
 }
