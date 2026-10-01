@@ -37,6 +37,10 @@ typedef struct {
 static SWPanelCfg g_SW;
 static wchar_t g_SWFace[FONT_FACE_MAX];
 static int g_InitDone = 0;
+/* 几何诊断 (只在变化时打一行): 排查名/计时两列错位看这个 */
+static int s_LastAnchor = -1, s_LastRightEdge = -1, s_LastMapRight = -1;
+static int s_LastRows = -1;   /* 行数也进触发条件: 条目变少要能看出来 */
+static int s_AnchorLost = 0;
 
 void SWPanel_EnsureInit(void)
 {
@@ -156,8 +160,9 @@ int SWPanel_Draw(void* surf, int bitLineH, int surfW, int surfH, int surfPitch)
     int n = 0, i, j, k;
     unsigned now;
     int fontPx, adv, maxNW = 0, maxTW = 0, hasTimer = 0;
-    int panelW = 0, panelH = 0, px = 0, py = 0, rightEdge, contentRight, nameEndCol;
-    int step = 0, top = 0;
+    int panelW = 0, panelH = 0, px = 0, py = 0;
+    int rightEdge = 0, contentRight = 0, nameEndCol = 0;
+    int step = 0, top = 0, anchor;
     RectangleStruct rect;
     ColorStruct board;
     unsigned char* locked;
@@ -167,7 +172,12 @@ int SWPanel_Draw(void* surf, int bitLineH, int surfW, int surfH, int surfPitch)
     for (i = 0; i < g_SWCapN && i < SWCAP_MAX; i++)
     {
         SWCapRow* c = &g_SWCap[i];
-        if (now - c->tick > SW_FRESH_MS) continue;
+        /* ★ 150ms 过期只用来剔"陈旧碎片", 不能让它把整块面板判没。
+         * 侧栏隐藏时引擎照旧逐帧画这些行 (只是整体右移), 收集一直新鲜; 万一
+         * 碰上某一帧没收到 (切模式那几帧), 早退只会让**原版列表**趁虚画出来
+         * (inband 放行), 那才是真正难看的那种"位置不对"。所以放宽到 1000ms:
+         * 宁可短暂显示上一次的内容, 也不能让面板凭空消失。*/
+        if (now - c->tick > (unsigned)SW_STALE_MS) continue;
         for (j = 0; j < n; j++) if (ys[j] == c->y) break;
         if (j >= n)
         {
@@ -209,7 +219,49 @@ int SWPanel_Draw(void* surf, int bitLineH, int surfW, int surfH, int surfPitch)
     }
     if (maxNW <= 0 && maxTW <= 0) return 0;
     board.R = board.G = board.B = 0;
-    rightEdge = surfW - g_SW.RightMargin;
+    /* 右缘锚到**地图区**而不是画布: 侧栏显示时地图只到 1752, 锚画布 (1920) 会把
+     * 整块列表塞到侧栏底下 (看不见, 而且名/计时两列还会被侧栏切开看着像重影)。
+     * ⚠️ 锚点拿不到时**不要**静默退回 surfW —— 那正是"隐藏侧栏后整块列表跳到
+     * 屏幕最右缘"的表现。退回 0 = 贴左缘, 至少位置是稳定的、可预期的。*/
+    if (g_MapRight > 0 && g_MapRight <= surfW) anchor = g_MapRight;
+    else
+    {
+        anchor = 0;
+        if (!s_AnchorLost)
+        {
+            char b1[16], buf[128];
+            unsigned q = 0;
+            s_AnchorLost = 1;
+            q = AppendCStr(buf, q, "swpanel: anchor lost, g_MapRight=", sizeof(buf));
+            UtoA((unsigned)g_MapRight, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+            q = AppendCStr(buf, q, " surfW=", sizeof(buf));
+            UtoA((unsigned)surfW, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+            LogLine(buf);
+        }
+    }
+    rightEdge = anchor - g_SW.RightMargin;
+    if (rightEdge < 0) rightEdge = 0;
+    /* 几何变化就打一行: 排查"名/计时两列错位"直接看这里 (错位=两处几何不一致,
+     * 同一次绘制里 anchor/rightEdge/contentRight/nameEndCol 必须自洽)。*/
+    if (anchor != s_LastAnchor || rightEdge != s_LastRightEdge
+        || g_MapRight != s_LastMapRight || n != s_LastRows)
+    {
+        char b1[16], buf[192];
+        unsigned q = 0;
+        s_LastAnchor = anchor; s_LastRightEdge = rightEdge;
+        s_LastMapRight = g_MapRight; s_LastRows = n;
+        q = AppendCStr(buf, q, "swpanel: geom mapRight=", sizeof(buf));
+        UtoA((unsigned)g_MapRight, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " anchor=", sizeof(buf));
+        UtoA((unsigned)anchor, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " rightEdge=", sizeof(buf));
+        UtoA((unsigned)rightEdge, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " contentRight=", sizeof(buf));
+        UtoA((unsigned)contentRight, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " rows=", sizeof(buf));
+        UtoA((unsigned)n, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        LogLine(buf);
+    }
     contentRight = rightEdge - g_SW.PadX;
     nameEndCol = contentRight - (hasTimer ? maxTW + g_SW.Gap : 0);
     /* 经典行距 (字高+上下 PadY): 条无缝衔接, 底部锚定守界 (引擎 y 只定顺序) */
@@ -245,7 +297,7 @@ int SWPanel_Draw(void* surf, int bitLineH, int surfW, int surfH, int surfPitch)
     {
         panelW = g_SW.PadX * 2 + maxNW + (hasTimer ? g_SW.Gap + maxTW : 0);
         panelH = g_SW.PadY * 2 + n * adv;
-        px = surfW - g_SW.RightMargin - panelW;
+        px = anchor - g_SW.RightMargin - panelW;
         py = surfH - g_SW.BottomMargin - panelH;
         if (px < 0) px = 0;
         if (py < 0) py = 0;

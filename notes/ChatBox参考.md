@@ -162,7 +162,7 @@ label 的 X/Y（`+0x24` 的 `+0x0C/+0x10`），Draw 只读 label 的 X/Y。
 - `dist/MOExperience.dll.inj` 纳入 git（GBK，`-text` 标记防行尾转换破坏）；
 - 改钩子后跑一次**重叠检查**：同区间内所有钩子两两比对首尾。
 
-**另一个坑**：`构建.bat` 第 10 行 `copy /Y dist\MOExperience.dll.inj ..`，
+**另一个坑**：`build-fast.bat` 第 10 行 `copy /Y dist\MOExperience.dll.inj ..`，
 每次构建都用 `dist` 覆盖游戏目录，手动改游戏目录那份做实验会被冲掉。
 实验要在 `dist` 里改，并以构建后的游戏目录为准。
 

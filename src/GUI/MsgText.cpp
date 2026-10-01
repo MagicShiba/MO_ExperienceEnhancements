@@ -13,7 +13,7 @@
  * 经启动校准得到的 16 位格式 (565/555) alpha 混入 Composite。
  * 取色: ColorScheme BaseColor 经 0x517440 转显示色 (Phobos 同用法)。
  *
- * 构建见 构建.bat (32 位 mingw, 无 CRT)。
+ * 构建见 build-fast.bat (32 位 mingw, 无 CRT)。
  */
 
 #include <windows.h>
@@ -556,6 +556,9 @@ static int s_prevCampTotal = 0;
 /* 战役框上一帧矩形 (滚轮命中 + 悬停判定用) */
 static RectangleStruct g_CampRect;
 static int g_CampValid = 0;
+/* 聊天输入框锚点缓存: DrawBox 画战役框时顺手写下 (提前返回之前), 输入框直接读,
+ * 不自己重算 —— 两边各算各的就会出现"首次不对齐、之后才对齐"。*/
+static int g_AnchorX = 0, g_AnchorY = 0, g_AnchorValid = 0;
 
 /* 注: 悬停展开无需防抖——透明度斜坡已保证无硬闪, 历史随底板一起淡入。
  * 展开跟瞬时悬停 (原版语义), 划过即见淡影找区。 */
@@ -728,6 +731,22 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
     textW = maxW;
     if (textW < 40) textW = 40;
 
+    /* ★ 聊天输入框 (ChatEdit.cpp) 的锚点在这里缓存 —— 必须在下面**所有**提前
+     * 返回之前。DrawBox 有两处提前返回: `picked<=0` (一条消息都没有) 和
+     * `totalRows<=0` (窗口被滚空)。而输入框是在消息帧的最后一层才画的, 只能读
+     * 缓存。之前锚点是输入框自己按 `CampTriggerRect` 重算的, 于是"首次不对齐、
+     * 之后才对齐": 首次战役框通常还没消息 → 走估算那条路, 之后走真实矩形。
+     * 现在只读绘制时这份结果, 结构上不可能错开。
+     * 底部模式取**底边** (行数无关的不变量); 顶部模式只按 1 行, 免得随条数抖。*/
+    if (B->pSkip)
+    {
+        g_AnchorX = x;
+        g_AnchorY = B->autoBottom
+                  ? surfH - B->bottomMargin + 2
+                  : (B->yBase + B->topGap * adv) + (adv + 4);
+        g_AnchorValid = 1;
+    }
+
     totalAll = PickLines(B->ring, B->wantSp, B->ignoreTimeout, B->tmoMul, textW, B->rowBudget, &picked);
     if (picked <= 0 || totalAll <= 0) return 0;
     /* 打字机揭示位: 原版速率 1 字/16ms (AnimPos += (time-timing)>>4) 与首帧 1 字;
@@ -855,6 +874,9 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
             int thumbY;
             if (thumbH < 8) thumbH = 8;
             if (thumbH > barH) thumbH = barH;
+            /* ★ 战役框的最新消息在**下**底 (rowEnd = totalAll - skip, skip=0 就是看最下面那
+             * limit 行)。所以 skip=0 (最下面) 时滑块要在**最下面**, 滑块位置与
+             * skip **反向**。写成正比会让滑块跑到顶上, 和内容正好对调。*/
             thumbY = (maxSkip > 0) ? barY + (barH - thumbH) * (maxSkip - skip) / maxSkip
                                    : barY + barH - thumbH;
             bar.X = barX; bar.Y = barY; bar.Width = 4; bar.Height = barH;
@@ -903,24 +925,39 @@ static int CampTriggerRect(int bitLineH, int screenW, int surfH, RectangleStruct
     return adv;
 }
 
-/* 聊天输入框锚点 (供 ChatEdit.cpp): 贴战役框下沿, 左侧与战役文本左缘对齐。
- * 只在**底部模式**成立: DrawBox 的 autoBottom 让战役框底边固定在
- * surfH-CampBottomMargin+2 (与行数无关的不变量), 其下就是配置里留的底部
- * 间距, 贴边放输入框, 位置不随消息条数变化。
- * 顶部模式返回 0 = 输入框留在原生位置: 战役框本来就在左上角, 输入框也留在
- * 原生那行 (两者同位, 画序保证输入框在上层, 不会有第二块黑条)。
- * 返回 1=有锚点 (写 px/py 两个 int), 0=无 (调用方用原生位置)。 */
+/* 聊天输入框锚点 (供 ChatEdit.cpp): 与战役框对齐 (左缘同列 + 贴在它下沿)。
+ * 返回 1=有锚点 (写 px/py), 0=无 (调用方退回原生位置)。
+ *
+ * ★ 底部模式必须读**实际画出来的**矩形 `g_CampRect` (DrawBox 存, 见 842 行),
+ *   不要用 `CampTriggerRect` 的 1 行估算再自己算 `surfH - CampBottomMargin + gap`。
+ *   两条路各算各的: 只要宽度来源/夹取顺序/居中基准有一处不同 (screenW vs
+ *   surfW、maxW 夹取次序), 输入框就会和战役框错开, 而且两边都"看着合理",
+ *   永远对不上。直接读绘制结果 = 构造上就对齐。
+ * ★ 顶部模式**不能**用 g_CampRect: 战役框随消息条数向下长, 输入框会跟着抖。
+ *   那里用 1 行触发矩形 (位置与行数无关, 稳定), 同样给锚点 —— 早期版本
+ *   `if (!CampBottom) return 0` 让顶部模式退回原生位, 就对不齐了。*/
 int MsgText_ChatAnchor(int surfW, int surfH, int bitLineH, int* px, int* py)
 {
     RectangleStruct tr;
     int adv, gap = 6, ax, ay;
     if (!g_Cfg.Enable) return 0;
     if (surfW <= 0 || surfH <= 0) return 0;
-    if (!g_Cfg.CampBottom) return 0;
-    adv = CampTriggerRect(bitLineH, surfW, surfH, &tr);
-    if (adv < 8) adv = 16;
-    ax = tr.X + 3;  /* tr.X 是底板左缘, +3 才是文本左缘 (与战役文本同列) */
-    ay = surfH - g_Cfg.CampBottomMargin + gap;
+    /* 首选: 绘制战役框时缓存下来的锚点 (DrawBox 里, 提前返回之前写)。
+     * 那是**本次绘制用的同一批数字**, 结构上不可能和战役框错开。*/
+    if (g_AnchorValid)
+    {
+        ax = g_AnchorX;
+        ay = g_AnchorY + gap;
+    }
+    else
+    {
+        /* 战役框还没走过一遍 (游戏刚起/被 Enable 关过): 退回 1 行触发矩形。
+         * 只在这一帧用, 下一帧就会被上面的缓存接管。*/
+        adv = CampTriggerRect(bitLineH, surfW, surfH, &tr);
+        if (adv < 8) adv = 16;
+        ax = tr.X + 3;
+        ay = tr.Y + tr.Height + gap;
+    }
     if (ax < 0) ax = 0;
     if (ax > surfW - 40) ax = surfW - 40;
     if (ay < 0) ay = 0;

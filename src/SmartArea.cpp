@@ -39,7 +39,7 @@
  * 但物理 Shift 盖光标, 待命逻辑按物理键等 (见上)。
  *
  * 联机: 只发标准事件, 本地只读 + 标准事件入队, 不写模拟内存。
- * 构建见 构建.bat (同一 DLL)。轮询挂 PowerDrawBoth (见 MOExperience.cpp)。
+ * 构建见 build-fast.bat (同一 DLL)。轮询挂 PowerDrawBoth (见 MOExperience.cpp)。
  * 日志: 仅启动行。
  */
 

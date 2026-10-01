@@ -14,7 +14,7 @@
  * (prepare/blitsb 的 ecx=this, update 的 edx=surface) -> 跳板/原函数拿到
  * 垃圾 -> 启动即崩。"m" 不占寄存器, 绝对安全。
  *
- * 构建见 构建.bat (32 位 mingw, 无 CRT)。
+ * 构建见 build-fast.bat (32 位 mingw, 无 CRT)。
  */
 
 #include <windows.h>
@@ -181,9 +181,15 @@ void* g_BlitSbTramp = NULL;
 
 static void BlitSbEntryDraw(void)
 {
-    void* tramp = (void*)(size_t)FM_BlitSb();   /* 0 = 不接管, 返回引擎跳板 */
+    void* tramp;
     MOE_EnsureInit();
+    /* ★ 顺序要紧: **先画字, 再上屏**。`FM_BlitSb()` 就是把侧栏面 blit 到 Primary
+     * 的那一步, 原来排在 PowerDisplay_DrawSb 前面 —— 字画在条带已经呈现之后,
+     * 晚一帧。而 prepare 里画的那份会被引擎 `SidebarClass::Draw` 的重画擦掉,
+     * 于是引擎每次重画面板的那一帧字就不在 = 时有时无的闪烁 (不是透明度问题,
+     * PwrBlitCache 的 alpha=100 本来就是覆盖写)。*/
     PowerDisplay_DrawSb();
+    tramp = (void*)(size_t)FM_BlitSb();   /* 0 = 不接管, 返回引擎跳板 */
     if (tramp) g_BlitSbTramp = tramp;
 }
 
@@ -346,8 +352,11 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     if (rc == 1) drew = 1;
 
     /* 2 超武面板: 右下整块重绘 (Print 入口已隐藏+收集, 此处统一画)。
-     * 主画布尺寸同时回填给收集门: 坐标系一致才收, 否则走原版。 */
+     * 主画布尺寸同时回填给收集门: 坐标系一致才收, 否则走原版。
+     * g_MapRight = 地图区右边界: 侧栏显示时 1752 / 隐藏时 1920。贴右缘画的那几层
+     * (超武面板、超武侧栏) 必须锚到它, 否则侧栏一显示就被压在侧栏底下。*/
     g_SWCompW = surfW; g_SWCompH = surfH;
+    g_MapRight = FM_MapRightEdge();
     rc = SWPanel_Draw(surf, bitLineH, surfW, surfH, surfPitch);
     if (rc < 0) { StatTick(tick, rc == -1 ? 2 : 4); return 0; }
     if (rc == 1) drew = 1;
@@ -447,11 +456,18 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_WheelHook(void* regs
     if (!GtMouseGameXY(&mx, &my)) return 0;
 
     wparam = *(unsigned*)((char*)regs + OFF_REG_ECX);
-    /* 战役框: wparam 高位=上滚 -> g_Skip 减小 (看更新的)。
-     * 超武栏 s_Scroll 是"第一条可见的条目下标", 上滚应看更靠前=减小。
-     * 实测这个方向是反的, 所以这里传反的 dir, 手感才和战役框一致。 */
+/* Windows 约定: wparam 高位 delta 为**负**(bit31=1) = 轮子朝用户 = **下滚**;
+     * bit31=0 = 上滚。
+     *
+     * ⚠️ 两个框的"上/下"语义天生相反, 所以 dir 要**反向**传, 这不是 bug:
+     *   - 战役框 (MsgText): 最新在**下**底 (rowEnd = totalAll - skip, skip=0 看最下面)。
+     *       下滚 = 看更新的 = skip 减小 => dirUp=1。
+     *   - 超武栏 (SWSBar): 第 0 项在**上**面 (r = rowIndex - s_Scroll)。
+     *       下滚 = 看更靠后的 = s_Scroll 增大 => dir=+1。
+     * 于是 bit31=1(下滚): SWS 传 +1, 战役框传 dirUp=1 —— 两个都是 1,
+     * 但含义相反, 因为底层变量方向相反。改任何一边都要同时验证另一边。*/
     if (SWS_WheelIn(mx, my, (wparam & 0x80000000u) ? 1 : -1)) return 0;
-    MsgText_WheelIn(mx, my, (wparam & 0x80000000u) ? 0 : 1);
+    MsgText_WheelIn(mx, my, (wparam & 0x80000000u) ? 1 : 0);
     return 0;
 }
 

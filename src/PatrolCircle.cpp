@@ -49,7 +49,7 @@
  * 联机: 只发标准事件, 各端同一份原版代码执行, 不影响联机。
  * 本地只读 + 标准事件入队, 不写模拟内存。
  *
- * 构建见 构建.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
+ * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
  * 轮询挂 PowerDrawBoth (见 MOExperience.cpp), 开关关时直接返回。
  */
 

@@ -32,7 +32,7 @@
  * 配置 [ToolTips] (缺失=默认值, 改后重启):
  *   Enable=1 (1=追加第三行, 0=原版两行)
  *
- * 构建见 构建.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
+ * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
  */
 
 #include <windows.h>

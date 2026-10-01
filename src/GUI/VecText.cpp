@@ -15,7 +15,7 @@
  *   +0x0C 锁定的 WORD 像素缓冲, +0x10 pitch(WORD 数),
  *   +0x24 默认色 WORD, +0x30..+0x3C 裁剪 LTRB (含端)。
  *
- * 构建见 构建.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
+ * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
  */
 #include <windows.h>
 #include "GdiText.h"
@@ -578,6 +578,7 @@ static int VecSWColon(const wchar_t* s)
 SWCapRow g_SWCap[SWCAP_MAX];
 int g_SWCapN = 0;
 int g_SWCompW = 0, g_SWCompH = 0;
+int g_MapRight = 0;
 int g_SWPanelOn = 0;
 
 /* 收表 (同坐标覆盖, 空串也收: 杀过期旧文, 面板画空=闪烁灭态)。
@@ -587,27 +588,45 @@ static void VecSWStore(int kind, const wchar_t* s, int n, int fore, int x,
                        int y, int src)
 {
     int i;
+    int idx = -1;
     SWCapRow* r;
     unsigned now = GetTickCount();
-    /* 同行归并 (x 容差 ±6): 引擎同行落笔 x 逐帧抖动 (1722~1725 实证),
-     * 精确匹配会涨满 32 项导致丢弃+过期闪烁。名/计时器同 y 不同 x
-     * (差 27) 天然分开, 不会误并。 */
+    /* ★★ 归并键 = (y, kind), **不是** (y, |dx|<=6)。
+     * 引擎这批行的位置会随侧栏模式**整体平移** (名 1722/计时器 1749 -> 侧栏
+     * 隐藏后 ~1890/~1917, 差 ~168)。用 x 邻近归并时, 平移后的行一律判成"新行"
+     * => 表里同时留着旧模式的行和新模式的行 => 很快撑爆 SWCAP_MAX(32)
+     * => `if (g_SWCapN >= SWCAP_MAX) return;` 把后来的行整批丢掉
+     * => 面板条目变少 (实测 11 条只剩 5 条, 且丢的是先画的那几条)。
+     * 按 (y,kind) 归并, 平移只是就地更新 x (下面本来就有 `r->x = x` 跟随漂移),
+     * 表大小恒定 = 行数 x 2。x 抖动 (±3, 1722~1725 实证) 由 x 跟随天然吸收。*/
     for (i = 0; i < g_SWCapN; i++)
+        if (g_SWCap[i].y == y && g_SWCap[i].kind == kind) { idx = i; break; }
+    if (idx < 0)
     {
-        int dx = g_SWCap[i].x - x;
-        if (g_SWCap[i].y == y && dx >= -6 && dx <= 6) break;
-    }
-    if (i >= g_SWCapN)
-    {
-        if (g_SWCapN >= SWCAP_MAX) return;
-        r = &g_SWCap[g_SWCapN++];
-        r->x = x; r->y = y;
-        r->fore = -1;
+        if (g_SWCapN < SWCAP_MAX)
+        {
+            idx = g_SWCapN++;
+            r = &g_SWCap[idx];
+            r->x = x; r->y = y;
+            r->fore = -1;
+        }
+        else
+        {
+            /* 满了: 踢掉最陈旧的一行再收, 而不是直接丢弃。
+             * 直接丢弃会让"最后几行永远进不来" (表被前面的陈旧行占死)。*/
+            int old = 0;
+            for (i = 1; i < g_SWCapN; i++)
+                if (g_SWCap[i].tick < g_SWCap[old].tick) old = i;
+            idx = old;
+            r = &g_SWCap[idx];
+            r->x = x; r->y = y;
+            r->fore = -1;
+        }
     }
     else
     {
-        r = &g_SWCap[i];
-        r->x = x;   /* 跟随漂移 */
+        r = &g_SWCap[idx];
+        r->x = x;   /* 跟随漂移 + 模式平移 */
         if (src == 1 && fore < 0 && r->fore >= 0 &&
             now - r->tick <= SW_FRESH_MS) return;   /* 新鲜正文, 后备碎片靠边 */
     }
@@ -627,22 +646,30 @@ static int VecSWCapture(void* surf, int kind, const wchar_t* s, int x, int y)
     int sw = 0, sh = 0, n = 0;
     if (!g_SWPanelOn) return 0;
     if (!s || !IsPlausiblePtr(s)) return 0;
-    if (x < 1300 || x > 1752 || y < 32 || y > 1080) return 0;
+    /* y 带固定 (顶部 32 是横条, 下面到画布底); x **不设上界** ——
+     * 这层只兜计时器 (靠冒号判别), 引擎侧栏隐藏后把它们挪到 ~1890,
+     * 任何"侧栏可见时"的上界都会让这层也漏 (只剩黑底, 因为底色条不走这层)。
+     * 名不在这里收 (见 Simple_ 入口注释: Print 层的名与悬浮提示不可区分)。*/
+    if (x < 1300 || y < 32 || y > g_SWCompH) return 0;
     if (surf && IsPlausiblePtr(surf))
     {
         int* b = (int*)surf;
         sw = b[1]; sh = b[2];
     }
     if (sw <= 0 || sh <= 0 || sw != g_SWCompW || sh != g_SWCompH) return 0;
+    /* ★ 位置检查**不许写死 x<=1752**: 那是"侧栏可见时"量的边界。侧栏一隐藏,
+     * 视口变 1920, 引擎把同一批行挪到 ~1890, 于是 inband=0 -> 这条路既不收表
+     * 也不拦截, `return g_OrigSimple` 放行 => **原版列表直接画出来**。
+     * 上界跟实际侧栏列 (g_MapRight) 走; 拿不到时用画布宽 (最宽松, 宁可多收)。*/
+    if (g_MapRight > 0 && g_MapRight < sw) sw = g_MapRight;
     while (s[n] && n < 63) n++;
     if (g_SWCapN >= SWCAP_MAX && n > 0)
     {
         int i, found = 0;
+        /* 找重必须用与 VecSWStore **同一个键** (y,kind), 否则这里判"没有重复"
+         * 而 Store 里又新建一行, 表反而更容易满。*/
         for (i = 0; i < g_SWCapN; i++)
-        {
-            int dx = g_SWCap[i].x - x;
-            if (g_SWCap[i].y == y && dx >= -6 && dx <= 6) { found = 1; break; }
-        }
+            if (g_SWCap[i].y == y && g_SWCap[i].kind == kind) { found = 1; break; }
         if (!found) return 1;   /* 满了: 照跳, 不收 */
     }
     VecSWStore(kind, s, n, -1, x, y, 1);
@@ -1066,17 +1093,41 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
             int* p2 = (int*)a2;
             int* p3 = (int*)a3;
             const wchar_t* text = NULL;
+            const wchar_t* raw = (const wchar_t*)(size_t)edxIn;
             int kind = VecSWTextKind(edxIn, &text);   /* 文本只认 EDX */
             int n = 0, sx, sy;
-            int inband;
+            int inband, isEmpty;
             sx = p2[0] + p3[0]; sy = p2[1] + p3[1];
-            inband = (sx >= 1300 && sx <= 1752 && sy >= 32 && sy <= 1080);
+            /* ★ 这条 inband 是"隐藏原版超武列表"的**唯一开关**: inband=0 直接
+             * `return g_OrigSimple(...)` 放行, 原版名/计时器/底色条原封动画出来。
+             *
+             * x **上界只能用画布宽 g_SWCompW**。侧栏隐藏后引擎把整批行挪到
+             * ~1890, 任何按"侧栏可见时"几何算出来的上界 (写死 1752、或收紧到
+             * g_MapRight) 都会把它们整批踢出 inband。
+             * 漏了不会整块原版列表冒出来, 而是"左边只剩矢量计时器 + 右边原版名和
+             * 黑底" —— 因为**名只能在 Simple_ 收** (Print 层的名与悬浮提示不可
+             * 区分), 而计时器有 Print 层兜底 (只判冒号、没有 x 上界)。
+             * 下界 1300 保留: 挡世界悬浮提示 (c=0x73AC616A) 与地图右缘杂字。*/
+            inband = (sx >= 1300 && sx <= g_SWCompW && sy >= 32 && sy <= g_SWCompH);
             if (text) { while (text[n] && n < 64) n++; }
-            if (text && inband && !VecSWHasEq(text))
+            if (inband)
             {
-                VecSWStore(kind, text, n, a4, sx, sy, 0);
-                if (n > 0)
+                /* 空串 = 该行的**底色条** (Simple_ 画背景时文本为空)。
+                 * 设计目的就是整体隐藏原版列表, 底色必须一起藏, 否则只剩黑底。
+                 * 只拦不收 —— 收进去会多出一个空行。*/
+                isEmpty = (!IsPlausiblePtr((void*)raw) || raw[0] == 0);
+                if (isEmpty)
                 {
+                    if (IsPlausiblePtr((void*)ecxIn))
+                    {
+                        ((int*)ecxIn)[0] = sx;
+                        ((int*)ecxIn)[1] = sy;
+                    }
+                    return ecxIn;
+                }
+                if (text && !VecSWHasEq(text) && n > 0)
+                {
+                    VecSWStore(kind, text, n, a4, sx, sy, 0);
                     if (IsPlausiblePtr((void*)ecxIn))
                     {
                         ((int*)ecxIn)[0] = sx;

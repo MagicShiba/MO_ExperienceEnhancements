@@ -1,15 +1,22 @@
 /* FullMap.h - 隐藏原版建造/生产侧栏, 地图铺满整个窗口宽度, 小地图保留在原角。
- * 实现见 FullMap.cpp (地址全部来自 gamemd.exe 反汇编实证)。构建见 构建.bat。 */
+ * 实现见 FullMap.cpp (地址全部来自 gamemd.exe 反汇编实证)。构建见 build-fast.bat。 */
 #pragma once
 
 /* 读 [FullMap] 节 (幂等)。 */
 void FM_EnsureInit(void);
 
-/* 装 CreateAll (0x533FD0) 入口钩: 把 Composite/Hidden 的建面矩形加宽, 否则
- * 撑宽视口后地图会画到面外。DllMain 里调 (见 MOExperience.cpp)。 */
+/* 装字节补丁 + CreateAll 两个调用点重定向: 让**渲染面永远全宽** (态0 要把视口收回
+ * 1752, 面不能跟着缩)。DllMain 里调 (见 MOExperience.cpp)。 */
 void FM_Install(void);
 
-/* 每循环 (prepare 钩 0x4F42F0) 调: 按 [FullMap] 开关撑视口 / 摘侧栏 gadget。 */
+/* 每循环 (prepare 钩 0x4F42F0) 调: 采 F11 三态切换 (见下), 撑视口 / 纠正侧栏列 /
+ * 摘侧栏 gadget。F11 三态 (ini [FullMap] ToggleVk, 默认 F11):
+ *   0 完全显示  整条侧栏面上屏, gadget 可用, 点击让位引擎 —— 与原版一致
+ *   1 只显示小地图和顶部两个按钮
+ *   2 全屏      侧栏一点不显示, 整窗都是地图, 点击全给地图
+ * 态0 会把视口宽度**收回** clientW-168 并恢复 0x72AD20 的原版字节 —— 只 blit 整条
+ * 侧栏但视口仍全宽时, 页签/cameo/小地图一个都点不动 (凡是拿视口跟侧栏列做比较
+ * 的地方全错 168)。详见 FullMap.cpp 的 Fm_ApplyViewWidth 与 notes/隐藏侧栏.md。 */
 void FM_Poll(void);
 
 /* 条带上屏钩 (SidebarClass::BlitSidebar 0x6A70E0) 调:
@@ -44,8 +51,16 @@ unsigned FM_RadarClickGate(void* regs);
 
 /* 把 SidebarBounds.X 纠正成"侧栏列在屏幕上的起点"(视口右边界 - 列宽)。
  * 引擎自己算的是 viewRect.X+viewRect.W, 视口铺满后会差 168。FM_Poll 每循环
- * 调一次, 并且 DisplayClass::InitGUI 入口钩 (MOExperience_InitGuiEntry) 也调
- * —— 那一批一次性侧栏布局写入只发生一次, 必须在那之前就纠正好。 */
+ * 调一次 (全屏态改推成"恒不成立"的鼠标路由阈值, 见 FullMap.cpp 的 Fm_SyncColumn),
+ * 并且 DisplayClass::InitGUI 入口钩 (MOExperience_InitGuiEntry) 也调 ——
+ * 那一批一次性侧栏布局写入只发生一次, 必须在那之前就纠正好。
+ * ★ InitGUI 那条路**永远**按"侧栏存在"的几何纠正, 不看当前模式。 */
 void FM_SyncSidebarColumn(void);
 
 int  FM_IniOn(const char* key, int def);
+
+/* **地图区的右边界** (= ViewBounds.X + ViewBounds.Width): 态0 侧栏显示时是 1752,
+ * 态1/2 侧栏隐藏时是 1920。MOE 那些贴右下角画的层 (超武侧栏 SWSBar、超武倒计时
+ * 列表 SWPanel) 必须锚到这里, 否则侧栏一显示就被压在侧栏底下 / 侧栏一隐藏就偏出
+ * 屏幕右缘。返回 0 = 本模块没接管, 调用方退回用面宽。 */
+int  FM_MapRightEdge(void);

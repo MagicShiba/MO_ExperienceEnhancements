@@ -31,7 +31,7 @@
  *   代价: 方向键不再被吞, 打字时镜头可能跟着动一下。拿可见小瑕疵换掉
  *     "抢全系统键盘", 要彻底消掉得再钩游戏自己的方向键处理。
  *
- * 构建见 构建.bat (32 位 mingw, 无 CRT, -limm32)。
+ * 构建见 build-fast.bat (32 位 mingw, 无 CRT, -limm32)。
  */
 
 #include <windows.h>

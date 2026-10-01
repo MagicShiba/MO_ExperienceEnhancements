@@ -17,7 +17,7 @@
  *
  * 开销: 地基尺寸指纹缓存 (选中签名+500ms), 帧内一次 ClickCoords。
  * 日志: 启动行 + 首次命中 + 每次 plots/fired/timeout。
- * 构建见 构建.bat。渲染挂 MOExperience_MessageDrawHook。
+ * 构建见 build-fast.bat。渲染挂 MOExperience_MessageDrawHook。
  */
 
 #include <windows.h>

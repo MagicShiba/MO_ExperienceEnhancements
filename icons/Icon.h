@@ -6,7 +6,7 @@
  * 位图来自 icons/icon_*.png (黑=墨, 白=忽略, 与底部闪电点阵同约定),
  * 由 icons/mkicons.py 在改图后手动转成 icons/icons.inc 编进 DLL, 无外部文件。
  * 步进统一 (=归一化宽度), 天然对齐; 高度≤32, 行内垂直居中。
- * 实现见 Icon.cpp。构建见 构建.bat。 */
+ * 实现见 Icon.cpp。构建见 build-fast.bat。 */
 
 #pragma once
 
