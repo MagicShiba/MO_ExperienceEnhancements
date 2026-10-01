@@ -22,6 +22,7 @@
 #include "VecText.h"
 #include "OrderUtil.h"
 #include "Icon.h"
+#include "FullMap.h"
 
 #define VC_MAXW 32
 #define VC_MAXH 32
@@ -2096,7 +2097,12 @@ static int PatchBlit(void)
     return 1;
 }
 
-/* 通用跳板/补丁 (入口钩用, 字节数按指令边界取) */
+/* 通用跳板/补丁 (入口钩用, 字节数按指令边界取)
+ * ⚠ `n` 必须落在一条**完整指令的末字节**上。跳板把 [at, at+n) 原样搬走再跳回
+ *   at+n; 若 at+n 落在某条指令中间, 跳板就从半个指令开始重新反汇编 → 执行到
+ *   莫名其妙的指令直接飞掉 (本项目已踩过一次: 0x6A8061 那处抄 10B 实际是 12B,
+ *   跳回点落在 call [eax+0x34] 中间, 游戏闪退)。
+ *   用法: 先 an.py dis 确认末字节再填 n, 复制粘贴时逐条核对。 */
 static void* BuildTrampAt(unsigned at, int n, unsigned back)
 {
     unsigned char* b;
@@ -2325,7 +2331,40 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: blitsb bytes mismatch"); LogBytes((unsigned char*)0x6A70E0u); }
     }
-    /* 呈现入口钩 (0x4F4780, 首7B=83 EC 5C 8B 44 24 60): 非条带呈现路。
+    /* 侧栏列纠正钩 (DisplayClass::InitGUI 0x6ABD30, 首5B = 83 EC 24 53 55)。
+     * 那里有一批一次性的侧栏布局写入全用 SidebarBounds.X, 必须在它之前纠正,
+     * 否则 FM_Poll 每循环纠正来不及。见 MOExperience.cpp 的 FM_SyncSidebarColumn。
+     * [FullMap] InitGuiFix=0 可只关掉这一道钩 (崩溃二分用)。 */
+    if (FM_IniOn("InitGuiFix", 1))
+    {
+        static const unsigned char kWantInitGui[5] = { 0x83, 0xEC, 0x24, 0x53, 0x55 };
+        if (BytesSame((unsigned char*)0x6ABD30u, kWantInitGui, 5))
+        {
+            g_InitGuiTramp = BuildTrampAt(0x6ABD30u, 5, 0x6ABD35u);
+            if (g_InitGuiTramp && PatchAt(0x6ABD30u, (void*)MOExperience_InitGuiEntry, 5))
+                LogLine("vtext: initgui hook ON");
+            else { LogLine("vtext: initgui hook OFF"); g_InitGuiTramp = NULL; }
+        }
+        else { LogLine("vtext: initgui bytes mismatch"); LogBytes((unsigned char*)0x6ABD30u); }
+    }
+    else LogLine("vtext: initgui hook skipped (InitGuiFix=0)");
+    /* 视口 gadget 输入钩 (0x4E1640, 首6B = 83 EC 0C 53 55 56 = sub esp,0x0C / push
+     * ebx / push ebp)。这是 gadget 命中链的入口, FullMap 要在
+     * ExtractGadgetAt 之前把横跨视口那个容器 gadget 收窄。
+     * 安装见 MOExperience (MOExperience_GadgetInputEntry/g_GadgetInputTramp)。 */
+    {
+        static const unsigned char kWantGadgetInput[6] =
+            { 0x83, 0xEC, 0x0C, 0x53, 0x55, 0x56 };
+        if (BytesSame((unsigned char*)0x4E1640u, kWantGadgetInput, 6))
+        {
+            g_GadgetInputTramp = BuildTrampAt(0x4E1640u, 6, 0x4E1646u);
+            if (g_GadgetInputTramp && PatchAt(0x4E1640u, (void*)MOExperience_GadgetInputEntry, 6))
+                LogLine("vtext: gadgetinput hook ON");
+            else { LogLine("vtext: gadgetinput hook OFF"); g_GadgetInputTramp = NULL; }
+        }
+        else { LogLine("vtext: gadgetinput bytes mismatch"); LogBytes((unsigned char*)0x4E1640u); }
+    }
+/* 呈现入口钩 (0x4F4780, 首7B=83 EC 5C 8B 44 24 60): 非条带呈现路。
      * 安装见 MOExperience (MOExperience_UpdateEntry/g_UpdateTramp)。 */
     {
         static const unsigned char kWantUpdate[7] = { 0x83, 0xEC, 0x5C, 0x8B, 0x44, 0x24, 0x60 };
@@ -2336,6 +2375,5 @@ void VecText_Install(void)
                 LogLine("vtext: update hook ON");
             else { LogLine("vtext: update hook OFF"); g_UpdateTramp = NULL; }
         }
-        else { LogLine("vtext: update bytes mismatch"); LogBytes((unsigned char*)0x4F4780u); }
     }
 }

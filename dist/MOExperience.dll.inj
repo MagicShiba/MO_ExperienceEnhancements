@@ -37,6 +37,10 @@
 ; 超武侧栏点击吞没 (DisplayClass::ProcessClickCoords 内, Phobos SkipOnNewButtons 同点;
 ; 落栏内跳 0x6925FC 防误下单, 余者跑原版, 见 SWSBar.cpp)
 0x692419 = SWS_ClickGate, 7
+; 小地图点击 (FullMap): 同一函数里另落一道门 (6 字节 = push ecx / mov ecx,0x87F7E8),
+; 落点雷达矩形内就自己调引擎原生 RadarClass::Action 跳转并跳 0x6925FC 吞掉,
+; 见 src/GUI/FullMap.cpp 的"小地图点击: 自己接手 + 吞掉穿透"
+0x692406 = FullMap_RadarClickGate, 6
 
 ; 维修简化: 维修快捷键 ToggleRepariModeCommandClass::Execute 吞 Ctrl (落 ret 4)
 0x536FA0 = RepairAll_HotKey, 7

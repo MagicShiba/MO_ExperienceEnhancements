@@ -229,6 +229,74 @@ __attribute__((naked)) void MOExperience_UpdateEntry(void)
         : "memory", "cc");
 }
 
+/* ---------------- DisplayClass::InitGUI 入口钩 (0x6ABD30) ----------------
+ * 这个函数里有**一次性**的侧栏布局写入, 全都用 SidebarBounds.X:
+ *   0x6ABDB2 SetPosition(0xB07E58, ...) / 0x6ABE37 mov [0xB0B3E4], -SidebarBounds.X
+ *   0x6ABE67 mov [0xB07E3C], -SidebarBounds.X / 0x6ABE9E mov [esi-0x1C], -SidebarBounds.X
+ *   0x6ABEDF / 0x6ABF0F 同类 / 0x6ABD39 call 0x6403A0 -> 0x654320 摆三个 radar gadget
+ * 而 SidebarBounds.X 是引擎在别处按 `viewRect.X + viewRect.W` 算出来的 —— 视口
+ * 铺满后那个和从 1752 变成 1920, 于是上面这些**一次性**写入全错 168:
+ *   - 三个 radar gadget 被摆到屏外 (1936)
+ *   - cameo/页签滚动偏移差 168 -> 侧栏布局显示混乱
+ * FM_Poll 每循环纠正一次来不及 (这些只发生一次), 所以在 InitGUI **入口**先纠正。
+ * 首6B 恰三条指令 (83 EC 24 / 53 / 55), 跳板抄6B + 跳回 0x6ABD36。
+ * Entry 不带参数 (pushal/pushfl 平衡, 原栈形 [ret] 不变)。 */
+void* g_InitGuiTramp = NULL;
+
+static void InitGuiEntryNote(void)
+{
+    FM_SyncSidebarColumn();
+}
+static void* g_CallInitGui = (void*)InitGuiEntryNote;
+
+__attribute__((naked)) void MOExperience_InitGuiEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "pushfl\n\t"
+        "call *%0\n\t"
+        "popfl\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallInitGui), "m" (g_InitGuiTramp)
+        : "memory", "cc");
+}
+
+/* ---------------- 视口 gadget 输入钩 (GadgetClass::Input 0x4E1640) ----------------
+ * 这是整条 gadget 命中链的入口: Input(this=根gadget) 里紧接着就调
+ * ExtractGadgetAt (0x4E15A0) 找出鼠标下的那个 gadget 并对它调 Clicked。
+ * 引擎把横跨整个视口的容器 gadget 摆在 ViewBounds 上; 地图铺满后它连侧栏列
+ * 一起吞掉, 那一列的点击全被判成"点在视口上"。所以必须在 ExtractGadgetAt
+ * 之前把它的宽度收成"视口减去侧栏列"。
+ * 首6B 恰三条指令 (83 EC 0C / 53 / 55), 跳板抄6B + 跳回 0x4E1646。
+ * 入口栈形 [ret][arg0..]; this 在 ECX, pushal 不动 ECX, 直接 push 过去。 */
+#define ADDR_GADGET_INPUT   0x4E1640u
+
+void* g_GadgetInputTramp = NULL;
+
+static void GadgetInputEntryNote(void* self)
+{
+    FM_NoteGadgetInput(self);
+}
+static void* g_CallGadgetInput = (void*)GadgetInputEntryNote;
+
+__attribute__((naked)) void MOExperience_GadgetInputEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "pushfl\n\t"
+        "push %%ecx\n\t"
+        "call *%0\n\t"
+        "add $4, %%esp\n\t"
+        "popfl\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallGadgetInput), "m" (g_GadgetInputTramp)
+        : "memory", "cc");
+}
+
 /* ---------------- 每帧消息渲染 (0x5D4A94) ----------------
  * 唯一的消息帧出口: 各模块按层级从下往上叠画, 任一步失败都回退原版。
  * 绘制顺序 (后者压前者):
@@ -401,12 +469,107 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_SidebarHook(void* re
     return 0;
 }
 
+/* ---------------- 崩溃现场: 异常捕获 ----------------
+ * 目的: 崩了要能直接看到"崩在哪"。之前 v0.2.166/167/168 三次崩溃都只靠日志
+ * 尾部推断, 定位不到 —— 这里把故障地址/读写位/寄存器和故障点前后 8 字节
+ * 打进日志, 下次崩溃一眼定案。
+ *
+ * ★ 用 AddVectoredExceptionHandler 而不是 SetUnhandledExceptionFilter:
+ *   后者会被后面加载的模块 (YRPP / Ares / 游戏自己) 随手覆盖掉 —— 实测
+ *   v0.2.170 装上它之后崩溃依旧没有 CRASH 行。向量处理器在**所有**异常上
+ *   最先被调用, 且不会被覆盖。
+ *
+ * 判定与返回:
+ *   只对真正的致命异常动手 (读/写违规、非法指令、整数除零、溢出、栈溢出)。
+ *   其余(调试断点等)一律放行, 否则会干扰游戏自身的调试流程。
+ *   命中后**照旧返回 EXCEPTION_CONTINUE_SEARCH**, 不改控制流: 该崩还是崩,
+ *   我们只是把现场留下来。防重入: 栈溢出时可能连续进来, 用一个忙标志挡住。
+ *   日志写不进去 (真·栈溢出) 时退回 CreateFile 单独落一份 crash.txt。 */
+static volatile LONG g_CrashBusy = 0;
+
+static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
+{
+    char b1[16], buf[256];
+    unsigned p = 0;
+    EXCEPTION_RECORD* r;
+    const unsigned char* code;
+    HMODULE mod;
+    char name[64];
+    unsigned i;
+    int fatal;
+
+    if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+    r = ep->ExceptionRecord;
+    fatal = (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
+         || (r->ExceptionCode == EXCEPTION_ILLEGAL_INSTRUCTION)
+         || (r->ExceptionCode == EXCEPTION_INT_DIVIDE_BY_ZERO)
+         || (r->ExceptionCode == EXCEPTION_INT_OVERFLOW)
+         || (r->ExceptionCode == EXCEPTION_STACK_OVERFLOW)
+         || (r->ExceptionCode == EXCEPTION_PRIV_INSTRUCTION);
+    if (!fatal) return EXCEPTION_CONTINUE_SEARCH;
+    if (InterlockedCompareExchange(&g_CrashBusy, 1, 0) != 0)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    GtEnsureLog();
+    code = (const unsigned char*)r->ExceptionAddress;
+    if (g_Log)
+    {
+        p = AppendCStr(buf, p, "CRASH: code=", sizeof(buf));
+        UtoA((unsigned)r->ExceptionCode, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " addr=", sizeof(buf));
+        UtoA((unsigned)(size_t)r->ExceptionAddress, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, (r->NumberParameters >= 2) ? " (read)" : " (write)", sizeof(buf));
+        p = AppendCStr(buf, p, " fault=", sizeof(buf));
+        UtoA(r->NumberParameters ? (unsigned)(size_t)r->ExceptionInformation[0] : 0u, b1);
+        p = AppendCStr(buf, p, b1, sizeof(buf));
+        LogLine(buf);
+
+        p = 0;
+        p = AppendCStr(buf, p, "CRASH: eax=", sizeof(buf));
+        UtoA((unsigned)(size_t)ep->ContextRecord->Eax, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " ecx=", sizeof(buf));
+        UtoA((unsigned)(size_t)ep->ContextRecord->Ecx, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " edx=", sizeof(buf));
+        UtoA((unsigned)(size_t)ep->ContextRecord->Edx, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " esp=", sizeof(buf));
+        UtoA((unsigned)(size_t)ep->ContextRecord->Esp, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " ebp=", sizeof(buf));
+        UtoA((unsigned)(size_t)ep->ContextRecord->Ebp, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        LogLine(buf);
+
+        /* 故障点所在模块 + 该点前后 8 字节: 判断是引擎指令还是野跳转。 */
+        name[0] = 0;
+        mod = NULL;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+            | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCSTR)r->ExceptionAddress, &mod) && mod)
+            GetModuleFileNameA(mod, name, sizeof(name));
+        p = 0;
+        p = AppendCStr(buf, p, "CRASH: mod=", sizeof(buf));
+        p = AppendCStr(buf, p, name, sizeof(buf));
+        p = AppendCStr(buf, p, " base=", sizeof(buf));
+        UtoA((unsigned)(size_t)mod, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " at", sizeof(buf));
+        for (i = 0; i < 8; i++)
+        {
+            b1[0] = "0123456789ABCDEF"[(code[i] >> 4) & 15];
+            b1[1] = "0123456789ABCDEF"[code[i] & 15];
+            b1[2] = 0;
+            p = AppendCStr(buf, p, " ", sizeof(buf));
+            p = AppendCStr(buf, p, b1, sizeof(buf));
+        }
+        LogLine(buf);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 extern "C" __declspec(dllexport) BOOL __stdcall DllMain(HINSTANCE h, DWORD reason, LPVOID res)
 {
     (void)h; (void)res;
     if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(h);
+        AddVectoredExceptionHandler(1, Moe_CrashFilter);
         MOE_EnsureInit();
         VecText_Install();
         AirWay_Install();

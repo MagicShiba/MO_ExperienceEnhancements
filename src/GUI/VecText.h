@@ -18,6 +18,15 @@ extern void* g_BlitSbTramp;
 /* Update-primary hook entry (MOExperience.cpp, naked): draw on presented surface. */
 void MOExperience_UpdateEntry(void);
 extern void* g_UpdateTramp;
+/* Map-rect capture hook entry (MOExperience.cpp, naked): MapClass::CreateEmptyMap. */
+void MOExperience_CreateMapEntry(void);
+extern void* g_CreateMapTramp;
+/* Gadget-input hook entry (MOExperience.cpp, naked): GadgetClass::Input. */
+void MOExperience_GadgetInputEntry(void);
+extern void* g_GadgetInputTramp;
+/* Sidebar-column fix hook entry (MOExperience.cpp, naked): DisplayClass::InitGUI. */
+void MOExperience_InitGuiEntry(void);
+extern void* g_InitGuiTramp;
 
 /* Top credits size (CreditPx, >0=user absolute px): bottom power matches it. */
 int VecText_CreditPx(void);
