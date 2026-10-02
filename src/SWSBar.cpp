@@ -103,6 +103,32 @@ static void** SwsVecItems(unsigned base, int* pCount)
 /* Super 字段 (括号里是 YRpp 头文件值, 本机实测 = 头文件 + 0x0C) */
 #define OFF_SUP_TYPE     0x28u   /* (0x1C) T405 全中 */
 #define OFF_SUP_OWNER    0x2Cu   /* (0x20) H405 全中 */
+/* ★ 引擎 `SuperClass::GetCameoChargeStage` 的**原式** (gamemd 0x6CBF85 起,
+ * Ares 在 0x6CBF5B 挂了 ChargeDrain 分支):
+ *
+ *     006CBF85  mov edi, [ecx+0x24]        ; A = 实例级倒计时总长
+ *     006CBF88  cmp edi, -1
+ *     006CBF8B  mov esi, edi
+ *     006CBF8D  jne 0x6CBF95
+ *     006CBF8F  mov esi, [ebx+0xB0]        ; A == -1 ⇒ 回退 Type->RechargeTime
+ *     006CBF95  mov eax, [ecx+0x38]        ; Left
+ *     006CBF98  mov ecx, [ecx+0x30]        ; Start
+ *     006CBF9B  cmp ecx, -1  / je          ; Start == -1 ⇒ 不扣流逝帧
+ *     006CBFA0  mov edx, [0xA8ED84]        ; CurrentFrame
+ *     006CBFA6  sub edx, ecx               ; elapsed
+ *     006CBFA8  cmp edx, eax / jge → xor    ; elapsed >= Left ⇒ rem = 0
+ *     006CBFAC  sub eax, edx               ; 否则 rem = Left - elapsed
+ *     006CBFB7  sub esi, eax  ; 006CBFC1 fild ; pct = (A - rem) / A
+ *
+ * ⚠⚠ 之前**只**拿 `Type->RechargeTime` 当总量, 漏了 `SuperClass+0x24` 这个
+ *   "每个实例自己的倒计时总长"。难度不同 / 剧情设定不同都会写它 ——
+ *   这就是"终结冲击在我们侧栏从 50% 开始、原本侧栏却是 11%"的成因:
+ *   两者用了不同的分母。`ebx` 是 Type、`ecx` 是 Super, 别把两者搞混。
+ */
+#define OFF_SUP_RTTOTAL  0x24u   /* (0x18) 实例级倒计时总长, -1 = 用类型的 */
+/* ChargeDrainState: 0=Charging / 1=Ready / 2=Draining(运作中)。
+ * 实证见 SwsScan 里 s_Items[n].drainState 那段注释 (Ares 二进制 0x1003517F/0x10035217)。 */
+#define OFF_SUP_DRAINSTATE 0x7Cu
 #define OFF_SUP_RTSTART  0x30u   /* (0x24) RechargeTimer.Start */
 #define OFF_SUP_RTLEFT   0x38u   /* (0x2C) RechargeTimer.Left  */
 #define OFF_SUP_PRESENT  0x6Du   /* (0x61) IsPresent  */
@@ -205,6 +231,8 @@ static void** SwsVecItems(unsigned base, int* pCount)
 #define ARES_EXT_PCXNAME   0x4B0u   /* SidebarPCX 文件名 (定长串, 已小写) */
 #define ARES_EXT_PCXSURF   0x4D0u   /* 解析后的 BSurface* (引擎自己缓存的) */
 #define ARES_EXT_PCXSURF2  0x4D8u   /* 同上, 另一处写入点 (0x10033301) */
+#define ARES_EXT_RATIO     0x220u   /* SW.ChargeToDrainRatio (double) */
+#define ARES_EXT_RATIO_SET 0x228u   /* 上面那个"ini 真的写了"标志 (bool) */
 #define ARES_HOOK_SCAN_EXT 0x30u    /* 扫钩子体的字节数 (只用到 +0x1C) */
 /* 同一个导出钩子的名字, 下面图标抓取那一节还要用 (此处先定义以便定位器引用) */
 #define ARES_HOOK_PCX     "StripClass_Draw_SuperWeapon_PCX"
@@ -430,6 +458,29 @@ static int SwsAresExtBool(void* ext, unsigned off)
     return v ? 1 : 0;
 }
 
+/* 取 ExtData 里的 `SW.ChargeToDrainRatio` (火风暴类"维持时长 = 充能时间 × ratio")。
+ * Ares 存的是 **double** @ +0x220, +0x228 是"ini 里真的写了"的标志位; 没写就
+ * 回退**全局默认 1.0** —— 见 Ares `SWTypeExt::GetChargeToDrainRatio()`:
+ *     10032690  cmp byte [ecx+0x228], 0
+ *     10032699  fld  qword [ecx+0x220]          ; ini 写了 → 用它
+ *     100326A5  fld  qword [eax+0x760]          ; 没写   → 1.0
+ * 返回 0 表示"读不到" (ExtData 没找到 / 值不合理), 调用方回退 1.0。
+ *
+ * ⚠ 为什么不从"激活瞬间的 TimeLeft"反推维持时长: 那要跨帧缓存一个峰值, 而且
+ *   玩家在充能中途激活时 duration 会被 (rechargeTime - left) 缩放, 峰值不等于
+ *   真正的维持时长。直接乘 ratio 是解析式的, 和引擎 `ClickFire` 里
+ *   `duration = (rechargeTime - left) * ratio` 逐字对应。 */
+static double SwsAresExtRatio(void* ext)
+{
+    double r;
+    if (!ext) return 0.0;
+    if (!*(const unsigned char*)((const char*)ext + ARES_EXT_RATIO_SET)) return 1.0;
+    r = *(const double*)((const char*)ext + ARES_EXT_RATIO);
+    /* 只接受 (0,1]: ratio=0 会让分母为 0 (除零), >1 是脏数据。 */
+    if (!(r > 0.0) || r > 1.0) return 1.0;
+    return r;
+}
+
 /* 取 ExtData 里的 SidebarPCX 文件名。Ares 自己已经把串小写化并存成定长串,
  * 直接拷出来即可 (只拷**名字**, 不碰 BSurface* —— 见下面图标一节的告警)。 */
 static const char* SwsAresExtPcxName(void* ext, char* dst, size_t cap)
@@ -600,6 +651,12 @@ typedef struct {
     int prio;
     int ready;
     int susp;
+    /* 火风暴类状态机: 0=Charging / 1=Ready / 2=Draining(运作中)。
+     * 只有 UseChargeDrain 的超武非 0 (其他类型该字段无意义, 由 tc->drain 门控)。 */
+    int drainState;
+    /* 运作中百分比分母 = 满充能时间 × ChargeToDrainRatio (= 维持时长)。
+     * 只有 drainState==2 时才用; 0 表示没算出来, 绘制层回退到 total。 */
+    int drainTotal;
     int remain;   /* 剩余帧 */
     int total;    /* 总帧 (<=0=未知) */
     int x, y;
@@ -971,6 +1028,8 @@ typedef struct {
     int   drain;     /* 1 = UseChargeDrain */
     int   actionNone;/* 1 = 对象上的 Action == None (点击即生效) */
     int   instant;   /* 1 = 点击即发射 */
+    double ratio;     /* SW.ChargeToDrainRatio (火风暴类维持时长系数, 缺省 1.0);
+                       * 只对 drain 类有意义, 别的类留 1.0 */
     const char* pcxFile;
     char pcxName[64];  /* pcxFile 指向的自有缓冲 (文件名很短, 内联省一次间接) */
     unsigned short* capPix;  /* 引擎 cameo 抓到的 60x48 像素 (优先于 pcxFile) */
@@ -1321,6 +1380,7 @@ static void SwsFillType(SwsTypeCache* tc, void* type, const char* id)
      * 取不到 ExtData (定位失败 / 该类型没有扩展数据) 时**照旧退回快照**,
      * 行为不倒退。 */
     ext = SwsAresExt(type);
+    tc->ratio = 1.0;
     if (ext)
     {
         int v;
@@ -1329,6 +1389,8 @@ static void SwsFillType(SwsTypeCache* tc, void* type, const char* id)
          * (rulesmo.ini 里 StasisGridSpawn/ConfusionGridSpawn 只写了后者),
          * 所以这里**只**用它来额外收紧, 绝不拿它去覆盖 manual。 */
         if (!SwsAresExtBool(ext, ARES_EXT_MANUAL)) tc->manual = 0;
+        /* 火风暴类的维持时长系数: 侧栏算"运作中百分比"的分母要用它。 */
+        tc->ratio = SwsAresExtRatio(ext);
     }
     if (!ext && m && (m->mask & SWS_MIX_SHOW)) tc->show = m->show;
     if (!tc->show)
@@ -1408,28 +1470,27 @@ static void SwsFillType(SwsTypeCache* tc, void* type, const char* id)
      *   退回"要选格" (症状: 原版点一下、侧栏要点两次)。
      *   ExtData 里这个值是 Ares 合并完的最终结果, 不依赖我们那个失效的钩子。 */
     if (ext && SwsAresExtBool(ext, ARES_EXT_AITGT)) tc->instant = 1;
-    /* 火风暴类 (UseChargeDrain) 继续过滤 —— 之前的研究成立, 且用户确认:
-     * Ares 的 ChargeDrain 状态机只接在 `SuperClass_ClickFire @0x6CB920`, 而我们
-     * 走 `SpecialPlace` 事件 (`Fire_SW->Launch->Activate`), 两条入口不相交 ⇒ 效果
-     * 能打出去, 但 `ChargeDrainState` 永远停在 Ready, **显示不出"生效中"**。
-     * 要补状态就得写引擎的 ChargeDrainState, 而那要先拿 `HouseClass::Supers`
-     * 偏移 (YRpp 头推导值 +0x180 与先前估值 0x384 差 0x204, 不可信)。收益远小于
-     * 风险。`[SWSidebar] DrainSupers=1` 可临时放回来试。
-     * Phobos 也没接这条 (照抄 LaunchSuper 就以为 SpecialPlace 就够是错的)。 */
-    if (tc->drain)
-    {
-        tc->instant = 1;
-        if (!s_ShowDrain)
-        {
-            static int s_DrainHidden = 0;
-            tc->hide = 1;
-            if (s_DrainHidden < 16)
-            {
-                LogS("sws: hide drain ", id);
-                s_DrainHidden++;
-            }
-        }
-    }
+/* ★★ 火风暴类 (UseChargeDrain) —— **支持**, 不再过滤 (2026-10-02)。
+     *
+     * 实测日志 (决定性): 这几类的 `Action` **就是 0 (None)** ——
+     *     sws: act BlasticadeSpecial   v=0x00000000 i1 m1 d1 s1 p=blasicon.pcx x1
+     *     sws: act PsychicFlashSpecial v=0x00000000 i1 m1 d1 s1 p=pblzicon.pcx x1
+     * (x1 = ExtData 已打通)。而 gamemd 侧栏点击处理 `0x6AAF08
+     *  cmp dword [ecx+0xBC], 0` / `jne 0x6AAF46` —— Action==0 就走 `0x6AAF10`
+     * **立即分支**, 即 ARES 手册描述的"点击激活", **不需要再点地图**。
+     *
+     * ⚠ 之前过滤它们的理由 ("ChargeDrain 状态机只接 ClickFire, 我们走 SpecialPlace
+     *   事件, 两条入口不相交") **是错的**: SpecialPlace 事件最终会路由回
+     *   `HouseClass::SWFire` → `SuperClass::ClickFire`, 状态机照样跑。
+     *   (ClickFire 全代码唯一调用点 `0x4FAE97` 就在 `HouseClass::SWFire` 里。)
+     *
+     * ⇒ 结论: **完全按普通超武处理即可, 什么都不用特殊化**。
+     *   `actionNone=1` 会自动让 `tc->instant = 1`, 走 SpecialPlace —— 与原版
+     *   一致。'激活中' 的状态由引擎自己维护 (SW.ChargeToDrainRatio 控制维持时长,
+     *   能量耗尽自动回充; 逻辑上可再点一次关闭, 但这几类 ini 里
+     *   `SW.Unstoppable=yes`, 所以启动后停不掉 —— 都是引擎行为, 我们不插手)。
+     */
+    (void)tc->drain;
     /* 自证日志: 把**判据的实际取值**打出来, 限 40 条。
      * `instant` 判错时 (症状: 原版点一下就生效、侧栏要点两次), 光看
      * `nopcx` / `armed` 是分不清"`Action` 偏移/取值读错了"还是"点击那步没走到
@@ -1500,7 +1561,9 @@ static int SwsSidebarShows(int swIdx)
     if (!tc) return 0;
     if (tc->prio < 0) SwsFillType(tc, type, id);
     if (tc->swIdx < 0) return 0;
-    return (tc->hide || !tc->show || !tc->manual || tc->drain) ? 0 : 1;
+    /* ★ `drain` (UseChargeDrain) **不再参与过滤** —— 支持之后它只用来决定
+ * instant (见 SwsFillType)。火风暴类现在与普通超武同等对待。 */
+return (tc->hide || !tc->show || !tc->manual) ? 0 : 1;
 }
 
 /* ================= 从引擎手里拿超武 cameo 图标 =================
@@ -2021,7 +2084,7 @@ static void SwsScan(void)
          * (理由见 SwsFillType)。三条都来自**合并后**的规则快照 + 对象字段。
          * 不能拿引擎 ShowTimers 集合当显示清单 —— 它只有 11 个, 是
          * "正在计时"的子集, 不是侧栏该有的全量。 */
-        if (tc->hide || !tc->manual || tc->drain) { rHidden++; continue; }
+        if (tc->hide || !tc->manual) { rHidden++; continue; }
         if (!tc->show) { rShow++; continue; }
         swIdx = tc->swIdx;
         side = tc->side;
@@ -2029,13 +2092,23 @@ static void SwsScan(void)
         pcxFile = tc->pcxFile;
         capPix = tc->capPix;
         instant = tc->instant;
-        total = *(int*)((char*)type + OFF_SWT_RECH);
-        if (total < 0 || total > 1000000) total = 0;
+        /* 倒计时: **逐字照抄** `SuperClass::GetCameoChargeStage` (0x6CBF85)。
+         * 关键在总量取 `SuperClass+0x24` (实例级), 只有它是 -1 才回退
+         * `Type->RechargeTime` —— 之前一律用后者, 于是难度/剧情一旦给这个
+         * 实例单独设了时长, 我们与原版侧栏的分母就不同 (症状: 我们 50%,
+         * 原版 11%)。 */
+        total = *(int*)((char*)sup + OFF_SUP_RTTOTAL);
+        if (total == -1 || total <= 0 || total > 1000000)
+        {
+            total = *(int*)((char*)type + OFF_SWT_RECH);
+            if (total < 0 || total > 1000000) total = 0;
+        }
         start = *(int*)((char*)sup + OFF_SUP_RTSTART);
         left = *(int*)((char*)sup + OFF_SUP_RTLEFT);
+        /* Start == -1 ⇒ 引擎不扣流逝帧, 直接拿 Left */
         if (start == -1) remain = left;
         else remain = left - (frame - start);
-        if (remain < 0) remain = 0;
+        if (remain < 0) remain = 0;          /* 同引擎的 "elapsed >= Left ⇒ 0" */
         if (total > 0 && remain > total) remain = total;
         s_Items[n].type = type;
         s_Items[n].pcxFile = pcxFile;
@@ -2047,6 +2120,87 @@ static void SwsScan(void)
         SwsCopyName(s_Items[n].name, tc->name, 24);
         s_Items[n].ready = (ready == 1 && susp == 0) ? 1 : 0;
         s_Items[n].susp = (susp == 1) ? 1 : 0;
+        /* ★ 火风暴类 (UseChargeDrain) 的"运作中"状态 = `ChargeDrainState`。
+         *
+         *   偏移 +0x7C, 三态 (Ares 源码 `Ext/SWType/Hooks.cpp:386-400` 的
+         *   `switch(ChargeDrainState)` 配 `Text.Charging`/`Text_Ready`/
+         *   `Text_Active`), 本机 3.0 二进制实证:
+         *       1003517F  mov dword [esi+0x7C], 1     ; ← Ready
+         *       10035217  mov dword [esi+0x7C], 2     ; ← Draining (激活中)
+         *       10035517  mov dword [esi+0x7C], 0     ; ← Charging
+         *   且 ClickFire (0x6CB9D9) 是 `state==1 → 写 2`(激活),
+         *   (0x6CB954) 是 `state==2 → 写 1`(停用), 与源码
+         *   `Ready→Draining` / `Draining→Ready` 完全对上。
+         *
+         *   只有 `UseChargeDrain` 的类型才有这个状态机, 其余类型该字段无意义,
+         *   所以按 `tc->drain` 门控, 避免误显示。 */
+        s_Items[n].drainState = tc->drain ? (*(int*)((char*)sup + OFF_SUP_DRAINSTATE) & 0xFF) : 0;
+        if (s_Items[n].drainState < 0 || s_Items[n].drainState > 2)
+            s_Items[n].drainState = 0;
+        /* ★ 运作中百分比的**分母** = 维持时长, 不是满充能时间。
+         *
+         * 引擎的 `SuperClass::GetCameoChargeStage` 在 `ChargeDrainState==2` 时
+         * 返回 `remaining / A`, A 取 `GetRechargeTime()` —— 也就是**满充能时间**
+         * (gamemd 0x6CC260: `Super+0x24`, 为 -1 才回退 `Type+0xB0`)。
+         * 而激活瞬间 `RechargeTimer.TimeLeft` 被写成
+         * `duration = (rechargeTime - left) * ratio` (Ares `ClickFire`), 满充能
+         * 激活时 left≈0, 所以 TimeLeft 从**满充能的 ratio 倍**开始往下走。
+         *
+         * 于是照抄引擎的话, 侧栏一激活就从 `ratio` 开始显示: 爆裂屏障 50%、
+         * 心灵之火 25% —— 正是先前实测到的 49%/24%。
+         *
+         * 原版侧栏之所以是 100% 起跳, 是因为它拿维持时长当分母。所以这里
+         * 显式算 `drainTotal = total * ratio`, 而**不是**引擎那个 A。
+         * ratio 来自 Ares ExtData `SW.ChargeToDrainRatio` (double @ +0x220),
+         * 缺省 1.0 —— 与 `ClickFire` 里 `duration` 的算法逐字对应。
+         *
+         * 注意 `total` 本身仍按引擎口径取 (实例级优先), 这样"充能中"的
+         * 百分比与原版完全一致, 只有运作中换分母。 */
+        s_Items[n].drainTotal = 0;
+        if (tc->drain && total > 0)
+        {
+            double dt = (double)total * (tc->ratio > 0.0 ? tc->ratio : 1.0);
+            if (dt >= 1.0 && dt <= 1000000.0) s_Items[n].drainTotal = (int)dt;
+            if (s_Items[n].drainTotal <= 0)       s_Items[n].drainTotal = total;
+        }
+        /* 自证: 火风暴类的 ChargeDrainState 变化 (0→2 激活 / 2→1 停用) 各记一行。
+         * 顶栏 `Run` 是**唯一**的外部可见反馈, 万一偏移读错 (恒 0 / 恒 2) 只有
+         * 这行能立刻分辨。 */
+        if (tc->drain)
+        {
+            static int s_LastDs = -1;
+            if (s_LastDs != s_Items[n].drainState)
+            {
+                char lb[16], line[96];
+                unsigned w;
+                s_LastDs = s_Items[n].drainState;
+                w = AppendCStr(line, 0, "sws: drain ", sizeof(line));
+                /* ⚠ 这句的返回值必须接回 w: 早先漏了, w 还停在 "sws: drain " 的
+                 * 末尾, 下一句 " state=" 直接把 ID 覆盖掉, 日志里就变成
+                 * `sws: drain  state=2` (ID 永远空), 几个火风暴类完全分不开。 */
+                w = AppendCStr(line, w, (const char*)type + OFF_SWT_ID, sizeof(line));
+                w = AppendCStr(line, w, " state=", sizeof(line));
+                UtoA((unsigned)s_Items[n].drainState, lb);
+                w = AppendCStr(line, w, lb, sizeof(line));
+                w = AppendCStr(line, w, " ready=", sizeof(line));
+                UtoA((unsigned)ready, lb);
+                w = AppendCStr(line, w, lb, sizeof(line));
+                /* 运作中百分比的两个量都打出来: `dt` 是分母 (维持时长),
+                 * `left` 是分子。激活瞬间应该看到 left≈dt → 百分比≈100%,
+                 * 若 dt 退回等于 `tot` 就是 ChargeToDrainRatio 没读到 (会退回
+                 * ratio 起跳, 症状: 爆裂屏障 50% / 心灵之火 25%)。 */
+                w = AppendCStr(line, w, " tot=", sizeof(line));
+                UtoA((unsigned)total, lb);
+                w = AppendCStr(line, w, lb, sizeof(line));
+                w = AppendCStr(line, w, " dt=", sizeof(line));
+                UtoA((unsigned)s_Items[n].drainTotal, lb);
+                w = AppendCStr(line, w, lb, sizeof(line));
+                w = AppendCStr(line, w, " left=", sizeof(line));
+                UtoA((unsigned)remain, lb);
+                AppendCStr(line, w, lb, sizeof(line));
+                LogLine(line);
+            }
+        }
         s_Items[n].remain = remain;
         s_Items[n].total = total;
         s_Items[n].instant = instant;
@@ -3951,8 +4105,11 @@ static unsigned SwsSig(int w, int h, int pitch)
         s = s * 31u + (unsigned)it->side;
         s = s * 31u + (unsigned)it->prio;
         s = s * 31u + (unsigned)it->ready;
-        s = s * 31u + (unsigned)it->susp;
-        s = s * 31u + (unsigned)it->instant;
+s = s * 31u + (unsigned)it->susp;
+    /* ★ drainState 必须进指纹: 火风暴类激活/停用只改这一个字段, 不加的话
+     * 状态切换不会触发重绘, 顶栏的 `Run` 要等下一次别的原因重绘才出现。 */
+    s = s * 31u + (unsigned)it->drainState;
+    s = s * 31u + (unsigned)it->instant;
         s = s * 31u + (unsigned)(size_t)it->pcxFile;
     }
     return s;
@@ -4190,54 +4347,121 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
         }
         if (drawn)
         {
-            /* 未就绪 (释放后充能中): 压暗。只对这类条目做, 通常 0~1 个。
-             * 悬停的那一个不压 —— 玩家正在看它, 让提示框和白框说话。 */
-            if (!it->ready && !isHover)
+            /* 未满格 (释放后充能中 / 火风暴类运作中): 压暗。**判据与上面那个
+             * 百分比门控完全一致** (`remain > 0 || !ready`), 别用 `!ready` 单判 ——
+             * 火风暴类的 IsReady 不可信 (Ares 激活时不清它, 详见上面 `pct` 处的
+             * 注释与实测日志 `state=2 ready=1 left=410`)。只按 `!ready` 判的话
+             * 这类超武永远不会压暗, 与其它超武"不满即压暗"的表现不一致。
+             *
+             * 通常 0~1 个条目会被压暗。悬停的那一个不压 —— 玩家正在看它,
+             * 让提示框和白框说话。 */
+            if ((it->remain > 0 || !it->ready) && !isHover)
                 SwsCFillA(it->x, it->y, SWS_ICON_W, SWS_ICON_H, 0, 0, 0, 45);
         }
         {
-            /* 充能百分比: 画在图标顶部 (两趟都用同宽: 多画 2px 会切出字形
-             * overhang 的碎片, 形似 '<'; 微软雅黑 extent 非矩形)。 */
+            /* 图标顶部文字, 最多两行:
+             *   行1: 状态/百分比 —— `Hold` (暂停) 或充能百分比 (所有超武一致)
+             *   行2: `Run` —— 仅火风暴类运作中 (ChargeDrainState==Draining)
+             *
+             * 两行各调一次 `RenderLine` 是安全的: 它内部 `ClearDib()` + 重画,
+             * 不跨调用留状态 (GdiText.cpp:895)。
+             * 行2 只对火风暴类出现, 别的超武行1 位置/语义完全不变。 */
             if (txtOk)
             {
-                wchar_t st[8];
-                int sl = 0, sw, sx, ny, adv;
-                /* 必须清满整个数组: 只清前 4 个的话第 5 个是栈上垃圾, 非零时
+                wchar_t l1[8], l2[8];
+                int li;
+                /* 两行都要清满: 只清前 4 个的话第 5 个是栈上垃圾, 非零时
                  * sl 会变长, RenderLine 就把 "100%" 后面的垃圾字节也画出来。 */
-                st[0] = st[1] = st[2] = st[3] = 0;
-                st[4] = st[5] = st[6] = st[7] = 0;
+                l1[0] = l1[1] = l1[2] = l1[3] = 0;
+                l1[4] = l1[5] = l1[6] = l1[7] = 0;
+                l2[0] = l2[1] = l2[2] = l2[3] = 0;
+                l2[4] = l2[5] = l2[6] = l2[7] = 0;
                 /* 就绪 (100%) 不显示任何字: 图标本身就是"可用"的意思, 再叠
                  * 一层 100% 只是多一次 GDI 文本渲染, 还压住图标。 */
                 if (it->susp)
                 {
-                    st[0] = 'H'; st[1] = 'o'; st[2] = 'l'; st[3] = 'd';
+                    l1[0] = 'H'; l1[1] = 'o'; l1[2] = 'l'; l1[3] = 'd';
                 }
-                else if (!it->ready && it->total > 0)
+                else if (it->total > 0 && (it->remain > 0 || !it->ready))
                 {
-                    int pct = 100 - (it->remain * 100) / it->total;
+                    int pct;
+                    /* ⚠ 上面那个门控看的是**计时器有没有在跑** (`remain > 0`),
+                     * 不是 `IsReady`。火风暴类 (UseChargeDrain) 的 `IsReady`
+                     * 不可信: Ares 激活它走 `ClickFire` → `Launch()`, **不清
+                     * IsReady** (它本来就是从 Ready 点过来的), 停用/耗尽后也没人
+                     * 补清 —— 引擎里唯一把 IsReady 置 1 的地方是计时器归零那条路
+                     * (Ares `0x10035587`), 置 0 只在发射路径。
+                     * 实测日志 (运作中的爆裂屏障):
+                     *     sws: drain BlasticadeSpecial state=2 ready=1 tot=3600 ...
+                     * `ready=1` 而 `left` 在减 —— 所以老门控 `!ready` 会把这些超武
+                     * **充能时的上升百分比整个挡掉**, 之前只看得到下降的那条
+                     * (靠 `|| drainState==2` 兜底)。
+                     *
+                     * `remain > 0` 是"计时器在跑"的直接证据, 三种状态都成立:
+                     *   充能中 → remain>0 → 上升百分比
+                     *   就绪   → remain=0 → 不显示 (图标本身即"可用")
+                     *   运作中 → remain>0 → 下降百分比 + 行2 `Run`
+                     * 附带 `|| !it->ready` 防回归: 万一某类型 IsReady=0 而计时器
+                     * 没跑, 老行为照样显示。 */
+                    /* ★ 火风暴类**运作中**时百分比是**倒着走**的 (燃料表),
+                     * 与充能时相反, 并且分母要换成**维持时长**
+                     * (`drainTotal` = 满充能 × ChargeToDrainRatio)。
+                     *
+                     * 引擎 `SuperClass::GetCameoChargeStage` 的 ChargeDrain 分支
+                     * (gamemd 0x6CBF02 起) 算的是 `remaining / GetRechargeTime()`,
+                     * 分母用的是**满充能时间**, 所以原版内部那个"充能条"在激活
+                     * 瞬间是停在 `ratio` 处 (爆裂屏障 50%、心灵之火 25%)。
+                     * 但**侧栏百分比不是那个充能条** —— 原版侧栏拿维持时长当
+                     * 分母, 所以是 100% 起跳往下走。实测: 我们先前 49%/24%,
+                     * 原版 100%, 差的就是这个分母。
+                     *
+                     * 不跟原版一致的话, 激活后百分比会从 ratio 跳起, 与原版相反。 */
+                    if (it->drainState == 2)
+                    {
+                        int dt = it->drainTotal > 0 ? it->drainTotal : it->total;
+                        pct = (it->remain * 100) / dt;
+                    }
+                    else
+                    {
+                        pct = 100 - (it->remain * 100) / it->total;
+                    }
                     if (pct < 0) pct = 0;
                     if (pct > 99) pct = 99;      /* 满格就是就绪, 由上面分支处理 */
                     /* 按位数输出: 早先固定写三字符, 1% 就成了 "001%"。 */
                     if (pct >= 10)            /* 按位数输出, 别让 1% 变 "001%" */
                     {
-                        st[0] = (wchar_t)('0' + (pct / 10) % 10);
-                        st[1] = (wchar_t)('0' + pct % 10);
-                        st[2] = '%';
+                        l1[0] = (wchar_t)('0' + (pct / 10) % 10);
+                        l1[1] = (wchar_t)('0' + pct % 10);
+                        l1[2] = '%';
                     }
                     else
                     {
-                        st[0] = (wchar_t)('0' + pct);
-                        st[1] = '%';
+                        l1[0] = (wchar_t)('0' + pct);
+                        l1[1] = '%';
                     }
                 }
-                while (sl < 7 && st[sl]) sl++;
-                adv = g_G->adv > 0 ? g_G->adv : s_FontPx + 2;
-                sw = sl ? RenderLine(st, sl) : 0;
-                if (sw > 0)
+                /* 行2: 火风暴类"运作中"。用英文 `Run` 而不是中文"运作中":
+                 * 图标只有 60px 宽, FontPx=16 下 4 个汉字必然溢出/糊成一团
+                 * (而 `Hold` 只有 4 个拉丁字母, 一直好好的)。引擎自己给这
+                 * 几类的 `Text.Active` 走 CSF 标签 (`NAME:BLASTRUNNING`),
+                 * 我们读不到 CSF, 所以取与 `Hold` 视觉宽度一致的 3 字母。 */
+                if (!it->susp && it->drainState == 2)
                 {
+                    l2[0] = 'R'; l2[1] = 'u'; l2[2] = 'n';
+                }
+                for (li = 0; li < 2; li++)
+                {
+                    const wchar_t* st = li ? l2 : l1;
+                    int sl = 0, sw, sx, ny, adv;
+                    while (sl < 7 && st[sl]) sl++;
+                    adv = g_G->adv > 0 ? g_G->adv : s_FontPx + 2;
+                    if (!sl) continue;
+                    sw = RenderLine(st, sl);
+                    if (sw <= 0) continue;
                     sx = it->x + (SWS_ICON_W - sw) / 2;
-                    ny = it->y + 1;
+                    ny = it->y + 1 + li * (adv + 1);
                     if (sx < it->x) sx = it->x;
+                    if (ny + adv > it->y + SWS_ICON_H) continue;  /* 越界就别画 */
                     SwsCCov(g_G->bits, g_G->pitch, 4, sx + 1, ny + 1, sw, adv,
                             0, 0, 0, 80 * s_Alpha / 100);
                     SwsCCov(g_G->bits, g_G->pitch, 4, sx, ny, sw, adv,
