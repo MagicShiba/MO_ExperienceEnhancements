@@ -25,13 +25,20 @@
  *   - 清单与图标: 清单 = 本家拥有的超武 (`SuperClass::Array` 里 owner==本家且
  *     IsPresent==1), **不是 rules ini, 也不是防御支援页** —— 两者都只覆盖基础
  *     规则那一份数据。图标**直接问引擎要** (从 Ares 的 cameo 绘制链上抓像素),
- *     见"从引擎手里拿超武 cameo 图标"。
+ *     见"从引擎手里拿超武 cameo 图标"; 抓不到时用**合并规则**里的
+ *     `SidebarPCX=` 自己载。
+ *   - 规则旗标 (`SW.ShowCameo` / `SW.ManualFire` / `SW.UseAITargeting` /
+ *     `Action` / `Type` / `UseChargeDrain` / `SidebarPCX`): 一律取**合并后**的
+ *     ini —— 挂在 `SuperWeaponTypeClass::LoadFromINI` 入口 (0x6CEA20) 当场读进
+ *     自有表。`CCINIClass::INI_Rules` 只有基础规则那份, 战役/地图内嵌 ini 新增
+ *     或改写的超武读不到; 三个症状全出在这个缺口上, 见"合并规则的快照"。
  *
  * 地址 (只读为主, 首帧探针日志自证)。**本机 Ares 3.0 的结构体字段比 YRpp
  * 头文件大 0x0C**: 头文件 Super/SWType 的字段值一律 +0x0C, 见下面各宏注释。
  * 头文件地址不能直接抄, 详见笔记的可信度表。
  *   SuperClass::Array 0xA83CB8 / HouseClass::Array 0xA80228 (含虚表);
  *   SuperWeaponTypeClass::Array 0xA8E330;
+ *   SuperWeaponTypeClass::LoadFromINI 0x6CEA20 (合并规则快照的钩点);
  *   CurrentPlayer *(0xA83D4C); CurrentFrame *(0xA8ED84);
  *   Scenario PlayerSideIndex *(*(0xA8B230)+0x34B8);
  *   Display 对象 0x87F7E8, CurrentSWTypeIndex +0x11B8 (=0x8809A0)。
@@ -102,13 +109,29 @@ static void** SwsVecItems(unsigned base, int* pCount)
 #define OFF_SUP_READY    0x6Fu   /* (0x63) IsReady    */
 #define OFF_SUP_SUSPEND  0x70u   /* (0x64) IsSuspended */
 
-/* SuperWeaponType 字段 (同样 +0x0C 漂移; ID 与 Super 同源, 计数已验证) */
+/* SuperWeaponType 字段 (同样 +0x0C 漂移; ID 与 Super 同源, 计数已验证)。
+ *
+ * ⚠ `ManualControl` 的 ini 键名是 **`ManualControl`** (gamemd .rdata 0x842644
+ *   字符串实证), **不是** `SW.ManualFire` —— `SW.ManualFire` 是 **Ares** 的键,
+ *   写进 Ares 自己的 `SWTypeExt::ExtData::SW_ManualFire`, 与本字段无关。以前
+ *   拿 `SW.ManualFire` 跟这个字段对账, 于是永远对不上 (那条 `flags OFFSET?`
+ *   日志**实测一直触发**), 而真正该读的 `ManualControl=` 又没人读 ⇒ 判据整个
+ *   是空的, `ManualControl=no`/`SW.ManualFire=no` 的那批一个都过滤不掉
+ *   (IronGuardSpecial 就是这么漏进侧栏的)。
+ */
 #define OFF_SWT_ID       0x24u   /* (0x18) */
 #define OFF_SWT_UINAME   0x60u   /* (0x54) */
 #define OFF_SWT_ARRIDX   0x98u   /* (0x8C) */
+#define OFF_SWT_ACTION   0xBCu   /* (0xB0) Action: 0 = None = 点击即生效 */
 #define OFF_SWT_RECH     0xB0u   /* (0xA4) RechargeTime */
 #define OFF_SWT_DRAIN       0xE5u /* UseChargeDrain */
-#define OFF_SWT_MANUALCTRL  0xF5u /* ManualControl = SW.ManualFire */
+#define OFF_SWT_MANUALCTRL  0xF5u /* ManualControl */
+
+/* Syringe 钩子帧布局 (YRpp Syringe.h; 本项目 TypeSelect.cpp / MsgText.cpp
+ * 已在用: EAX=0x24 / ECX=0x20 / ESP=0x14)。SWS_SwTypeIni 用它取 this 与
+ * 栈上的 pINI。 */
+#define SWS_REG_ESP 0x14u
+#define SWS_REG_ECX 0x20u
 
 #define VT_LOCK            0x5C
 #define VT_UNLOCK          0x60
@@ -123,6 +146,302 @@ static void** SwsVecItems(unsigned base, int* pCount)
  * "见过" 和 "活的"。2048 远大于实测类型数 (~500), 上界只作野值闸门。 */
 #define SWS_LIVE_BITS 2048
 #define SWS_LIVE_BYTES (SWS_LIVE_BITS / 8)
+
+/* =======================================================================
+ * Ares SWTypeExt::ExtData —— 超武行为的**权威来源**
+ *
+ * ⚠⚠⚠ 2026-10-02: 之前所有"过滤/即时/图标"判据都在 ini 层面自己重做一遍
+ * (快照表 s_Mix + LoadFromINI 钩子)。**全部是错的**, 而且错法各不相同:
+ *   - `SWS_SwTypeIni` 钩子实测**一次都没被调到** (日志里连一行 `sws: swtype
+ *     hook` 都没有), 于是 `s_Mix` 永远只有"首建时垫的 INI_Rules 底" ——
+ *     地图内嵌 ini 的 `SW.UseAITargeting=yes` / `SidebarPCX=` 根本读不到,
+ *     这就是 WarheadSpecial1 图标空着 + 要点两下的**同一个**根因。
+ *   - 就算钩子被调到, 自己复刻 ini 合并语义也永远追不上 Ares 自己的合并
+ *     顺序 (`Action=Custom` 被 Ares 在 0x1003332A 改写成 0x7F, 我们读到的
+ *     永远是改写前的字符串)。
+ *
+ * ★ 正确做法 = **直接读 Ares 已经算好的结果**。Ares 把每个超武的扩展数据放在
+ *   `SWTypeExt::ExtMap` (ContainerMap<SuperWeaponTypeClass, ExtData>) 里, 键是
+ *   **类型对象指针** (`ExtMap.Find(pSuper->Type)`, 见 `Ext/SWType/Hooks.Update.cpp:188`
+ *   与 `_Container.hpp:226`)。
+ *
+ * 下面每个偏移都是**从本机 Ares.dll 离线反汇编确认**的, 不是猜的:
+ *   入口 `SWTypeExt::ExtData::LoadFromINIFile` (0x10033300 附近), 模式固定为
+ *       push <键名>; push edi; lea eax,[esp+18h]; push eax;
+ *       lea ecx,[esi+OFF];  call Valueable<T>::Read
+ *   所以 `esi` = ExtData 基址, `lea ecx,[esi+OFF]` 里的 OFF 就是字段偏移。
+ *   逐条现场反汇编 (只认**紧邻**的那一对, 别用 FIFO 配对):
+ *       10033425 lea ecx,[esi+0x1E3]  <- "SW.FireIntoShroud"
+ *       1003343B lea ecx,[esi+0x1E1]  <- "SW.AutoFire"
+ *       10033451 lea ecx,[esi+0x1E2]  <- "SW.ManualFire"
+ *       10033467 lea ecx,[esi+0x1E4]  <- "SW.CreateRadarEvent"
+ *       1003347D lea ecx,[esi+0x1E5]  <- "SW.ShowCameo"      ★
+ *       10033499 lea ecx,[esi+0x1E6]  <- "SW.Unstoppable"
+ *       100335C7 lea ecx,[esi+0x20E]  <- "SW.UseAITargeting" ★
+ *       10033B60 lea ecx,[esi+0x4B0]  <- "SidebarPCX"        ★
+ *
+ * ★★ 最硬的交叉验证: `HouseClass_UpdateSuperWeaponsUnavailable` 里那段
+ *   **AddCameo 的判门** (`0x1003961D`, 对应 `Hooks.Update.cpp:186-193`):
+ *       mov ecx, <ExtMap>; push [eax+0x28]; call find
+ *       cmp byte ptr [eax+0x1E5], 0     ; SW_ShowCameo
+ *       jne  → AddCameo(0x1F, index)
+ *   ⇒ `+0x1E5` 是 **1 字节 bool** 且**就是**引擎自己决定"进不进防御页"的那个值。
+ *   我们读它 = 与引擎逐位一致, 不可能再出现"游戏里没有、侧栏里却有"。
+ *
+ * ★ 定位一律**从 Ares 自己的指令里读地址**, 不写死绝对地址 (Ares.dll 的
+ *   ImageBase 是 0x10000000, ASLR 后 base 会变):
+ *   - `ExtMap` = AresBase + 0xC1C54  —— 从 `mov ecx, <imm32>` 取。
+ *   - `find()` = 该 `call` 的落点 (AresBase + 0x57C70)。
+ *   - ExtData 大小 0x500、字段 +0x20 是 AttachedToObject (`push 0x500` 走
+ *     operator new, 实证于 0x10034701); ctor 把 +0x4B0 清 0、`+0x4D0` 置空。
+ * ===================================================================== */
+#define ARES_EXTMAP_OFF    0x000C1C54u
+#define ARES_FIND_OFF      0x00057C70u
+#define ARES_EXTDATA_SZ    0x500u
+#define ARES_EXT_OWNER     0x020u   /* AttachedToObject = SuperWeaponTypeClass* */
+#define ARES_EXT_MANUAL    0x1E2u   /* SW_ManualFire     (bool, 1 字节) */
+#define ARES_EXT_SHOW      0x1E5u   /* SW_ShowCameo      (bool, 1 字节) */
+#define ARES_EXT_AITGT     0x20Eu   /* SW_UseAITargeting (bool, 1 字节) */
+#define ARES_EXT_PCXNAME   0x4B0u   /* SidebarPCX 文件名 (定长串, 已小写) */
+#define ARES_EXT_PCXSURF   0x4D0u   /* 解析后的 BSurface* (引擎自己缓存的) */
+#define ARES_EXT_PCXSURF2  0x4D8u   /* 同上, 另一处写入点 (0x10033301) */
+#define ARES_HOOK_SCAN_EXT 0x30u    /* 扫钩子体的字节数 (只用到 +0x1C) */
+/* 同一个导出钩子的名字, 下面图标抓取那一节还要用 (此处先定义以便定位器引用) */
+#define ARES_HOOK_PCX     "StripClass_Draw_SuperWeapon_PCX"
+
+typedef void* (__thiscall *SwsAresFindFn)(void* self, const void* key);
+
+static void*        s_AresExtMap = NULL;   /* ContainerMapBase* (静态对象) */
+static SwsAresFindFn s_AresFind = NULL;
+static int          s_AresExtFail = 0;
+static int          s_AresExtTried = 0;
+
+/* Ares 映像范围 + 后面的日志/名字校验助手 (定义都在下方, 这里先声明) */
+static int SwsAresImage(unsigned char** ppLo, unsigned char** ppHi);
+static int SwsIdOk(const char* s);
+static void LogS(const char* tag, const char* s);
+static void LogI(const char* tag, int v);
+static int SwsTabCameoOk(void);
+static int SwsEngineCleanList(int* outIdx, int cap);
+static void SwsCleanStampCheck(void);
+static int SwsStripCameoCount(int tab);
+#define TAB_DEFENSE           1      /* 0 建筑 / 1 防御 / 2 步兵 / 3 载具 (见下重复定义) */
+
+/* 引擎干净清单的**快照** (按超武下标开位)。
+ * `s_CleanMode==1` 时它是硬闸门: 不在快照里的一律不画。
+ * 只增不减 —— 因为引擎那个容器会被去重删空, 直接读它会自我蚕食
+ * (详见 SwsEngineCleanList 上方那段)。 */
+static unsigned char s_CleanBits[SWS_LIVE_BYTES];
+static int s_CleanMode = 0;
+static int s_CleanN = -1;
+
+/* 定位 ExtMap + find()。地址全部来自 Ares 自己的代码, fail-closed。 */
+static int SwsAresLocateExt(void)
+{
+    unsigned char *base, *imgHi, *p, *fn;
+    FARPROC hook;
+    int gotMap = 0, gotCall = 0;
+    unsigned mapAddr = 0;
+    if (s_AresExtMap && s_AresFind) return 1;
+    if (s_AresExtFail) return 0;
+    /* ⚠⚠ 这两处失败**绝不能**置 `s_AresExtFail` (闩死): Ares.dll 未必在第一次
+     *   询问时就已经映射进来 (SwsFillType 可能被 `SwsSidebarShows` 提前调到,
+     *   那条路没有 `frame >= 60` 的门槛)。一旦在这里闩死, 后面再也不会重试,
+     *   于是**全程 x0 且一行日志都没有** —— 2026-10-02 卡在这上面很久。
+     *   判据: "还没准备好"是可恢复的, 只有"准备好了但内容不对"才是真失败。 */
+    if (!SwsAresImage(&base, &imgHi)) return 0;
+    hook = GetProcAddress((HMODULE)base, ARES_HOOK_PCX);
+    if (!hook || (unsigned char*)(size_t)hook < base ||
+        (unsigned char*)(size_t)hook >= imgHi) return 0;
+    fn = (unsigned char*)(size_t)hook;
+    for (p = fn; p + 6 <= fn + ARES_HOOK_SCAN_EXT; p++)
+    {
+        /* B9 <imm32>              mov ecx, ExtMap */
+        if (p[0] == 0xB9) { memcpy(&mapAddr, p + 1, 4); gotMap = 1; }
+        /* E8 <rel32>              call find */
+        else if (p[0] == 0xE8)
+        {
+            int rel;
+            memcpy(&rel, p + 1, 4);
+            s_AresFind = (SwsAresFindFn)(size_t)(unsigned)(p + 5 + rel);
+            gotCall = 1;
+        }
+    }
+    if (!gotMap || !gotCall) goto fail;
+    /* ExtMap 必须落在 Ares 映像内的数据区 (.data: VA 0xC0000..0xC2C44) */
+    if ((unsigned char*)(size_t)mapAddr < base ||
+        (unsigned char*)(size_t)mapAddr >= imgHi) goto fail;
+    /* find() 必须是 Ares 映像内的可执行体 */
+    if ((unsigned char*)(size_t)s_AresFind < base ||
+        (unsigned char*)(size_t)s_AresFind >= imgHi) goto fail;
+    /* ★ 必须确认签名真的是 "1 个栈参 + 自己清栈" (`ret 4` = C2 04 00)。
+     *   我们是**跨模块**按指针调它: 签名猜错 = 栈被清错 = 崩溃, 而不是返回 NULL。
+     *   所以这里把落点附近的 `ret` 指令字节抠出来核对 —— 对不上就整个 ExtData
+     *   路线停用, 退回 ini 快照 (行为不倒退, 只是少了图标/即时判定)。
+     *   实测本机 3.0 的 Epilogue 在 +0x73 (`0x10057CE3`)。 */
+    {
+        const unsigned char* f = (const unsigned char*)(size_t)s_AresFind;
+        int ok4 = 0, i;
+        for (i = 0; i < 0x100; i++)
+            if (f[i] == 0xC2 && f[i + 1] == 0x04 && f[i + 2] == 0x00)
+            { ok4 = 1; break; }
+        if (!ok4) goto fail;
+    }
+    s_AresExtMap = (void*)(size_t)mapAddr;
+    /* 定位成功必须**自证**一行: 三个地址都打出来, 否则"取不到 ExtData"根本无从
+     * 分辨是"没定位到"还是"定位到了但 find() 查不到"。 */
+    {
+        char b[16], buf[96];
+        unsigned q = AppendCStr(buf, 0, "sws: extmap map=", sizeof(buf));
+        HtoA((unsigned)(size_t)s_AresExtMap, b);
+        q = AppendCStr(buf, q, b, sizeof(buf));
+        q = AppendCStr(buf, q, " find=", sizeof(buf));
+        HtoA((unsigned)(size_t)s_AresFind, b);
+        q = AppendCStr(buf, q, b, sizeof(buf));
+        q = AppendCStr(buf, q, " base=", sizeof(buf));
+        HtoA((unsigned)(size_t)base, b);
+        AppendCStr(buf, q, b, sizeof(buf));
+        LogLine(buf);
+    }
+    return 1;
+fail:
+    s_AresExtMap = NULL;
+    s_AresFind = NULL;
+    s_AresExtFail = 1;
+    LogI("sws: extmap locate FAIL m=", gotMap);
+    LogI("sws: extmap locate FAIL c=", gotCall);
+    return 0;
+}
+
+/* 取某超武的 Ares ExtData; 取不到返回 NULL。
+ *
+ * ⚠ **键 = `SuperWeaponTypeClass*` 本身, 不是 ID 字符串**。
+ *   - Ares 源码 `Ext/SWType/Hooks.Update.cpp:188`: `SWTypeExt::ExtMap.Find(pSuper->Type)`,
+ *     `_Container.hpp:226` `using key_type = base_type*` (base_type = SuperWeaponTypeClass)。
+ *   - 本机 3.0 二进制同一条路 (`0x1003961D`):
+ *         mov eax,[esi]            ; SuperClass*
+ *         mov ecx, <ExtMap>
+ *         push [eax+0x28]          ; ← SuperClass+0x28 = Type 指针
+ *         call ContainerMapBase::find
+ *     同一函数里紧接着 `mov edi,[eax+0x98]` = `Type->ArrayIndex`, 反证 +0x28 取到的
+ *     确实是 SuperWeaponTypeClass*。
+ *   - `find` 的散列是对**指针自己的 4 个字节**做 FNV-1a (`movzx eax,bl` / `shr eax,8`
+ *     / `xor 0x811C9DC5` / `imul 0x1000193`), 全程不解引用 ⇒ 键只可能是指针。
+* ⚠ 早先误把 `+0x24` 当成"存放 `char* ID` 的指针字段", 于是 `*(void**)(type+0x24)`
+ *   读出来的是**字符串内容** (`oy1S` / `Warh` / `eadS` 之类), 三个候选键全错,
+ *   还因此踩出一次 CRASH。实际它是**内联定长字符数组**, 键就是它的首地址。
+ *
+ * 失败不致命: 调用方全部退回旧的 ini 快照路径, 行为不倒退。 */
+static void* SwsAresExt(void* type)
+{
+    void* p;
+    int slot = 0;
+    if (!type || !IsPlausiblePtr(type)) return NULL;
+    if (!SwsAresLocateExt()) return NULL;
+    if (!SwsIdOk((const char*)type + OFF_SWT_ID)) return NULL;
+    s_AresExtTried++;
+    /* ★ 键 = **`SuperWeaponTypeClass*` 本身** (类型指针), 不是 `&type->ID`。
+     *
+     * 证据 (本机 Ares.dll `HouseClass_UpdateSuperWeaponsUnavailable` @0x100395EE,
+     * 对应源码 `Ext/SWType/Hooks.Update.cpp:188`):
+     *     100395EE  mov eax, [ecx+0x28]      ; SuperClass+0x28 = Type
+     *     100395F1  mov edi, [eax+0x98]      ; Type->ArrayIndex (反证 +0x28 是 Type)
+     *     1003961D  mov eax, [esi]           ; = pSuper
+     *     10039624  push [eax+0x28]          ; ★ 键 = pSuper->Type
+     *     10039627  call find
+     * 与源码 `SWTypeExt::ExtMap.Find(pSuper->Type)` 逐字一致; `_Container.hpp:226`
+     * `using key_type = base_type*` 佐证。
+     *
+     * ⚠ 曾被 `StripClass_Draw_SuperWeapon_PCX` 的 `push [eax+0x24]` 误导 —— 那里
+     *   eax 是**另一个**对象, 与本路径无关。按 &type->ID 去查恒返回 NULL。
+     */
+    {
+        static int s_OwnerOff = -1;         /* AttachedToObject 的真实偏移 */
+        p = s_AresFind(s_AresExtMap, type);
+        if (!p) { slot = 1; goto miss; }
+        if (!IsPlausiblePtr(p)) { slot = 2; goto miss; }
+        if (s_OwnerOff < 0)
+        {
+            /* 偏移还没定 ⇒ 扫一遍这个块, 找出等于 type 的那一格。ExtData 是
+             * operator new(0x500) 的 0x500 字节块, 里面必然存着它自己的类型指针。
+             * **读出来, 不猜** —— 之前把 +0x20 写死, 于是每次都"命中但不匹配"。 */
+            unsigned i;
+            for (i = 0; i * 4u < ARES_EXTDATA_SZ; i++)
+            {
+                if (*(void**)((char*)p + i * 4u) == type)
+                { s_OwnerOff = (int)(i * 4u); break; }
+            }
+            {
+                char b[16], buf[128];
+                unsigned q = AppendCStr(buf, 0, "sws: ext OWNER off=", sizeof(buf));
+                HtoA((unsigned)s_OwnerOff, b);
+                q = AppendCStr(buf, q, b, sizeof(buf));
+                q = AppendCStr(buf, q, " id=", sizeof(buf));
+                AppendCStr(buf, q, (const char*)type + OFF_SWT_ID, sizeof(buf));
+                q = AppendCStr(buf, q, " ext=", sizeof(buf));
+                HtoA((unsigned)(size_t)p, b);
+                AppendCStr(buf, q, b, sizeof(buf));
+                LogLine(buf);
+            }
+            if (s_OwnerOff < 0) return NULL;
+        }
+        if (*(void**)((char*)p + (unsigned)s_OwnerOff) != type) return NULL;
+        return p;
+    }
+miss:
+    /* 只记一次, 免得每帧刷屏。
+     * ⚠ `slot` 进来时已经是非 0 (1=NULL, 2=野指针), 所以判据必须用**函数级
+     *   static**, 不能用 `slot` —— 之前写成 `if (!slot)` 等于永远不成立,
+     *   把"`find()` 返回 NULL"这个最关键的现象整整藏了两轮 (2026-10-02)。 */
+    {
+        static int s_Said = 0;
+        if (!s_Said)
+        {
+            s_Said = 1;
+            LogI(slot == 1 ? "sws: ext find() returned NULL, id="
+                           : "sws: ext find() ptr implausible", s_AresExtTried);
+            {
+                char b[40], buf[128];
+                unsigned q = AppendCStr(buf, 0, "sws: ext tried type=", sizeof(buf));
+                /* ⚠ 必须接住 AppendCStr 的返回值 —— 丢掉它的话下一段会写回同一
+                 *   个位置, 把 ID 整段覆盖掉 (2026-10-02 踩过, 表现为
+                 *   `key= map=...` 看起来像"ID 是空的")。 */
+                q = AppendCStr(buf, q, (const char*)type + OFF_SWT_ID, sizeof(buf));
+                q = AppendCStr(buf, q, " type=", sizeof(buf));
+                HtoA((unsigned)(size_t)type, b);
+                q = AppendCStr(buf, q, b, sizeof(buf));
+                q = AppendCStr(buf, q, " map=", sizeof(buf));
+                HtoA((unsigned)(size_t)s_AresExtMap, b);
+                AppendCStr(buf, q, b, sizeof(buf));
+                LogLine(buf);
+            }
+        }
+    }
+    return NULL;
+}
+
+/* 读 ExtData 里的 1 字节 bool。ExtData 是 operator new 出来的堆块, 未初始化
+ * 垃圾值一律当 false —— 宁可多藏一个 (可点"过滤"放出来), 不可漏藏一个。 */
+static int SwsAresExtBool(void* ext, unsigned off)
+{
+    unsigned char v;
+    if (!ext) return -1;
+    v = *(const unsigned char*)((const char*)ext + off);
+    return v ? 1 : 0;
+}
+
+/* 取 ExtData 里的 SidebarPCX 文件名。Ares 自己已经把串小写化并存成定长串,
+ * 直接拷出来即可 (只拷**名字**, 不碰 BSurface* —— 见下面图标一节的告警)。 */
+static const char* SwsAresExtPcxName(void* ext, char* dst, size_t cap)
+{
+    const char* src;
+    size_t i;
+    if (!ext || !dst || cap < 2) return NULL;
+    src = (const char*)((const char*)ext + ARES_EXT_PCXNAME);
+    for (i = 0; i + 1 < cap && i < 0x20 && src[i]; i++) dst[i] = src[i];
+    dst[i] = 0;
+    return dst[0] ? dst : NULL;
+}
 
 /* ---------------- 配置 ----------------
  * 铁律: 每帧路径上**不允许**出现 GetPrivateProfileIntA —— 那等于每帧一次 ini
@@ -180,6 +499,9 @@ static int SwsPushSpecialPlace(int swIdx);
 static int s_ShowDrain = 0;   /* [SWSidebar] DrainSupers: 1=显示火风暴类 (默认 0=过滤掉) */
 static int s_ForceScan = 0;   /* 点击时置 1: 强制立刻重扫, 不等 15 帧 */
 static int s_ScrollStep = 1;  /* [SWSidebar] ScrollStep */
+/* `sws: act` 自证日志的配额。换 ini/换剧本时由 SwsCacheEpoch 重给满 ——
+ * 不重给的话第一局就把 40 条用完, 后面出问题的剧本正好没得可看。 */
+static int s_DiagLeft = 40;
 
 /* ---------------- 隐藏"防御支援页"里的重复超武 ----------------
  * 目标态 s_DedupHide (按钮切换 / [SWSidebar] DedupDefensePage 初值) 与已落到
@@ -330,6 +652,12 @@ static int SwsStrEq(const char* a, const char* b)
         i++;
     }
     return a[i] == b[i];
+}
+
+/* 同上, 但返回"是否不同" (给"内容变了才记日志"用) */
+static int SwsStrDiff(const char* a, const char* b)
+{
+    return !SwsStrEq(a, b);
 }
 
 /* copy an ID string (bounded) */
@@ -627,32 +955,24 @@ typedef int (__thiscall *SwsPcxLoadFn)(void* pcx, const char* name, int f1, int 
 #define ADDR_PCX_INSTANCE 0xAC4848u
 #define PCX_TRANS_PARENT 0xF81Fu   /* COLOR_PURPLE = COLOR_RED|COLOR_BLUE */
 
-#define PCX_CACHE 320
-
-typedef struct {
-    char id[32];
-    char file[64];
-    int  tried;
-} SwsPcxEnt;
-
-static SwsPcxEnt s_Pcx[PCX_CACHE];
-static int s_PcxN = 0;
-
 /* ---- 每类型缓存 ----
  * ArrayIndex (线性扫 135 项类型数组做字符串比较)、阵营、ini 优先级/隐藏
  * 都是**类型**的固有属性, 类型对象静态, 按 type 指针缓存一次即可, 之后每
  * 帧只剩指针比较。 */
-#define SWS_TCACHE 320
+#define SWS_TCACHE 640
 typedef struct {
     void* type;
     int   swIdx;
     int   side;      /* -2 = 查表未命中, 要用玩家阵营 */
     int   prio;      /* -1 = 尚未填充 (SwsTypeEntry 用它当"已填"标志) */
     int   hide;
+    int   show;      /* 1 = SW.ShowCameo (Ares: 默认 1;=0 压根不进防御页) */
     int   manual;    /* 1 = SW.ManualFire */
     int   drain;     /* 1 = UseChargeDrain */
+    int   actionNone;/* 1 = 对象上的 Action == None (点击即生效) */
     int   instant;   /* 1 = 点击即发射 */
     const char* pcxFile;
+    char pcxName[64];  /* pcxFile 指向的自有缓冲 (文件名很短, 内联省一次间接) */
     unsigned short* capPix;  /* 引擎 cameo 抓到的 60x48 像素 (优先于 pcxFile) */
     wchar_t name[24];   /* 悬停提示, 属于**类型**而非条目下标 */
 } SwsTypeCache;
@@ -671,156 +991,282 @@ static SwsTypeCache* SwsTypeEntry(void* type, const char* id)
     s_TC[i].side = -2;
     s_TC[i].prio = -1;              /* -1 = 尚未填充 */
     s_TC[i].hide = 0;
+    s_TC[i].show = 1;
     s_TC[i].manual = 1;
     s_TC[i].drain = 0;
+    s_TC[i].actionNone = 0;
     s_TC[i].instant = 0;
     s_TC[i].pcxFile = NULL;
+    s_TC[i].pcxName[0] = 0;
     s_TC[i].capPix = NULL;
     s_TC[i].name[0] = 0;
     return &s_TC[i];
 }
 
-/* 两条显示旗标读**类型对象**, 不用 ini: 引擎建对象用的是合并后的 ini
- * (基础 + gamemode + 地图/战役内嵌), 而 INIClass::ReadString(INI_Rules) 只有基础
- * 那一份 —— 战役现场声明的超武读出来是空。
- *
- * ⚠ 偏移 0xE5 / 0xF5 是按 YRpp SuperWeaponTypeClass.h 的字段顺序逐个 4 字节
- *   推出来的, **没有验证过**。下面那条 `flags OFFSET?` 日志就是在报推错了;
- *   实测它确实会触发 (ConfusionGridSpawn), 所以这两个偏移很可能都不对,
- *   代价是 SW.ManualFire=no 的超武没被过滤掉。 */
+/* 三条显示旗标读**类型对象**: 引擎建对象用的是合并后的 ini
+ * (基础 + gamemode + 地图/战役内嵌), 所以战役现场改写的值天然生效。
+ * ⚠ 偏移已逐个对回 gamemd: CTOR (`0x6CE62E` 起) 写的是
+ *   `[ebp+0xE6]=1 / [ebp+0xF5]=0 / [ebp+0xB8]=0 / [ebp+0xBC]=0`, 而
+ *   `SuperWeaponTypeClass_FindIndex` (0x6CEE60) 用 `add ecx,0x24` 取 ID,
+ *   `SidebarClass::DrawCameo` 用 `mov edx,[eax+0xB8]` 取 SidebarImage ——
+ *   三处互证 0xBC=Action / 0xE5=UseChargeDrain / 0xF5=ManualControl。
+ * 下面那条对账日志现在拿 `ManualControl` (gamemd 的键名, .rdata 0x842644)
+ * 比 `0xF5`; 以前写的是 `SW.ManualFire` (Ares 的键), 所以**永远**对不上,
+ * 于是"偏移可疑"这个结论一直挂着, 而真正的判据形同虚设。 */
 static void SwsFlagsOf(SwsTypeCache* tc, void* type, const char* id)
 {
     int iniManual = 1, iniHasManual = 0;
     void* rules = *(void**)ADDR_INI_RULES;
     tc->manual = *(unsigned char*)((char*)type + OFF_SWT_MANUALCTRL) ? 0 : 1;
     tc->drain = *(unsigned char*)((char*)type + OFF_SWT_DRAIN) ? 1 : 0;
+    /* Action == None: 引擎不消费目标格, 原版侧栏点一下就直接打在鼠标上。
+     * 默认值就是 None (CTOR `mov [ebp+0xBC],0`), 所以任何**没写** `Action=`
+     * 的超武 —— 包括地图内嵌 ini 新增的那批 (WarheadSpecial1) —— 都是"点一下
+     * 就生效"。MO 基础规则里的超武几乎都写了 `Action=Custom`, Ares 又把它改写
+     * 成 `Actions::SuperWeaponAllowed` (0x7F), 落在 else 分支要选格。 */
+    tc->actionNone = (*(int*)((char*)type + OFF_SWT_ACTION) == 0) ? 1 : 0;
     if (!rules || !IsPlausiblePtr(rules)) return;
     {
         char b[32];
         b[0] = 0;
-        FN_INIREADSTR(rules, id, "SW.ManualFire", "", b, (unsigned)sizeof(b));
+        FN_INIREADSTR(rules, id, "ManualControl", "", b, (unsigned)sizeof(b));
         if (b[0])
         {
             iniHasManual = 1;
             if (SwsStrEq(b, "no") || SwsStrEq(b, "false")) iniManual = 0;
         }
     }
-    /* 对账: 对"ini 里显式写过 SW.ManualFire"的类型, 对象字段与 ini 读数应当一致
-     * —— 不一致就说明偏移推错了, 立刻能看出来。ini 没写过的 (只有地图内嵌 ini
+    /* 对账: 对"ini 里显式写过 ManualControl"的类型, 对象字段与 ini 读数应当一致
+     * —— 不一致就说明偏移又推错了, 立刻能看出来。ini 没写过的 (只有地图内嵌 ini
      * 才声明的那些) 对不上是正常的, 不算错。 */
     if (iniHasManual && (iniManual == 0) != (tc->manual == 0))
         LogS("sws: flags OFFSET? manual ", id);
 }
-/* 取某超武的 SidebarPCX= 文件名 (读一次, 缓存在我们自己的表里)。
- * 注意: 这里只缓存"文件名", 绝不缓存引擎的 BSurface* —— 引擎会在切页签/
- * 重载美术时释放并重建 PCX surface, 跨帧持有它的指针 = 野指针 (表现为
- * 图画成紫球, 切页时崩溃)。surface 每帧现取。 */
-/* ---------------- 行为旗标 (从 rules INI 读, 不猜结构偏移) ----------------
- * "点击即生效" 的判据**必须**读 ini, 不能看 `Type->Action == Action::None`:
- * Ares 把 `Action=Custom` 改写成 `Actions::SuperWeaponAllowed` (0x7F) 而不是
- * None, 而 MO 六个超武全是 Custom —— 按 Action==0 判会判错对象。
- * 真正成立的两个键: `Action=None` 与 `SW.UseAITargeting=yes` (手册: 点击图标
- * 自动发射, 无需选目标)。Ares 的 `Type=<NewSWType>` 另有两类把 Action 写成
- * None (HunterSeeker / Battery), 也算。推导过程见笔记。
- * `UseChargeDrain=yes` 是长期生效类, 只用来把它们从侧栏过滤掉。 */
+
+/* ---------------- 合并规则的快照 (挂 SuperWeaponTypeClass::LoadFromINI) --------
+ *
+ * 为什么要这张表: **只有合并后的 ini 说得清"游戏自己怎么对待这个超武"**。
+ * `CCINIClass::INI_Rules` (0x887048) 里只有基础规则那一份, 而战役/地图可以在
+ * **地图内嵌 ini** 里新增或改写 `[XxxSpecial]` 节 (实测 `SP_CryospearSpecial` /
+ * `WarheadSpecial1` 在 rulesmo.ini 里出现 0 次, 只在 emigdal.map 里)。三处症状
+ * 全部出在这个缺口上:
+ *   ① `SW.ShowCameo=false` 的超武 (IronGuardSpecial) —— 键在基础规则里也有,
+ *      但以前**根本没读**这个键;
+ *   ② 地图新增的超武图标空着 —— `SidebarPCX=` 只存在于地图那份 ini, 而去重把
+ *      防御页上的 cameo 搬走了 ⇒ 引擎不再画 ⇒ 抓取钩永远抓不到 ⇒ 只能靠"读 ini"，
+ *      于是读到空 (`sws: nopcx`);
+ *   ③ 地图里 `SW.UseAITargeting=yes` / 无 `Action=` 的超武 (WarheadSpecial1)
+ *      点一次就生效, 侧栏里却要点两次 —— `instant` 判据读的是基础规则那份。
+ *
+ * ★ 钩点 = `SuperWeaponTypeClass::LoadFromINI` **入口 0x6CEA20** (6 字节 =
+ *   `sub esp,0x3F0`; 离线反汇编确认 `mov ebx,[esp+0x3F8]` 取的正是栈上那个
+ *   pINI, 而 Ares 自己也在这个函数里 0x6CEE43 挂了 `ExtMap.LoadFromINI`)。
+ *   引擎每读一份 ini 就对**每个**超武调它一次, 于是我们**当场**把值读出来存进
+ *   自有表 —— **绝不留住 ini 指针**: 地图那份是 `ScenarioClass::Load` 栈上的
+ *   临时对象 (`lea ecx,[esp+0x2C]` + 用完 `call ~INIClass`), 跨帧读它就是野指针。
+ *   合并语义 = "后写的键覆盖先写的, 没写的键保持原值", 与引擎/Ares 的
+ *   `Valueable::Read` (`ReadString` 返回 0 就不动) 完全一致。
+ *
+ * ★★ **实测: 引擎喂进来的"合并后那份"就是 `*(void**)ADDR_INI_RULES`** (所以
+ *   钩子里比的就是它, 一开始按"非 INI_Rules = 地图那份"去判, 结果永远不成立)。
+ *   gamemd 在读类型之前会把 `[0x887048]` 指向合并后的 ini (`0x52D0FA
+ *   mov [0x887048],eax`), 读完之后再换回去 —— 而我们是在**扫描期**才去读
+ *   `[0x887048]`, 那时已经是基础规则那份了。
+ *   ⇒ **推论: 钩子读到的值必须留住, 绝不能在扫描期重读一遍。** 第一版把
+ *   `s_Mix` 放进 `SwsCacheEpoch` 的"换代就清"里, 等于每次都把钩子读到的地图
+ *   那些键 (`SidebarPCX` / `SW.UseAITargeting`) 全扔掉 —— 图标空着 + `instant`
+ *   判错, 两个症状同一个原因。
+ *
+ * 钩子恒返回 0 = 跑原指令, 自己什么都不改 ⇒ 联机安全 (只读游戏状态)。
+ */
+
+#define SWS_MIX_CAP 640            /* 实测类型数 ~500, 留余量 */
+#define SWS_MIX_PCX  0x01u         /* SidebarPCX= */
+#define SWS_MIX_SHOW 0x02u         /* SW.ShowCameo */
+#define SWS_MIX_MAN  0x04u         /* SW.ManualFire */
+#define SWS_MIX_AI   0x08u         /* SW.UseAITargeting */
+#define SWS_MIX_ACT  0x10u         /* Action= */
+#define SWS_MIX_TYPE 0x20u         /* Type=<NewSWType> */
+#define SWS_MIX_DRN  0x40u         /* UseChargeDrain */
+
 typedef struct {
-    char id[32];
-    int instant;    /* 1 = 点击即发射, 无需选格 */
-    int tried;
-} SwsBehavior;
+    void* type;
+    unsigned mask;        /* 哪些键真的在这份/前面某份 ini 里出现过 */
+    int show;             /* SW_ShowCameo: 1 = 进防御页 (默认 1) */
+    int man;              /* SW_ManualFire: 1 = 可手动点 (默认 1) */
+    int ai;               /* SW_UseAITargeting */
+    int actNone;          /* Action=None */
+    int newType;          /* 1=HunterSeeker 2=Battery */
+    int drain;            /* UseChargeDrain */
+    int seeded;           /* 已经用 INI_Rules 垫过底 */
+    char pcx[40];         /* SidebarPCX 文件名 (已小写化, 与 Ares 一致) */
+} SwsIniMix;
 
-#define SWS_BEH_CAP 320
-static SwsBehavior s_Beh[SWS_BEH_CAP];
-static int s_BehN = 0;
+static SwsIniMix s_Mix[SWS_MIX_CAP];
+static int s_MixN = 0;
 
-static int SwsIniYes(void* rules, const char* sec, const char* key)
+/* ini 布尔值: 1 / 0 / -1(写法不认识, 当没写)。
+ * gamemd 的 `ReadBool` (0x5295F0) 接受 1/0/true/false/yes/no/on/off; 地图里也
+ * 常见缩写 (`SW.ShowCameo=f`, `SW.ManualFire=n`)。只按首字母判**必须先把
+ * on/off 这对歧义拆开** —— "off" 判成 true 就正好把该藏的超武放出来了。 */
+static int SwsIniBool(const char* v)
 {
-    char buf[32];
-    buf[0] = 0;
-    if (!rules || !IsPlausiblePtr(rules)) return 0;
-    FN_INIREADSTR(rules, sec, key, "", buf, (unsigned)sizeof(buf));
-    if (SwsStrEq(buf, "yes") || SwsStrEq(buf, "true") ||
-        SwsStrEq(buf, "YES") || SwsStrEq(buf, "TRUE"))
-        return 1;
-    return 0;
+    char c, d;
+    if (!v || !v[0]) return -1;
+    c = v[0];
+    d = v[1];
+    if (c == 'y' || c == 'Y' || c == 't' || c == 'T' || c == '1') return 1;
+    if (c == 'n' || c == 'N' || c == 'f' || c == 'F' || c == '0') return 0;
+    if (c == 'o' || c == 'O') return (d == 'f' || d == 'F') ? 0 : 1;   /* off / on */
+    return -1;
 }
 
-static SwsBehavior* SwsBehaviorOf(const char* id)
+/* 把一份 ini 里属于 <id> 节的那几个键, 覆盖进快照。键不存在 (= 读到空串) 就
+ * **什么都不动**, 正是引擎 "没写就沿用上一份" 的语义。 */
+static void SwsMixRead(SwsIniMix* m, const char* id, void* ini)
 {
-    int i, slot = -1;
-    void* rules;
-    char act[32];
-    char typ[32];
-    for (i = 0; i < s_BehN; i++)
-        if (SwsStrEq(s_Beh[i].id, id)) { slot = i; break; }
-    if (slot >= 0 && s_Beh[slot].tried) return &s_Beh[slot];
-    if (slot < 0)
-    {
-        if (s_BehN >= SWS_BEH_CAP) return NULL;
-        slot = s_BehN++;
-        SwsCopyId(s_Beh[slot].id, id);
-        s_Beh[slot].tried = 0;
-    }
-    s_Beh[slot].tried = 1;
-    s_Beh[slot].instant = 0;
-    rules = *(void**)ADDR_INI_RULES;
-    if (rules && IsPlausiblePtr(rules))
-    {
-        /* Action=None 才是"引擎不处理格子", 无需玩家选目标 */
-        act[0] = 0;
-        FN_INIREADSTR(rules, id, "Action", "", act, (unsigned)sizeof(act));
-        if (SwsStrEq(act, "None")) s_Beh[slot].instant = 1;
-        /* 手册: SW.UseAITargeting=yes -> 点击图标自动发射, 不需选目标 */
-        if (SwsIniYes(rules, id, "SW.UseAITargeting")) s_Beh[slot].instant = 1;
-        /* Type=<Ares NewSWType>: HunterSeeker 与 Battery 在各自的
-         * src/Misc/SWTypes 下把 `pSW->Action = Action::None` 写死了。
-         * (Firestorm 没有, 所以爆裂屏障确实要选格, 点两次才对。) */
-        typ[0] = 0;
-        FN_INIREADSTR(rules, id, "Type", "", typ, (unsigned)sizeof(typ));
-        if (SwsStrEq(typ, "HunterSeeker") || SwsStrEq(typ, "Battery"))
-            s_Beh[slot].instant = 1;
-        /* 长期生效类 (爆裂屏障/心灵之火): 点击是开关 (Ready<->Draining),
-         * 同样**一次点击**就完成 —— Ares 的 SW_Firewall::Activate 收下 cell
-         * 参数却根本不用, 直接置 house 的 firestorm 状态。 */
-        if (SwsIniYes(rules, id, "UseChargeDrain"))
-        {
-            s_Beh[slot].instant = 1;
-        }
-    }
-    return &s_Beh[slot];
-}
-
-/* 取某超武的 SidebarPCX= 文件名。只缓存**文件名**, 绝不缓存引擎的
- * BSurface* —— 引擎切页签/重载美术时会释放重建, 跨帧持有就是野指针。 */
-static const char* SwsPcxFileOf(const char* id)
-{
-    int i, slot = -1;
-    void* rules;
-    char buf[64];
-    for (i = 0; i < s_PcxN; i++)
-        if (SwsStrEq(s_Pcx[i].id, id)) { slot = i; break; }
-    if (slot >= 0 && s_Pcx[slot].tried)
-        return s_Pcx[slot].file[0] ? s_Pcx[slot].file : NULL;
-    if (slot < 0)
-    {
-        if (s_PcxN >= PCX_CACHE) return NULL;
-        slot = s_PcxN++;
-        SwsCopyId(s_Pcx[slot].id, id);   /* 必须记 id, 否则下次查不到 */
-        s_Pcx[slot].file[0] = 0;
-        s_Pcx[slot].tried = 0;
-    }
-    s_Pcx[slot].tried = 1;
-    rules = *(void**)ADDR_INI_RULES;
-    buf[0] = 0;
-    if (rules && IsPlausiblePtr(rules))
-        FN_INIREADSTR(rules, id, "SidebarPCX", "", buf, (unsigned)sizeof(buf));
+    char b[64];
+    int v;
+    if (!m || !id || !ini || !IsPlausiblePtr(ini)) return;
+    b[0] = 0;
+    FN_INIREADSTR(ini, id, "SidebarPCX", "", b, (unsigned)sizeof(b));
+    if (b[0])
     {
         unsigned k = 0;
         int j = 0;
-        while (buf[j] && j < 63) s_Pcx[slot].file[k++] = buf[j++];
-        s_Pcx[slot].file[k] = 0;
+        while (b[j] && j < 39) { char c = b[j++];
+                                if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+                                m->pcx[k++] = c; }
+        m->pcx[k] = 0;
+        m->mask |= SWS_MIX_PCX;
     }
-    return s_Pcx[slot].file[0] ? s_Pcx[slot].file : NULL;
+    b[0] = 0;
+    FN_INIREADSTR(ini, id, "SW.ShowCameo", "", b, (unsigned)sizeof(b));
+    if ((v = SwsIniBool(b)) >= 0) { m->show = v; m->mask |= SWS_MIX_SHOW; }
+    b[0] = 0;
+    FN_INIREADSTR(ini, id, "SW.ManualFire", "", b, (unsigned)sizeof(b));
+    if ((v = SwsIniBool(b)) >= 0) { m->man = v; m->mask |= SWS_MIX_MAN; }
+    b[0] = 0;
+    FN_INIREADSTR(ini, id, "SW.UseAITargeting", "", b, (unsigned)sizeof(b));
+    if ((v = SwsIniBool(b)) >= 0) { m->ai = v; m->mask |= SWS_MIX_AI; }
+    b[0] = 0;
+    FN_INIREADSTR(ini, id, "Action", "", b, (unsigned)sizeof(b));
+    if (b[0]) { m->actNone = SwsStrEq(b, "None") ? 1 : 0; m->mask |= SWS_MIX_ACT; }
+    b[0] = 0;
+    FN_INIREADSTR(ini, id, "Type", "", b, (unsigned)sizeof(b));
+    if (b[0])
+    {
+        m->newType = (SwsStrEq(b, "HunterSeeker") || SwsStrEq(b, "Battery")) ? 1 : 0;
+        m->mask |= SWS_MIX_TYPE;
+    }
+    b[0] = 0;
+    FN_INIREADSTR(ini, id, "UseChargeDrain", "", b, (unsigned)sizeof(b));
+    if ((v = SwsIniBool(b)) >= 0) { m->drain = v; m->mask |= SWS_MIX_DRN; }
+}
+
+/* 取 (必要时建) 某超武的快照。**首次建时先用 INI_Rules 垫底**, 于是"钩子只看到
+ * 基础规则那份"也能得到与今天一样的结果 —— 缺地图那份时行为不倒退。 */
+static SwsIniMix* SwsMixOf(void* type, const char* id)
+{
+    int i;
+    for (i = 0; i < s_MixN; i++)
+        if (s_Mix[i].type == type) return &s_Mix[i];
+    if (s_MixN >= SWS_MIX_CAP) return NULL;
+    i = s_MixN++;
+    s_Mix[i].type = type;
+    s_Mix[i].mask = 0;
+    s_Mix[i].show = 1;      /* Ares: SW_ShowCameo 默认 true */
+    s_Mix[i].man = 1;       /* Ares: SW_ManualFire 默认 true */
+    s_Mix[i].ai = 0;
+    s_Mix[i].actNone = 0;
+    s_Mix[i].newType = 0;
+    s_Mix[i].drain = 0;
+    s_Mix[i].seeded = 1;            /* 下面立刻垫底, 没有"未垫底"的中间态 */
+    s_Mix[i].pcx[0] = 0;
+    SwsMixRead(&s_Mix[i], id, *(void**)ADDR_INI_RULES);
+    return &s_Mix[i];
+}
+
+/* 钩子: SuperWeaponTypeClass::LoadFromINI 入口 (see .inj)。取 this = ECX、
+ * pINI = [ESP+4], 当场读键。恒返回 0。
+ *
+ * 自证日志: **只**看到 INI_Rules 那一份时, 地图内嵌 ini 就没走到这里, 于是
+ * 地图新增/改写的超武仍然只有基础规则那份值 —— 这行日志就是用来一眼分辨
+ * "钩子没装上" 与 "引擎确实只喂了一份 ini"。每换一份非 INI_Rules 的 ini 记一行。 */
+extern "C" __declspec(dllexport) unsigned __cdecl SWS_SwTypeIni(void* regs)
+{
+    static void* s_MixTypes = NULL;
+    static int s_HookHits = 0;
+    void* type, *sp, *ini;
+    const char* id;
+    SwsIniMix* m;
+    if (!regs) return 0;
+    type = *(void**)((char*)regs + SWS_REG_ECX);
+    sp = *(void**)((char*)regs + SWS_REG_ESP);
+    if (!type || !IsPlausiblePtr(type)) return 0;
+    if (!sp || !IsPlausiblePtr(sp)) return 0;
+    ini = *(void**)((char*)sp + 4);          /* __thiscall + 1 栈参 */
+    if (!ini || !IsPlausiblePtr(ini)) return 0;
+    /* 必须是 CCINIClass: 虚表指针落在 gamemd 代码段 (启动期垃圾值过不了这关) */
+    if (!IsPlausiblePtr(*(void**)ini)) return 0;
+    id = (const char*)type + OFF_SWT_ID;
+    if (!SwsIdOk(id)) return 0;
+    /* 类型对象重建 ⇒ 旧的 type 键全部作废。**必须在这里清** (而不是等到第一次
+     * SwsScan): 新剧本是"先建类型 → 再对每个类型调 LoadFromINI", 在扫描期清
+     * 就等于把本钩子刚读到的地图那份 ini 全部丢掉 (2026-10-02 的教训)。 */
+    {
+        int cnt = 0;
+        void** it = SwsVecItems(ADDR_SWTYPE_ARR, &cnt);
+        if (it != s_MixTypes)
+        {
+            s_MixTypes = it;
+            if (s_MixN) { s_MixN = 0; LogLine("sws: mix reset (types rebuilt)"); }
+        }
+    }
+    m = SwsMixOf(type, id);
+    if (!m) return 0;
+    /* 自证: 这个钩子到底有没有被调到、被喂的是哪份 ini。前三次命中各记一行
+     * (之后每 250 次一行)。日志里 `p=0` 说明喂进来的就是当前的
+     * `*(void**)ADDR_INI_RULES` —— 那正是"合并后那份", 所以**不要**把"非
+     * INI_Rules"当成地图那份的判据 (见本节开头的 ★★)。 */
+    s_HookHits++;
+    if (s_HookHits <= 3 || (s_HookHits % 250) == 0)
+    {
+        char b[16], buf[96];
+        unsigned q = AppendCStr(buf, 0, "sws: swtype hook n=", sizeof(buf));
+        UtoA((unsigned)s_HookHits, b);
+        q = AppendCStr(buf, q, b, sizeof(buf));
+        q = AppendCStr(buf, q, " ", sizeof(buf));
+        q = AppendCStr(buf, q, id, sizeof(buf));
+        q = AppendCStr(buf, q, (ini == *(void**)ADDR_INI_RULES) ? " p=0" : " p=1",
+                       sizeof(buf));
+        q = AppendCStr(buf, q, " @", sizeof(buf));
+        HtoA((unsigned)(size_t)ini, b);
+        AppendCStr(buf, q, b, sizeof(buf));
+        LogLine(buf);
+    }
+    SwsMixRead(m, id, ini);
+    return 0;
+}
+
+/* 快照查询: 全部只走一张表 (SwsIniMix), 不再各读各的 ini。
+ *
+ * 之前是三个互不相干的缓存 (s_Beh 行为表 / s_Pcx 文件名表 / 对象字段偏移),
+ * 键名还各写各的 —— `SW.ManualFire` 被拿去和 gamemd 的 `ManualControl` 字段
+ * 对账 (对不上), `SidebarPCX` 只读基础规则那份 (地图新增的超武读不到)。
+ * 合并成一张表之后: 键名只有一处、优先级只有一处、ini 换了就整体重读。 */
+static SwsIniMix* SwsMixLookup(void* type, const char* id)
+{
+    return SwsMixOf(type, id);
+}
+
+/* 图标文件名 (SidebarPCX=)。只缓存**文件名**, 绝不缓存引擎的 BSurface* ——
+ * 引擎切页签/重载美术时会释放重建 PCX surface, 跨帧持有就是野指针。 */
+static const char* SwsMixPcx(void* type, const char* id)
+{
+    SwsIniMix* m = SwsMixLookup(type, id);
+    if (!m) return NULL;
+    return m->pcx[0] ? m->pcx : NULL;
 }
 
 
@@ -850,12 +1296,70 @@ static void* SwsPcxLiveSurf(const char* file)
 static void SwsFillType(SwsTypeCache* tc, void* type, const char* id)
 {
     int h = 0;
-    SwsBehavior* bh;
+    void* ext = NULL;
+    char pcxName[64];
+    SwsIniMix* m = SwsMixLookup(type, id);
     tc->side = SwsSideOf(id);
     tc->prio = SwsPrioOf(id, &h);
     tc->hide = h;
+    /* 对象字段 = 引擎从**合并后**的 ini 建出来的值 (战役/地图改写天然生效):
+     * ManualControl / UseChargeDrain / Action。ini 那份只用来对账 (SwsFlagsOf)。 */
     SwsFlagsOf(tc, type, id);
-    tc->pcxFile = SwsPcxFileOf(id);
+
+    /* ★ 权威判据 = **Ares 自己算好的 ExtData**。
+     *
+     * 优先于下面那条 ini 快照, 因为:
+     *  - `SW.ShowCameo` / `SW.UseAITargeting` / `SW.ManualFire` / `SidebarPCX`
+     *    全是 **Ares 的键**, 对象上**没有**对应字段, 只有 ExtData 里才有;
+     *  - Ares 的 ini 合并顺序/改写 (比如 `Action=Custom` 被它自己改成 0x7F)
+     *    我们**无法**在快照里复刻, 而 ExtData 里是**已经算完的最终值**;
+     *  - 快照依赖 `SWS_SwTypeIni` 钩子, 而那个钩子实测从没被调到过 (见
+     *    上面那段大注释), 于是它只有基础规则那份底 —— 地图内嵌 ini 的
+     *    `SW.UseAITargeting=yes` / `SidebarPCX=psybicon.pcx` 全丢, 这正是
+     *    WarheadSpecial1 图标空着 + 要点两下的根因。
+     *
+     * 取不到 ExtData (定位失败 / 该类型没有扩展数据) 时**照旧退回快照**,
+     * 行为不倒退。 */
+    ext = SwsAresExt(type);
+    if (ext)
+    {
+        int v;
+        if ((v = SwsAresExtBool(ext, ARES_EXT_SHOW)) >= 0)  tc->show = v;
+        /* Ares 的 SW_ManualFire 与 gamemd 的 ManualControl 是两个独立的键
+         * (rulesmo.ini 里 StasisGridSpawn/ConfusionGridSpawn 只写了后者),
+         * 所以这里**只**用它来额外收紧, 绝不拿它去覆盖 manual。 */
+        if (!SwsAresExtBool(ext, ARES_EXT_MANUAL)) tc->manual = 0;
+    }
+    if (!ext && m && (m->mask & SWS_MIX_SHOW)) tc->show = m->show;
+    if (!tc->show)
+    {
+        /* `SW.ShowCameo=no` 的压根不进防御页 (Ares
+         * HouseClass_UpdateSuperWeaponsUnavailable: `if(pData->SW_ShowCameo)`
+         * AddCameo), 侧栏跟着藏才是"与游戏一致" (IronGuardSpecial 就是这类)。
+         * 记一行便于核对到底藏了谁 —— 只藏不记, 出问题分不清是"读错了"还是
+         * "键名又写错了"。 */
+        static int s_ShowHidden = 0;
+        if (s_ShowHidden < 16)
+        {
+            LogS("sws: hide cameo ", id);
+            s_ShowHidden++;
+        }
+    }
+    /* 图标: Ares ExtData 里的 `SidebarPCX` 是权威 (已经是合并后的最终文件名,
+     * 且已小写化), 优先于快照。取不到才退回快照。 */
+    if (!ext || !SwsAresExtPcxName(ext, pcxName, sizeof(pcxName)))
+        pcxName[0] = 0;
+    tc->pcxFile = pcxName[0] ? pcxName : SwsMixPcx(type, id);
+    /* tc->pcxFile 可能指向 pcxName[] (栈上) 或快照里的静态串, 统一复制进
+     * 类型缓存的自有缓冲, 免得下一轮 pcxName 出作用域后成为野指针。 */
+    if (tc->pcxFile)
+    {
+        int k = 0;
+        while (k < (int)sizeof(tc->pcxName) - 1 && tc->pcxFile[k])
+        { tc->pcxName[k] = tc->pcxFile[k]; k++; }
+        tc->pcxName[k] = 0;
+        tc->pcxFile = tc->pcxName;
+    }
     {
         /* 悬停提示文本: 优先 UIName, 空则退回 ID。存进**类型缓存**而不是
          * s_Items[n] —— 条目下标会随建筑增减重排, 存那里必然错位。 */
@@ -870,14 +1374,40 @@ static void SwsFillType(SwsTypeCache* tc, void* type, const char* id)
             }
             tc->name[k] = 0;
         }
-        /* 缺 SidebarPCX 的超武: 一次性记下来, 便于查它们的图标。
-         * 同时把引擎对象上自带的兜底图标信息一起打出来 (见 SwsIconDiag) ——
-         * `nopcx` 只说明**我们**没读到, 要判断引擎那边有没有图, 得看它。 */
+        /* 缺 SidebarPCX 的超武: 一次性记下来, 便于查它们的图标 (还可能靠引擎
+         * 抓取兜底, 见"从引擎手里拿超武 cameo 图标")。 */
         if (!tc->pcxFile) LogS("sws: nopcx ", id);
     }
-    /* "点击即生效" 读 rules INI, 理由见 SwsBehaviorOf 上方注释 */
-    bh = SwsBehaviorOf(id);
-    tc->instant = bh ? bh->instant : 0;
+    /* "点击即生效" = **一次点击就完成, 无需再点地图选格**。判据与 Phobos 的
+     * `SWButtonClass::LaunchSuper` 逐字对齐 (MO 原版侧栏就是它):
+     * ```
+     * if (pType->Action == Action::None || pSWExt->SW_UseAITargeting)
+     *     OutList.Add(EventClass(..., SpecialPlace, swIndex, CellStruct::Empty));
+     * else
+     *     CurrentSWTypeIndex = swIndex;  // + EVA_SelectTarget
+     * ```
+     * (Phobos 源码 `src/Ext/Sidebar/SWSidebar/SWButtonClass.cpp:203`)
+     *
+     * ★ **`SW_UseAITargeting` 不是可有可无的补充**: `WarheadSpecial1` 在
+     *   rulesmo.ini 里是 `Type=GenericWarhead` + `Action=Custom` ⇒ Ares 改写成
+     *   `SuperWeaponAllowed` ⇒ **纯 `Action==0` 判不出来**; 它"点一下就生效"
+     *   靠的是 emigdal.map 里那行 `SW.UseAITargeting=yes`。这条键只在**地图
+     *   内嵌 ini** 里有 ⇒ **只能从合并规则的快照拿** (钩子没吃到地图那份就会退
+     *   回"要选格", 症状正是"原版点一下、侧栏要点两次")。
+     *
+     * 另一半 `Action == 0` 读对象字段: 引擎/Ares 建对象时已把合并后的 Action
+     * 写好, 而 gamemd 自己的侧栏点击处理 (`0x6AAF08 cmp dword [ecx+0xBC],edi`,
+     * ecx = `pSuper->Type`+0x28) 判的也正是它, 引擎那条路没有 UseAITargeting。 */
+    tc->instant = tc->actionNone;
+    if (m && (m->ai || m->actNone || m->newType)) tc->instant = 1;
+    /* ★ `SW_UseAITargeting` 的权威来源 = Ares ExtData。`WarheadSpecial1` 在
+     *   rulesmo.ini 里是 `Type=GenericWarhead` + `Action=Custom` (Ares 把它改写成
+     *   0x7F, 见 0x1003332A 的 `mov [edi+0xBC],0x7F`), 所以纯 `Action==0` 判不
+     *   出来; 它"点一下就生效"靠的是 emigdal.map 内嵌 ini 里那行
+     *   `SW.UseAITargeting=yes` —— **只存在于地图 ini**, 快照钩子没吃到就必然
+     *   退回"要选格" (症状: 原版点一下、侧栏要点两次)。
+     *   ExtData 里这个值是 Ares 合并完的最终结果, 不依赖我们那个失效的钩子。 */
+    if (ext && SwsAresExtBool(ext, ARES_EXT_AITGT)) tc->instant = 1;
     /* 火风暴类 (UseChargeDrain) 继续过滤 —— 之前的研究成立, 且用户确认:
      * Ares 的 ChargeDrain 状态机只接在 `SuperClass_ClickFire @0x6CB920`, 而我们
      * 走 `SpecialPlace` 事件 (`Fire_SW->Launch->Activate`), 两条入口不相交 ⇒ 效果
@@ -886,21 +1416,67 @@ static void SwsFillType(SwsTypeCache* tc, void* type, const char* id)
      * 偏移 (YRpp 头推导值 +0x180 与先前估值 0x384 差 0x204, 不可信)。收益远小于
      * 风险。`[SWSidebar] DrainSupers=1` 可临时放回来试。
      * Phobos 也没接这条 (照抄 LaunchSuper 就以为 SpecialPlace 就够是错的)。 */
-    if (tc->drain && !s_ShowDrain)
+    if (tc->drain)
     {
-        static int s_DrainHidden = 0;
-        tc->hide = 1;
-        if (s_DrainHidden < 16)
+        tc->instant = 1;
+        if (!s_ShowDrain)
         {
-            LogS("sws: hide drain ", id);
-            s_DrainHidden++;
+            static int s_DrainHidden = 0;
+            tc->hide = 1;
+            if (s_DrainHidden < 16)
+            {
+                LogS("sws: hide drain ", id);
+                s_DrainHidden++;
+            }
+        }
+    }
+    /* 自证日志: 把**判据的实际取值**打出来, 限 40 条。
+     * `instant` 判错时 (症状: 原版点一下就生效、侧栏要点两次), 光看
+     * `nopcx` / `armed` 是分不清"`Action` 偏移/取值读错了"还是"点击那步没走到
+     * instant 分支"的 —— 只有把 v=<Action> 打出来才能一眼定位。
+     * 只给"有看点"的类型记 (即时类 / 被藏的 / 手动不可点的 / 火风暴类 / 无 PCX),
+     * 否则每个剧本几十行噪声。 */
+    if (tc->instant || !tc->show || !tc->manual || tc->drain || !tc->pcxFile)
+    {
+        if (s_DiagLeft > 0)
+        {
+            char b[16], buf[160];
+            unsigned q = AppendCStr(buf, 0, "sws: act ", sizeof(buf));
+            q = AppendCStr(buf, q, id, sizeof(buf));
+            q = AppendCStr(buf, q, " v=", sizeof(buf));
+            HtoA((unsigned)*(int*)((char*)type + OFF_SWT_ACTION), b);
+            q = AppendCStr(buf, q, b, sizeof(buf));
+            q = AppendCStr(buf, q, " i", sizeof(buf));
+            UtoA((unsigned)tc->instant, b);
+            q = AppendCStr(buf, q, b, sizeof(buf));
+            q = AppendCStr(buf, q, " m", sizeof(buf));
+            UtoA((unsigned)tc->manual, b);
+            q = AppendCStr(buf, q, b, sizeof(buf));
+            q = AppendCStr(buf, q, " d", sizeof(buf));
+            UtoA((unsigned)tc->drain, b);
+            q = AppendCStr(buf, q, b, sizeof(buf));
+            q = AppendCStr(buf, q, " s", sizeof(buf));
+            UtoA((unsigned)tc->show, b);
+            q = AppendCStr(buf, q, b, sizeof(buf));
+            q = AppendCStr(buf, q, " p=", sizeof(buf));
+            q = AppendCStr(buf, q, tc->pcxFile ? tc->pcxFile : "-", sizeof(buf));
+            /* `x` = ExtData 取到没有。Ares ExtData 是判据的权威来源,
+             * x=0 就说明定位器或 find() 出了问题, 得回去查上面那段。 */
+            q = AppendCStr(buf, q, ext ? " x1" : " x0", sizeof(buf));
+            LogLine(buf);
+            s_DiagLeft--;
         }
     }
 }
 
 /* 这个超武 (按 SuperWeaponType 数组下标) 到底显不显示在超武侧栏上。
-  * 判据 = SwsScan 的显示门: !hide && ManualFire (本家/IsPresent 由调用方在
-  * SuperClass 数组上自己判)。
+  * 判据 = SwsScan 的显示门: !hide && SW_ShowCameo && ManualFire (本家/IsPresent
+  * 由调用方在 SuperClass 数组上自己判)。
+  *
+  * `SW_ShowCameo` 必须在判据里: Ares 的 `HouseClass_UpdateSuperWeaponsUnavailable`
+  * 是 `if(pData->SW_ShowCameo) AddCameo(...)` —— `=no` 的压根不会进防御页。
+  * 侧栏不跟着藏, 就是"游戏里没有、侧栏里却有"; 反过来漏掉它, `SwsDedupRestore`
+  * 会把引擎本来不给的 cameo 主动加进防御页, 那是**改游戏行为**。
   *
   * "搬回"共用。而"切回显示"时 `s_DedupHide` 恰好是 0, 一旦在这里判掉, 搬回
   * 循环会把所有超武都 `continue` 掉, 按钮就永远没反应 (日志表现为
@@ -924,7 +1500,7 @@ static int SwsSidebarShows(int swIdx)
     if (!tc) return 0;
     if (tc->prio < 0) SwsFillType(tc, type, id);
     if (tc->swIdx < 0) return 0;
-    return (tc->hide || !tc->manual || tc->drain) ? 0 : 1;
+    return (tc->hide || !tc->show || !tc->manual || tc->drain) ? 0 : 1;
 }
 
 /* ================= 从引擎手里拿超武 cameo 图标 =================
@@ -992,7 +1568,6 @@ static int SwsSidebarShows(int swIdx)
 #define ADDR_CAMEO_OBS_RESUME 0x006A9966u /* 原 jmp 的落点 */
 #define ADDR_CAMEO_OBS_LEN  0x5u
 #define ARES_HOOK_SCAN       0x100u        /* 扫钩子体的字节数 (DrawPCX 的清零在 +0x7D) */
-#define ARES_HOOK_PCX        "StripClass_Draw_SuperWeapon_PCX"
 #define ARES_HOOK_DRAW       "StripClass_Draw_DrawPCX"
 
 static void*  s_PswSlot = NULL;     /* 壳写的 SuperWeaponTypeClass* */
@@ -1005,7 +1580,7 @@ static int SwsAresImage(unsigned char** ppLo, unsigned char** ppHi);
 
 /* 逐超武的图标缓存: 按**类型指针**索引 (类型对象终身静态)。
  * 只缓存 60x48 的 16 位色, 抓到一次终身有效。60*48*2 = 5760B/条, 320 条 = 1.8MB。 */
-#define SWS_ICON_CAP 320
+#define SWS_ICON_CAP 512
 typedef struct { void* type; unsigned short* pix; } SwsCap;
 static SwsCap s_Cap[SWS_ICON_CAP];
 static int s_CapN = 0;
@@ -1194,6 +1769,49 @@ fail:
  * 数据源是 `SuperClass::Array` 里 `Owner==本家 && IsPresent==1` 的那些对象 ——
  * **不是** rules ini, **也不是**防御支援页 (为什么见 SwsScan 里那段注释)。 */
 
+/* ---- ini / 类型数组换代: 把 ini 派生缓存清掉 ----
+ * `s_Ini` (配置优先级表) 与 `s_TC` (类型缓存) 是**一次性**读 ini 填的, 而
+ *   ① 换战役/重开/读档时 `CCINIClass::INI_Rules` 会被换成另一份 (gamemd
+ *      `0x52D0FA mov [0x887048],eax`), 键值全变;
+ *   ② `SuperWeaponTypeClass::Array` 换容器时**类型对象也会重建**, 于是按
+ *      `type` 指针缓存的条目全部张冠李戴 (同地址复用 = 拿到别的超武的图标)。
+ * 以前两者都没管: 打完 A 关的缓存会带进 B 关, "图标时有时无"有一半是这个。
+ * 判据用**指针**而不是内容: 换一份 ini 一定换指针, 而每帧读内容比对不便宜。
+ *
+ * ⚠ **`s_Mix` 不在这里清**。它是 `SWS_SwTypeIni` 钩子在**加载期**填的, 而加载
+ *   发生在每次进剧本时 —— 在扫描期清 = 把钩子刚读到的 (地图那份) ini 全部丢掉。
+ *   它的作废条件是"类型对象重建", 由钩子自己在 `SWS_SwTypeIni` 里判
+ *   (`SuperWeaponTypeClass::Array.Items` 变了就清, 正好赶在这一轮 ini 读之前)。 */
+static void* s_EpochRules = NULL;
+static void* s_EpochTypes = NULL;
+
+static void SwsCacheEpoch(void)
+{
+    void* rules = *(void**)ADDR_INI_RULES;
+    void* types = 0;
+    int cnt = 0;
+    void** it = SwsVecItems(ADDR_SWTYPE_ARR, &cnt);
+    if (it) types = it;
+    if (rules == s_EpochRules && types == s_EpochTypes) return;
+    s_EpochRules = rules;
+    s_EpochTypes = types;
+    s_IniN = 0;
+    SwsLoadIniList();
+    s_TCN = 0;
+    s_DiagLeft = 40;
+    /* ★ `s_Mix` 现在也在这里清。
+     *   它按**类型指针**索引, 而类型对象跨剧本会被重建 —— 分配器把新类型放到
+     *   上一局某个已释放类型的地址上是常事。于是"上一局的 show=0"会被当成
+     *   "这一局的 show=0", 这正是 `StasisGridSpawn` / `ConfusionGridSpawn`
+     *   "上次能过滤、这次又冒出来"这类**时好时坏**的来源。
+     *   ⚠ 之前特意不在这里清 (怕把钩子刚读到的地图 ini 丢掉), 但那个钩子
+     *   **实测从未被调用** —— `s_Mix` 里根本没有"钩子读到的数据", 只有
+     *   `SwsMixOf` 首建时垫的 `INI_Rules` 底, 清掉重垫结果完全一样。
+     *   (钩子真能被调到时, 它的清表逻辑在类型重建处, 不依赖这里。) */
+    if (s_MixN) { s_MixN = 0; LogLine("sws: mix reset (epoch)"); }
+    LogLine("sws: ini epoch reset");
+}
+
 /* ---- 扫描早退/扫空的旁路日志 ----
  *
  * SwsScan 的每一条 return 都是**静默**的, 而 s_ItemN=0 有两种截然不同的后果:
@@ -1278,10 +1896,12 @@ static void SwsScan(void)
     /* 图标抓取钩子: 装上之后引擎每次画防御页超武 cameo 都会把像素交给我们。
      * 每轮试一次 (内部自带"装过就不再试")。 */
     SwsEnsureCameoHook();
+    /* ini / 类型数组换代就把所有 ini 派生缓存清掉 (见 SwsCacheEpoch)。 */
+    SwsCacheEpoch();
     /* 逐项被拒的计数 (只在扫空时一次性打出来, 见下)。别用它改逻辑 ——
      * 它存在的意义是"扫空时能一眼看出是哪一道显示门吃掉了全部条目"。 */
     int rOwner = 0, rPresent = 0, rType = 0, rFlag = 0, rId = 0,
-        rCache = 0, rIdx = 0, rHidden = 0;
+        rCache = 0, rIdx = 0, rHidden = 0, rShow = 0, rNotClean = 0;
     s_ItemN = 0;
     /* 以下全是固定地址字读取, 不碰数组内容, 任何状态下安全。 */
     cur = *(void**)ADDR_CURPLAYER;
@@ -1314,6 +1934,40 @@ static void SwsScan(void)
     /* ★ 数据源就是本家拥有的超武 (Super 对象, 见 SwsScan 里那段)。防御支援页
      * 那一份是引擎按 SW_ShowCameo 挑过的滞后镜像, 而且会被我们单方面删条目 ——
      * 拿它当数据源等于自己改自己 ("先复制一份再过滤" 就是现在这个结构)。 */
+    /* ★★ 数据源: **引擎的干净清单** (`TabCameos[防御页]`, 长度以
+     * `CameoCount` 为准 —— 引擎刚跑完 `CameoIsGone` 过滤)。
+     *
+     * 为什么改成以它为准: 玩家在原版侧栏看不见不该出现的超武, 说明引擎手上
+     * 已经有过滤好的结果。我们自己扫 `SuperClass::Array` 再复刻一遍
+     * `SW_ShowCameo` / `ManualFire` / 火风暴, 就是在**猜**引擎已经算好的答案 ——
+     * 猜错一次就是"游戏里没有、侧栏里有", 而且时好时坏。
+     *
+     * 所以改成"读引擎的清单 → 在**副本**上过滤 → 交给侧栏绘制", 我们自己的规则
+     * 只做减法, 永远不负责"加进来"。这样侧栏 ⊆ 引擎给的, 不可能凭空多出条目。
+     *
+     * 拿不到清单 (容器没定位上 / 校验不过) 时退回旧的全数组扫描, 行为不倒退。 */
+    {
+        static int s_CleanIdx[SWS_CAP];
+        int got;
+        SwsCleanStampCheck();
+        got = SwsEngineCleanList(s_CleanIdx, SWS_CAP);
+        /* ⚠ 快照为空时**不开闸门**: 空说明"这个数据源此刻不可信" (容器刚被
+         * 去重删空), 而不是"本家没有超武"。硬开会把侧栏杀成一格不画, 而且
+         * 引擎侧栏也跟着空掉, 容器再也长不回来 (2026-10-02 实测)。 */
+        s_CleanMode = (s_CleanN > 0) ? 1 : 0;
+        if (got >= 0)
+        {
+            /* 只在**快照条目数变了**才记。快照只增, 所以这里的值单调不减。 */
+            {
+                static int s_LastClean = -1;
+                if (s_CleanN != s_LastClean)
+                {
+                    s_LastClean = s_CleanN;
+                    LogI("sws: clean snapshot n=", s_CleanN);
+                }
+            }
+        }
+    }
     pside = SwsPlayerSide();
     frame = *(int*)ADDR_FRAME;
     for (i = 0; i < count && n < SWS_CAP; i++)
@@ -1347,15 +2001,28 @@ static void SwsScan(void)
         if (!tc) { rCache++; continue; }
         if (tc->swIdx < 0) { rIdx++; continue; }
         if (tc->prio < 0) SwsFillType(tc, type, id);
+        /* ★★ 引擎清单闸门: 不在引擎那份干净清单里的一律不画。
+         * 这一条取代了原先"自己判 SW_ShowCameo"的做法 —— 引擎已经判过了, 我们
+         * 再判一遍只会引入分歧 (原版 `SW.ShowCameo=false` 的 IronGuard /
+         * StasisGridSpawn / ConfusionGridSpawn 就是这么漏进侧栏的)。 */
+        if (s_CleanMode)
+        {
+            int b = tc->swIdx;
+            if (b < 0 || b >= SWS_LIVE_BITS ||
+                !(s_CleanBits[b >> 3] & (1u << (b & 7))))
+            { rNotClean++; continue; }
+        }
         /* 引擎抓到的图标: 每次扫描重新挂一次 (SwsTypeEntry 把 capPix 清成 NULL),
          * 因为 s_Cap[] 会随超武解锁/战役切换而重抓, 不能只认第一次。 */
         if (!tc->capPix) tc->capPix = SwsCaptured(type);
-        /* 与防御页一致: 只排除 `SW.ManualFire=no` (引擎在防御页上同样拒绝点击
-         * 它们)。UseChargeDrain 那批也过滤, 理由见 SwsFillType。
-         * 两条旗标都走**对象字段**, ini 那份只用来对账 (见 SwsFlagsOf)。
+        /* 与防御页一致: `SW.ShowCameo=no` 压根不进防御页 (Ares
+         * HouseClass_UpdateSuperWeaponsUnavailable 里 `if(pData->SW_ShowCameo)`),
+         * `SW.ManualFire=no` 在防御页上会被拒绝点击, `UseChargeDrain` 那批也过滤
+         * (理由见 SwsFillType)。三条都来自**合并后**的规则快照 + 对象字段。
          * 不能拿引擎 ShowTimers 集合当显示清单 —— 它只有 11 个, 是
          * "正在计时"的子集, 不是侧栏该有的全量。 */
         if (tc->hide || !tc->manual || tc->drain) { rHidden++; continue; }
+        if (!tc->show) { rShow++; continue; }
         swIdx = tc->swIdx;
         side = tc->side;
         prio = tc->prio;
@@ -1399,6 +2066,57 @@ static void SwsScan(void)
             s_LastN = n;
             LogI("sws: scan ok n=", n);
         }
+        /* ★ 把**实际画出来的 ID 逐个列出来** (条目集变化时才记)。
+         *   "本该过滤掉的仍然没过滤掉" 这类反馈, 光看 `n=` 与逐条的
+         *   `sws: act` 判据日志对不上号 —— 后者只在"有看点"的类型上记, 而且
+         *   配额有限; 这里直接把成品清单打出来, 与截图逐个核对, 一眼看出
+         *   多出来的是谁、该靠哪条规则滤掉。 */
+        {
+            static char s_LastSet[512];
+            static int s_LastSetInit = 0;
+            char cur[512];
+            unsigned q = 0;
+            int k;
+            cur[0] = 0;
+            for (k = 0; k < n; k++)
+            {
+                const char* sid = (const char*)s_Items[k].type + OFF_SWT_ID;
+                if (q + 1 < sizeof(cur))
+                {
+                    unsigned j;
+                    for (j = 0; j < 20 && sid[j]; j++) { cur[q++] = sid[j]; }
+                    cur[q++] = ',';
+                }
+            }
+            cur[q] = 0;
+            if (!s_LastSetInit || SwsStrDiff(s_LastSet, cur))
+            {
+                char line[600], t1[16];
+                unsigned w = AppendCStr(line, 0, "sws: list ", sizeof(line));
+                w = AppendCStr(line, w, cur, sizeof(line));
+                /* ★ 带上**当前规则集地址**, 这样日志能对上"是哪张图/哪局"。
+                 *   之前日志里最新一局只有 Deploy1/Warhead 两三个超武, 而用户
+                 *   截图里有十来个 —— 两边根本不是同一张图, 于是"清单里有没有
+                 *   那个不该出现的"根本无从比对。规则集指针每换一张图必变。 */
+                w = AppendCStr(line, w, "   [rules=", sizeof(line));
+                HtoA((unsigned)(size_t)*(void**)ADDR_INI_RULES, t1);
+                w = AppendCStr(line, w, t1, sizeof(line));
+                w = AppendCStr(line, w, " cameo=", sizeof(line));
+                UtoA((unsigned)SwsStripCameoCount(TAB_DEFENSE), t1);
+                w = AppendCStr(line, w, t1, sizeof(line));
+                w = AppendCStr(line, w, " snap=", sizeof(line));
+                UtoA((unsigned)s_CleanN, t1);
+                AppendCStr(line, w, t1, sizeof(line));
+                LogLine(line);
+                {
+                    unsigned j;
+                    for (j = 0; j + 1 < sizeof(s_LastSet) && cur[j]; j++)
+                        s_LastSet[j] = cur[j];
+                    s_LastSet[j] = 0;
+                }
+                s_LastSetInit = 1;
+            }
+        }
     }
     /* 一条都没扫出来 = 侧栏整块不画 (SwsRebuild 的 goto nogeo), 而且防御页去重
      * 也一并停手 —— 症状正是"有时候能显示有时候不能"。把每一道显示门吃掉了多少
@@ -1433,8 +2151,11 @@ static void SwsScan(void)
         q = AppendCStr(buf, q, " hidden=", sizeof(buf));
         UtoA((unsigned)rHidden, t2);
         q = AppendCStr(buf, q, t2, sizeof(buf));
+        q = AppendCStr(buf, q, " nocameo=", sizeof(buf));
+        UtoA((unsigned)rShow, t2);
+        q = AppendCStr(buf, q, t2, sizeof(buf));
         q = AppendCStr(buf, q, " notseen=", sizeof(buf));
-        UtoA(0u, t1);
+        UtoA((unsigned)rNotClean, t1);
         q = AppendCStr(buf, q, t1, sizeof(buf));
         q = AppendCStr(buf, q, " page=", sizeof(buf));
         UtoA(1u, t2);
@@ -1481,7 +2202,7 @@ static void SwsScan(void)
 #define OFF_SIDE_NEEDREDRAW   0x53A6u
 #define OFF_SIDE_NEEDBGREDRAW 0x53A7u
 #define ABS_SPECIAL           0x1F   /* 引擎实际用的超武 cameo 类型 */
-#define TAB_DEFENSE           1      /* 0 建筑 / 1 防御 / 2 步兵 / 3 载具 */
+/* TAB_DEFENSE 已在上方前置声明处定义 */
 #define BT_SIZE               0x34u  /* sizeof(BuildType) */
 
 /* DynamicVectorClass<BuildType> (YRpp ArrayClasses.h, 带虚表):
@@ -1526,6 +2247,105 @@ static int SwsStripCameoCount(int tab)
            (unsigned)tab * OFF_STRIP_STRIDE + OFF_STRIP_CAMCOUNT;
     if (!IsPlausiblePtr((void*)(size_t)addr)) return -1;
     return *(int*)(size_t)addr;
+}
+
+/* =======================================================================
+ * 引擎干净清单 —— 自定义侧栏的权威数据源
+ *
+ * 玩家在原版侧栏看不见不该出现的超武 ⇒ 引擎手上**一定有一份过滤好的清单**。
+ * 找到它就不必自己复刻过滤规则 (那是所有 bug 的来源)。
+ *
+ * 清单 = `RulesExt::TabCameos[防御页]`, 长度以 `StripClass::CameoCount`
+ * (页签头 +0x54) 为准。证据:
+ *  - Ares 源码 `Ext/Rules/Hooks.CameoList.cpp:308-331` (`StripClass_RecheckCameos
+ *    @0x6AA600`, 注释 "complete replacement of StripClass::Recalc"):
+ *        auto const kept  = std::remove_if(cameos.begin(), cameos.end(), CameoIsGone);
+ *        auto const count = int(kept - cameos.begin());
+ *        cameos.Count     = count;      // 容器长度 = 过滤后存活数
+ *        pStrip->CameoCount = count;    // 侧栏绘制数 = 同一个值
+ *    ⇒ 两者恒等, 且都已过 `CameoIsGone` (`!Super->IsPresent` 已 remove)。
+ *  - 本机二进制: `0x6AA617 mov eax,[ebp+0x54]` / `cmp eax,edi(0)`;
+ *    绘制循环上界 `0x6A9022 cmp edi,[eax+0x54]`。
+ *  ⚠ `+0x58` **不是** CameoCount, 是 `StripClass::Index` (页签号): 被
+ *    `mov [0xA8E334]` → `mov eax,[eax+edi*4]` 拿去索引页签数组。
+ *
+ * 每项 `BuildType` 步长 0x34 (gamemd `0x6A900F`/`0x6A9014`/`0x6A9017` 写入序列
+ * 实证, 另有 `cmp eax,0x35` = 53 条上限):
+ *   +0x00 int ItemIndex / +0x04 int ItemType (超武=0x1F) / +0x08 / +0x0C
+ *
+ * ⚠⚠⚠ **本容器会被 `SwsDedupRemove` 缩短**, 所以它**不能**直接当数据源:
+ *   "读它 → 过滤 → 删它" 构成自我蚕食 —— 现场日志 `clean list n=0` +
+ *   `notseen=25` + `tc=0/0/0/0`, 侧栏一格不画, 而且引擎侧栏也跟着空掉,
+ *   容器再也长不回来 (引擎补货也走这个容器)。
+ *
+ *   ⇒ 做法: **第一次读到时就存一份快照**, 之后一直用那份快照当数据源。
+ *     快照只增不减 (条目出现就并进来), 去重随便删容器, 都不影响侧栏。
+ *     这才真正做到"拷贝一份, 在副本上过滤" —— 用户要的就是这个结构。
+ * ===================================================================== */
+/* 把引擎容器当前的内容并进快照 (只增不减)。
+ * 返回快照里的条目数; -1 = 容器不可用 (本轮不开闸门)。 */
+static int SwsEngineCleanList(int* outIdx, int cap)
+{
+    unsigned char *vec, *items;
+    int cnt, lim, i, n = 0;
+    if (!SwsTabCameoOk()) return -1;
+    vec = s_TabCam + (unsigned)TAB_DEFENSE * DVEC_SIZE;
+    cnt = *(int*)(vec + DVEC_OFF_COUNT);
+    /* CameoCount 是权威长度 (引擎刚跑完 CameoIsGone); 容器自己的 Count 在
+     * ClearCameos→AddCameo 的窗口里可能还没同步, 取两者小的。 */
+    lim = SwsStripCameoCount(TAB_DEFENSE);
+    if (lim >= 0 && lim < cnt) cnt = lim;
+    if (cnt <= 0) return 0;
+    items = *(unsigned char**)(vec + DVEC_OFF_ITEMS);
+    if (!items || !IsPlausiblePtr(items)) return -1;
+    for (i = 0; i < cnt && n < cap; i++)
+    {
+        const unsigned char* it = items + (size_t)i * BT_SIZE;
+        int idx = *(const int*)(it + 0);
+        int typ = *(const int*)(it + 4);
+        if (typ != ABS_SPECIAL) continue;      /* 不是超武 */
+        if (idx < 0 || idx >= SWS_LIVE_BITS) continue;
+        outIdx[n++] = idx;
+        /* 并进快照 (只增) —— 这一步才是"拷贝一份" */
+        s_CleanBits[idx >> 3] |= (unsigned char)(1u << (idx & 7));
+    }
+    /* ★ 快照条目数 = 位图 popcount。**必须在这里更新 `s_CleanN`** ——
+     *   漏掉它的话 `s_CleanMode = (s_CleanN > 0)` 永远是 0, 闸门从来没打开过,
+     *   而日志里表现为 `snap=-1` (2026-10-02 踩过, 白跑好几轮)。
+     *   注意要数**整张快照**而不是本轮读到的 `n`: 快照是累积的, 容器被去重
+     *   删短之后 `n` 会变小, 但之前见过的超武仍然有效。 */
+    {
+        int total = 0, b;
+        for (b = 0; b < SWS_LIVE_BYTES; b++)
+        {
+            unsigned char v = s_CleanBits[b];
+            while (v) { total += (v & 1u); v = (unsigned char)(v >> 1); }
+        }
+        s_CleanN = total;
+    }
+    return n;
+}
+
+/* 清空快照。只在"引擎把整套超武重建了"时做 (换剧本), 否则快照会越攒越多,
+ * 把上一局出现过的超武带进这一局。判据用类型数组的 Items 指针。
+ *
+ * ⚠ 首次调用**不能**触发清空: `s_Last` 初始为 NULL 而 `it` 非 NULL, 直接
+ *   "变了就清" 会在开局的第二轮把刚攒下的快照清掉。首帧只登记不动作。 */
+static void SwsCleanStampCheck(void)
+{
+    void** it = SwsVecItems(ADDR_SWTYPE_ARR, NULL);
+    static void* s_Last = NULL;
+    static int s_Init = 0;
+    if (!s_Init) { s_Init = 1; s_Last = it; return; }
+    if (it == s_Last) return;
+    s_Last = it;
+    if (s_CleanN > 0)
+    {
+        memset(s_CleanBits, 0, sizeof(s_CleanBits));
+        LogLine("sws: clean snapshot reset (types rebuilt)");
+    }
+    s_CleanN = -1;
+    s_CleanMode = 0;
 }
 
 /* 取 Ares.dll 的映像范围 [lo, hi)。解析 PE 头拿 SizeOfImage, 只为两件事:
@@ -1857,7 +2677,25 @@ static int SwsSidebarHasIcon(int swIdx)
     return 0;
 }
 
-/* 从防御页删掉所有"侧栏上确实也有"的超武 cameo。返回删掉几条, -1 = 不可用。 */
+/* 从防御页删掉所有"侧栏上确实也有"的超武 cameo。返回删掉几条, -1 = 不可用。
+ *
+ * ⚠⚠ 与 `SwsEngineCleanList` 的**致命顺序依赖** (2026-10-02):
+ *   引擎的干净清单就是**这个容器本身**, 而本函数会把它缩短。于是
+ *     "读清单 → 过滤 → 绘制 → 删容器" 这个闭环一旦成立, 下一轮读到的清单
+ *     就只剩"上次没删掉的" —— 逐轮自我蚕食, 最后侧栏变空。
+ *
+ *   两个方向都踩过:
+ *     - 只删不读: 侧栏照旧全量, 但 `ShowCameo=false` 的又会漏进来 (老 bug);
+ *     - 只读不删: 过滤对了, 但同一个超武在引擎侧栏和自定义侧栏**同时**出现。
+ *
+ *   ⇒ 正确做法: **读一份快照当数据源, 再对容器做去重**。快照必须在删除**之前**
+ *     取, 且删除只针对"本轮确实画出来了"的条目 —— 画出来的条件里已经包含
+ *     "在快照里", 所以删除是快照的子集, 不会把还没画的条目误删。
+ *
+ *   `SwsScan` 每轮都重建快照 (见 s_CleanBits), `SwsDedupSync` 在其后跑,
+ *   于是每轮都是"先按引擎的完整清单决定画什么, 再把画了的搬走"。
+ *   引擎下一帧会通过 `HouseClass_UpdateSuperWeaponsUnavailable` / AddCameo
+ *   把该给的补回来 —— 这本来就是它每帧在做的事, 我们只是搭个便车。 */
 static int SwsDedupRemove(void)
 {
     unsigned char* vec, *items;
@@ -2020,6 +2858,90 @@ static int SwsDedupSync(void)
     return r;
 }
 
+/* ---------------- 图标兜底: 让引擎自己把防御页重画一次 ----------------
+ *
+ * 抓取钩 (`0x6A9958`) 只在**引擎正在画防御页 cameo** 时才有数据, 而:
+ *   ① 钩子要 `frame >= 60` 才装得上 (见 SwsEnsureCameoHook), 装上之前侧栏
+ *      早就画过一轮了;
+ *   ② 防御页默认不是激活页签;
+ *   ③ 地图内嵌 ini 新增的超武 (SP_CryospearSpecial / WarheadSpecial1 …) 压根
+ *      不在 rulesmo.ini 里 ⇒ `SidebarPCX=` 读不到 ⇒ 自己载 PCX 这条路也空。
+ * ⇒ 结果是"格子空着"。用户点一次"过滤/显示"按钮之所以能救回来, 就是按钮那条路
+ *   顺手调了一次 `RepaintSidebar(1)`, 引擎于是把防御页重画, 抓取钩抓到像素。
+ *   这里把那次重画自己做掉, 每轮扫描最多催一次, 催满 32 次停手。
+ *
+ * 纯 UI 重绘请求 (`SwsDedupRestore` / `SwsDefenseRepair` 早就在调它), 不碰模拟。
+ * 副作用只有一次多余的侧栏重画, 而侧栏本来每帧都在重画。
+ *
+ * ⚠⚠ 2026-10-02 实测修正: **光调 `RepaintSidebar(1)` 抓不到**。用户在 emigdal
+ *   地图上手动点"过滤/显示"按钮能一次救回两个图标, 而按钮那条路除了
+ *   `RepaintSidebar` 之外**还走了 `AddCameo`**; 只抄 `RepaintSidebar` 的
+ *   `SwsNudgePaint` 连催 32 次一个也没抓到 (日志: `SwsNudgePaint` 跑满, 无
+ *   `sws: cap`)。差别就在 `AddCameo` —— 它会把 super 挂到防御页的 cameo 槽上,
+ *   而抓取钩 (`0x6A9958`) 只在**槽被画**时才有机会拷像素。所以这里改成
+ *   "AddCameo(所有本家超武) + RepaintSidebar", 即复用 `SwsDedupRestore` 那条
+ *   已被用户操作实证有效的路径。
+ *
+ * 为什么这样安全 (联机铁律):
+ *   - `AddCameo` 是 UI 层操作, 不写任何模拟状态, 引擎自己就在用它建防御页;
+ *   - 它自带查重 (Ares 的 `SidebarClass_AddCameo_SkipSizeCheck` 扫一遍
+ *     `TabCameos[TabIndex]`), 重复调用是无害空操作;
+ *   - 紧接着的 `SwsDedupSync()` 仍是**单向搬出** (只从防御页删, 绝不加),
+ *     所以即便这里多加了不该有的 cameo, 下一轮也会被搬走。 */
+#define SWS_NUDGE_MAX 8
+static int s_NudgeLeft = SWS_NUDGE_MAX;
+
+static void SwsNudgePaint(void)
+{
+    int i, added = 0;
+    if (s_ItemN <= 0 || s_NudgeLeft <= 0) return;
+    for (i = 0; i < s_ItemN; i++)
+        if (!s_Items[i].capPix && !s_Items[i].pcxFile) break;
+    if (i >= s_ItemN) return;          /* 图标都齐了, 不用再催 */
+    s_NudgeLeft--;
+    /* 与 SwsDedupRestore 逐字同一条路: 引擎自己的 AddCameo (自带查重),
+     * 只对本家、已就绪、且侧栏本来就显示的超武调用。 */
+    {
+        void* cur = *(void**)ADDR_CURPLAYER;
+        void** items;
+        int count;
+        if (!cur || !IsPlausiblePtr(cur)) return;
+        count = 0;
+        items = SwsVecItems(ADDR_SUPER_ARR, &count);
+        if (!items || count <= 0) return;
+        for (i = 0; i < count; i++)
+        {
+            void* sup = items[i];
+            void* type, *owner;
+            int swIdx;
+            if (!sup || !IsPlausiblePtr(sup)) continue;
+            type = *(void**)((char*)sup + OFF_SUP_TYPE);
+            owner = *(void**)((char*)sup + OFF_SUP_OWNER);
+            if (!type || !IsPlausiblePtr(type)) continue;
+            if (!owner || !IsPlausiblePtr(owner) || owner != cur) continue;
+            if (*(unsigned char*)((char*)sup + OFF_SUP_PRESENT) != 1) continue;
+            if (*(unsigned char*)((char*)sup + OFF_SUP_READY) > 1) continue;
+            if (*(unsigned char*)((char*)sup + OFF_SUP_SUSPEND) > 1) continue;
+            swIdx = *(int*)((char*)type + OFF_SWT_ARRIDX);
+            if (swIdx < 0 || swIdx >= SWS_LIVE_BITS) continue;
+            if (!SwsSidebarShows(swIdx)) continue;
+            if (((int (__thiscall *)(void*, int, int))(void*)ADDR_ADDCAMEO)
+                    ((void*)ADDR_SIDEBAR, ABS_SPECIAL, swIdx))
+                added++;
+        }
+    }
+    ((void (__thiscall *)(void*, int))(void*)ADDR_REPAINTSIDEBAR)
+        ((void*)ADDR_SIDEBAR, TAB_DEFENSE);
+    if (s_DiagLeft > 0 && s_NudgeLeft == 0)
+    {
+        char b[16], buf[64];
+        unsigned q = AppendCStr(buf, 0, "sws: nudge done added=", sizeof(buf));
+        UtoA((unsigned)added, b);
+        AppendCStr(buf, q, b, sizeof(buf));
+        LogLine(buf);
+    }
+}
+
 /* ---------------- 轮询 (切换键 + 点击 + 扫描) ---------------- */
 
 
@@ -2055,6 +2977,7 @@ extern "C" __declspec(dllexport) int __cdecl SWS_OverBar(int mx, int my)
 
 void SWS_Poll(void)
 {
+    static int s_LastItemN = -1;
     int tog, lb, rb;
     /* ---- 帧门: 这个函数挂在 0x4F42F0, 而那个地址**不是**每帧一次 ----
      * gamemd 里 `call 0x4F42F0` 有 113 个静态调用点, 散在 AI / 对象 / 渲染 /
@@ -2271,11 +3194,33 @@ void SWS_Poll(void)
         {
             s_ScanAge = 0;
             s_ForceScan = 0;
+            /* 换剧本: 条目集整个变了 ⇒ 图标催画的配额重新给满 */
+            if (s_ItemN != s_LastItemN) { s_LastItemN = s_ItemN; s_NudgeLeft = SWS_NUDGE_MAX; }
             SwsScan();
+            /* 图标还缺就让引擎重画一次防御页 (抓取钩只在这时候拿得到像素)。
+             * 必须在 SwsDedupSync **之前**: 去重会把没有图标的条目"留在防御页上"
+             * 等图标 (SwsSidebarHasIcon), 催画要赶在它被搬走之前。 */
+            SwsNudgePaint();
             /* 顺便把防御页去重**标记**成"要复查": 新冒进防御页的超武 cameo 靠
              * 这一遍搬走。只在"隐藏"态复查; "显示"态是按钮点一下才需要补, 而
              * 补的判据 (AddCameo 自带查重) 不会因为时间推移而失效。 */
             if (s_DedupHide) s_DedupDirty = 1;
+        }
+        else if (s_CleanMode)
+        {
+            /* ★ 两次扫描之间容器会被去重缩短, 所以**只要它被改过就立刻重建
+             * 快照**, 否则下一轮会拿一份"已经被自己删过"的清单当数据源 ——
+             * 逐轮自我蚕食。判据便宜 (读两个 int 比一下), 每帧做无所谓。 */
+            static int s_LastSeenCnt = -1, s_LastSeenCam = -1;
+            int nowCnt = *(int*)(s_TabCam + (unsigned)TAB_DEFENSE * DVEC_SIZE +
+                                 DVEC_OFF_COUNT);
+            int nowCam = SwsStripCameoCount(TAB_DEFENSE);
+            if (nowCnt != s_LastSeenCnt || nowCam != s_LastSeenCam)
+            {
+                s_LastSeenCnt = nowCnt;
+                s_LastSeenCam = nowCam;
+                s_ForceScan = 1;
+            }
         }
     }
     SwsDedupSync();
