@@ -36,6 +36,7 @@
 #include <windows.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "ScaleBar.h"
 
 #define FA_SECTION "FuzzyAttack"
 
@@ -313,8 +314,11 @@ static void FA_ProjLep(int lx, int ly, int* px, int* py)
 {
     int dx = lx - (s_FaPrevRefCx * 256 + 128);
     int dy = ly - (s_FaPrevRefCy * 256 + 128);
-    *px = s_FaPrevRefPx + (dx * 30 - dy * 30) / 256;
-    *py = s_FaPrevRefPy + (dx * 15 + dy * 15) / 256;
+    int ex = (dx * 30 - dy * 30) / 256;
+    int ey = (dx * 15 + dy * 15) / 256;
+    SB_MapDeltaToScreen(&ex, &ey);   /* 缩放档: 地图像素差要按 A/R 折成屏幕差 */
+    *px = s_FaPrevRefPx + ex;
+    *py = s_FaPrevRefPy + ey;
 }
 
 static void FA_PrevStore(void* u, void* t)

@@ -4,6 +4,7 @@
 #include <windows.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "ScaleBar.h"
 
 int OU_WhatAmI(void* p)
 {
@@ -25,7 +26,8 @@ int OU_Enqueue(char ev[EVT_SIZE])
     Fn_SndCb snd;
     unsigned eaxAfter;
     if (count >= EVT_CAP) return 0;
-    next = *(unsigned*)ADDR_OUT_NEXT;
+    next = *(unsigned*)ADDR_OUT_NEXT & 0x7Fu;   /* 当写下标用之前先夹 */
+    if (next >= EVT_CAP) return 0;
     for (i = 0; i < EVT_SIZE; i++)
         ((char*)(ADDR_OUT_BUF + next * EVT_SIZE))[i] = ev[i];
     snd = *(Fn_SndCb*)0x7E1530u;
@@ -75,6 +77,10 @@ int OU_MouseCellPx(int* cx, int* cy, int* px, int* py)
     crd.X = crd.Y = crd.Z = 0;
     if (!GtMouseGameXY(&mx, &my)) return 0;
     pt.X = mx; pt.Y = my;
+    /* ProcessClickCoords 按**视口空间**判格/拾取对象, 而 GtMouseGameXY 给的是
+     * 物理屏幕点 —— 放大档 (视口 R = A*scale) 下必须先过缩放模块的反变换,
+     * 否则取到的格偏 A/R 倍。scale=1 时恒等。*/
+    SB_MapPoint(&pt, 0);
     if (!FN_CLICKCOORDS((void*)ADDR_DISPLAY, &pt, &center, &crd,
                         &tgtObj, &b5, &b6))
         return 0;
@@ -103,6 +109,7 @@ int OU_MouseCellTarget(int* cx, int* cy, void** tgtOut, int* px, int* py)
     if (tgtOut) *tgtOut = 0;
     if (!GtMouseGameXY(&mx, &my)) return 0;
     pt.X = mx; pt.Y = my;
+    SB_MapPoint(&pt, 0);          /* 见 OU_MouseCellPx: 物理点 -> 视口点 */
     if (!FN_CLICKCOORDS((void*)ADDR_DISPLAY, &pt, &center, &crd,
                         &tgtObj, &b5, &b6))
         return 0;

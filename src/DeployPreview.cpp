@@ -24,6 +24,7 @@
 #include <math.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "ScaleBar.h"
 #include "SmartArea.h"
 #include "DeployPreview.h"
 
@@ -257,6 +258,7 @@ static int DP_MouseCellZ(int* mcx, int* mcy, int* lz)
     crd.X = crd.Y = crd.Z = 0;
     if (!GtMouseGameXY(&mx, &my)) return 0;
     pt.X = mx; pt.Y = my;
+    SB_MapPoint(&pt, 0);          /* 物理点 -> 视口点 (放大档必须, scale=1 恒等) */
     if (!FN_CLICKCOORDS((void*)ADDR_DISPLAY, &pt, &center, &crd, &tgtObj, &b5, &b6))
         return 0;
     *mcx = (int)center.X; *mcy = (int)center.Y;
@@ -273,7 +275,8 @@ static int DP_CornerZ(int cx, int cy, int fb, int* zOut)
     return 1;
 }
 
-/* 任意 lep 点 → 屏像素 (唯一投影出口, 调引擎 CoordsToClient)。 */
+/* 任意 lep 点 → 屏像素 (唯一投影出口, 调引擎 CoordsToClient)。
+ * CoordsToClient 给的是**渲染面坐标**, 缩放档还要折到屏幕坐标 (ScaleBar)。 */
 static int DP_CornerLep(int lx, int ly, int lz, int* px, int* py)
 {
     void* tac = *(void**)DP_TAC_INSTANCE;
@@ -283,7 +286,7 @@ static int DP_CornerLep(int lx, int ly, int lz, int* px, int* py)
     c.X = lx; c.Y = ly; c.Z = lz;
     o.X = 0; o.Y = 0;
     FN_DP_C2C(tac, &c, &o);
-    *px = o.X; *py = o.Y;
+    if (!SB_ViewToScreen(o.X, o.Y, px, py)) { *px = o.X; *py = o.Y; }
     return 1;
 }
 

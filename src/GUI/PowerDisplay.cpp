@@ -240,6 +240,9 @@ int PowerDisplay_DrawSb(void)
     sbH = GtSurfGet(sb, GtVT_GET_HEIGHT);
     sbPitch = GtSurfGet(sb, GtVT_GET_PITCH);
     if (sbW < 60 || sbW > 400 || sbH < 400 || sbPitch <= 0) return 0;
+    /* PwrBoltPx / PwrBlitCache 都按 16bpp 写; pitch < 2*width 就说明不是 16bpp 的面,
+     * 那样每行会越过行尾、最后几行直接写出缓冲。*/
+    if (sbPitch < sbW * 2) return 0;
     PwrColor(&fr, &fg, &fb);
     PwrLayout(sbW, sbH, &x0, &y0);
     locked = GtLock(sb);

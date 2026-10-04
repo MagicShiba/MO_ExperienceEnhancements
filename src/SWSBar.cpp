@@ -1924,11 +1924,14 @@ s_Items[n].remain = remain;
             for (k = 0; k < n; k++)
             {
                 const char* sid = (const char*)s_Items[k].type + OFF_SWT_ID;
-                if (q + 1 < sizeof(cur))
+                /* 每写一个字节都要重新判容量: 原来只在进循环前查一次
+                 * (q+1 < 512), 但一轮最多追加 20+1 字节 ⇒ 侧栏条目一多就把
+                 * cur[512] 写溢出几字节, 直接砸掉本函数栈帧 (每次 poll 都发生)。*/
                 {
                     unsigned j;
-                    for (j = 0; j < 20 && sid[j]; j++) { cur[q++] = sid[j]; }
-                    cur[q++] = ',';
+                    for (j = 0; j < 20 && sid[j] && q + 2 < sizeof(cur); j++)
+                        cur[q++] = sid[j];
+                    if (q + 1 < sizeof(cur)) cur[q++] = ',';
                 }
             }
             cur[q] = 0;
@@ -2547,6 +2550,12 @@ static int SwsDedupRemove(void)
     if (SwsBuildLiveSet(live) < 0) return -1;
     vec = s_TabCam + (unsigned)TAB_DEFENSE * DVEC_SIZE;
     cnt = *(int*)(vec + DVEC_OFF_COUNT);
+    /* CameoCount 是权威上限 (它会剔除已消失的 Cameo), 而增删路径没有反向同步,
+     * 所以只信它 —— 下面要按 cnt 原地搬 0x34 字节的条目, cnt 偏大就越界写。*/
+    {
+        int lim = SwsStripCameoCount(TAB_DEFENSE);
+        if (lim >= 0 && lim < cnt) cnt = lim;
+    }
     if (cnt <= 0) return 0;
     items = *(unsigned char**)(vec + DVEC_OFF_ITEMS);
     if (!items || !IsPlausiblePtr(items)) return -1;

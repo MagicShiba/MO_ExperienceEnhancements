@@ -579,7 +579,11 @@ static int BQ_FireProduce(void* house, void* type)
 
     count = *(unsigned*)ADDR_OUT_COUNT;
     if (count >= EVT_CAP) return 0;
-    next = *(unsigned*)ADDR_OUT_NEXT;
+    /* OutList_Next 是引擎的字段, 值必须是 0..EVT_CAP-1 才配当写下标。原来直接拿
+     * 它算 next*EVT_SIZE 写进事件槽, 脏值就是一次任意地址写。OrderUtil.cpp:28
+     * 那份已经 mask 过了, 这里漏了 (孪生代码不同步)。*/
+    next = *(unsigned*)ADDR_OUT_NEXT & 0x7Fu;
+    if (next >= EVT_CAP) return 0;
 
     houseIdx = *(int*)((char*)house + OFF_HOUSE_INDEX);
     heap = BQ_HeapOf(type);
@@ -596,7 +600,11 @@ static int BQ_FireProduce(void* house, void* type)
         "movl %%eax, %0"
         : "=r" (eaxAfter)
         : "r" (snd)
-        : "ecx", "edx", "cc", "memory");
+        /* 必须列出 ebx/esi/edi/ebp: 引擎这个回调是真实函数, 会动 callee-saved
+         * 寄存器, 而编译器以为它不会 —— 于是下面用 next/count 写 OutList_Count /
+         * OutList_Next 时可能拿到垃圾, 引擎同帧按这份坏账本去派发事件就会跳进堆
+         * (实测 0xC0000005, EIP 落在非代码区)。OrderUtil.cpp:46 早修好了。*/
+        : "ecx", "edx", "ebx", "esi", "edi", "ebp", "cc", "memory");
     *(unsigned*)(ADDR_OUT_PAR + next * 4u) = eaxAfter;
 
     *(unsigned*)ADDR_OUT_NEXT = (next + 1u) & 0x7Fu;

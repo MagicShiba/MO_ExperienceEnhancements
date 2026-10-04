@@ -23,6 +23,7 @@
 #include "OrderUtil.h"
 #include "Icon.h"
 #include "FullMap.h"
+#include "MOExperience.h"
 
 #define VC_MAXW 32
 #define VC_MAXH 32
@@ -575,6 +576,41 @@ static int VecSWColon(const wchar_t* s)
     return 0;
 }
 
+/* ---------------- 超武列表横向带 (收表/拦截共用) ----------------
+ * 引擎把这批行画在**视口右缘**: PowerBarClass::Draw (0x6DA9D0, 由
+ * TacticalClass::Render 的第三趟 0x4F4515 调用, 画进 Composite 0x887314)
+ * 里行 x 是 `f(...) + ViewBounds.Width` —— 0x6DAF57 `add eax,[0x886FA4]`,
+ * 且同一函数的 0x6DB005 把 `&ViewBounds` 当裁剪矩形传给 Simple_Text_Print。
+ * 1x 实测: 视口右缘 1752, 名 x=1722 (=右缘-30), 计时器 x=1749 (=右缘-3);
+ * 侧栏隐藏后视口右缘 1920, 整批挪到 ~1890 (=右缘-30)。
+ *
+ * ⚠⚠ ViewBounds 就是缩放用的视口 R (放大档 R = A*scale)。放大时这批行跟着
+ * 视口缩到**视口右缘** (2x 下 846/873, 落在 R 里面), 随后被我们把 R 放大铺到
+ * A 的那一步原样放大两倍 —— 于是原版列表又大又偏, 正好压在自定义面板上。
+ * 以前这里写死下界 1300, 放大档下 846/873 被整批踢出 inband ⇒ 收表也不收、
+ * 拦截也不拦, `return g_OrigSimple` 放行 ⇒ 原版列表直接画出来。
+ * ⇒ 带必须跟着 ViewBounds 走, 一个像素都不能写死。*/
+#define SW_BAND_BACK 400      /* 左界留够: 名越长起点越靠左 (右对齐在右缘-30) */
+#define SW_BAND_FWD  8         /* 右界只留一点: 再往右就是侧栏列 (cameo 名) */
+
+static void VecSWBand(int* lo, int* hi)
+{
+    RectangleStruct vb;
+    int right;
+    vb = *(const RectangleStruct*)(size_t)ADDR_SURF_VIEWBOUNDS;
+    right = vb.X + vb.Width;
+    if (right < 128 || right > 0x10000)
+    {
+        /* ViewBounds 还没写好 (开局/切分辨率那一瞬): 退回老口径 (1300 .. 画布宽),
+         * 只是比现在宽, 别把整块原版列表漏出去。几何一好就自动让位给上面那条。*/
+        *lo = 1300;
+        *hi = (g_SWCompW > 1300) ? g_SWCompW : 1300;
+        return;
+    }
+    *lo = right - SW_BAND_BACK;
+    *hi = right + SW_BAND_FWD;
+}
+
 SWCapRow g_SWCap[SWCAP_MAX];
 int g_SWCapN = 0;
 int g_SWCompW = 0, g_SWCompH = 0;
@@ -648,20 +684,20 @@ static int VecSWCapture(void* surf, int kind, const wchar_t* s, int x, int y)
     if (!s || !IsPlausiblePtr(s)) return 0;
     /* y 带固定 (顶部 32 是横条, 下面到画布底); x **不设上界** ——
      * 这层只兜计时器 (靠冒号判别), 引擎侧栏隐藏后把它们挪到 ~1890,
-     * 任何"侧栏可见时"的上界都会让这层也漏 (只剩黑底, 因为底色条不走这层)。
+     * 放大档下它们跟着视口缩到 ~846 (见 VecSWBand), 任何写死的下界都会让
+     * 这层漏 (只剩黑底, 因为底色条不走这层)。
      * 名不在这里收 (见 Simple_ 入口注释: Print 层的名与悬浮提示不可区分)。*/
-    if (x < 1300 || y < 32 || y > g_SWCompH) return 0;
+    {
+        int lo, hi;
+        VecSWBand(&lo, &hi);
+        if (x < lo || x > hi || y < 32 || y > g_SWCompH) return 0;
+    }
     if (surf && IsPlausiblePtr(surf))
     {
         int* b = (int*)surf;
         sw = b[1]; sh = b[2];
     }
     if (sw <= 0 || sh <= 0 || sw != g_SWCompW || sh != g_SWCompH) return 0;
-    /* ★ 位置检查**不许写死 x<=1752**: 那是"侧栏可见时"量的边界。侧栏一隐藏,
-     * 视口变 1920, 引擎把同一批行挪到 ~1890, 于是 inband=0 -> 这条路既不收表
-     * 也不拦截, `return g_OrigSimple` 放行 => **原版列表直接画出来**。
-     * 上界跟实际侧栏列 (g_MapRight) 走; 拿不到时用画布宽 (最宽松, 宁可多收)。*/
-    if (g_MapRight > 0 && g_MapRight < sw) sw = g_MapRight;
     while (s[n] && n < 63) n++;
     if (g_SWCapN >= SWCAP_MAX && n > 0)
     {
@@ -1101,14 +1137,19 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
             /* ★ 这条 inband 是"隐藏原版超武列表"的**唯一开关**: inband=0 直接
              * `return g_OrigSimple(...)` 放行, 原版名/计时器/底色条原封动画出来。
              *
-             * x **上界只能用画布宽 g_SWCompW**。侧栏隐藏后引擎把整批行挪到
-             * ~1890, 任何按"侧栏可见时"几何算出来的上界 (写死 1752、或收紧到
-             * g_MapRight) 都会把它们整批踢出 inband。
-             * 漏了不会整块原版列表冒出来, 而是"左边只剩矢量计时器 + 右边原版名和
-             * 黑底" —— 因为**名只能在 Simple_ 收** (Print 层的名与悬浮提示不可
-             * 区分), 而计时器有 Print 层兜底 (只判冒号、没有 x 上界)。
-             * 下界 1300 保留: 挡世界悬浮提示 (c=0x73AC616A) 与地图右缘杂字。*/
-            inband = (sx >= 1300 && sx <= g_SWCompW && sy >= 32 && sy <= g_SWCompH);
+             * 横向带**必须跟着 ViewBounds 走** (见 VecSWBand): 这批行的 x 是
+             * `ViewBounds.Width - 30` (名) / `-3` (计时器), 而 ViewBounds 就是
+             * 缩放用的视口 R = A*scale。放大档下它们缩到 ~846/873, 写死任何
+             * 固定下界 (1300 / 1752 / g_MapRight) 都会把它们整批踢出 inband ⇒
+             * 收表也不收、拦截也不拦, 原版列表照画, 再被 R→A 那一步放大两倍。
+             *
+             * y 侧 32..g_SWCompH 保留: 挡顶部横条与世界悬浮提示 (c=0x73AC616A
+             * 那条在 VecSimpleEntry 入口就按发起者挡掉了, 这里只是双保险)。*/
+            {
+                int lo, hi;
+                VecSWBand(&lo, &hi);
+                inband = (sx >= lo && sx <= hi && sy >= 32 && sy <= g_SWCompH);
+            }
             if (text) { while (text[n] && n < 64) n++; }
             if (inband)
             {
@@ -2382,7 +2423,11 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: blitsb bytes mismatch"); LogBytes((unsigned char*)0x6A70E0u); }
     }
-    /* 侧栏列纠正钩 (DisplayClass::InitGUI 0x6ABD30, 首5B = 83 EC 24 53 55)。
+    /* ⚠ 曾经在 UpdatePrimarySurface 的两个调用点 (0x777717 / 0x77776F) 挂过壳,
+     * 字节校验和安装都成功, 但运行时**一次都没被调用** —— 那 5 字节会被别的模块
+     * (Ares) 在初始化之后改写掉。所以只留一个"补丁是否还在"的监测 (见
+     * MOE_CheckUpsPatch): 万一以后又要挂, 先确认没人跟我们抢。*/
+        /* 侧栏列纠正钩 (DisplayClass::InitGUI 0x6ABD30, 首5B = 83 EC 24 53 55)。
      * 那里有一批一次性的侧栏布局写入全用 SidebarBounds.X, 必须在它之前纠正,
      * 否则 FM_Poll 每循环纠正来不及。见 MOExperience.cpp 的 FM_SyncSidebarColumn。 */
     {
@@ -2412,7 +2457,7 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: gadgetinput bytes mismatch"); LogBytes((unsigned char*)0x4E1640u); }
     }
-/* 呈现入口钩 (0x4F4780, 首7B=83 EC 5C 8B 44 24 60): 非条带呈现路。
+/* 呈现入口钩 (0x4F4780, 首7B=83 EC 5C 8B 44 24 60): 缩放模块在这条路之后做放大呈现。
      * 安装见 MOExperience (MOExperience_UpdateEntry/g_UpdateTramp)。 */
     {
         static const unsigned char kWantUpdate[7] = { 0x83, 0xEC, 0x5C, 0x8B, 0x44, 0x24, 0x60 };
@@ -2424,4 +2469,10 @@ void VecText_Install(void)
             else { LogLine("vtext: update hook OFF"); g_UpdateTramp = NULL; }
         }
     }
+/* 缩放: 鼠标折算在**源头**做 —— 换掉 WWMouseClass 虚表 +0x34
+     * (GetMousePosition), 让引擎拿到的已经是视口空间的点。11 个调用点一次
+     * 覆盖 (框选橡皮线/点选/Scroll_Map/单位矩形命中全在里面), 不再需要按
+     * 调用点白名单去挂 ClientToCoords / CoordsToCell (那两个钩已拆, 留着
+     * 会折两次)。详见 MOExperience.cpp 的说明。 */
+    MOE_InstallMousePosHook();
 }

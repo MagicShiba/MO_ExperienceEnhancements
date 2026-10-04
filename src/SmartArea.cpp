@@ -46,6 +46,7 @@
 #include <windows.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "ScaleBar.h"
 #include "SmartArea.h"
 
 #define SA_SECTION "SmartArea"
@@ -684,8 +685,11 @@ static void SA_ProjLep(int lx, int ly, int* px, int* py)
 {
     int dx = lx - (s_PrevRefCx * 256 + 128);
     int dy = ly - (s_PrevRefCy * 256 + 128);
-    *px = s_PrevRefPx + (dx * 30 - dy * 30) / 256;
-    *py = s_PrevRefPy + (dx * 15 + dy * 15) / 256;
+    int ex = (dx * 30 - dy * 30) / 256;
+    int ey = (dx * 15 + dy * 15) / 256;
+    SB_MapDeltaToScreen(&ex, &ey);   /* 缩放档: 地图像素差要按 A/R 折成屏幕差 */
+    *px = s_PrevRefPx + ex;
+    *py = s_PrevRefPy + ey;
 }
 
 /* 存一对规划线端点 (双端取坐标, 任一失败则丢弃)。 */

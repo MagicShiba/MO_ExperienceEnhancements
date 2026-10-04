@@ -23,6 +23,8 @@
 #include <windows.h>
 #include "GdiText.h"
 #include "FullMap.h"
+#include "ScaleBar.h"
+#include "MOExperience.h"
 
 #define FM_SECTION "FullMap"
 
@@ -138,6 +140,11 @@ static int s_SurfWarned = 0;
 static int s_ClickLogged = 0;
 static unsigned s_nPoll = 0;
 static unsigned s_nBlit = 0;
+/* 缩放 (ScaleBar): A = 满视图区, R = 引擎实际视口 (A 居中的 1/m)。每循环刷新。 */
+static RectangleStruct s_ViewA = { 0, 0, 640, 448 };
+static RectangleStruct s_ViewR = { 0, 0, 640, 448 };
+static int s_ZoomLast = 1;
+static int s_ZoomChanged = 0;
 /* 换视口宽度后还要催地图重画几帧 (见 Fm_DirtyRedraw 的注释) */
 static int s_DirtyFrames = 0;
 
@@ -668,11 +675,15 @@ static int s_InSetViewDims = 0;
 /* 一帧只允许重建一次裁剪器 (prepare 一帧能跑上百次) */
 static int s_SyncViewFrame = -1;
 
-/* 当前视口是不是"全宽"那套 (态1/2)。按 ViewBounds 与客户宽比, 而不是按模式 ——
- * 切换的当帧两者会短暂不一致, 而侧栏列起点必须跟着**实际视口**走。 */
+/* 当前视口是不是"全宽"那套 (态1/2)。按 A 与客户宽比, 而不是按模式 ——
+ * 切换的当帧两者会短暂不一致, 而侧栏列起点必须跟着**实际视口**走。
+ *
+ * ★ 缩放后引擎拿到的是 R (居中那一小块), 但**屏幕布局**相关的量一律按 A 算:
+ * 侧栏列起点 / 地图右边界 / 视口 gadget 命中区都跟着 R 走的话, 放大时侧栏会被
+ * 摆到屏幕中间 (R 右边界 = 1095/1314), 凭空多出第二条侧栏。 */
 static int Fm_ViewWide(void)
 {
-    RectangleStruct* vb = (RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
+    const RectangleStruct* vb = &s_ViewA;
     RectangleStruct* wb = (RectangleStruct*)(size_t)ADDR_WINDOWBOUNDS;
     if (wb->Width < 64 || wb->Width > 8192) return 1;
     return (vb->Width >= wb->Width - 8) ? 1 : 0;
@@ -694,7 +705,7 @@ static int Fm_ViewWide(void)
  * 面板全量重画) 用同一组阈值, 取值后恒不成立, 顺带避免每次点击都强刷面板。 */
 static int Fm_ColumnX(int bare)
 {
-    RectangleStruct* vb = (RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
+    const RectangleStruct* vb = &s_ViewA;   /* 满视图区, 不跟缩放走 (见 Fm_ViewWide) */
     int sbW = *(int*)(size_t)ADDR_SIDEBAR_W;
     int colX;
     if (sbW < 64 || sbW > 512) return -1;
@@ -734,7 +745,8 @@ void FM_SyncSidebarColumn(void)
 /* ---------------- 地图区右边界 (给 MOE 那些贴右下角画的层当锚点) ---------------- */
 int FM_MapRightEdge(void)
 {
-    RectangleStruct* vb = (RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
+    /* 满视图区右边界 (缩放不改变"地图区"这个概念, 见 Fm_ViewWide 的说明)。*/
+    const RectangleStruct* vb = &s_ViewA;
     int r;
     if (!s_Enable) return 0;
     if (vb->Width < 64 || vb->Width > 8192) return 0;
@@ -872,6 +884,13 @@ static void Fm_DirtyRedraw(void)
     s_DirtyFrames--;
 }
 
+/* 本循环用的两个视口矩形 (给 ScaleBar 的拉伸与鼠标反变换)。 */
+void FM_GetViewRects(RectangleStruct* a, RectangleStruct* r)
+{
+    if (a) *a = s_ViewA;
+    if (r) *r = s_ViewR;
+}
+
 static void Fm_ApplyViewWidth(void)
 {
     RectangleStruct* vb = (RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
@@ -879,9 +898,10 @@ static void Fm_ApplyViewWidth(void)
     void* tac;
     void* comp;
     int sbW = *(int*)(size_t)ADDR_SIDEBAR_W;
-    int winW, winH, x, w, h, cw, oldW, oldH, d;
+    int winW, winH, x, y = 0, w, h, cw, oldW, oldH, d;
 
     if (!s_Enable) return;
+    MOE_SetPhase(MP_APPLY);
     if (sbW < 64 || sbW > 512) return;
     if (wb->Width < 640 || wb->Width > 8192) return;
     if (wb->Height < 240 || wb->Height > 8192) return;
@@ -924,12 +944,42 @@ static void Fm_ApplyViewWidth(void)
         if (x > w - 16) x = 0;
     }
     if (x < 0) x = 0;
-    if (vb->X == x && vb->Y == 0 && vb->Width == w && vb->Height == h) return;
+    /* ---------------- 缩放 (ScaleBar): 视口改成 A*scale ----------------
+     * 引擎只会 1:1 逐格画, 所以缩放只能靠"视口大小 + 呈现时重采样":
+     *   A = 满视图区 (上面算出来的), R = A * scale (ScaleBar 算, 含落点)。
+     *   scale<1 视口收小 -> 引擎画得少, 呈现时把 R 放大铺回 A;
+     *   scale>1 视口放大 -> 引擎照旧 1:1 画进 ScaleBar 的大面, 三趟之后
+     *   把 R 降采样进 Composite 的 A (引擎的 ZBuffer/ABuffer 也跟着按 R 重建)。
+     * 本模块只负责把 R 写进 ViewBounds, 缩放的几何全在 ScaleBar 里。 */
+    {
+        RectangleStruct r;
+        int sig;
+        /* A 永远记"引擎本该用的满视图区", 与缩放无关。 */
+        s_ViewA.X = x; s_ViewA.Y = 0; s_ViewA.Width = w; s_ViewA.Height = h;
+        if (SB_GetViewRect(&r))
+        {
+            x = r.X;
+            y = r.Y;
+            w = r.Width;
+            h = r.Height;
+        }
+        else { y = 0; }
+        sig = (int)(SB_Scale() * 256.0);
+        if (s_ZoomLast != sig)
+        {
+            /* 换挡时视口变了, 但**不要**走下面"左边界钉住"那套: 缩放要的是中心
+             * 不动 (缩放原地), 那套是给侧栏模式切换用的 (左边界固定)。*/
+            s_ZoomChanged = 1;
+            s_ZoomLast = sig;
+        }
+        s_ViewR.X = x; s_ViewR.Y = y; s_ViewR.Width = w; s_ViewR.Height = h;
+    }
+    if (vb->X == x && vb->Y == y && vb->Width == w && vb->Height == h) return;
 
     oldW = vb->Width;
     oldH = vb->Height;
     vb->X = x;
-    vb->Y = 0;
+    vb->Y = y;
     vb->Width = w;
     vb->Height = h;
     /* 几何变了 => 催引擎把整块重画一遍, 否则视口外那条留残影。判"几何变了"
@@ -969,6 +1019,9 @@ static void Fm_ApplyViewWidth(void)
          * 换算用 ⇒ 宽度一变左边界就跑半个差值 (1920↔1752 = 84px)。把中心按
          * ±ΔW/2 挪回去左边界就不动; 只挪中心, 让引擎照旧钳位 (地图边缘该夹还夹)。 */
         d = (w - oldW) / 2;
+        if (d && s_ZoomChanged)
+            d = 0;              /* 只是换了缩放挡: 中心保持不动 */
+        s_ZoomChanged = 0;
         if (d)
         {
             *(int*)((char*)tac + 0xD64) += d;
@@ -994,8 +1047,21 @@ static void Fm_ApplyViewWidth(void)
             {
                 s_SyncViewFrame = fr;
                 s_InSetViewDims = 1;
-                setDims((void*)(size_t)ADDR_DISPLAY_INSTANCE,
-                        (const void*)(size_t)ADDR_VIEWBOUNDS);
+                /* ★ 用 **A** 重建, 完事把 ViewBounds 写回 R。
+                 * Set_View_Dimensions 末尾会 InitGUI, 侧栏页签/cameo 行/底部工具栏
+                 * 那些"一次性写入"的偏移全按传进去的矩形算。传 R 的话引擎是按
+                 * 438x262 摆的 ⇒ 侧栏下半截空掉、底部工具栏落到侧栏中段、鼠标命中
+                 * 也跟着错。隐藏侧栏那套之所以没事, 正是因为它传进去的就是 A。
+                 * 渲染那边仍然读 ViewBounds, 所以这里结束前必须还原成 R ——
+                 * 视口小正是缩放的实现手段, 渲染期必须是 R。*/
+                {
+                    RectangleStruct keep = *vb;      /* = R */
+                    vb->X = s_ViewA.X; vb->Y = s_ViewA.Y;
+                    vb->Width = s_ViewA.Width; vb->Height = s_ViewA.Height;
+                    setDims((void*)(size_t)ADDR_DISPLAY_INSTANCE,
+                            (const void*)(size_t)ADDR_VIEWBOUNDS);
+                    *vb = keep;                       /* 还原成 R */
+                }
                 s_InSetViewDims = 0;
                 /* 重建裁剪器顺带改了侧栏的一次性布局 —— 立刻纠正列起点。*/
                 FM_SyncSidebarColumn();
@@ -1013,6 +1079,7 @@ static int s_GadgetsArmed = 0;   /* 1 = 页签/cameo 已经恢复可用 (不必�
 static int s_ForceRedraw = 0;    /* 还剩几帧强制面板全量重画 (进态0 用) */
 static int s_ForceRedrawFrame = -1;
 static int s_LastLoggedMode = -1;   /* 只用于"模式变了就打一行几何" */
+static int s_LastLoggedZoom = -1;
 
 static void Fm_PollToggle(void)
 {
@@ -1087,19 +1154,34 @@ void FM_Poll(void)
     Fm_SyncColumn(Fm_SidebarGone());
     /* 诊断以**模式**为触发条件 (拿 vb->Width != before 当条件永远相等, 等于
      * 没有诊断)。一次打两行: 几何 + 引擎内部与视口是否同源。*/
-    if (s_Mode != s_LastLoggedMode)
+    if (s_Mode != s_LastLoggedMode || SB_Level() != s_LastLoggedZoom)
     {
         char b1[16], b2[16], buf[256];
         RectangleStruct rr;
         int okR;
         unsigned q = 0;
         s_LastLoggedMode = s_Mode;
+        s_LastLoggedZoom = SB_Level();
         q = AppendCStr(buf, q, "fullmap: geom mode=", sizeof(buf));
         UtoA((unsigned)s_Mode, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " zoom=", sizeof(buf));
+        {
+            /* scale 是小数 (0.25 = 4 倍放大 ... >1 = 缩小), 打三位定点 */
+            double sc = SB_Scale();
+            int iv = (int)sc;
+            int fr = (int)((sc - (double)iv) * 1000.0 + 0.5);
+            UtoA((unsigned)iv, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+            q = AppendCh(buf, q, '.', sizeof(buf));
+            UtoA((unsigned)fr, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        }
         q = AppendCStr(buf, q, " view=", sizeof(buf));
         UtoA((unsigned)vb->Width, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCh(buf, q, 'x', sizeof(buf));
+        UtoA((unsigned)vb->Height, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         q = AppendCStr(buf, q, "/", sizeof(buf));
         UtoA((unsigned)vb->X, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCh(buf, q, ',', sizeof(buf));
+        UtoA((unsigned)vb->Y, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         q = AppendCStr(buf, q, " col=", sizeof(buf));
         UtoA((unsigned)sb->X, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         q = AppendCStr(buf, q, " colCalc=", sizeof(buf));
@@ -1413,7 +1495,8 @@ static int s_TrimLogged = 0;
 /* 视口扣掉侧栏列之后的矩形。读不到 (列/视口不合理) 返回 0。 */
 static int Fm_ViewNoSidebar(RectangleStruct* out)
 {
-    RectangleStruct* vb = (RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
+    /* 用 A (满视图区): 放大后整个 A 都是地图, 命中区要盖满 A, 不能只盖 R。*/
+    const RectangleStruct* vb = &s_ViewA;
     RectangleStruct* sb = (RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS;
     int sbw = *(int*)(size_t)ADDR_SIDEBAR_W;
     int right;
@@ -1451,9 +1534,10 @@ void FM_TrimViewGadget(void)
     if (gx < 0 || gw <= 0) return;
     if (!Fm_ModeTrim())
     {
-        /* 不收窄 (全屏态): 命中区必须是整宽。引擎每帧从 ViewBounds 重设, 这里只是
-         * 在切模式的当帧把上一次收窄的结果主动改回去, 不依赖那套重设。*/
-        RectangleStruct* vb = (RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
+        /* 不收窄 (全屏态): 命中区必须是整宽 (按 A, 缩放时整块 A 都是地图)。
+         * 引擎每帧从 ViewBounds 重设, 这里只是在切模式的当帧把上一次收窄的结果
+         * 主动改回去, 不依赖那套重设。*/
+        const RectangleStruct* vb = &s_ViewA;
         if (vb->Width < 64 || vb->Width > 8192) return;
         if (gx == vb->X && gw == vb->Width) return;
         *(int*)(g + GAD_LOG_X) = vb->X;
