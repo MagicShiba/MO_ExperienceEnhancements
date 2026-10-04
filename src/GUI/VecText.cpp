@@ -2384,9 +2384,7 @@ void VecText_Install(void)
     }
     /* 侧栏列纠正钩 (DisplayClass::InitGUI 0x6ABD30, 首5B = 83 EC 24 53 55)。
      * 那里有一批一次性的侧栏布局写入全用 SidebarBounds.X, 必须在它之前纠正,
-     * 否则 FM_Poll 每循环纠正来不及。见 MOExperience.cpp 的 FM_SyncSidebarColumn。
-     * [FullMap] InitGuiFix=0 可只关掉这一道钩 (崩溃二分用)。 */
-    if (FM_IniOn("InitGuiFix", 1))
+     * 否则 FM_Poll 每循环纠正来不及。见 MOExperience.cpp 的 FM_SyncSidebarColumn。 */
     {
         static const unsigned char kWantInitGui[5] = { 0x83, 0xEC, 0x24, 0x53, 0x55 };
         if (BytesSame((unsigned char*)0x6ABD30u, kWantInitGui, 5))
@@ -2398,7 +2396,6 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: initgui bytes mismatch"); LogBytes((unsigned char*)0x6ABD30u); }
     }
-    else LogLine("vtext: initgui hook skipped (InitGuiFix=0)");
     /* 视口 gadget 输入钩 (0x4E1640, 首6B = 83 EC 0C 53 55 56 = sub esp,0x0C / push
      * ebx / push ebp)。这是 gadget 命中链的入口, FullMap 要在
      * ExtractGadgetAt 之前把横跨视口那个容器 gadget 收窄。
