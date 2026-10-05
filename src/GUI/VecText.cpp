@@ -587,8 +587,7 @@ static int VecSWColon(const wchar_t* s)
  * ⚠⚠ ViewBounds 就是缩放用的视口 R (放大档 R = A*scale)。放大时这批行跟着
  * 视口缩到**视口右缘** (2x 下 846/873, 落在 R 里面), 随后被我们把 R 放大铺到
  * A 的那一步原样放大两倍 —— 于是原版列表又大又偏, 正好压在自定义面板上。
- * 以前这里写死下界 1300, 放大档下 846/873 被整批踢出 inband ⇒ 收表也不收、
- * 拦截也不拦, `return g_OrigSimple` 放行 ⇒ 原版列表直接画出来。
+ * ⇒ 带必须跟着 ViewBounds 走, 一个像素都不能写死: 写死下界让放大档的行整批漏出拦截带 (`return g_OrigSimple` 放行) → 原版列表直接画出来
  * ⇒ 带必须跟着 ViewBounds 走, 一个像素都不能写死。*/
 #define SW_BAND_BACK 400      /* 左界留够: 名越长起点越靠左 (右对齐在右缘-30) */
 #define SW_BAND_FWD  8         /* 右界只留一点: 再往右就是侧栏列 (cameo 名) */
@@ -742,7 +741,7 @@ static int VecMenuMatch(unsigned caller, int w, int h, int flags)
 }
 
 /* ---------------- 悬浮提示背景盒自适应已删除 ----------------
- * ToolBox=0 关闭定案 (三条原因见 notes/VecText顶栏与简报.md), 1/2 已退役,
+ * ToolBox=0 关闭定案 (三条原因见 notes/VecText矢量文本.md (顶栏资金/简报正文)), 1/2 已退役,
  * 代码整机移除 (收串/取样拓盒/自有笔位)。悬浮提示走通用 Render 路径,
  * 电力提示出界修复由 TipBox 接管。 */
 
@@ -2423,13 +2422,12 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: blitsb bytes mismatch"); LogBytes((unsigned char*)0x6A70E0u); }
     }
-    /* ⚠ 曾经在 UpdatePrimarySurface 的两个调用点 (0x777717 / 0x77776F) 挂过壳,
-     * 字节校验和安装都成功, 但运行时**一次都没被调用** —— 那 5 字节会被别的模块
-     * (Ares) 在初始化之后改写掉。所以只留一个"补丁是否还在"的监测 (见
-     * MOE_CheckUpsPatch): 万一以后又要挂, 先确认没人跟我们抢。*/
-        /* 侧栏列纠正钩 (DisplayClass::InitGUI 0x6ABD30, 首5B = 83 EC 24 53 55)。
+    /* ⇒ UpdatePrimarySurface 的两个调用点 (0x777717 / 0x77776F) 挂过字节校验和安装都成功, 但运行时**一次都没被调用**
+     * ——— 5 字节被 Ares 在初始化之后改写掉了。所以不能对这两个地址挂任何功能钩,
+     * 只留一个“补丁是否还在”的监听 (MOE_CheckUpsPatch): 万一以后要里这里, 先确认没人抢。*/
+    /* 侧栏列纠正钩 (DisplayClass::InitGUI 0x6ABD30, 抢 5B = 83 EC 24 53 55)。
      * 那里有一批一次性的侧栏布局写入全用 SidebarBounds.X, 必须在它之前纠正,
-     * 否则 FM_Poll 每循环纠正来不及。见 MOExperience.cpp 的 FM_SyncSidebarColumn。 */
+     * 否则 FM_Poll 每循环纠正来不及。见 MOExperience.cpp 的 FM_SyncSidebarColumn。*/
     {
         static const unsigned char kWantInitGui[5] = { 0x83, 0xEC, 0x24, 0x53, 0x55 };
         if (BytesSame((unsigned char*)0x6ABD30u, kWantInitGui, 5))
@@ -2475,4 +2473,25 @@ void VecText_Install(void)
      * 调用点白名单去挂 ClientToCoords / CoordsToCell (那两个钩已拆, 留着
      * 会折两次)。详见 MOExperience.cpp 的说明。 */
     MOE_InstallMousePosHook();
+/* 缩放 (补): 上面那个钩只覆盖"每帧读鼠标在哪"。鼠标**按钮**消息走的是另一条路
+     * —— 窗口过程 0x7775C0 在 0x777640 把 Win32 消息的 lParam 指针当第4实参交给
+     * 0x6930A0, 那里面 (左键下/上/双击、右键下/上 五个分支) 全程不过 WWMouseClass
+     * ⇒ 框选锚点 / 点选落格是**没折算**的物理点, 与"当前点"(已折算) 差 A/R 倍 ⇒
+     * 单击被判成拖框、橡皮线起点偏到 2 倍远。钩 0x6930A0 入口把第4实参那个
+     * **指针**换成我们折算好的副本 (那个槽在它自己的栈帧上, ret 0x10 会弹掉,
+     * 窗口过程那边的 lParam 一个字节都不动 —— 那个值后面还要给 0x54F790 更新
+     * 鼠标位置, 改了不还原会把光标和 gadget 命中一起带歪)。
+     * 安装见 MOExperience (MOExperience_WndMouseEntry/g_WndMouseTramp)。 */
+    {
+        static const unsigned char kWantWndMouse[8] =
+            { 0xA0, 0x78, 0xE3, 0xA8, 0x00, 0x83, 0xEC, 0x1C };
+        if (BytesSame((unsigned char*)0x6930A0u, kWantWndMouse, 8))
+        {
+            g_WndMouseTramp = BuildTrampAt(0x6930A0u, 8, 0x6930A8u);
+            if (g_WndMouseTramp && PatchAt(0x6930A0u, (void*)MOExperience_WndMouseEntry, 8))
+                LogLine("vtext: wndmouse hook ON");
+            else { LogLine("vtext: wndmouse hook OFF"); g_WndMouseTramp = NULL; }
+        }
+        else { LogLine("vtext: wndmouse bytes mismatch"); LogBytes((unsigned char*)0x6930A0u); }
+    }
 }

@@ -38,7 +38,6 @@ extern int g_LogDetail;
  * 引擎面对象首成员是虚表指针, 槽号见下; 全部只读调用 + 渲染面写入, 联机安全。 */
 #define GtVT_FILL_RECT        0x14
 #define GtVT_FILL_RECT_TRANS  0x1C
-#define GtVT_SET_PIXEL        0x24
 #define GtVT_GET_PIXEL        0x28
 #define GtVT_LOCK             0x5C
 #define GtVT_UNLOCK           0x60
@@ -138,7 +137,6 @@ int GtRenderGlyphAt(wchar_t ch, int x0, int y0, int* outW);
 /* Current slot DIB generation; bumped on every clear/redraw. Lets callers
  * tell whether the DIB still holds what they last drew, so repeated GDI
  * text renders of the same string can be skipped. */
-unsigned GdiSlotGen(void);
 
 void BlitCoverage(unsigned char* dstBase, int dstPitch, int surfW, int surfH,
                   int dx, int dy, int w, int h,

@@ -46,7 +46,6 @@
 #define REG_OFF_ESP 0x14
 
 #define ADDR_TOOLTIP_BUF 0xB07BC4u
-#define TT_ORIG_CAP 0x42u
 #define ADDR_CURPLAYER 0xA83D4Cu
 
 #define TO_TT_EXIT 0x006A93DEu

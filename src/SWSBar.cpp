@@ -244,7 +244,7 @@ static int SwsAresLocateExt(void)
     /* ⚠⚠ 这两处失败**绝不能**置 `s_AresExtFail` (闩死): Ares.dll 未必在第一次
      *   询问时就已经映射进来 (SwsFillType 可能被 `SwsSidebarShows` 提前调到,
      *   那条路没有 `frame >= 60` 的门槛)。一旦在这里闩死, 后面再也不会重试,
-     *   于是**全程 x0 且一行日志都没有** —— 2026-10-02 卡在这上面很久。
+     *   于是**全程 x0 且一行日志都没有** —— 卡在这上面很久。
      *   判据: "还没准备好"是可恢复的, 只有"准备好了但内容不对"才是真失败。 */
     if (!SwsAresImage(&base, &imgHi)) return 0;
     hook = GetProcAddress((HMODULE)base, ARES_HOOK_PCX);
@@ -364,7 +364,7 @@ miss:
     /* 只记一次, 免得每帧刷屏。
      * ⚠ `slot` 进来时已经是非 0 (1=NULL, 2=野指针), 所以判据必须用**函数级
      *   static**, 不能用 `slot` —— 之前写成 `if (!slot)` 等于永远不成立,
-     *   把"`find()` 返回 NULL"这个最关键的现象整整藏了两轮 (2026-10-02)。 */
+     *   把"`find()` 返回 NULL"这个最关键的现象整整藏了两轮。 */
     {
         static int s_Said = 0;
         if (!s_Said)
@@ -809,10 +809,9 @@ static void SwsLoadIniList(void)
             SwsStrEq(k, "ScrollStep") ||
             SwsStrEq(k, "Side") ||
             SwsStrEq(k, "DedupDefensePage");
-        /* 漏一个全局键的后果: 它会被当成"超武 ID"收进 s_Ini, 显示成一个
-         * 永远不亮的空条目。新增配置项时**必须**同时加进这一串, 并与
-         * SwsEnsureInit 里真正读取的那份保持一致 (曾经两边不一致, 留下一堆
-         * 早已删除的键, 排查时以为它们还生效)。 */
+        /* 漏一个全局键的后果: 它会被当成“超武 ID”收进 s_Ini, 显示成一个
+         * 永远不亮的空条目。新增配置项**必须**同时加进这里, 并与
+         * SwsEnsureInit 里真正读取的那份保持一致 —— 两边不一致时会留下堆早已删除的键, 排查时以为它们还生效。*/
         if (!isGlobal && L < 31)
         {
             int v = GetPrivateProfileIntA(SWS_SECTION, k, 0, g_IniPath);
@@ -1707,7 +1706,7 @@ static void SwsScan(void)
         SwsEngineCleanList();
         /* ⚠ 快照为空时**不开闸门**: 空说明"这个数据源此刻不可信" (容器刚被
          * 去重删空), 而不是"本家没有超武"。硬开会把侧栏杀成一格不画, 而且
-         * 引擎侧栏也跟着空掉, 容器再也长不回来 (2026-10-02 实测)。 */
+         * 引擎侧栏也跟着空掉, 容器再也长不回来 (实测)。 */
         s_CleanMode = (s_CleanN > 0) ? 1 : 0;
         /* 只在**快照条目数变了**才记。快照只增, 所以这里的值单调不减。 */
         {
@@ -2522,7 +2521,7 @@ static int SwsSidebarHasIcon(int swIdx)
 
 /* 从防御页删掉所有"侧栏上确实也有"的超武 cameo。返回删掉几条, -1 = 不可用。
  *
- * ⚠⚠ 与 `SwsEngineCleanList` 的**致命顺序依赖** (2026-10-02):
+ * ⚠⚠ 与 `SwsEngineCleanList` 的**致命顺序依赖**:
  *   引擎的干净清单就是**这个容器本身**, 而本函数会把它缩短。于是
  *     "读清单 → 过滤 → 绘制 → 删容器" 这个闭环一旦成立, 下一轮读到的清单
  *     就只剩"上次没删掉的" —— 逐轮自我蚕食, 最后侧栏变空。
@@ -2722,7 +2721,7 @@ static int SwsDedupSync(void)
  * 纯 UI 重绘请求 (`SwsDedupRestore` / `SwsDefenseRepair` 早就在调它), 不碰模拟。
  * 副作用只有一次多余的侧栏重画, 而侧栏本来每帧都在重画。
  *
- * ⚠⚠ 2026-10-02 实测修正: **光调 `RepaintSidebar(1)` 抓不到**。用户在 emigdal
+ * ⚠⚠ 实测修正: **光调 `RepaintSidebar(1)` 抓不到**。用户在 emigdal
  *   地图上手动点"过滤/显示"按钮能一次救回两个图标, 而按钮那条路除了
  *   `RepaintSidebar` 之外**还走了 `AddCameo`**; 只抄 `RepaintSidebar` 的
  *   `SwsNudgePaint` 连催 32 次一个也没抓到 (日志: `SwsNudgePaint` 跑满, 无

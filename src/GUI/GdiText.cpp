@@ -50,7 +50,7 @@ int IsPlausiblePtr(const void* p)
 
 /* 无 CRT: 编译器可能把拷贝/清零循环优化成 memcpy/memset 调用, 自备实现。
  * 注意: 实现体必须用 volatile, 否则 -O2 会把函数体自身再认作标准语义、
- * 优化成一次对自己的调用 (0.2.149d 实测 ToolTip 假对象清零因此死循环)。 */
+ * 优化成一次对自己的调用 (实测 ToolTip 假对象清零因此死循环)。 */
 extern "C" void* memcpy(void* dst, const void* src, unsigned n)
 {
     volatile unsigned char* d = (volatile unsigned char*)dst;
@@ -884,12 +884,6 @@ static void ClearDib(void)
         row = g_G->bits + y * g_G->pitch;
         for (x = 0; x < DIB_W; x++) { row[x*4+0] = 0; row[x*4+1] = 0; row[x*4+2] = 0; row[x*4+3] = 0; }
     }
-}
-
-/* 把一行画进 DIB (黑底白字), 返回实际像素宽; 覆盖率=红色通道 */
-unsigned GdiSlotGen(void)
-{
-    return g_G ? g_G->gen : 0;
 }
 
 int RenderLine(const wchar_t* text, int len)

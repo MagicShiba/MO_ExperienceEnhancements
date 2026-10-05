@@ -32,7 +32,6 @@
 #define OFF_REG_ESP              0x14
 #define OFF_REG_ECX              0x20
 #define STK_ARG_NAME             0x04
-#define STK_ARG_ID               0x08
 #define STK_ARG_MESSAGE          0x0C
 #define STK_ARG_CS               0x10
 #define STK_ARG_TIMEOUT          0x18
@@ -134,7 +133,6 @@ static int GameIsMultiplayer(void)
 
 /* ---------------- 消息存储 ---------------- */
 
-#define MAX_MSGS   200
 #define MAX_TEXT_W 512
 #define MAX_NAME_W 64
 

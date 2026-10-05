@@ -44,7 +44,6 @@
 
 #define ADDR_AFTER_MSGLIST_DRAW  0x005D4A9Bu
 #define ADDR_SKIP_SCROLL_SIDEBAR 0x00533FC3u
-#define ADDR_CURRENT_FRAME       0x00A8ED84u
 
 #define OFF_REG_ECX              0x20
 
@@ -139,7 +138,6 @@ static void StatTick(unsigned frame, int kind)
  * 即错位)。栈形全程 [ret][arg], 原 ret 4 收尾, 与引擎一致。
  * 循环体内事件 (重画盖住/上屏) 跑在 prepare 之前, 故每迭代先恢复;
  * render 跳过 (静置/滚完) 时照画——之前所有"帧内"修法缺的就是这一块。 */
-#define ADDR_PREPARE       0x4F42F0u
 
 void* g_PrepareTramp = NULL;
 
@@ -201,7 +199,6 @@ __attribute__((naked)) void MOExperience_PrepareEntry(void)
  * (0xB0B519=1 / 0xB0B518=0 / this+0x53A8=0)。
  * ★ 裸钩本身一个字都不改: 换的是 g_BlitSbTramp 的指向, 汇编层与改动前
  *   逐字节相同 (上一版动过这层, 结果默认路径直接崩)。 */
-#define ADDR_BLITSB        0x6A70E0u
 
 void* g_BlitSbTramp = NULL;
 
@@ -279,16 +276,15 @@ __attribute__((naked)) void MOExperience_UpdateEntry(void)
  *   0x4AAC6D ClientToCoords 0x4AE538 框选 ProcessClickCoords
  *   0x4B8FAA 地图像素区判定 0x4FB405 ClientToCoords -> ProcessClickCoords
  *   0x692F5E 点选下单击     0x6D0ABA 地形判定   0x6D5068 框选橡皮线
- * 以前是在 ClientToCoords (0x6D2280) / CoordsToCell (0x6D6590) 两个函数里
- * 按**调用点白名单**折算, 只折了 3 个点, 剩下 8 个 (含橡皮线那条, 以及点选
- * 0x692F5E) 全部漏 —— 症状就是"点选/框选错位, 但下令落点是对的" (走
- * CoordsToCell 0x69238E, 在白名单里)。而且白名单里 0x4FB425 的注释
- * ("入参是从某个对象读出来的点") 是误读: 0x4FB3F8 那里是
- * `mov ecx,[0x887640]; call [edx+0x34]`, 拿的就是鼠标。
  *
- * 现在改成在**源头**折: 虚表 +0x34 换成我们自己的入口, 由它直接读实例里
- * +0x1C/+0x20 (与 GtMouseGameXY 同源) 再折成视口点。两个查格钩一并拆掉
- * —— 留着就会折两次。
+ * ★ 折算必须挑**数据源**而不是消费者: 挂在 `ClientToCoords` (0x6D2280) /
+ * `CoordsToCell` (0x6D6590) 上按调用点白名单折是不可行的 —— 它们的入参绝大
+ * 多数是引擎自己的地图像素, 折算等于替引擎改数据 (一折就崩); 而只挑"看着像
+ * 鼠标"的少数调用点又必然漏 (0x6D5068 橡皮线、0x692F5E 点选都漏过)。
+ * 源头只有一处: 虚表 +0x34 换成我们自己的入口, 由它直接读实例里的 +0x1C/+0x20
+ * (与 GtMouseGameXY 同源) 再折成视口点, 11 个消费点一次覆盖。
+ * 另有一条数据源: 鼠标**按钮**消息走窗口过程那条 lParam, 见下面的
+ * MOExperience_WndMouseEntry —— 不折它就只剩一半口径, 单击会被判成拖框。
  *
  * 为什么这样安全:
  *  - gadget 命中链 (`GadgetClass::Input` 0x4E1640) 用的是虚表 **+0x2C/+0x30**
@@ -414,6 +410,114 @@ void MOE_InstallMousePosHook(void)
 /* 0 = 还没装上 (prepare 每循环重试; 见 PowerDrawBoth)。 */
 int MOE_MousePosPending(void) { return g_MouseHookDone ? 0 : 1; }
 
+/* ---------------- 缩放: 鼠标**按钮**消息那条路 (0x6930A0) ------------------
+ * 上面那个虚表 +0x34 的钩覆盖的是"**每帧读鼠标现在在哪**"(11 个调用点全是
+ * 这一类)。引擎处理**鼠标按钮消息**走的是另一条路, 完全不过 WWMouseClass:
+ *
+ *   窗口过程 0x7775C0 (0x777C79 用 RegisterClassEx 注册的那一个)
+ *     ├ 0x777627  Msg 既不是 0x475 也不是网络包 → 进"鼠标消息分支"
+ *     └ 0x777640  call 0x6930A0 (this=MouseClass::Instance=0x87F7E8)
+ *            第4实参 = **&lParam** (窗口过程自己栈上那个槽)
+ *
+ * 0x6930A0 用 `eax = Msg-0x201` 查一张 6 项跳转表 (0x693410), 落地的只有五个
+ * 鼠标按钮, 开头是同一段 (0x693126 为例):
+ *   mov edx,[esp+0x34]      ; 第4实参 = &lParam
+ *   mov eax,[edx]           ; LOWORD(lParam) → x
+ *   movsx ecx,word [esp+36] ; HIWORD(lParam) → y
+ *   sub  eax,[0x886FA0]     ; 减 ViewBounds.xy (缩放时恒 0)
+ * 这五个分支分别做: 点选下令 + 记框选锚点 (0x201, `LeftMouseButtonClick`
+ * 0x4AC310 写 DisplayClass+0x11DC/+0x11E0)、滚屏与点选收尾 (0x202/0x203,
+ * `0x63A8E0` + ProcessClickCoords + `DecideAction` 0x692610 + `0x4AB9B0`)、
+ * 边缘卷屏开关 (0x204, `0x63AB00`)、左键还按着才收尾 (0x205)。
+ *
+ * 不折的后果 (放大档 2x): "按下时的点"是**没折算的物理点**, "当前点"是已折算的
+ * 视口点, 两者差 A/R = 2 倍。`DisplayClass::0x4AC380` (每帧跑的框选状态机) 拿
+ * 这两个比, 不等就进框选 ⇒ **单击必然被判成拖框**, 且橡皮线 (0x6D5030) 起点落在
+ * 2 倍远、终点正好在光标下。点选落格与边缘卷屏判据同样偏一档。
+ *
+ * ★ **只能换掉那个"指针", 不能改 lParam 的值**: 同一个 lParam 槽在 0x777645 之后
+ * 还要**原样**交给 `0x778030` 和 0x7779B9 → `0x54F790` —— 后者靠 lParam 更新
+ * `WWMouseClass` 的位置 (虚表 +0x38/+0x44)。改了值不还原 ⇒ 光标跑偏、gadget 命中
+ * (+0x2C/+0x30) 全歪、本项目自己的 `GtMouseGameXY` 还会**再折一次**。
+ * 而第4实参那个槽在 0x6930A0 **自己**的栈帧上 (窗口过程 call 时压的), 它的
+ * `ret 0x10` 会把它弹掉 ⇒ 只换指针, 窗口过程那边一个字节都不受影响。
+ *
+ * ★ 副本里必须放**打包好的 lParam** (`(y<<16)|x`), **不能放 Point2D**:
+ * 引擎先把整个 dword 抄进自己的栈槽, 再 `movsx eax,ax` 取低 16 位 (x)、
+ * `movsx ecx,word [esp+36]` 取那个 dword 的**高 16 位** (= y)。放 Point2D 的话
+ * y 恒等于 X 的高 16 位 (0) ⇒ 每次点击都变成"点地图最上一行"。
+ *
+ * 抄 8B = `A0 78 E3 A8 00` (mov al,[0xA8E378]) + `83 EC 1C` (sub esp,0x1C),
+ * 跳板跳回 0x6930A8。Entry **尾跳**跳板 (不 call): 原函数 `ret 0x10` 直接回窗口
+ * 过程 0x777645, 我们没有"返回点" ⇒ 汇编层栈必须逐字节平衡。
+ * ★ 入口 ecx = this, 跳板里 `mov esi,ecx` 把它当 DisplayClass 用 ⇒ 中间那个
+ * cdecl 调用的前后必须手动 push/pop ecx (见 Entry 里的说明)。
+ * 1x / [Debug] Safe=1 时只做恒等抄写 ⇒ 零行为变化。 */
+
+void* g_WndMouseTramp = NULL;
+
+/* 替引擎读的那份 lParam。0x6930A0 全程单线程、不泵消息, 一份就够。 */
+static unsigned s_WndLp;                 /* 低 16 位 x / 高 16 位 y, 与 lParam 同编码 */
+static unsigned* const s_WndLpP = &s_WndLp;   /* 裸钩操作数只许 "m", 传指针 */
+
+/* 把 lParam 里的 (x,y) 折成视口点, 按 lParam 的编码塞回 s_WndLp。折算与
+ * WWMouseClass 虚表 +0x34 那条**同一个式子** (SB_MapPoint), 这样"按下时的点"
+ * 与"每帧读到的点"才同一坐标系 —— 框选状态机 (0x4AC380) 正是拿这两个比。 */
+static void MOE_WndFixLParam(unsigned slot)
+{
+    unsigned lp, out;
+    Point2D pt;
+    int x, y;
+    if (!slot) return;
+    lp = *(unsigned*)(size_t)slot;
+    x = (int)(short)(lp & 0xFFFFu);
+    y = (int)(short)((lp >> 16) & 0xFFFFu);
+    if (!SB_Safe() && SB_In())
+    {
+        pt.X = x;
+        pt.Y = y;
+        SB_MapPoint(&pt, 0);
+        x = pt.X;
+        y = pt.Y;
+    }
+    if (x < -32768) x = -32768;   /* 引擎按 16 位符号扩展读, 别溢出 */
+    if (x >  32767) x =  32767;
+    if (y < -32768) y = -32768;
+    if (y >  32767) y =  32767;
+    out = ((unsigned)(y & 0xFFFF) << 16) | (unsigned)(x & 0xFFFF);
+    s_WndLp = out;
+}
+
+static void* g_CallWndFix = (void*)MOE_WndFixLParam;
+
+__attribute__((naked)) void MOExperience_WndMouseEntry(void)
+{
+    /* 裸钩铁律 (两条, 见本文件头):
+     *   1) 操作数只许 "m" —— "r" 会让编译器在 pushal 之前用 ecx/edx 传操作数
+     *      地址, 恰好盖掉入口活寄存器。
+     *   2) ★ 这里连**调 C 函数**都会盖掉 ecx: 入口 ecx = this = 0x87F7E8,
+     *      跳板里 0x6930AD `mov esi,ecx` 直接把它当 DisplayClass 用。
+     *      cdecl 辅助函数返回时 ecx 是它内部用的值 ⇒ 后面第一个
+     *      `cmp byte [esi+0x555A],bl` (0x693194 / 0x693232 / 0x69338F, 三条
+     *      鼠标按钮分支各一处) 就读野指针崩 ⇒ 表现是"崩点飘忽、看着无关"。
+     *      所以 call 前后手动 push/pop ecx。ebx/esi/edi/ebp 是 callee-saved,
+     *      C 函数自己会还原, 不用管。
+     * 栈必须逐字节平衡 (尾跳跳板, 原函数自己 ret 0x10 回窗口过程)。*/
+    __asm__ volatile (
+        "movl 0x10(%%esp), %%eax\n\t"    /* 第4实参 = &lParam */
+        "pushl %%ecx\n\t"                /* ★ 保住 this */
+        "pushl %%eax\n\t"
+        "call *%0\n\t"                   /* 折算进 s_WndLp (cdecl, 1 个实参) */
+        "addl $4, %%esp\n\t"
+        "popl %%ecx\n\t"                 /* ★ 还原 this */
+        "movl %1, %%eax\n\t"             /* eax = &s_WndLp */
+        "movl %%eax, 0x10(%%esp)\n\t"    /* ★ 第4实参换成我们的副本 */
+        "jmp *%2\n\t"                    /* 尾跳跳板 → 0x6930A8 */
+        :
+        : "m" (g_CallWndFix), "m" (s_WndLpP), "m" (g_WndMouseTramp)
+        : "memory", "cc");
+}
+
 /* ---------------- DisplayClass::InitGUI 入口钩 (0x6ABD30) ----------------
  * 这个函数里有**一次性**的侧栏布局写入, 全都用 SidebarBounds.X:
  *   0x6ABDB2 SetPosition(0xB07E58, ...) / 0x6ABE37 mov [0xB0B3E4], -SidebarBounds.X
@@ -456,7 +560,6 @@ __attribute__((naked)) void MOExperience_InitGuiEntry(void)
  * 之前把它的宽度收成"视口减去侧栏列"。
  * 首6B 恰三条指令 (83 EC 0C / 53 / 55), 跳板抄6B + 跳回 0x4E1646。
  * 入口栈形 [ret][arg0..]; this 在 ECX, pushal 不动 ECX, 直接 push 过去。 */
-#define ADDR_GADGET_INPUT   0x4E1640u
 
 void* g_GadgetInputTramp = NULL;
 
@@ -700,13 +803,13 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_SidebarHook(void* re
 }
 
 /* ---------------- 崩溃现场: 异常捕获 ----------------
- * 目的: 崩了要能直接看到"崩在哪"。之前 v0.2.166/167/168 三次崩溃都只靠日志
+ * 目的: 崩了要能直接看到"崩在哪"。之前三次崩溃都只靠日志
  * 尾部推断, 定位不到 —— 这里把故障地址/读写位/寄存器和故障点前后 8 字节
  * 打进日志, 下次崩溃一眼定案。
  *
  * ★ 用 AddVectoredExceptionHandler 而不是 SetUnhandledExceptionFilter:
  *   后者会被后面加载的模块 (YRPP / Ares / 游戏自己) 随手覆盖掉 —— 实测
- *   v0.2.170 装上它之后崩溃依旧没有 CRASH 行。向量处理器在**所有**异常上
+ *   装上它之后崩溃依旧没有 CRASH 行。向量处理器在**所有**异常上
  *   最先被调用, 且不会被覆盖。
  *
  * 判定与返回:

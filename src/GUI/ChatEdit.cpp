@@ -70,8 +70,6 @@
 #define CE_RING_N        0x100u                  /* 环长 (0x114..0x313) */
 #define CE_CHAR_FLAG     0x000Au                 /* WM_CHAR 的 (A) 标志字 */
 
-#define CE_COMPOSITE    0x0088731Cu
-#define CE_VIEWBOUNDS   0x00886FA0u
 #define CE_BITFONT      0x0089C4D0u
 #define CE_OFF_FONT_H   0x1Cu
 
@@ -1281,17 +1279,17 @@ void ChatEdit_Install(void)
  * **这个钩永远不返回 0** —— 这一点是全部要害。3 字节装不下 Syringe 的 5 字节
  * 跳转, return 0 走的是"回放被覆盖的字节", 而落回 0x5D49B7 时那里已经是跳转
  * 指令的位移字节: test/je 吃到垃圾 → 歪跳 0x5D4A8D → 原生行整段不画
- * (症状: [MsgText] ChatEdit=0 永远看不到原生框, 2026-09-29 查了九版都是这个)。
+ * (症状: [MsgText] ChatEdit=0 永远看不到原生框, 查了九版都是这个)。
  * 自己读 [this+0x19] 判 IsEdit, 两个方向都给显式落点, 就完全不用回放了。
  *
- * 判决性实测 (0.2.152j, 摘掉本钩): [MsgText] ChatEdit=0 原生框**正常显示**。
+ * 判决性实测 (摘掉本钩): [MsgText] ChatEdit=0 原生框**正常显示**。
  * 证明 (1) 是本钩拦的, 不是引擎单机不画; (2) 0x5D49BF..0x5D4A8C 这段在单机
  * 下跑得好好的。所以本钩只要把"进入"落点给对, 0 就等于原生。
  *
  * 另外: 绝对不要碰 0x5D4A22 的打印段。单机下 [+0x2B8] CursorCharacter==0,
  * 引擎在 0x5D49FA 就跳 0x5D4A81, **永远不执行那段**。0.5D4A22 要用
  * [0x887314] 那个面和 0x4A61C0 的 8 个参数, 单机路径上从没初始化过,
- * 强行进入必崩 (0.2.152d~152h 连崩三次都是这个原因)。 */
+ * 强行进入必崩 (原生弹框要 8 帧淡出, 期间会闪)。 */
 extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_HideNative(void* regs)
 {
     static int s_logged = 0;

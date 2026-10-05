@@ -36,10 +36,7 @@
 #define ADDR_SIDEBAR_W        0x007F5BF8u   /* 168 */
 #define ADDR_ISNOD_SIDEBAR    0x00A8EB7Cu   /* byte: 1=侧栏在右(苏联), 0=在左(盟军) */
 #define ADDR_ARMAGEDDON       0x00A8ED6Bu   /* byte: 末日模式 (视口 X 偏移也不加 168) */
-#define ADDR_BAR_H            0x007F5BFCu   /* 上下栏高 32 */
 #define ADDR_RADAR_RECT       0x008809F4u   /* RadarClass+0x120C: 雷达绘制矩形(侧栏面内) */
-#define ADDR_RADAR_GADGET    0x00B04A10u   /* 雷达 gadget 本体 (虚表 0x7F02BC, Action=+0x7C) */
-#define ADDR_RADAR_VTABLE    0x007F02BCu
 #define ADDR_SIDEBAR_DIRTY    0x00B0B518u   /* byte: TabClass::Draw 每帧置 1 */
 #define ADDR_SIDEBAR_TOUCH    0x00B0B519u   /* byte */
 #define ADDR_SIDEBAR_REDRAW   0x00884B90u   /* byte (this+0x53A8) */
@@ -120,7 +117,6 @@ typedef int (__thiscall *FnFillRect)(void* self, RectangleStruct* rect, unsigned
  * 字节补丁不反向撤 —— 撤了还得重算视口并同步 view_bound, 风险远大于收益。
  * "完全显示"就是把视口收回原版宽度 + 把整条侧栏面 blit 出来, 随时能切回去。 */
 #define FM_MODE_FULL   0
-#define FM_MODE_RADAR  1
 #define FM_MODE_BARE   2
 
 #define ADDR_FRAME_COUNT        0x00A8ED84u
@@ -657,6 +653,26 @@ static void Fm_RearmSidebarGadgets(int colX, int topH)
  * ⚠️ 必须跟着**实际视口宽度**走, 不看模式 (切换当帧两者会短暂不一致)。 */
 typedef void (__thiscall *FnSyncViewBounds)(void* tactical, void* rect);
 #define ADDR_SYNC_VIEW       0x006D5F60u   /* TacticalClass 视口同步 (Set_View_Dimensions 内部第二步) */
+/* ★ `[0xB0CE28/2C/30/34]` = ViewBounds 的**缓存副本**, 由 0x6D5F60 抄。引擎有两处
+ * 读的是这份缓存而不是 ViewBounds:
+ *   `Update_Tactical_Position` (0x6D8B30): TacticalPos = 中心 - [0xB0CE30/34]/2
+ *   `ClientToCoords`           (0x6D2280): 用它判点在不在视口内
+ * 所以缓存必须**始终等于 R**。本模块为修侧栏布局有一处故意拿 **A** 调
+ * `DisplayClass::Set_View_Dimensions`, 顺手就把缓存留成了 A ⇒ TacticalPos 按 A 算
+ * 而渲染按 R ⇒ 恒定偏移 (A-R)/2, 放大档下 = 视野整体偏左上 (左上出界/右下少一圈)
+ * + 引擎悬浮提示错位(与我们自己那份重影)。详见 notes §2.1。*/
+#define ADDR_VIEW_CACHE_W    0x00B0CE30u
+#define ADDR_VIEW_CACHE_H    0x00B0CE34u
+
+/* 让缓存回到 R。幂等, 代价是两次 int 比较 —— 所以"几何没变"的早退之前也照跑。*/
+static void Fm_SyncViewCache(void* tac, int w, int h)
+{
+    FnSyncViewBounds sync = (FnSyncViewBounds)(size_t)ADDR_SYNC_VIEW;
+    if (!sync || !tac || !IsPlausiblePtr(tac)) return;
+    if (*(int*)(size_t)ADDR_VIEW_CACHE_W == w
+     && *(int*)(size_t)ADDR_VIEW_CACHE_H == h) return;
+    sync(tac, (void*)(size_t)ADDR_VIEWBOUNDS);
+}
 
 /* DisplayClass::Set_View_Dimensions (0x4A8960): 视口尺寸变化的**引擎正门**。
  * 比 SetTacticalViewBounds 多做三件我们必须一起做的事:
@@ -680,8 +696,7 @@ static int s_SyncViewFrame = -1;
  *
  * ★ 缩放后引擎拿到的是 R (居中那一小块), 但**屏幕布局**相关的量一律按 A 算:
  * 侧栏列起点 / 地图右边界 / 视口 gadget 命中区都跟着 R 走的话, 放大时侧栏会被
- * 摆到屏幕中间 (R 右边界 = 1095/1314), 凭空多出第二条侧栏。 */
-static int Fm_ViewWide(void)
+ * 摆到屏幕中间 (R 右边界 = 1095/1314), 凭空多出第二条侧栏。 */static int Fm_ViewWide(void)
 {
     const RectangleStruct* vb = &s_ViewA;
     RectangleStruct* wb = (RectangleStruct*)(size_t)ADDR_WINDOWBOUNDS;
@@ -974,7 +989,14 @@ static void Fm_ApplyViewWidth(void)
         }
         s_ViewR.X = x; s_ViewR.Y = y; s_ViewR.Width = w; s_ViewR.Height = h;
     }
-    if (vb->X == x && vb->Y == y && vb->Width == w && vb->Height == h) return;
+    tac = *(void**)(size_t)0x00887324u;
+    /* 早退前也自愈一次: 下面那个"拿 A 调 Set_View_Dimensions"的分支会把缓存
+     * 留在 A 上 (见 Fm_SyncViewCache), 而几何没变时这里直接 return, 救不回来。*/
+    if (vb->X == x && vb->Y == y && vb->Width == w && vb->Height == h)
+    {
+        Fm_SyncViewCache(tac, w, h);
+        return;
+    }
 
     oldW = vb->Width;
     oldH = vb->Height;
@@ -1012,7 +1034,6 @@ static void Fm_ApplyViewWidth(void)
     tac = *(void**)(size_t)0x00887324u;
     if (tac && IsPlausiblePtr(tac))
     {
-        FnSyncViewBounds sync = (FnSyncViewBounds)(size_t)ADDR_SYNC_VIEW;
         /* ★ 换宽度时把**左边界**钉住 (用户要求"左侧固定, 右侧收缩或扩展")。引擎存的是
          * 视口中心格 (+0xD64, +0xD74 是它的目标值), 而 `0x6D8B30` 用
          * `中心 - ViewBounds.Width/2` 算出左上角 (TacticalPos) 供 cell->client
@@ -1028,8 +1049,8 @@ static void Fm_ApplyViewWidth(void)
             *(int*)((char*)tac + 0xD74) += d;
         }
         /* 便宜的每循环路径: 只把矩形同步给 TacticalClass (照抄引擎
-         * Set_View_Dimensions 的第二步)。幂等。*/
-        if (sync) sync(tac, (void*)(size_t)ADDR_VIEWBOUNDS);
+         * Set_View_Dimensions 的第二步)。幂等; 缓存对不上时才真调。*/
+        Fm_SyncViewCache(tac, w, h);
         /* ★ 宽度真的变了还要走一次引擎自己的 Set_View_Dimensions ——
          * 只调 0x6D5F60 不会重建那两个裁剪器/鼠标视口, 引擎内部就长期停在
          * "视口 1752 / 裁剪 1920" ⇒ 鼠标落在侧栏列上被当成"还在地图里"去查格,
@@ -1065,6 +1086,10 @@ static void Fm_ApplyViewWidth(void)
                 s_InSetViewDims = 0;
                 /* 重建裁剪器顺带改了侧栏的一次性布局 —— 立刻纠正列起点。*/
                 FM_SyncSidebarColumn();
+                /* 上面那次 setDims 顺手把 [0xB0CE30/34] 留成了 A ⇒ 每帧
+                 * TacticalPos 按 A 算而渲染按 R, 视野恒偏 (A-R)/2。纠正回 R。*/
+                Fm_SyncViewCache(tac, w, h);
+                Fm_SyncViewCache(tac, w, h);
             }
         }
     }

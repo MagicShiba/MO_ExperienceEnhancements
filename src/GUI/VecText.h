@@ -9,22 +9,10 @@ void VecText_EnsureInit(void);
 /* 装运行时补丁 (Blit/DrawText/Print/帧准备/上屏/呈现), 只在 DllMain 调一次。 */
 void VecText_Install(void);
 
-/* Frame-prepare hook entry (MOExperience.cpp, naked): always-draw for bottom power. */
-void MOExperience_PrepareEntry(void);
-extern void* g_PrepareTramp;
-/* Sidebar-present hook entry (MOExperience.cpp, naked): restore before present. */
-void MOExperience_BlitSbEntry(void);
-extern void* g_BlitSbTramp;
-/* Update-primary hook entry (MOExperience.cpp, naked): draw on presented surface. */
-void MOExperience_UpdateEntry(void);
-extern void* g_UpdateTramp;
-/* Map-rect capture hook entry (MOExperience.cpp, naked): MapClass::CreateEmptyMap. */
-void MOExperience_CreateMapEntry(void);
-extern void* g_CreateMapTramp;
-/* Gadget-input hook entry (MOExperience.cpp, naked): GadgetClass::Input. */
+/* 装在 MOExperience.cpp 里定义的几个裸钩入口 (本模块是它们的安装处, 声明跟着
+ * MOExperience.h 走; 这里只补两个 MOExperience.h 没列的)。*/
 void MOExperience_GadgetInputEntry(void);
 extern void* g_GadgetInputTramp;
-/* Sidebar-column fix hook entry (MOExperience.cpp, naked): DisplayClass::InitGUI. */
 void MOExperience_InitGuiEntry(void);
 extern void* g_InitGuiTramp;
 
@@ -35,7 +23,6 @@ const wchar_t* VecText_FontFace(void);
 int VecText_Bold(void);
 /* Resolved global vector font pixel size ([VecText] FontPx, 0 = auto). */
 int VecText_FontPx(void);
-int VecText_Bold(void);
 
 /* ---------------- 超武列表整体接管 (Print 入口收集, 消息帧统一重绘) ----------------
  * VecText.cpp 只做高层级隐藏+收集 (不管内容细节, 不逐行绘制);

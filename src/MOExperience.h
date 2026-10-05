@@ -7,7 +7,7 @@
  */
 #pragma once
 
-#define MOE_VERSION "0.2.207"
+#define MOE_VERSION "0.2.208"
 
 /* 一次性初始化: 建日志路径 + 各模块首次载入配置。幂等, 各入口都先调它。 */
 void MOE_EnsureInit(void);
@@ -46,31 +46,20 @@ extern void* g_PrepareTramp;
  * 接管这一次 blit (只呈小地图) 并按原版 ret 4 收尾, 跳过整条侧栏。 */
 void MOExperience_BlitSbEntry(void);
 extern void* g_BlitSbTramp;
-/* 缩放的鼠标折算: **在源头做**, 不再逐个调用点挂钩。
- * 把 WWMouseClass 虚表 +0x34 (GetMousePosition) 换成 MOE_MousePosEntry,
- * 它读实例里的原始物理坐标 (+0x1C/+0x20) 再折成视口空间的点。
- * 装在 VecText_Install 里 (见 MOE_InstallMousePosHook)。*/
+/* 缩放的鼠标折算, 两条数据源都要折, 否则"按下时的点"与"每帧读到的点"差 A/R 倍
+ * (放大档下表现为单击被判成拖框、橡皮线起点偏、点选落格偏):
+ *   (a) WWMouseClass 虚表 +0x34 (GetMousePosition) —— 每帧轮询, 11 个消费点。
+ *       装法见 MOE_InstallMousePosHook。
+ *   (b) 窗口过程 0x7775C0 → 0x6930A0 的鼠标**按钮**消息分支, 点击点直接从
+ *       Win32 消息的 lParam 取 (左键下/上/双击、右键下/上五个分支), 不过
+ *       WWMouseClass。本钩把第4实参那个 lParam **指针**换成折算好的副本 ——
+ *       那个槽在 0x6930A0 自己的栈帧上, ret 0x10 会弹掉 ⇒ 窗口过程那边一个字节
+ *       都不动 (那个值后面还要交给 0x54F790 更新 WWMouseClass 的位置)。*/
 void MOE_MousePosEntry(void);
 void MOE_InstallMousePosHook(void);
 int  MOE_MousePosPending(void);   /* 1 = 还没装上 (prepare 每循环重试) */
-/* TacticalClass::Render 入口钩 (naked, 0x6D3D10): 缩小档把渲染面换成缩放模块
- * 自建的整图大面, 引擎照旧 1:1 画进去。 */
-void MOExperience_TacRenderEntry(void);
-extern void* g_TacRenderTramp;
-/* 三趟 Render 之后 / UI 之前 (naked, 0x4F451B): 把大面里的视口降采样进
- * Composite 的视图区, 于是之后的 UI 全是 1:1。 */
-void MOExperience_PostRenderEntry(void);
-extern void* g_PostRenderTramp;
-/* TacticalClass::RegisterDirtyArea 入口钩 (naked, 0x6D2790): 引擎标脏的矩形
- * 折算成降采样目的区的脏矩形。 */
-void MOExperience_DirtyEntry(void);
-extern void* g_DirtyTramp;
-/* ZBuffer/ABuffer 每帧清零的跳过钩 (naked, 0x7BCF50 / 0x4112D0): 缩小档下视口
- * 太大, 清零光 memset 就十几毫秒。 */
-void MOExperience_ZBufFillEntry(void);
-extern void* g_ZBufFillTramp;
-void MOExperience_ABufFillEntry(void);
-extern void* g_ABufFillTramp;
+void MOExperience_WndMouseEntry(void);
+extern void* g_WndMouseTramp;
 
 /* 消息框 Draw 内部钩 (0x5D4A94, 7B): 各模块 *_Draw 的唯一出口 (链表非空时才跑)。
  * 依次调 MsgText / SWPanel / 超武侧栏 / 智能中键橡皮线 / 底部电量 /
