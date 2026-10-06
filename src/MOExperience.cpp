@@ -113,7 +113,8 @@ volatile unsigned g_MoePhase = MP_NONE;
 
 static const char* const k_PhaseName[] =
 {
-    "-", "poll", "applyview", "msgdraw", "uilayers", "comp-magnify", "blitsidebar"
+    "-", "poll", "applyview", "msgdraw", "uilayers", "comp-magnify", "blitsidebar",
+    "tip-pre"
 };
 #define MP_COUNT ((int)(sizeof(k_PhaseName) / sizeof(k_PhaseName[0])))
 
@@ -218,6 +219,8 @@ static void PowerDrawBoth(void)
     /* 缩放刻度条: 探整图 / 建档位表 / 摆条 / 点选滚轮换档。必须在 FM_Poll 之后
      * —— 落位要用 FM_Poll 刚刷新出来的视口矩形。 */
     SB_Poll();
+    /* CCToolTip 选面/量宽用的矩形影子 = 满视图区 A (见 ScaleBar.cpp)。*/
+    SB_PublishAView();
     /* 鼠标源头折算 (缩放): 注入可能早于 WWMouse 构造, 没装上就在这里每循环重试。*/
     if (MOE_MousePosPending()) MOE_InstallMousePosHook();
     /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;
@@ -316,6 +319,63 @@ __attribute__((naked)) void MOExperience_UpdateEntry(void)
         "jmp *%1\n\t"
         :
         : "m" (g_CallUpdate), "m" (g_UpdateTramp)
+        : "memory", "cc");
+}
+
+/* ---------------- 缩放: 放大前那次提示框绘制要跳过 ----------------
+ * 放大档下悬停提示显示两遍: 一份 1:1 正确, 一份字号大一倍、位置偏到 2 倍远。
+ * 字号来自全局字体 [0x89C4D0], 永不随缩放变 ⇒ 大那份是 SB_CompositeMagnify 的
+ * 重采样产物; 地图每帧重画整个视口 ⇒ 不是残影 ⇒ 只能是放大前那次绘制。
+ * `ToolTipManager::Draw` 只有两个调用点: 0x4F4564 (Render, 放大后) 与
+ * 0x6A7081 (SidebarClass::Draw, 放大前)。这里在放大档挡掉后者。
+ * ⚠ 必须自己跑 Process (0x724AD0): Draw(1) 第一件事就是它, 刷 Dimension 与
+ *   LifeTime/Sticky 计时; 整个跳掉之后放大后那次会画空框。
+ * ⚠ 只跳绘制, 0x6A7090 之后的 BlitSidebar 判据一字不改。
+ * 门控与 SB_CompositeMagnify 一致 ⇒ 1x 与 Safe 档零行为变化。联机安全。 */
+#define ADDR_TIPMANAGER      0x00887368u  /* CCToolTip::Instance */
+#define ADDR_TIP_PRO_DRAW    0x006A7089u  /* mov edx,[ecx]/push 1/call [edx+0x0C] */
+#define ADDR_TIP_PRO_NEXT    0x006A7090u  /* mov dl,[0xB0B518] —— 跳过点 */
+#define ADDR_TIP_PROCESS     0x00724AD0u  /* ToolTipManager::Process (thiscall, 无参) */
+
+void* g_TipPreDrawTramp = NULL;
+static void* g_TipPreDrawDest = NULL;
+
+/* bool Process() { JMP_THIS(0x724AD0); } —— 无参无栈清理 (0x724B7C 裸 ret)。 */
+typedef void (__fastcall *TipProcessFn)(void* self);
+
+static void* TipPreDrawSkip(void)
+{
+    void* self;
+    static int s_logged = 0;
+    MOE_EnsureInit();
+    g_TipPreDrawDest = (SB_In() && !SB_Safe())
+                       ? (void*)(size_t)ADDR_TIP_PRO_NEXT : g_TipPreDrawTramp;
+    if (!g_TipPreDrawDest) g_TipPreDrawDest = (void*)(size_t)ADDR_TIP_PRO_NEXT;
+    if (g_TipPreDrawDest == g_TipPreDrawTramp) return g_TipPreDrawTramp;
+    MOE_SetPhase(MP_TIPPRE);
+    self = *(void**)(size_t)ADDR_TIPMANAGER;
+    if (self && IsPlausiblePtr(self))
+        ((TipProcessFn)(size_t)ADDR_TIP_PROCESS)(self);
+    if (!s_logged)
+    {
+        s_logged = 1;
+        LogLine("tip: pre-magnify draw skipped");
+    }
+    return g_TipPreDrawDest;
+}
+
+static void* g_CallTipPre = (void*)TipPreDrawSkip;
+__attribute__((naked)) void MOExperience_TipPreDrawEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "pushfl\n\t"
+        "call *%0\n\t"
+        "popfl\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallTipPre), "m" (g_TipPreDrawDest)
         : "memory", "cc");
 }
 

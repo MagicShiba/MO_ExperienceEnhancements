@@ -30,7 +30,8 @@ enum
     MP_MSGDRAW,     /* 引擎消息帧 */
     MP_UILAYER,     /* MOE_DrawUILayers */
     MP_COMPMAG,     /* 放大结果写进 Composite */
-    MP_BLITSIDEBAR  /* BlitSb */
+    MP_BLITSIDEBAR, /* BlitSb */
+    MP_TIPPRE       /* 放大前那次提示框 Process (重影修复) */
 };
 extern volatile unsigned g_MoePhase;
 void MOE_SetPhase(unsigned id);
@@ -46,6 +47,11 @@ extern void* g_PrepareTramp;
  * 接管这一次 blit (只呈小地图) 并按原版 ret 4 收尾, 跳过整条侧栏。 */
 void MOExperience_BlitSbEntry(void);
 extern void* g_BlitSbTramp;
+/* 放大前那次提示框绘制钩入口 (naked): 抢 SidebarClass::Draw 里的
+ * `ToolTipManager::Draw(1)` (0x6A7089, 7B)。放大档下只跑 Process 不画,
+ * 否则那份会被 SB_CompositeMagnify 放大成重影。见 notes/地图缩放.md §5.1。*/
+void MOExperience_TipPreDrawEntry(void);
+extern void* g_TipPreDrawTramp;
 /* 缩放的鼠标折算, 两条数据源都要折, 否则"按下时的点"与"每帧读到的点"差 A/R 倍
  * (放大档下表现为单击被判成拖框、橡皮线起点偏、点选落格偏):
  *   (a) WWMouseClass 虚表 +0x34 (GetMousePosition) —— 每帧轮询, 11 个消费点。

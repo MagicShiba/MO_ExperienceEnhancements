@@ -38,6 +38,7 @@
 #include <windows.h>
 #include "GdiText.h"
 #include "Icon.h"
+#include "ScaleBar.h"
 
 #define TT_SECTION "ToolTips"
 
@@ -325,8 +326,21 @@ extern "C" __declspec(dllexport) DWORD __cdecl ToolTip_Clamp(void* regs)
     w = pr[2];
     if (w <= 0 || w > 2048) return 0;
     if (!IsPlausiblePtr((void*)ADDR_VIEWBOUNDS)) return 0;
-    minX = *(int*)ADDR_VIEWBOUNDS;
-    maxX = minX + *(int*)(ADDR_VIEWBOUNDS + 8u);
+    /* 边界取满视图区 A, 不能取视口 R: 放大档下 ViewBounds 已缩成 R, 拿它当
+     * 右界会把盒子连字整体往左拽最多一整个视口宽, 且位移随档位缩放。
+     * CCToolTip 的选面/量宽右界已被改指到同一块影子 (VecText.cpp 的 rep[],
+     * notes/地图缩放.md §5.2), 这里必须同源。1x 时 A == R。*/
+    if (SB_In())
+    {
+        const unsigned* av = SB_AViewBlock();
+        minX = (int)av[0];
+        maxX = minX + (int)av[2];
+    }
+    else
+    {
+        minX = *(int*)ADDR_VIEWBOUNDS;
+        maxX = minX + *(int*)(ADDR_VIEWBOUNDS + 8u);
+    }
     if (maxX <= minX + 16 || maxX - minX < w + 16) return 0;
     dx = 0;
     if (pr[0] + w > maxX) dx = maxX - (pr[0] + w);

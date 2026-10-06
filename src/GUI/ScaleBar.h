@@ -29,6 +29,10 @@ double SB_Scale(void);
 /* 1 = 放大档 (视口比视图区小)。 */
 int SB_In(void);
 
+/* CCToolTip 选面/量宽用的矩形影子 = 满视图区 A (见 ScaleBar.cpp)。*/
+const unsigned* SB_AViewBlock(void);
+void SB_PublishAView(void);
+
 /* 当前档要写进 ViewBounds 的视口矩形; 返回 0 = 不缩放 (用 A 本身)。 */
 int SB_GetViewRect(RectangleStruct* out);
 

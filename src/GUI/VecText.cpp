@@ -23,6 +23,7 @@
 #include "OrderUtil.h"
 #include "Icon.h"
 #include "FullMap.h"
+#include "ScaleBar.h"
 #include "MOExperience.h"
 
 #define VC_MAXW 32
@@ -2421,6 +2422,82 @@ void VecText_Install(void)
             else { LogLine("vtext: blitsb hook OFF"); g_BlitSbTramp = NULL; }
         }
         else { LogLine("vtext: blitsb bytes mismatch"); LogBytes((unsigned char*)0x6A70E0u); }
+    }
+    /* 缩放: 放大前那次提示框绘制 (0x6A7089, 抢 7B = 8B 11 6A 01 FF 52 0C =
+     * `mov edx,[ecx]` / `push 1` / `call [edx+0x0C]`)。那是 SidebarClass::Draw
+     * 里的 `ToolTipManager::Draw(1)`, 落在 SB_CompositeMagnify **之前** ⇒ 放大档
+     * 提示框出两份 (大的那份被放大成 2 倍字号 + 2 倍偏)。Entry 里改成"只跑
+     * Process 不画", 留 GScreenClass::Render 里 0x4F4564 那次。
+     * 安装见 MOExperience (MOExperience_TipPreDrawEntry/g_TipPreDrawTramp)。 */
+    {
+        static const unsigned char kWantTipPre[7] =
+            { 0x8B, 0x11, 0x6A, 0x01, 0xFF, 0x52, 0x0C };
+        if (BytesSame((unsigned char*)0x6A7089u, kWantTipPre, 7))
+        {
+            g_TipPreDrawTramp = BuildTrampAt(0x6A7089u, 7, 0x6A7090u);
+            if (g_TipPreDrawTramp && PatchAt(0x6A7089u, (void*)MOExperience_TipPreDrawEntry, 7))
+                LogLine("vtext: tip-pre hook ON");
+            else { LogLine("vtext: tip-pre hook OFF"); g_TipPreDrawTramp = NULL; }
+        }
+        else { LogLine("vtext: tip-pre bytes mismatch"); LogBytes((unsigned char*)0x6A7089u); }
+    }
+    /* CCToolTip 的"选面/量宽"矩形改指到 A 影子 (ScaleBar.cpp 的 g_AView,
+         * notes/地图缩放.md §5.2)。引擎把 ViewBounds 的**绝对地址**写死在指令
+         * imm32 里, 所以改指 = 改那几条 imm32, 指令长度不变:
+         *   ToolTipManager::Update 0x478BA0: 0x478BD1 [X] / 0x478BD7 [Width] /
+         *     0x478C17 mov edi,ViewBounds (之后 [edi]/[edi+8] 量宽与居中走影子)
+         *   CCToolTip::DrawText 0x478E30: 0x478E4A [X] / 0x478E50 [Width]
+         * 侧栏两处 SidebarBounds 不动; 1x 时 A==R ⇒ 无变化; 不写回 ViewBounds。*/
+        {
+            unsigned char* p;
+            DWORD old;
+            unsigned i, n;
+            int bad = -1;
+            unsigned abase = (unsigned)(size_t)SB_AViewBlock();
+            /* at / imm = imm32 在指令内的偏移 / off = 影子内偏移 / op = opcode 字节
+             * (⚠ `A1 <imm32>` / `BF <imm32>` 形态第 2 字节已是立即数, 不能当 opcode) */
+            static const struct {
+                unsigned at; unsigned imm; unsigned off; unsigned oplen;
+                unsigned char op[2];
+            } rep[] =
+            {
+                { 0x478BD1u, 2u, 0u, 2u, { 0x8B, 0x15 } },  /* mov edx,[A.X]     */
+                { 0x478BD7u, 1u, 8u, 1u, { 0xA1, 0x00 } },  /* mov eax,[A.Width] */
+                { 0x478C17u, 1u, 0u, 1u, { 0xBF, 0x00 } },  /* mov edi,A         */
+                { 0x478E4Au, 2u, 0u, 2u, { 0x8B, 0x35 } },  /* mov esi,[A.X]     */
+                { 0x478E50u, 2u, 8u, 2u, { 0x8B, 0x1D } }   /* mov ebx,[A.Width] */
+            };
+            n = (unsigned)(sizeof(rep) / sizeof(rep[0]));
+            /* 先全验完再动手, 免得留半改状态 */
+            for (i = 0; i < n; i++)
+            {
+                p = (unsigned char*)rep[i].at;
+                if (p[0] != rep[i].op[0]) { bad = (int)i; break; }
+                if (rep[i].oplen > 1 && p[1] != rep[i].op[1]) { bad = (int)i; break; }
+            }
+            if (bad < 0)
+            {
+                for (i = 0; i < n; i++)
+                {
+                    unsigned imm = rep[i].at + rep[i].imm;
+                    if (!VirtualProtect((void*)imm, 4, PAGE_EXECUTE_READWRITE, &old))
+                    { bad = (int)i; break; }
+                    *(unsigned*)(size_t)imm = abase + rep[i].off;
+                    VirtualProtect((void*)imm, 4, old, &old);
+                    FlushInstructionCache(GetCurrentProcess(), (void*)imm, 4);
+                }
+            }
+            if (bad < 0)
+                LogLine("vtext: tooltip surface rect -> A shadow");
+            else
+            {
+                char b1[16], buf[96];
+                unsigned q = 0;
+                q = AppendCStr(buf, q, "vtext: tooltip rect patch OFF at=",
+                                sizeof(buf));
+                UtoA(rep[bad].at, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+                LogLine(buf);
+            }
     }
     /* ⇒ UpdatePrimarySurface 的两个调用点 (0x777717 / 0x77776F) 挂过字节校验和安装都成功, 但运行时**一次都没被调用**
      * ——— 5 字节被 Ares 在初始化之后改写掉了。所以不能对这两个地址挂任何功能钩,

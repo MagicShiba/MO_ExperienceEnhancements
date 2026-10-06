@@ -34,7 +34,8 @@
  *
  * ⚠ 凡是"按 ViewBounds 定位"的引擎代码都会跟着视口缩小的量挪位置 —— 除了
  *   地图光栅化, 还有超武列表 (PowerBarClass::Draw 0x6DA9D0)、边缘卷屏
- *   (Scroll_Map)、框选橡皮线 (0x6D5030)。新增缩放功能时按这条核一遍。
+ *   (Scroll_Map)、框选橡皮线 (0x6D5030)、悬停提示三处 (见下面 g_AView 段)。
+ *   新增缩放功能时按这条核一遍。
  *
  * 纯本地摄像机 + 只读查询 + 渲染面写入, 联机安全。
  */
@@ -154,6 +155,27 @@ static void Sb_InitLabels(void)
 int SB_Level(void)    { return s_Enable ? s_Level : s_NLev - 1; }
 double SB_Scale(void) { return SB_In() ? s_LevScale[s_Level] : 1.0; }
 int SB_In(void)       { return (s_Enable && s_LevScale[s_Level] < 1.0) ? 1 : 0; }
+
+/* ---------------- CCToolTip 的"选面/量宽"矩形必须是 A ----------------
+ * `ToolTipManager::Update` (0x478BA0) 与 `CCToolTip::DrawText` (0x478E30)
+ * 把 ViewBounds 的绝对地址写死在指令里, 拿它当右界与 maxWidth。放大档下
+ * ViewBounds 已是视口 R, 拿它当界 ⇒ 误判"提示框在侧栏上"、文本提前折行。
+ * 消费方: VecText.cpp 的 rep[] (改 imm32 改指) 与 ToolTip.cpp 的
+ * ToolTip_Clamp (自己算, 按 SB_In 取)。1x 时 A == R ⇒ 与原版一致。 */
+static unsigned g_AView[4] = { 0u, 0u, 1752u, 1048u };
+
+const unsigned* SB_AViewBlock(void) { return g_AView; }
+
+void SB_PublishAView(void)
+{
+    RectangleStruct a;
+    FM_GetViewRects(&a, 0);
+    if (a.Width < 16 || a.Height < 16) return;   /* 还没布局好: 保留上一份 */
+    g_AView[0] = (unsigned)a.X;
+    g_AView[1] = (unsigned)a.Y;
+    g_AView[2] = (unsigned)a.Width;
+    g_AView[3] = (unsigned)a.Height;
+}
 
 /* 引擎实际要画的视口矩形 = 视图区 * scale。
  * ★ ViewBounds 恒为 (0,0,w,h): 引擎的渲染落点是 ViewBounds.xy + (mapPos -
