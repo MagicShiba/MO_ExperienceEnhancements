@@ -1,44 +1,24 @@
-/* TreeChop.cpp - Ctrl+Z+中键快速砍树 (选中地面单位强制攻击树木)。
- *
- * 触发: 按住 Ctrl + Z 的同时按住鼠标中键 (Hotkey, 默认 Ctrl+Z+Middle),
- * 显示生效格块菱形框, 松开才在当前格执行: 以鼠标格为基准扫
- * Range x Range (默认 4x4, 可配 2~16), 找树木地形, 选中单位
- * 按轮询均分强制攻击 (MegaMission Mission=Attack, Target=树对象)。
- * Z 按住即路径点语义, 事件带 IsPlanningEvent=1 (排进路径点队列)。
- * 与巡逻圈互斥: Ctrl 按住时巡逻圈让路 (见 PatrolCircle.cpp)。
- *
- * 找树 (YRpp 交叉确认):
- *   CellClass::GetTerrain (thiscall 0x47C550, ECX=格, 栈 bool) 直取
- *   TerrainClass*; 其 Type 指针偏移自校准 (Terrain 对象内扫指针,
- *   命中 TerrainType 数组 0xA8E318 成员即 pin); 类型 ID 读法与单位
- *   类型同基类 (候选 0x20/0x24/0x28, pin 后复用)。
- *   树判定: ID 以 "TREE" 开头 (TREE01~46/JP/N/B/H 全覆盖) 或以
- *   "TIBT" 开头 (TIBTRE01~03 纤维树); VEINTREE/岩石/箱子等排除
- *   (rulesmo.ini [TerrainTypes] 实测名单)。
- * 任务值: Mission::Attack=5 (YRpp GeneralDefinitions.h)。
- * 目标编码: TargetFromObj 0x6E6AB0 对树对象同样产出 ID+RTTI 描述,
- * 直接透传, 不硬编码 RTTI。
- *
- * 联机: 只发标准事件, 各端同一份原版代码执行, 不影响联机。
- * 本地只读 + 标准事件入队, 不写模拟内存。
- *
- * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
- * 轮询挂 PowerDrawBoth (见 MOExperience.cpp), 开关关时直接返回。
- */
+/* TreeChop.cpp - Ctrl+Z+中键快速砍树。
+ * 按住显示 Range x Range 菱形框, 松开在当前鼠标格执行。
+ * 框内树用地形扫描找 (TREE / TIBTRE 前缀, 见 TC_IsTreeID),
+ * 按树全覆盖分配 (tree t -> unit[t % nu], IsPlanningEvent=1 排队)。
+ * 画框走引擎 CoordsToClient 投影格线角点, 与扫描同格。
+ * 只读查询 + 标准事件, 不写模拟内存。 */
 
 #include <windows.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "ScaleBar.h"
 
 #define TC_SECTION "TreeChop"
 
-/* ---------------- 砍树私有地址 (共享部分见 OrderUtil.h) ---------------- */
+/* 砍树私有地址 (共享部分见 OrderUtil.h) */
 
 #define ADDR_TERRAINTYPES 0xA8E318u  /* TerrainType 数组 (DynamicVector) */
 #define OFF_VEC_ITEMS 4u
 #define OFF_VEC_COUNT 16u
 
-/* CellClass::GetTerrain (0x47C550, ECX=格, 栈 bool alt): 返回树对象或空。 */
+/* CellClass::GetTerrain (0x47C550): 返回格上地形或空。 */
 typedef void* __attribute__((thiscall)) (*Fn_GetTerrain)(void* cell, int alt);
 typedef void* (__fastcall *TC_LockFn)(void*, void*, int, int);
 typedef int (__fastcall *TC_UnlockFn)(void*, void*);
@@ -48,12 +28,11 @@ typedef int (__fastcall *TC_UnlockFn)(void*, void*);
 
 #define FN_GETTERRAIN ((Fn_GetTerrain)(void*)0x47C550u)
 
-/* ---------------- 配置 ---------------- */
-
+/* 配置 */
 static int g_TcInit = 0;
 static int g_TcEnable = 1;
-static OU_Hotkey g_TcHk;      /* Hotkey=Ctrl+Z+Middle (主键中键 + 按住 Ctrl/Z) */
-static int g_TcRange = 4;       /* 扫描块边长 (格, 鼠标在块内 [Range/2][Range/2]) */
+static OU_Hotkey g_TcHk;
+static int g_TcRange = 4;
 
 static void TC_EnsureInit(void)
 {
@@ -64,8 +43,8 @@ static void TC_EnsureInit(void)
     BuildPaths();
     GtEnsureLog();
     g_TcEnable = GetPrivateProfileIntA(TC_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    OU_ParseHotkey("Ctrl+Z+Middle", &g_TcHk);          /* 默认 (必成功) */
-    OU_ReadHotkey(TC_SECTION, "Hotkey", &g_TcHk);      /* 有则覆盖, 坏串留默认 */
+    OU_ParseHotkey("Ctrl+Z+Middle", &g_TcHk);
+    OU_ReadHotkey(TC_SECTION, "Hotkey", &g_TcHk);
     if (g_TcHk.disabled) g_TcEnable = 0;
     g_TcRange = GetPrivateProfileIntA(TC_SECTION, "Range", 4, g_IniPath);
     if (g_TcRange < 2) g_TcRange = 2;
@@ -78,16 +57,14 @@ static void TC_EnsureInit(void)
     if (!g_TcEnable) LogLine("treechop: OFF");
 }
 
-/* ---------------- 小工具 (通用部分见 OrderUtil.h) ---------------- */
-
-/* 只要地面 (飞机砍不了树, 不点)。 */
+/* 地面单位才能砍树。 */
 static int TC_IsChopper(void* p)
 {
     int w = OU_WhatAmI(p);
     return (w == ABS_UNIT || w == ABS_INFANTRY) ? 1 : 0;
 }
 
-/* 强制攻击树: MegaMission(Attack, Target=树对象, Dst=空, 路径点=1)。 */
+/* 强制攻击树 (MegaMission Attack + IsPlanningEvent=1)。 */
 static int TC_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
                          int tgtID, unsigned char tgtRtti)
 {
@@ -112,10 +89,90 @@ static void* TC_CellPtr(int cx, int cy)
     return cells[idx];
 }
 
-/* ---------------- 树查找 (地形自校准 + ID 前缀) ---------------- */
+/* 画框投影: 格线角点走引擎 CoordsToClient, 每角取框内格高。 */
 
-static int g_TcTypeOff = -1;  /* TerrainClass 内 Type 指针偏移 pin */
-static int g_TcIdOff = -1;    /* TerrainType 内 ID 字符串偏移 pin */
+typedef int __attribute__((thiscall)) (*Fn_TC_C2C)(void* tac,
+    const CoordStruct* c, Point2D* out);
+#define FN_TC_C2C ((Fn_TC_C2C)(void*)0x6D2140u)
+#define TC_TAC_INSTANCE 0x887324u
+
+typedef int __attribute__((thiscall)) (*Fn_TC_FloorH)(void* cell, const Point2D* p);
+#define FN_TC_FLOORH ((Fn_TC_FloorH)(void*)0x47B3A0u)
+
+static int TC_CellZ(int cx, int cy, int* zOut)
+{
+    void** cells;
+    int maxc, idx;
+    void* cell;
+    Point2D zero;
+    int z;
+    if (cx < 0 || cy < 0 || cx >= 512 || cy >= 512) return 0;
+    cells = *(void***)(ADDR_DISPLAY + OFF_MAP_CELLS);
+    maxc = *(int*)(ADDR_DISPLAY + OFF_MAP_MAXC);
+    if (!cells || !IsPlausiblePtr(cells) || maxc <= 0 || maxc > 512 * 512) return 0;
+    idx = (cy << 9) + cx;
+    if (idx < 0 || idx >= maxc) return 0;
+    cell = cells[idx];
+    if (!cell || !IsPlausiblePtr(cell)) return 0;
+    zero.X = 0; zero.Y = 0;
+    z = FN_TC_FLOORH(cell, &zero);
+    if (z < -8192 || z > 8192) return 0;
+    *zOut = z;
+    return 1;
+}
+
+/* 鼠标格 + 光标高度 (ClickCoords, 只读)。 */
+static int TC_MouseCellZ(int* mcx, int* mcy, int* lz)
+{
+    int mx, my;
+    Point2D pt;
+    CellStruct center;
+    CoordStruct crd;
+    void* tgtObj = 0;
+    unsigned char b5 = 0, b6 = 0;
+    center.X = center.Y = 0;
+    crd.X = crd.Y = crd.Z = 0;
+    if (!GtMouseGameXY(&mx, &my)) return 0;
+    pt.X = mx; pt.Y = my;
+    SB_MapPoint(&pt, 0);
+    if (!FN_CLICKCOORDS((void*)ADDR_DISPLAY, &pt, &center, &crd,
+                        &tgtObj, &b5, &b6))
+        return 0;
+    *mcx = (int)center.X; *mcy = (int)center.Y;
+    *lz = crd.Z;
+    if (*lz < -8192 || *lz > 8192) *lz = 0;
+    return OU_CellValid(*mcx, *mcy);
+}
+
+static int TC_CornerZ(int cx, int cy, int fb, int* zOut)
+{
+    if (TC_CellZ(cx, cy, zOut)) return 1;
+    *zOut = fb;
+    return 1;
+}
+
+static int TC_ProjLep(int lx, int ly, int lz, int* px, int* py)
+{
+    void* tac = *(void**)TC_TAC_INSTANCE;
+    CoordStruct c;
+    Point2D o;
+    if (!tac || !IsPlausiblePtr(tac)) return 0;
+    c.X = lx; c.Y = ly; c.Z = lz;
+    o.X = 0; o.Y = 0;
+    FN_TC_C2C(tac, &c, &o);
+    if (!SB_ViewToScreen(o.X, o.Y, px, py)) { *px = o.X; *py = o.Y; }
+    return 1;
+}
+
+static int TC_GridCorner(int gx, int gy, int gz, int* px, int* py)
+{
+    return TC_ProjLep(gx * 256, gy * 256, gz, px, py);
+}
+
+/* 树查找 */
+
+static int g_TcTypeOff = -1;
+static int g_TcIdOff = -1;
 
 static int TC_StrOk(const char* s)
 {
@@ -132,7 +189,7 @@ static int TC_StrOk(const char* s)
     return 0;
 }
 
-/* 类型 ID 可读即拷出 (24 字节) 并 pin 偏移。 */
+/* ID 字符串有效即拷出并记住偏移。 */
 static int TC_TypeID(void* p, char* out)
 {
     static const unsigned cands[3] = { 0x20u, 0x24u, 0x28u };
@@ -159,7 +216,7 @@ static int TC_TypeID(void* p, char* out)
     return 0;
 }
 
-/* 地形类型集合成员判定 (数组越界/坏读全回 0)。 */
+/* 指针是否在 TerrainType 数组内。 */
 static int TC_InTerrainSet(void* p)
 {
     void** items;
@@ -174,7 +231,7 @@ static int TC_InTerrainSet(void* p)
     return 0;
 }
 
-/* 树对象取 Type 指针 (pin 命中直取, 否则全扫; 带类型集合验证)。 */
+/* 树对象取 Type 指针 (命中直取, 否则扫描)。 */
 static void* TC_TerrainTypeOf(void* t)
 {
     unsigned off;
@@ -200,7 +257,7 @@ static void* TC_TerrainTypeOf(void* t)
     return 0;
 }
 
-/* 树判定: TREE* / TIBTRE* (VEINTREE/岩石/箱子等排除)。 */
+/* TREE* / TIBTRE* 为树, 其余排除。 */
 static int TC_IsTreeID(const char* id)
 {
     if (!id || !id[0]) return 0;
@@ -211,13 +268,12 @@ static int TC_IsTreeID(const char* id)
     return 0;
 }
 
-#define TC_TREE_CAP 256  /* Range 上限 16 → 16x16 格, 一格一树 */
+#define TC_TREE_CAP 256
 
 static int TC_FindTrees(int cx, int cy, void** trees, int* treeIDs)
 {
     int n = 0, dx, dy;
     int lo, hi;
-    /* Range x Range: 鼠标在块内 [Range/2][Range/2] (Range=4 → 偏移 -2..+1)。 */
     lo = -(g_TcRange / 2);
     hi = lo + g_TcRange - 1;
     for (dy = lo; dy <= hi; dy++)
@@ -254,7 +310,7 @@ static int TC_FindTrees(int cx, int cy, void** trees, int* treeIDs)
     return n;
 }
 
-/* ---------------- 待发队列 (保序 drip) ---------------- */
+/* 待发队列 */
 
 #define TC_UNIT_CAP 256
 #define TC_PEND_CAP 512
@@ -264,7 +320,7 @@ typedef struct { void* unit; int uid; void* tree; int tid; } TCPend;
 
 static TCPend g_TcPend[TC_PEND_CAP];
 static int g_TcPendCount = 0;
-static int g_TcIdxOk = 0;         /* ID 索引机制自检通过 (存活校验总开关) */
+static int g_TcIdxOk = 0;
 static void* g_TcHouse = 0;
 static int g_TcHouseIdx = 0;
 static int g_TcPrevTrig = 0;
@@ -282,7 +338,7 @@ static void TC_ShiftDown(void)
     g_TcPendCount--;
 }
 
-/* 排空: 发完即止 (攻击无多阶段门控)。中途 house 变化则清空。 */
+/* 排空队列。house 变化则清空。 */
 static void TC_Drain(void)
 {
     void* cur = *(void**)ADDR_CURPLAYER;
@@ -301,7 +357,7 @@ static void TC_Drain(void)
         int srcID, tgtID;
         unsigned char srcR, tgtR;
         for (i = 0; i < 8; i++) srcB[i] = tgtB[i] = 0;
-        /* 先验活 (纯读索引): 单位战死/树已倒即丢弃, 不碰悬空指针 */
+        /* 存活校验不过即丢弃。 */
         if (!OU_PtrAlive(e->unit, e->uid, g_TcIdxOk)) { TC_ShiftDown(); continue; }
         if (!TC_IsChopper(e->unit)) { TC_ShiftDown(); continue; }
         if (!OU_PtrAlive(e->tree, e->tid, g_TcIdxOk)) { TC_ShiftDown(); continue; }
@@ -310,7 +366,7 @@ static void TC_Drain(void)
         srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
         tgtID = *(int*)(tgtB + 0); tgtR = (unsigned char)tgtB[4];
         if (!TC_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR))
-            return; /* 满: 下轮继续 */
+            return;
         TC_ShiftDown();
         sent++;
     }
@@ -325,7 +381,7 @@ static void TC_Drain(void)
     }
 }
 
-/* ---------------- 触发 ---------------- */
+/* 触发 */
 
 static void TC_Press(void)
 {
@@ -353,7 +409,6 @@ static void TC_Press(void)
     }
     if (nu <= 0) { LogLine("tc: no choppers"); return; }
     if (!OU_MouseCell(&cx, &cy)) { LogLine("tc: off map"); return; }
-    /* 快照单位 Fetch_ID (存活校验用; 选中单位必活, 此处 vcall 安全) */
     for (i = 0; i < nu; i++)
     {
         char tb[8];
@@ -361,7 +416,6 @@ static void TC_Press(void)
         for (ti = 0; ti < 8; ti++) tb[ti] = 0;
         s_uids[i] = FN_TGT_OBJ(tb, s_units[i]) ? *(int*)(tb + 0) : 0;
     }
-    /* ID 索引自检 (fail-open): 首单位查不到则本轮跳过存活校验 */
     g_TcIdxOk = 0;
     {
         void* base = *(void**)ADDR_IDBASE;
@@ -374,7 +428,6 @@ static void TC_Press(void)
     nt = TC_FindTrees(cx, cy, s_trees, s_tids);
     if (nt <= 0)
     {
-        /* 附地形数组计数: 0=数组未加载/地址不对, >0=这块真没树。 */
         char nb[64], n1[16];
         unsigned nq = 0;
         int tcnt = *(int*)(ADDR_TERRAINTYPES + OFF_VEC_COUNT);
@@ -394,27 +447,22 @@ static void TC_Press(void)
     q = AppendCStr(buf, q, b2, sizeof(buf));
     (void)q;
     LogLine(buf);
-    /* 建队: 单位按轮询均分到树 (unit i -> tree[i % nt]) */
+    /* 按树全覆盖 (tree t -> unit[t % nu])。 */
     g_TcPendCount = 0;
-    for (i = 0; i < nu; i++)
+    for (i = 0; i < nt; i++)
     {
-        int t = i % nt;
+        int u = i % nu;
         if (g_TcPendCount >= TC_PEND_CAP) break;
-        g_TcPend[g_TcPendCount].unit = s_units[i];
-        g_TcPend[g_TcPendCount].uid = s_uids[i];
-        g_TcPend[g_TcPendCount].tree = s_trees[t];
-        g_TcPend[g_TcPendCount].tid = s_tids[t];
+        g_TcPend[g_TcPendCount].unit = s_units[u];
+        g_TcPend[g_TcPendCount].uid = s_uids[u];
+        g_TcPend[g_TcPendCount].tree = s_trees[i];
+        g_TcPend[g_TcPendCount].tid = s_tids[i];
         g_TcPendCount++;
     }
     g_TcHouse = cur;
     g_TcHouseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
     TC_Drain();
 }
-
-/* ---------------- 每循环轮询 (挂 PowerDrawBoth) ---------------- */
-
-static void TC_BoxReset(void);
-static void TC_BoxSample(void);
 
 void TreeChop_Poll(void)
 {
@@ -425,40 +473,14 @@ void TreeChop_Poll(void)
     trigDown = OU_KeyDown(g_TcHk.vk);
     combo = (OU_ModsDown(g_TcHk.mods) && OU_ExtraDown(&g_TcHk)) ? 1 : 0;
     if (g_TcPendCount > 0)
-    { TC_Drain(); g_TcPrevTrig = trigDown; return; } /* drip 续发 */
+    { TC_Drain(); g_TcPrevTrig = trigDown; return; }
     if (!g_TcEnable) { g_TcPrevTrig = trigDown; return; }
-    if (trigDown && !g_TcPrevTrig)
-        TC_BoxReset();            /* 按下: 采样器清零 (无动作, 松开才执行) */
-    if (trigDown && combo)
-        TC_BoxSample();           /* 按住: 采样画框 (+像素质校准) */
-    else if (!trigDown && g_TcPrevTrig && combo)
-        TC_Press();               /* 松开: 当前格执行 */
+    if (!trigDown && g_TcPrevTrig && combo)
+        TC_Press();
     g_TcPrevTrig = trigDown;
 }
 
-/* ---------------- 渲染期范围框 (按住显示, 松开执行) ---------------- */
-/* 格→像素固定等距映射: X+1 格 = (+30,+15)px, Y+1 格 = (-30,+15)px
- * (RA2 格 60x30, 无缩放)。故意不用采样解算: 中键按住平移镜头,
- * 前后采样不在同一镜头帧, 解出的矩阵是垃圾 (框乱 skew 的根因)。
- * 参考点按轮刷新 (像素+格同轮, 恒一致), 框 glue 在鼠标上。 */
-
-static int g_TcBRx = 0, g_TcBRy = 0, g_TcBRcx = 0, g_TcBRcy = 0;
-static int g_TcBHas = 0;
-
-static void TC_BoxReset(void)
-{
-    g_TcBHas = 0;
-}
-
-/* 按住期间每轮跟踪最新 (像素+格) 参考点。 */
-static void TC_BoxSample(void)
-{
-    int mx, my, cx, cy;
-    if (!GtMouseGameXY(&mx, &my)) return;
-    if (!OU_MouseCell(&cx, &cy)) return;
-    g_TcBRx = mx; g_TcBRy = my; g_TcBRcx = cx; g_TcBRcy = cy;
-    g_TcBHas = 1;
-}
+/* 范围框 (按住显示, 与扫描同格)。 */
 
 static unsigned char* s_TcLocked = 0;
 static int s_TcW = 0, s_TcH = 0, s_TcPitch = 0;
@@ -471,7 +493,7 @@ static void TC_Plot(int x, int y, unsigned a)
     dstRow[x] = Blend16(dstRow[x], 255, 255, 255, a);
 }
 
-/* 3px 线 (Bresenham + 上下各 1px, 零依赖)。 */
+/* 3px 线。 */
 static void TC_Line(int x0, int y0, int x1, int y1, unsigned a)
 {
     int dx, dy, sx, sy, err, e2, x, y, n;
@@ -493,21 +515,13 @@ static void TC_Line(int x0, int y0, int x1, int y1, unsigned a)
     }
 }
 
-/* 实心方块标记 (半边 m)。 */
+/* 实心标记 (半边 m)。 */
 static void TC_Mark(int cx, int cy, int m, unsigned a)
 {
     int k, j;
     for (k = -m; k <= m; k++)
         for (j = -m; j <= m; j++)
             TC_Plot(cx + k, cy + j, a);
-}
-
-/* 格块角 → 像素 (参考点 + 固定等距差)。 */
-static void TC_BoxCorner(int ccx, int ccy, int* px, int* py)
-{
-    int dx = ccx - g_TcBRcx, dy = ccy - g_TcBRcy;
-    *px = g_TcBRx + dx * 30 - dy * 30;
-    *py = g_TcBRy + dx * 15 + dy * 15;
 }
 
 void TreeChop_Draw(void* surf, int w, int h, int pitch)
@@ -517,11 +531,26 @@ void TreeChop_Draw(void* surf, int w, int h, int pitch)
     TC_UnlockFn unlockFn;
     unsigned char* locked;
     int lo, hi, x0, y0, x1, y1, x2, y2, x3, y3;
+    int ccx, ccy, clz, z0, z1, z2, z3;
+    int bx0, by0, bx1, by1;
     extern int g_Calibrated;
-    if (!g_TcEnable || !g_TcBHas) return;
-    if (!OU_KeyDown(g_TcHk.vk)) return;  /* 按住才画 */
+    if (!g_TcEnable) return;
+    if (!OU_KeyDown(g_TcHk.vk)) return;
     if (!OU_ModsDown(g_TcHk.mods) || !OU_ExtraDown(&g_TcHk)) return;
     if (!g_Calibrated) return;
+    if (!TC_MouseCellZ(&ccx, &ccy, &clz)) return;
+    lo = -(g_TcRange / 2);
+    hi = lo + g_TcRange - 1;
+    bx0 = ccx + lo; by0 = ccy + lo;
+    bx1 = ccx + hi + 1; by1 = ccy + hi + 1;
+    TC_CornerZ(bx0, by0, clz, &z0);
+    TC_CornerZ(bx1 - 1, by0, clz, &z1);
+    TC_CornerZ(bx1 - 1, by1 - 1, clz, &z2);
+    TC_CornerZ(bx0, by1 - 1, clz, &z3);
+    if (!TC_GridCorner(bx0, by0, z0, &x0, &y0)) return;
+    if (!TC_GridCorner(bx1, by0, z1, &x1, &y1)) return;
+    if (!TC_GridCorner(bx1, by1, z2, &x2, &y2)) return;
+    if (!TC_GridCorner(bx0, by1, z3, &x3, &y3)) return;
     if (!surf || !IsPlausiblePtr(surf)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;
     vt = *(unsigned char**)surf;
@@ -532,14 +561,6 @@ void TreeChop_Draw(void* surf, int w, int h, int pitch)
     locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
     if (!locked || !IsPlausiblePtr(locked)) return;
     s_TcLocked = locked; s_TcW = w; s_TcH = h; s_TcPitch = pitch;
-    /* 生效格块 (参考格为块中心锚点, 与 Find 一致) 菱形框 + 四角标记。
-     * 注: 中键拖动平移镜头时参考点按轮更新, 帧间小漂, 与各家线同 caveat。 */
-    lo = -(g_TcRange / 2);
-    hi = lo + g_TcRange - 1;
-    TC_BoxCorner(g_TcBRcx + lo, g_TcBRcy + lo, &x0, &y0);
-    TC_BoxCorner(g_TcBRcx + hi + 1, g_TcBRcy + lo, &x1, &y1);
-    TC_BoxCorner(g_TcBRcx + hi + 1, g_TcBRcy + hi + 1, &x2, &y2);
-    TC_BoxCorner(g_TcBRcx + lo, g_TcBRcy + hi + 1, &x3, &y3);
     TC_Line(x0, y0, x1, y1, 230);
     TC_Line(x1, y1, x2, y2, 230);
     TC_Line(x2, y2, x3, y3, 230);
