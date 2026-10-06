@@ -100,6 +100,22 @@ int SB_ViewToScreen(int vx, int vy, int* sx, int* sy);
  * 1x/放大档恒 1。*/
 int SB_PtInView(int vx, int vy);
 
+/* ---------------- 视口比地图大: 居中钳位 (抖动 + 一侧残影的根因) ----------
+ * `TacticalClass::Clamp_Center` (0x6D8640) 的 min/max 来自地图尺寸与 ViewBounds;
+ * 视口大于地图时 min > max, 夹位自相矛盾 ⇒ TacticalPos 每帧在 min/max 之间跳,
+ * 而地图是**增量**光栅化 (按位移做 CopyFromPart) ⇒ 来回搬运像素 = 抖动 + 残影。
+ * 边界现在由本模块**直接读引擎全局**算 (MapClass 全局对象 0x87F7E8 的
+ * +0xFC/+0x100/+0x104/+0x108 = 地图左上角与宽高, 格; px 换算 60/30 一格),
+ * 不再由 MOExperience 侧探原版 —— 跨边界调引擎函数踩过调用约定的坑。
+ * 返回值语义与原版一致 (非 0 = 动过)。*/
+int SB_ClampFix(Point2D* c);
+/* 1 = 缩放接管中 (该由本模块接管 Clamp_Center)。*/
+int SB_ClampNeeded(void);
+
+/* 每帧把"图外"铺成底色 (窗口面 + 大面各一次, 由 chrome pass 前后的钩调)。
+ * 必须每帧铺: 增量位移拷贝搬过来的旧像素没有任何地图格子会再覆盖它。*/
+void SB_PaintVoid(void);
+
 /* 地图像素增量 → 屏幕增量 (给那些"以鼠标物理像素为基准自己算等距投影"的层用:
  * SmartArea/FuzzyAttack 的路径预览)。scale=1 时恒等。 */
 void SB_MapDeltaToScreen(int* dx, int* dy);

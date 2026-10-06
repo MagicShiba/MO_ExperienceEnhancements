@@ -99,6 +99,7 @@ static int s_Y = -1;                    /* <0 = 贴视图区下沿上方 */
 static int s_Len = 240;
 static int s_FontPx = 13;
 static int s_GrowZBuf = 0;              /* [ScaleBar] GrowZBuf: 1=按 R 放大 ZBuffer/ABuffer */
+static int s_VoidR = 0x20, s_VoidG = 0x20, s_VoidB = 0x28;  /* 图外底色 (深灰) */
 
 /* ---------------- 档位表 ----------------
  * 6 档 (0 = 最左 = 放大最多):
@@ -199,6 +200,73 @@ static unsigned Sb_Fmt1(char* p, double v)
  * 用来二分"崩溃到底跟缩放有没有关系" (Enable=0 只是不画, 钩子还在跑)。*/
 int  SB_Safe(void) { return s_Safe; }
 
+/* ---------------- 脏矩形/重画裁剪改读 ViewBounds (飞行单位拖影的根因) -----
+ * ★ 背景: Fm_ApplyViewWidth 为了 UI 布局正确, 调 setDims 时传 A (满视图区),
+ *   完事把 ViewBounds 写回 R (大面)。于是 `[0x886FA0..AC]` (=A) 与 ViewBounds
+ *   (=R) 长期分叉。而引擎渲染裁剪读的是前者:
+ *     - SubmitDirtyRect (0x6D2B90): 按 [0x886FA0..AC] 裁脏矩形 ⇒ R 独有区域
+ *       (A 之外) 的脏矩形被裁掉/丢弃 ⇒ 那里的飞行单位旧影永远擦不掉, 沿航线
+ *       累积成百上千个残影 (地面静态所以看不出来)。
+ *     - 全量重画阈值 (0x6D3D91/A6): 滚动 delta 按 [0x886FA8/AC] (=A) 比 ⇒
+ *       中等滚动就误判全量重画 ⇒ 每帧重画整图 ⇒ 卡死。
+ *     - 单体 invalidade (0x6D999E/A4): 原点按 [0x886FA0/A4] 加 ⇒ R 原点不同时错位。
+ * ★ 修法: 把这 8 处 `mov reg,[0x886Fxx]` 改成读 ViewBounds (`0xB0CE28/2C/30/34`,
+ *   永远是真实视口)。全部等长改写 (5B↔5B, 6B↔6B), 无跳板、无重定位。
+ * ★ 1x 下是空操作: Set_Viewport 把 [0x886FA0] 原样抄进 ViewBounds, 两者恒等,
+ *   改完行为逐字节一致。只在缩小档 (ViewBounds=R ≠ A) 生效。
+ * ★ 带字节校验 + 日志: 对不上就不装, 绝不硬写。*/
+static int Sb_PatchViewClip(void)
+{
+    /* {地址, 原字节, 新字节, 长度} */
+    static const unsigned char kWant1[5] = { 0xA1, 0xA4, 0x6F, 0x88, 0x00 };
+    static const unsigned char kNew1[5]  = { 0xA1, 0x2C, 0xCE, 0xB0, 0x00 };
+    static const unsigned char kWant2[6] = { 0x8B, 0x0D, 0xA0, 0x6F, 0x88, 0x00 };
+    static const unsigned char kNew2[6]  = { 0x8B, 0x0D, 0x28, 0xCE, 0xB0, 0x00 };
+    static const unsigned char kWant3[5] = { 0xA1, 0xAC, 0x6F, 0x88, 0x00 };
+    static const unsigned char kNew3[5]  = { 0xA1, 0x34, 0xCE, 0xB0, 0x00 };
+    static const unsigned char kWant4[6] = { 0x8B, 0x0D, 0xA8, 0x6F, 0x88, 0x00 };
+    static const unsigned char kNew4[6]  = { 0x8B, 0x0D, 0x30, 0xCE, 0xB0, 0x00 };
+    static const unsigned char kWant5[6] = { 0x8B, 0x15, 0xA8, 0x6F, 0x88, 0x00 };
+    static const unsigned char kNew5[6]  = { 0x8B, 0x15, 0x30, 0xCE, 0xB0, 0x00 };
+    static const unsigned char kWant6[6] = { 0x8B, 0x15, 0xAC, 0x6F, 0x88, 0x00 };
+    static const unsigned char kNew6[6]  = { 0x8B, 0x15, 0x34, 0xCE, 0xB0, 0x00 };
+    static const unsigned char kWant7[6] = { 0x8B, 0x3D, 0xA0, 0x6F, 0x88, 0x00 };
+    static const unsigned char kNew7[6]  = { 0x8B, 0x3D, 0x28, 0xCE, 0xB0, 0x00 };
+    static const unsigned char kWant8[6] = { 0x8B, 0x2D, 0xA4, 0x6F, 0x88, 0x00 };
+    static const unsigned char kNew8[6]  = { 0x8B, 0x2D, 0x2C, 0xCE, 0xB0, 0x00 };
+    struct { unsigned at; const unsigned char* want; const unsigned char* repl; int n; } sites[] = {
+        { 0x6D2BCBu, kWant1, kNew1, 5 },   /* SubmitDirtyRect: y0 */
+        { 0x6D2BD4u, kWant2, kNew2, 6 },   /* SubmitDirtyRect: x0 */
+        { 0x6D2BE2u, kWant3, kNew3, 5 },   /* SubmitDirtyRect: h */
+        { 0x6D2BEFu, kWant4, kNew4, 6 },   /* SubmitDirtyRect: w */
+        { 0x6D3D91u, kWant5, kNew5, 6 },   /* 全量重画阈值: w */
+        { 0x6D3DA6u, kWant6, kNew6, 6 },   /* 全量重画阈值: h */
+        { 0x6D999Eu, kWant7, kNew7, 6 },   /* 单体 invalidate: x0 */
+        { 0x6D99A4u, kWant8, kNew8, 6 },   /* 单体 invalidate: y0 */
+    };
+    unsigned i;
+    int ok = 1;
+    for (i = 0; i < sizeof(sites) / sizeof(sites[0]); i++)
+    {
+        unsigned char* p = (unsigned char*)(size_t)sites[i].at;
+        int k;
+        DWORD old;
+        for (k = 0; k < sites[i].n; k++)
+            if (p[k] != sites[i].want[k]) { ok = 0; break; }
+        if (!ok) break;
+        if (!VirtualProtect(p, (SIZE_T)sites[i].n, PAGE_EXECUTE_READWRITE, &old)) { ok = 0; break; }
+        for (k = 0; k < sites[i].n; k++) p[k] = sites[i].repl[k];
+        VirtualProtect(p, (SIZE_T)sites[i].n, old, &old);
+    }
+    if (ok)
+    {
+        FlushInstructionCache(GetCurrentProcess(), NULL, 0);
+        LogLine("sbar: viewclip patch ON (dirty/threshold read ViewBounds)");
+    }
+    else LogLine("sbar: viewclip patch OFF (bytes mismatch)");
+    return ok;
+}
+
 void SB_EnsureInit(void)
 {
     char b1[16], buf[192];
@@ -217,10 +285,16 @@ void SB_EnsureInit(void)
     if (s_FontPx > 40) s_FontPx = 40;
     s_Safe = GetPrivateProfileIntA("Debug", "Safe", 0, g_IniPath) ? 1 : 0;
     s_GrowZBuf = GetPrivateProfileIntA(SB_SECTION, "GrowZBuf", 0, g_IniPath) ? 1 : 0;
+    /* 图外底色 (视口比地图大时露出来的那一大片)。0xRRGGBB, 分开三个键更易读。*/
+    s_VoidR = GetPrivateProfileIntA(SB_SECTION, "VoidR", 0x20, g_IniPath) & 0xFF;
+    s_VoidG = GetPrivateProfileIntA(SB_SECTION, "VoidG", 0x20, g_IniPath) & 0xFF;
+    s_VoidB = GetPrivateProfileIntA(SB_SECTION, "VoidB", 0x28, g_IniPath) & 0xFF;
     s_NLev = SB_MAXLEV;
     s_Level = GetPrivateProfileIntA(SB_SECTION, "Level", 3, g_IniPath);
     if (s_Level < 0 || s_Level >= s_NLev) s_Level = 3;
     if (!s_Enable) return;
+    /* 脏矩形裁剪改读 ViewBounds (只装一次, 常驻)。见 Sb_PatchViewClip 注释。*/
+    Sb_PatchViewClip();
     p = 0;
     p = AppendCStr(buf, p, "sbar: on level=", sizeof(buf));
     UtoA((unsigned)s_Level, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
@@ -230,6 +304,12 @@ void SB_EnsureInit(void)
     UtoA((unsigned)s_Len, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " growzbuf=", sizeof(buf));
     UtoA((unsigned)s_GrowZBuf, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCStr(buf, p, " void=", sizeof(buf));
+    UtoA((unsigned)s_VoidR, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCh(buf, p, ',', sizeof(buf));
+    UtoA((unsigned)s_VoidG, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCh(buf, p, ',', sizeof(buf));
+    UtoA((unsigned)s_VoidB, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     LogLine(buf);
 }
 
@@ -487,30 +567,49 @@ static void Sb_FreeSurf(void* s)
     ((SbDSurfDtorFn)vt[0])(s, 1);       /* vtable[0](this, 1) = 引擎释放面对象 */
 }
 
-/* 整面填零 (无 CRT: 自己写循环)。宽高/pitch 先按**面自己的**尺寸夹一遍。
+/* 整面填**图外底色** (无 CRT: 自己写循环)。宽高/pitch 先按**面自己的**尺寸夹一遍。
  * 只用于刚建好大面时: DSurface 的像素缓冲是 operator new 出来的, 内容
  * 未定义; 地图光栅化只覆盖它认为该覆盖的格子, 图外/半格区会把堆里
- * 上一块内存的残留直接当成画面。清成黑 = 引擎自己的图外底色, 视觉上
- * 也对。
+ * 上一块内存的残留直接当成画面。
+ *
+ * ★ 底色用深灰而不是纯黑: 视口 R 一旦比整张地图还大 (缩小档在 64x64 这类
+ * 小图上很常见 —— 地图 3840x1920 而 R 是 3504x2096, 高度就溢出了), 图外那块
+ * 就成了屏幕上的一大片。纯黑看着像"渲染坏了", 深灰才读得出"这里没有地图"。
+ * 引擎的光栅器只画它有的格子, 所以**整面先铺底色、地图再画上来**就是最终效果,
+ * 之后增量渲染也刷不掉它 (两张大面同色, CopyFromPart 拷过去还是它)。
+ * 像素值按 g_RBits/g_GBits/g_BBits 现算 (Calibrate 已在本帧跑过)。
  * ⚠ 不要想着"抹掉底栏带"来藏残影 (已试过, 图1): R 里那条带是**地图**,
  * 地图是增量画的, 抹了不一定回来 ⇒ 留一条黑带。正解是别让窗口坐标
  * 的绘制碰到大面 (SB_RenderSuspend/Resume)。 */
+static unsigned short Sb_VoidPixel(void)
+{
+    unsigned r, g, b, px;
+    if (!g_Calibrated) Calibrate();
+    r = (unsigned)(s_VoidR >> (8 - g_RBits)) & ((1u << g_RBits) - 1u);
+    g = (unsigned)(s_VoidG >> (8 - g_GBits)) & ((1u << g_GBits) - 1u);
+    b = (unsigned)(s_VoidB >> (8 - g_BBits)) & ((1u << g_BBits) - 1u);
+    px = (r << (g_GBits + g_BBits)) | (g << g_BBits) | b;
+    return (unsigned short)px;
+}
+
 static void Sb_ClearSurf(void* s)
 {
     unsigned char* b;
     int pitch, w, h, x, y;
+    unsigned short px;
     if (!s || !IsPlausiblePtr(s)) return;
     pitch = GtSurfGet(s, GtVT_GET_PITCH);
     w = GtSurfGet(s, GtVT_GET_WIDTH);
     h = GtSurfGet(s, GtVT_GET_HEIGHT);
     if (pitch <= 0 || w < 8 || h < 8) return;
     if (pitch < w * 2) return;          /* 不是 16bpp 的面: 逐行会越过行尾 */
+    px = Sb_VoidPixel();
     b = GtLock(s);
     if (!b) return;
     for (y = 0; y < h; y++)
     {
         unsigned short* row = (unsigned short*)(b + (size_t)y * pitch);
-        for (x = 0; x < w; x++) row[x] = 0;
+        for (x = 0; x < w; x++) row[x] = px;
     }
     GtUnlock(s);
 }
@@ -594,7 +693,13 @@ void SB_RenderSuspend(int forCursor)
 
 /* 三趟地图之前 (0x4F44CB 的 `mov eax,[0x88731C]`) 与 chrome pass 之后
  *   (0x4F4505 的 `mov ecx,[0x88731C]`) 各装回一次大面。那之后的代码自己
- *   会重读全局, 所以不用改任何寄存器。*/
+ *   会重读全局, 所以不用改任何寄存器。
+ * ★ 以前这里只还原 COMPOSITE / MAP, **漏了 CUR_SURF_SB (0x887314)**。引擎自己
+ *   把它当"当前渲染面"用: Render 入口 0x4F4492 写它、0x4F459D 还原它,
+ *   而 `TacticalClass::Draw` 里 0x6D4934 `mov ds:0x887314,ecx` 也在写它。
+ *   漏还原 ⇒ 让出期间它是窗口面、还原后 composite 是大面, 两者**不一致**,
+ *   引擎就会拿着一个错的渲染面去走虚表 ⇒ 实测崩在 0x6D493E `call [edx+0x60]`
+ *   (槽为 NULL, eip=0), ecx 正是那张 3504x2096 的大面。*/
 void SB_RenderResume(void)
 {
     if (!s_Suspended) return;
@@ -602,6 +707,7 @@ void SB_RenderResume(void)
     if (!s_RenderSwapped) return;
     *(void**)ADDR_SURF_COMPOSITE = s_CurC;
     *(void**)ADDR_SURF_MAP       = s_CurM;
+    *(void**)ADDR_CUR_SURF_SB    = s_CurC;
 }
 
 void SB_RenderSwapOut(void)
@@ -831,6 +937,8 @@ void SB_EdgeScrollPointFix(Point2D* pt)
     pt->Y = *(int*)((char*)m + SB_WWMOUSE_OFF_Y);
 }
 
+static void* s_RetComp = 0;   /* 退休槽: 上一代大面, 推迟释放 (见下) */
+static void* s_RetMap = 0;
 static void SB_SurfaceDestroy(void)
 {
     if (!s_SurfActive) return;
@@ -844,8 +952,19 @@ static void SB_SurfaceDestroy(void)
             || d == s_BigComp || d == s_BigMap)
             LogLine("sbar: WARN free big surf still referenced by engine");
     }
-    Sb_FreeSurf(s_BigComp);
-    Sb_FreeSurf(s_BigMap);
+    /* ★★ 推迟一代再释放。实测: 离开缩小档的当帧, 引擎 TacticalClass::Draw 里
+     *   (`0x6D493E call [edx+0x60`, 返回地址 `0x006D4941`) 还在用这对大面的指针
+     *   —— 三个引擎全局当时都已经干净 (上面的诊断没报), 说明引擎把它缓存在了
+     *   自己的结构里, 我们够不着、清不掉。这就是典型的 use-after-free:
+     *   当场释放 ⇒ 野虚表 (槽里是 0 或堆垃圾, eip=0/addr=12 之类) ⇒ 崩。
+     *   修法: 先退到退休槽, **下次再销毁时**才真正释放上一代。引用再长也长不过
+     *   一次完整的"离开 → 重进 → 再离开"周期; 而崩溃都发生在销毁的当帧/下几帧,
+     *   那时内存还有效 ⇒ 野指针变成"多活一阵的有效指针", 崩溃归零。
+     *   代价: 最多多活一代 (2x14MB), 且只在"离开过缩小档"的进程里。可接受。
+     *   (如果用户离开后不再回来, 退休槽的内存在进程结束时由 OS 回收。) */
+    if (s_RetComp) Sb_FreeSurf(s_RetComp);
+    if (s_RetMap) Sb_FreeSurf(s_RetMap);
+    s_RetComp = s_BigComp; s_RetMap = s_BigMap;
     s_BigComp = s_BigMap = 0;
     s_CurC = s_CurM = s_LastFinal = 0;
     s_BigW = s_BigH = 0;
@@ -1076,9 +1195,10 @@ void SB_PrepareSurface(void)
 {
     RectangleStruct a, r;
     if (!s_Enable || s_Safe) return;
+    MOE_SetPhase(MP_ZBUF);
     /* 换面泄漏自愈: 上一帧 Render 入口换了大面却没走到还原点 (钩子被抢/异常),
      * 引擎全局就一直指着大面 ⇒ 后面按窗口坐标画的东西全进大面 ⇒ 残影。*/
-    if (s_RenderSwapped) SB_RenderSwapOut();
+    if (s_RenderSwapped) { MOE_SetPhase(MP_SURFSWAP); SB_RenderSwapOut(); }
     g_PreCurWin = 0;
     g_PreCurSurf = 0;
     FM_GetViewRects(&a, &r);
@@ -1280,6 +1400,351 @@ int SB_CanvasH(int w)
     return 0;
 }
 
+/* ---------------- 地图矩形 / 视口原点: 直接读引擎全局 -------------------
+ * ★ 这些全局**不是**猜的, 是把 `TacticalClass::Clamp_Center` (0x6D8640)
+ *   和 `Update_Tactical_Position` (0x6D8B30) 逐条反汇编出来的:
+ *
+ *   MapClass 实例是一个**全局对象**在 0x87F7E8 (不是指针), 它 +0x34 的
+ *   Rectangle 由 0x6E21E0 抄进四个全局 (该函数是唯一写点):
+ *       [0x87F8DC] = +0xF4   恒为 0 (唯一写点 0x68555A 写 0)
+ *       [0x87F8E4] = +0xFC   地图左上角 格X
+ *       [0x87F8E8] = +0x100  地图左上角 格Y
+ *       [0x87F8EC] = +0x104  地图宽 格
+ *       [0x87F8F0] = +0x108  地图高 格
+ *
+ *   0x6D8640 的 px 换算 (X 60px/格, Y 30px/格, 外加原版两个历史常数):
+ *       minX = W/2 + 30*(2*格X - [0x87F8DC])
+ *       maxX = minX + 60*格W - W            ⇒  地图宽 = 60*格W
+ *       minY = 15*([0x87F8DC] + 2*格Y - 5) + H/2
+ *       maxY = minY + 30*格H + 135 - H     ⇒  地图高 = 30*格H + 135
+ *   (60x30 一格是 RA2 的 Iso 尺寸; 64x64 图 = 3840x1920, 与笔记 §11.13 一致。
+ *    那两个 -5 / +135 是原版自带的边界余量, 抄过来即可, 不必理解。)
+ *
+ *   ⇒ 地图中心 (= (min+max)/2) **完全不含视口尺寸**:
+ *       centerX = 60*格X + 30*格W,  centerY = 30*格Y - 75 + 15*格H + 67
+ *     所以"图外那一圈"的位置只由地图矩形与视口决定, 与历史无关。
+ *
+ *   视口 (大面 R): 原点 = TacticalClass+0xB0/+0xB4, 尺寸 = ViewBounds
+ *   (0xB0CE30/34, 由 `Set_Viewport` 0x6D5F60 从 0x886FA0 那个 rect 抄);
+ *   `Update_Tactical_Position` 就是 origin = center - ViewBounds.size/2。*/
+static int Sb_MapPx(int* l, int* t, int* w, int* h)
+{
+    int bx, gx, gy, cw, ch;
+    if (!l || !t || !w || !h) return 0;
+    bx = *(volatile int*)(size_t)0x87F8DCu;
+    gx = *(volatile int*)(size_t)0x87F8E4u;
+    gy = *(volatile int*)(size_t)0x87F8E8u;
+    cw = *(volatile int*)(size_t)0x87F8ECu;
+    ch = *(volatile int*)(size_t)0x87F8F0u;
+    if (cw <= 0 || ch <= 0 || cw > 8192 || ch > 8192) return 0;
+    if (gx < -4096 || gx > 4096 || gy < -4096 || gy > 4096) return 0;
+    *l = 30 * (2 * gx - bx);
+    *t = 15 * (bx + 2 * gy - 5);
+    *w = 60 * cw;
+    *h = 30 * ch + 135;
+    return 1;
+}
+
+/* 视口在大面坐标系里的原点与尺寸 (大面原点恒为 (0,0))。*/
+static int Sb_ViewPx(int* ox, int* oy, int* w, int* h)
+{
+    void* tac;
+    if (!ox || !oy || !w || !h) return 0;
+    tac = *(void**)0x00887324u;                 /* TacticalClass 实例指针 */
+    if (!tac || !IsPlausiblePtr(tac)) return 0;
+    *ox = *(volatile int*)((unsigned char*)tac + 0xB0);
+    *oy = *(volatile int*)((unsigned char*)tac + 0xB4);
+    *w  = *(volatile int*)(size_t)0xB0CE30u;    /* ViewBounds.Width  */
+    *h  = *(volatile int*)(size_t)0xB0CE34u;    /* ViewBounds.Height */
+    return (*w > 16 && *h > 16 && *ox > -1000000 && *ox < 1000000
+                          && *oy > -1000000 && *oy < 1000000);
+}
+
+/* ---------------- 视口比地图大时的居中钳位 (抖动 + 跳动的根因) ----------------
+ * `TacticalClass::Clamp_Center` (0x6D8640, `ret 4`) 把视口中心夹进
+ * `[min, max]`, 边界现算 (公式见上面 Sb_MapPx 的注释)。
+ *
+ * **视口比地图大 ⇒ min > max**, 原版夹位自相矛盾:
+ *     某一帧 center < min ⇒ 置成 min, 返回 1;
+ *     下一帧 center(=min) > max ⇒ 置成 max, 返回 1;
+ *     再下一帧又回到 min …
+ * 调用方 `Scroll_Map` (0x6D2540, 0x6D2641 调 Clamp_Center) 每次都把结果写进
+ * TacticalCenter(+0xD64/+0xD68, 0x6D2663..0x6D2675) 再 `Update_Tactical_Position`
+ * (0x6D8B30) ⇒ **TacticalPos 每帧在两个值之间来回跳**。而地图光栅化是**增量**的
+ * (0x6D3D55 用 +0xB8/+0xBC 的旧原点算 delta 做 CopyFromPart 位移拷贝), 位移
+ * 一会儿正一会儿负 ⇒ 来回搬运同一块像素 ⇒ 观感就是抖动 + 一侧残影。
+ *
+ * 修法: 该轴退化时不用 [min,max] 区间, 直接钉在**地图正中** = (min+max)/2。
+ * 该值与视口尺寸无关 ⇒ 每帧算出来都一样 ⇒ 调用方每帧写同一个 center ⇒
+ * TacticalPos 不动 ⇒ 增量渲染没有位移、没有残影。另一轴照常夹位, 所以
+ * "只在一个方向溢出"的常见情形仍然能正常卷动。
+ *
+ * ★★ 与原版**逐条对齐** (0x6D86B3..0x6D86FB 的真实控制流):
+ *     edx = arg->Y ;  if (edx >= Ymin) goto upper
+ *                      arg->Y = Ymin ; bl = 1 ; goto X_part      ← 不是返回!
+ *     upper:         if (edx <= Ymax) goto X_part
+ *                      arg->Y = Ymax ; bl = 1 ; goto X_part
+ *     X_part:        eax = arg->X ;  if (eax >= Xmin) goto xupper
+ *                      arg->X = Xmin ; return 1
+ *     xupper:        if (eax <= Xmax) return bl
+ *                      arg->X = Xmax ; return 1
+ *   ⇒ **Y 夹了以后仍然要把 X 也夹完**。之前这里写成 `return 1` 直接短路,
+ *     结果"视口比地图宽"的那一轴在 Y 越界时**根本没被钉住** ⇒ 地图横向乱飘
+ *     (表现为"居中没修好" + 帧与帧之间跳)。这是本轮实测修掉的一个真 bug。
+ *
+ * ★ 退化判据用 `mapW < ViewBounds.w` 而不是 `min > max`: 两者等价
+ *   (max-min = mapW - VB.w), 但后者每帧重算、边界上会来回翻; 而退化时
+ *   钉住的值 = 正常夹位在边界处会给的值 (mapW==VB.w 时 min==max==center),
+ *   所以**翻动的那一帧不会跳**, 天然连续。
+ *
+ * ★ 全部自己算, **不再回调原版探针** (以前用跳板调原版取边界, 踩过调用约定
+ *   的坑: 原版结尾是裸 `ret 4`, 声明错就双重清栈踩烂栈。现已删干净)。*/
+int SB_ClampFix(Point2D* c)
+{
+    static int s_tick = 0;
+    static int s_wasDeg = 2;
+    int bl = 0;
+    int ml, mt, mw, mh;
+    int vw, vh;
+    int mnX, mxX, mnY, mxY;
+    int cx, cy, midX, midY;
+    int degX, degY;
+    if (!c || !IsPlausiblePtr(c)) return 0;
+    if (!Sb_MapPx(&ml, &mt, &mw, &mh)) return 0;
+    vw = *(volatile int*)(size_t)0xB0CE30u;     /* ViewBounds.Width  */
+    vh = *(volatile int*)(size_t)0xB0CE34u;     /* ViewBounds.Height */
+    if (vw <= 16 || vh <= 16) return 0;
+    /* 退化 ⇔ 地图比视口小。等价于 min > max, 但写成了不含舍入的形式。*/
+    degX = (mw < vw);
+    degY = (mh < vh);
+    /* 与原版同一份推导 (见 Sb_MapPx 注释), 保证与边界处连续。*/
+    cx = ml + mw / 2;
+    cy = mt + mh / 2;
+    mnX = vw / 2 + ml;      mxX = mnX + mw - vw;
+    mnY = vh / 2 + mt;      mxY = mnY + mh - vh;
+    midX = cx;              midY = cy;
+    /* 退化状态翻转时打一条 (2 秒一条): 确认 "视口 > 地图" 真的被认出来了。*/
+    {
+        int deg = degX || degY;
+        if (deg != s_wasDeg || --s_tick <= 0)
+        {
+            char b1[16], b2[16], buf[224];
+            unsigned q = 0;
+            s_wasDeg = deg;
+            s_tick = 240;
+            q = AppendCStr(buf, q, deg ? "sbar: view > map, center-pinned  x "
+                                       : "sbar: view <= map, normal clamp  x ",
+                            sizeof(buf));
+            UtoA((unsigned)mnX, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+            q = AppendCh(buf, q, ',', sizeof(buf));
+            UtoA((unsigned)mxX, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+            q = AppendCStr(buf, q, "  y ", sizeof(buf));
+            UtoA((unsigned)mnY, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+            q = AppendCh(buf, q, ',', sizeof(buf));
+            UtoA((unsigned)mxY, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+            LogLine(buf);
+        }
+    }
+    /* ---- Y: 与 0x6D86B3..0x6D86C7 一致, 夹完**继续**去夹 X ---- */
+    if (degY) { if (c->Y != midY) { c->Y = midY; bl = 1; } }
+    else if (c->Y < mnY) { c->Y = mnY; bl = 1; }
+    else if (c->Y > mxY) { c->Y = mxY; bl = 1; }
+    /* ---- X: 与 0x6D86D2..0x6D86F2 一致, 夹了直接返回 1 ---- */
+    if (degX) { if (c->X != midX) { c->X = midX; bl = 1; } }
+    else if (c->X < mnX) { c->X = mnX; return 1; }
+    else if (c->X > mxX) { c->X = mxX; return 1; }
+    return bl;
+}
+
+/* 视口比地图大时, 图外那一圈要不要钉住视口中心 (见 SB_ClampFix)。*/
+int SB_ClampNeeded(void)
+{
+    return (s_Enable && !s_Safe) ? 1 : 0;
+}
+
+/* ---------------- 图外底色: 每帧重铺, 彻底不吃历史的亏 -------------------
+ * ★ 为什么必须**每帧**铺, 而不能只在建面时铺一次 (Sb_ClearSurf):
+ *   引擎的地图光栅是**增量**的 —— 0x6D3D55 用 `TacticalClass+0xB8/+0xBC`
+ *   (上一帧原点, `TacticalClass::Draw` 0x6D45A9 存) 减当前原点算 delta,
+ *   再按 delta 做 CopyFromPart 位移拷贝。所以视口一动, 整幅图被搬一次,
+ *   而**新空出来的那一条没有任何地图格子会再去覆盖它** ⇒ 那一块永远留着
+ *   "搬过来的旧像素" = 残影。它跟视口稳不稳无关: 视口早就钉死了, 残影仍然在,
+ *   因为它是**过去某一帧**搬过来的, 之后谁也不会去碰它。
+ *   (同理, 建面时铺的底色也会被后续的位移拷贝搬走, 不能一劳永逸。)
+ *
+ * ★ 铺在**哪张面上**: 两张都铺, 因为最终显示的是哪一张取决于 chrome 那段的
+ *   面切换 (SB_RenderSuspend/Resume), 没必要去猜:
+ *     - 窗口面: chrome pass 之前 (0x4F44FD)。此刻窗口面上已经是这一帧的地图
+ *       (0x4F44DF/0x4F44F4 那两趟 0x6D3D10 刚画完), 铺完正好被 chrome 的底栏
+ *       之类画在 A 之外, 互不重叠。
+ *     - 大面 R: chrome pass 之后 (0x4F4505), 第三趟地图 (0x4F4515) 之前。
+ *       那一趟只画地图, 铺好的图外不会被碰。
+ *   两处都是**纯渲染面写入**, 不碰任何模拟状态 ⇒ 联机安全。
+ *
+ * ★ 几何: 图外 = 大面 [0,0]-[vw,vh] 减去"地图落在大面里的矩形"。
+ *   地图落在大面里的矩形 = 地图 px 矩形 - 视口原点 (TacticalClass+0xB0/+0xB4)。
+ *   全部由 Sb_MapPx / Sb_ViewPx 给, 与历史无关 ⇒ 天然自愈。
+ *   大面坐标 -> 窗口坐标用现成的 `a.xy + v * a.size / r.size`
+ *   (与 SB_MapPoint 同一个变换, 那里是反着用的)。*/
+static void Sb_FillOpaque(unsigned char* base, int pitch, int W, int H,
+                          int x0, int y0, int w, int h, unsigned short px)
+{
+    int yy, xx;
+    unsigned short* row;
+    if (x0 < 0) { w += x0; x0 = 0; }
+    if (y0 < 0) { h += y0; y0 = 0; }
+    if (x0 + w > W) w = W - x0;
+    if (y0 + h > H) h = H - y0;
+    if (w <= 0 || h <= 0) return;
+    for (yy = 0; yy < h; yy++)
+    {
+        row = (unsigned short*)(base + (size_t)(y0 + yy) * pitch);
+        for (xx = 0; xx < w; xx++) row[x0 + xx] = px;
+    }
+}
+
+/* 在指定的大面上铺图外底色 (只用于我们自己的 R 大面, 不碰窗口面, 见 SB_PaintVoid)。*/
+static void Sb_PaintVoidOn(void* surf)
+{
+    int ml, mt, mw, mh;
+    int ox, oy, vw, vh;
+    int rx0, ry0, rx1, ry1;
+    int bx0, by0, bx1, by1;
+    int pitch, sw, sh;
+    unsigned char* base;
+    unsigned short px;
+    if (!surf || !IsPlausiblePtr(surf)) return;
+    if (!Sb_MapPx(&ml, &mt, &mw, &mh)) return;
+    if (!Sb_ViewPx(&ox, &oy, &vw, &vh)) return;
+    rx0 = ml - ox;  rx1 = rx0 + mw;
+    ry0 = mt - oy;  ry1 = ry0 + mh;
+    /* 图外只可能出现在四个边; 地图完全盖住视口时四个矩形都空。*/
+    bx0 = Sb_MinI(rx0, vw); if (bx0 < 0) bx0 = 0;      /* 左侧宽 */
+    bx1 = Sb_MaxI(rx1, 0); if (bx1 > vw) bx1 = vw;    /* 右侧起点 */
+    by0 = Sb_MinI(ry0, vh); if (by0 < 0) by0 = 0;
+    by1 = Sb_MaxI(ry1, 0); if (by1 > vh) by1 = vh;
+    if (bx0 >= bx1 && by0 >= by1) return;               /* 没有图外 */
+    pitch = GtSurfGet(surf, GtVT_GET_PITCH);
+    sw = GtSurfGet(surf, GtVT_GET_WIDTH);
+    sh = GtSurfGet(surf, GtVT_GET_HEIGHT);
+    if (pitch <= 0 || sw < 8 || sh < 8 || pitch < sw * 2) return;
+    /* ★ 面尺寸必须与这份几何对得上, 否则这一帧干脆不铺 —— 下一帧几何对了自然会铺。
+     *   (换挡那一瞬面与 ViewBounds 可能还没同步; 拿"旧几何"去铺"新面"只会写错颜色,
+     *   更糟的是盖住本该留给地图的位置。) */
+    if (sw != vw || sh != vh)
+    {
+        static int s_warned = 0;
+        if (!s_warned) { s_warned = 1; LogLine("sbar: WARN void skip, surface != ViewBounds"); }
+        return;
+    }
+    px = Sb_VoidPixel();
+    base = GtLock(surf);
+    if (!base) return;
+    /* 直接铺大面坐标: 左右两条通高 (上下两条由 by0/by1 自然为空, Sb_FillOpaque 会跳过)。*/
+    Sb_FillOpaque(base, pitch, sw, sh, 0, 0, bx0, vh, px);
+    Sb_FillOpaque(base, pitch, sw, sh, bx1, 0, vw - bx1, vh, px);
+    Sb_FillOpaque(base, pitch, sw, sh, 0, 0, vw, by0, px);
+    Sb_FillOpaque(base, pitch, sw, sh, 0, by1, vw, vh - by1, px);
+    GtUnlock(surf);
+}
+
+/* chrome pass 前后各调一次 (见上面注释): 把图外底色铺到大面上。
+ * ★ 只铺大面 (s_CurC/s_CurM), **不碰窗口面**。原因:
+ *   1. 窗口面那笔是冗余的: aftermap 把大面降采样进窗口 A, 图外自然跟着过去;
+ *      再锁一次 backbuffer 画一遍没有任何额外效果。
+ *   2. 锁 backbuffer 是风险最高的: 它是引擎的 DirectDraw 主面, 正在呈现管线里;
+ *      而大面是我们自己的离屏面, Lock/画/Unlock 与 Sb_ClearSurf 同 pattern。
+ *   3. 实测多起野指针崩溃都和"面状态混乱"有关, 能少碰一张面就少碰一张。*/
+void SB_PaintVoid(void)
+{
+    static int s_tick = 0;
+    static int s_wasL = -99999, s_wasR = -99999, s_wasT = -99999, s_wasB = -99999;
+    static int s_wasMapL = -99999, s_wasMapT = -99999, s_wasOx = -99999, s_wasOy = -99999;
+    if (!s_Enable || s_Safe) return;
+    if (!SB_Zoomed()) return;
+    if (!s_RenderSwapped) return;      /* 没接管渲染面就别乱画 */
+    /* ★ 只认我们自己的两张大面, 不认全局里读出来的指针。全局可能正处在
+     *   换挡中间态 (composite 刚被换成窗口、s_CurC 还没更新之类), 拿它去 Lock
+     *   就是往未知面上写 ⇒ 堆破坏 ⇒ 随机崩 + 花屏。s_CurC/s_CurM 是我们亲手
+     *   建的 (EnsureBig) 或亲手记的 (SwapOut), 来源干净。*/
+    if (!s_CurC || !IsPlausiblePtr(s_CurC)) return;
+    MOE_SetPhase(MP_PAINTVOID);
+    Sb_PaintVoidOn(s_CurC);
+    if (s_CurM && s_CurM != s_CurC && IsPlausiblePtr(s_CurM))
+        Sb_PaintVoidOn(s_CurM);
+    /* 几何诊断: 图外矩形或视口/地图位置一变就打一条, 便于核对"居中 + 图外"
+     * 是不是真的算对了 (单位 px, 大面坐标系; 4 个数 = 左/右/上/下的图外宽度)。*/
+    {
+        int ml, mt, mw, mh, ox, oy, vw, vh, l, r, t, b;
+        if (Sb_MapPx(&ml, &mt, &mw, &mh) && Sb_ViewPx(&ox, &oy, &vw, &vh))
+        {
+            l = Sb_MinI(ml - ox, vw); if (l < 0) l = 0;
+            r = Sb_MaxI(ml - ox + mw, 0); if (r > vw) r = vw;
+            t = Sb_MinI(mt - oy, vh); if (t < 0) t = 0;
+            b = Sb_MaxI(mt - oy + mh, 0); if (b > vh) b = vh;
+            if (l != s_wasL || r != s_wasR || t != s_wasT || b != s_wasB ||
+                ml != s_wasMapL || mt != s_wasMapT || ox != s_wasOx || oy != s_wasOy ||
+                --s_tick <= 0)
+            {
+                char b1[16], b2[16], b3[16], buf[224];
+                unsigned q = 0;
+                s_wasL = l; s_wasR = r; s_wasT = t; s_wasB = b;
+                s_wasMapL = ml; s_wasMapT = mt; s_wasOx = ox; s_wasOy = oy;
+                s_tick = 240;
+                q = AppendCStr(buf, q, "sbar: void L,R,T,B=", sizeof(buf));
+                UtoA((unsigned)l, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+                q = AppendCh(buf, q, ',', sizeof(buf));
+                UtoA((unsigned)(vw - r), b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+                q = AppendCh(buf, q, ',', sizeof(buf));
+                UtoA((unsigned)t, b3); q = AppendCStr(buf, q, b3, sizeof(buf));
+                q = AppendCh(buf, q, ',', sizeof(buf));
+                UtoA((unsigned)(vh - b), b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+                q = AppendCStr(buf, q, "  map ", sizeof(buf));
+                UtoA((unsigned)ml, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+                q = AppendCh(buf, q, ',', sizeof(buf));
+                UtoA((unsigned)mt, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+                q = AppendCh(buf, q, ',', sizeof(buf));
+                UtoA((unsigned)mw, b3); q = AppendCStr(buf, q, b3, sizeof(buf));
+                q = AppendCh(buf, q, ',', sizeof(buf));
+                UtoA((unsigned)mh, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+                q = AppendCStr(buf, q, "  view ", sizeof(buf));
+                UtoA((unsigned)ox, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+                q = AppendCh(buf, q, ',', sizeof(buf));
+                UtoA((unsigned)oy, b3); q = AppendCStr(buf, q, b3, sizeof(buf));
+                q = AppendCh(buf, q, ',', sizeof(buf));
+                UtoA((unsigned)vw, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+                q = AppendCh(buf, q, ',', sizeof(buf));
+                UtoA((unsigned)vh, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+                /* 两张大面的实际尺寸 (查双缓冲轮换: s_CurC/s_CurM 应当每帧互换;
+                 * 若卡住不动, 说明引擎没换/我们记错, 平滑移动层就再也擦不掉 = 拖影)。*/
+                {
+                    q = AppendCStr(buf, q, "  big ", sizeof(buf));
+                    if (s_CurC && IsPlausiblePtr(s_CurC))
+                    {
+                        UtoA((unsigned)GtSurfGet(s_CurC, GtVT_GET_WIDTH), b1);
+                        q = AppendCStr(buf, q, b1, sizeof(buf));
+                        q = AppendCh(buf, q, 'x', sizeof(buf));
+                        UtoA((unsigned)GtSurfGet(s_CurC, GtVT_GET_HEIGHT), b2);
+                        q = AppendCStr(buf, q, b2, sizeof(buf));
+                    }
+                    else q = AppendCStr(buf, q, "?", sizeof(buf));
+                    q = AppendCh(buf, q, '/', sizeof(buf));
+                    if (s_CurM && IsPlausiblePtr(s_CurM))
+                    {
+                        UtoA((unsigned)GtSurfGet(s_CurM, GtVT_GET_WIDTH), b1);
+                        q = AppendCStr(buf, q, b1, sizeof(buf));
+                        q = AppendCh(buf, q, 'x', sizeof(buf));
+                        UtoA((unsigned)GtSurfGet(s_CurM, GtVT_GET_HEIGHT), b2);
+                        q = AppendCStr(buf, q, b2, sizeof(buf));
+                    }
+                    else q = AppendCStr(buf, q, "?", sizeof(buf));
+                }
+                LogLine(buf);
+            }
+        }
+    }
+}
+
 /* ---------------- 物理鼠标点 -> 视口点 (两条折算共用) -------------------
  * 引擎把地图画在渲染面的 (mapPos - TacticalPos), 屏幕点 p 落在的视口坐标 =
  * (p - A.xy) * R.size / A.size。两个方向共用这一个式子。
@@ -1445,13 +1910,14 @@ static void Sb_SetLevel(int lv, const char* why)
 /* 每循环: 摆矩形 + 点击换档。 */
 void SB_Poll(void)
 {
-    int mx, my, down;
+    int mx, my, down, lv0;
     if (!s_Enable) return;
     Sb_InitLabels();
     /* 缩小档的离屏大面 + ZBuffer/ABuffer 尺寸必须在本帧 Render 之前准备好。 */
     SB_PrepareSurface();
     Sb_Place();
     if (!GtMouseGameXY(&mx, &my)) { s_LbDown = 0; return; }
+    lv0 = s_Level;
     down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
     if (down && !s_LbDown)
     {
@@ -1459,6 +1925,11 @@ void SB_Poll(void)
         s_LbDown = 1;
     }
     else if (!down) s_LbDown = 0;
+    /* ★ 改档当帧立刻同步视口, 不能等下一帧 FM_Poll。否则本帧后半的 Render 会用
+     *   旧 ViewBounds/旧裁剪 ([0x887644]/[0x87E8A4]) 配新档的面 ⇒ 切回 1x 时
+     *   sidebar blit 按旧 R 裁剪往窗口小面里写, 0x494BF9 `mov [edi],ax` 越界崩。
+     *   FM_SyncViewNow 幂等 (没变直接返回, setDims 有帧门控), 开销可忽略。*/
+    if (s_Level != lv0) FM_SyncViewNow();
 }
 
 /* ---------------- 刻度条绘制 (已 Lock 的 16 位面里直接写像素) ---------------- */

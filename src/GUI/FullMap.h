@@ -21,6 +21,13 @@ void FM_Install(void);
  * 全错 168, 页签/cameo/小地图一个都点不动。 */
 void FM_Poll(void);
 
+/* 缩放改档后立刻同步一次视口 (ScaleBar 的 SB_Poll 里调)。
+ * 背景: SB_Poll 先跑 PrepareSurface(旧档) 再处理点击改档, 而引擎裁剪对象
+ * ([0x887644]/[0x87E8A4], setDims 按 ViewBounds 重建) 要等下一帧 FM_Poll 才更新。
+ * 中间的 Render/sidebar blit 就会用旧 R 裁剪往窗口小面里写 ⇒ 0x494BF9 越界崩。
+ * 这里直接调一次 Fm_ApplyViewWidth (幂等, setDims 有帧门控), 让改档当帧就一致。*/
+void FM_SyncViewNow(void);
+
 /* 条带上屏钩 (SidebarClass::BlitSidebar 0x6A70E0) 调: 只 blit 保留的那一小块,
  * 补齐原版尾声的脏标记, 然后返回"直接 ret 4 的出口"指针 —— 调用方把
  * g_BlitSbTramp 指向它即等于跳过原版整条 blit。返回 0 = 不接管。 */

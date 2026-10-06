@@ -1099,6 +1099,16 @@ static void Fm_ApplyViewWidth(void)
     }
 }
 
+/* 缩放改档后立刻同步一次视口 (ScaleBar 的 SB_Poll 里调, 见 FullMap.h 注释)。
+ * 与 FM_Poll 里同一套 (Fm_ApplyViewWidth + Fm_DirtyRedraw), 幂等, 可重入。
+ * setDims 有帧门控 (s_SyncViewFrame), 同一帧调两次第二次是空操作。*/
+void FM_SyncViewNow(void)
+{
+    if (!s_Enable) return;
+    Fm_ApplyViewWidth();
+    Fm_DirtyRedraw();
+}
+
 /* ---------------- F11 边沿检测 + 三态切换 ----------------
  * prepare 钩 (0x4F42F0) 一帧能跑上百次, 必须自门控帧号。
  * 只在游戏窗口有焦点时响应, 免得切窗口时误按。 */

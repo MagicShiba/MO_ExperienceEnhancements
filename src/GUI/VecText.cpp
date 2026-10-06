@@ -2727,6 +2727,24 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: clickcoords bytes mismatch"); LogBytes((unsigned char*)0x692300u); }
     }
+/* 缩放: TacticalClass::Clamp_Center (0x6D8640) 入口接管夹位。首 5B =
+ * `A1 E4 F8 87 00`。视口 > 地图时原版的 min>max 自相矛盾 ⇒ TacticalPos 每帧跳
+ * ⇒ 抖动 + 残影, 这里把该轴钉在地图正中 (推导见 ScaleBar.cpp 的 SB_ClampFix)。
+ * ★ **不再建跳板**: 边界改成直接读引擎全局自己算, 不回调原版了 —— 原版结尾是
+ *   裸 `ret 4`, 跨边界调它踩过调用约定 (cdecl 双清栈把 `Set_View_Dimensions`
+ *   的栈踩烂, 崩在 Ares 的 .data)。所以这里只做字节校验 + 入口跳板。
+ * 安装见 MOExperience (MOExperience_ClampCenterEntry)。 */
+    {
+        static const unsigned char kWantClamp[5] =
+            { 0xA1, 0xE4, 0xF8, 0x87, 0x00 };
+        if (BytesSame((unsigned char*)0x6D8640u, kWantClamp, 5))
+        {
+            if (PatchAt(0x6D8640u, (void*)MOExperience_ClampCenterEntry, 5))
+                LogLine("vtext: clampcenter hook ON");
+            else LogLine("vtext: clampcenter hook OFF");
+        }
+        else { LogLine("vtext: clampcenter bytes mismatch"); LogBytes((unsigned char*)0x6D8640u); }
+    }
 /* 通用拉伸 blit (0x6BA580, cameo/图标) 的野面守卫钩。
      * 首 5B = `83 EC 14 55 56` (sub esp,0x14 / push ebp/esi), 跳回 0x6BA585。
      * 安装见 MOExperience (MOExperience_BlitGuardEntry/g_BlitGuardTramp)。 */

@@ -118,7 +118,7 @@ volatile unsigned g_MoePhase = MP_NONE;
 static const char* const k_PhaseName[] =
 {
     "-", "poll", "applyview", "msgdraw", "uilayers", "comp-magnify", "blitsidebar",
-    "tip-pre"
+    "tip-pre", "paintvoid", "zbuf", "surfaceswap"
 };
 #define MP_COUNT ((int)(sizeof(k_PhaseName) / sizeof(k_PhaseName[0])))
 
@@ -380,12 +380,6 @@ void* g_MapTramp = NULL;
 int   g_PreCurWin = 0;
 void* g_PreCurSurf = NULL;
 
-static void PreCurC(void)
-{
-    SB_RenderSuspend(1);
-}
-static void* g_CallPreCur = (void*)PreCurC;
-
 /* ⚠ 0x4F4492 在函数体中间: eax 是活的寄存器, 栈上是 Render 自己的帧槽, **不能**按
  *   "入口钩读栈参数"取 (那偏移是 `ret` 后第一个参数)。要拿/换 eax 只能用 pushal 帧里
  *   的 EAX 槽 `[esp+0x1C]` (pushal 压入次序 EDI,ESI,EBP,ESP,EBX,EDX,ECX,EAX)。
@@ -453,6 +447,10 @@ void* g_ChromePostTramp = NULL;
 static void ChromePreC(void)
 {
     SB_RenderSuspend(0);
+    /* 让出窗口面之后立刻把"图外"铺在窗口面上。此刻窗口面上已经是这一帧的
+     * 地图 (0x4F44DF / 0x4F44F4 两趟 0x6D3D10 刚画完), 而图外那块永远是
+     * 增量拷贝搬过来的旧像素 —— 见 ScaleBar.cpp 里 SB_PaintVoid 的注释。*/
+    SB_PaintVoid();
 }
 static void* g_CallChromePre = (void*)ChromePreC;
 __attribute__((naked)) void MOExperience_ChromePreEntry(void)
@@ -470,6 +468,9 @@ __attribute__((naked)) void MOExperience_ChromePreEntry(void)
 static void ChromePostC(void)
 {
     SB_RenderResume();
+    /* 装回大面之后、第三趟地图 (0x4F4515) 之前, 把图外也铺到大面上:
+     * 增量拷贝的残影正是留在这张面上, 在源头清掉最干净。*/
+    SB_PaintVoid();
 }
 static void* g_CallChromePost = (void*)ChromePostC;
 __attribute__((naked)) void MOExperience_ChromePostEntry(void)
@@ -591,7 +592,10 @@ void* g_BlitTramp = NULL;
 
 static void BlitDiagC(unsigned* frame, void* dest, void* ra)
 {
-    static unsigned s_seen[12];
+    /* ★ 日志限流: 同一 ra 只打一次, 表满之后不再打 (之前只有 12 个槽,
+     *   实测有 55 个不同的 ra, 满了之后每次都打 ⇒ 单文件 700MB+ 的灾难)。
+     *   这个探针只用来一次性认调用方, 64 个足够; 真要重新认, 重进游戏即可。*/
+    static unsigned s_seen[64];
     static int s_nseen;
     const unsigned* a = frame + 9;         /* pushal 帧 0x24 起 = 原函数栈参数 */
     unsigned k, i;
@@ -603,7 +607,8 @@ static void BlitDiagC(unsigned* frame, void* dest, void* ra)
     if (GtSurfGet(dest, GtVT_GET_WIDTH) <= GtGameW()
         || GtSurfGet(dest, GtVT_GET_HEIGHT) <= GtGameH()) return;
     for (i = 0; i < (unsigned)s_nseen; i++) if (s_seen[i] == (unsigned)(size_t)ra) return;
-    if (s_nseen < 12) s_seen[s_nseen++] = (unsigned)(size_t)ra;
+    if (s_nseen >= 64) return;             /* 表满: 停, 不再打 */
+    s_seen[s_nseen++] = (unsigned)(size_t)ra;
     p = AppendCStr(buf, p, "moe: blitbig ra=", sizeof(buf));
     UtoA((unsigned)(size_t)ra, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " dst=", sizeof(buf));
@@ -746,6 +751,58 @@ __attribute__((naked)) void MOExperience_ClickCoordsEntry(void)
         "ret $0x18\n\t"
         :
         : "m" (g_CallClickCoords), "m" (g_ClickCoordsTramp)
+        : "memory", "cc");
+}
+
+/* ---------------- 视口比地图大: 接管 TacticalClass::Clamp_Center ----------------
+ * 抖动 + 一侧残影的根因 (完整推导见 ScaleBar.cpp 的 SB_ClampFix 注释):
+ * Clamp_Center 的 min/max 由地图尺寸与 ViewBounds 现算, 视口大于地图时 min > max,
+ * 夹位自相矛盾 ⇒ TacticalPos 每帧在 min/max 之间跳; 而地图光栅化是**增量**的
+ * (按位移做 CopyFromPart), 位移反复变号 ⇒ 来回搬运同一块像素 = 抖动 + 一侧残影。
+ *
+ * 做法: 边界**不再靠回调原版探出来**, 改成直接读引擎全局自己算 ——
+ * `[0x87F8DC..0x87F8F0]` 就是 MapClass 全局对象 (0x87F7E8) 的
+ * +0xF4/+0xFC/+0x100/+0x104/+0x108, 语义已逐条反汇编确认 (地图左上角格坐标与
+ * 宽高格数, px 换算 60/30 一格)。推导过程写在 ScaleBar.cpp 的 Sb_MapPx 注释里。
+ *
+ * ⚠⚠ **踩过的坑, 别再走回头路: 不要用跳板回调原版来探边界。**
+ *   原版结尾是裸 `ret 4` (被调方清栈)。当时把函数指针写成了 `__cdecl`
+ *   (调用方清栈) ⇒ callee 弹一次、GCC 又以为该自己弹而不弹 ⇒ **每次探针净丢
+ *   4 字节栈**, 一次钩两次探针丢 8 字节。这个函数是被 `Set_View_Dimensions`
+ *   → `SetTacticalViewBounds` (0x6D5FA8) 在开局切视图那一瞬调用的, 丢掉的栈把
+ *   返回地址改成垃圾 ⇒ 实测崩在 `eip=0x09C8A708` (Ares 的 .data, 字节
+ *   `FF FF FF FF 20 33 2E 33` = " 3.3"), `MOE: phase=applyview`, 栈上
+ *   `006D5FAD ← 004A89C2`。
+ *   (改成 `__stdcall` 能跑, 但既然全局已经读通, 干脆不跨边界调引擎函数了。)
+ *   ★ 项目口径: 其余 30 多处引擎函数指针都是"被调方清栈"
+ *     (`__attribute__((thiscall))`)。**要这个语义就别写 `__cdecl`**;
+ *     也别写只有 1 个参数的 `thiscall` —— GCC 会把它当 this 塞进 ecx 不压栈,
+ *     实测直接崩。要"被调方清栈"就用 `__stdcall`。
+ * 首 5B = `A1 E4 F8 87 00` (mov eax,[0x87F8E4]), 跳板跳回 0x6D8645。
+ * Entry 不用 pushal (要原样把 al 与栈交给原版的 `ret 4`), 只在调 C 前后保住
+ * ecx/实参指针。*/
+static int SbClampCenter(void* self, Point2D* c)
+{
+    (void)self;
+    if (!c || !IsPlausiblePtr(c)) return 0;
+    if (!SB_ClampNeeded()) return 0;
+    return SB_ClampFix(c);
+}
+static void* g_CallClamp = (void*)SbClampCenter;
+
+__attribute__((naked)) void MOExperience_ClampCenterEntry(void)
+{
+    __asm__ volatile (
+        "movl 4(%%esp), %%eax\n\t"        /* arg1 = Point2D* (原版只收这一个栈参) */
+        "pushl %%ecx\n\t"
+        "pushl %%eax\n\t"                  /* C 的第2实参 self (原版不用 ecx) */
+        "pushl %%eax\n\t"                  /* C 的第1实参 c */
+        "call *%0\n\t"
+        "addl $8, %%esp\n\t"
+        "popl %%ecx\n\t"
+        "ret $4\n\t"                     /* ★ 原版就是 ret 4: 弹 retaddr + 实参 */
+        :
+        : "m" (g_CallClamp)
         : "memory", "cc");
 }
 

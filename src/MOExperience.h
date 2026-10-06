@@ -7,7 +7,7 @@
  */
 #pragma once
 
-#define MOE_VERSION "0.2.210"
+#define MOE_VERSION "0.2.218"
 
 /* 一次性初始化: 建日志路径 + 各模块首次载入配置。幂等, 各入口都先调它。 */
 void MOE_EnsureInit(void);
@@ -31,7 +31,10 @@ enum
     MP_UILAYER,     /* MOE_DrawUILayers */
     MP_COMPMAG,     /* 放大结果写进 Composite */
     MP_BLITSIDEBAR, /* BlitSb */
-    MP_TIPPRE       /* 放大前那次提示框 Process (重影修复) */
+    MP_TIPPRE,      /* 放大前那次提示框 Process (重影修复) */
+    MP_PAINTVOID,   /* SB_PaintVoid: 铺图外底色 */
+    MP_ZBUF,        /* SB_PrepareSurface: ZBuffer/大面尺寸 */
+    MP_SURFSWAP     /* 换面 (SwapIn/SwapOut/Suspend/Resume) */
 };
 extern volatile unsigned g_MoePhase;
 void MOE_SetPhase(unsigned id);
@@ -93,6 +96,10 @@ extern void* g_BlitGuardTramp;
  * 选中单位点底栏 = 对画面中部的地图像素下令 (SB_PtInView)。1x/放大档恒空操作。 */
 void MOExperience_ClickCoordsEntry(void);
 extern void* g_ClickCoordsTramp;
+/* TacticalClass::Clamp_Center (0x6D8640) 入口钩: 视口比地图大时把该轴钉在地图正中,
+ * 消掉 "TacticalPos 每帧在 min/max 之间跳 ⇒ 增量光栅化来回搬运像素" 造成的抖动与
+ * 一侧残影 (推导见 ScaleBar.cpp 的 SB_ClampFix)。首 5B = `A1 E4 F8 87 00`。 */
+void MOExperience_ClampCenterEntry(void);
 /* 帧准备钩入口 (naked): 每循环必跑, 底部电量"始终绘制"靠它。 */
 void MOExperience_PrepareEntry(void);
 extern void* g_PrepareTramp;
