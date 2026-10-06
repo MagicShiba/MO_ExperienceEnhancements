@@ -87,8 +87,6 @@ static int ce_Enable = 1;
 static int ce_ChatBoxSP = 1;   /* 单人也建原生聊天框 */
 static int ce_ChatNameSP = 0;  /* 单人消息也显示 "名字: " */
 static int ce_Active = 0;
-/* 落位只记一次 (排查用: 见 CE_LogWhere) */
-static int ce_AnchorLogged = 0;
 /* 本帧盒子是用战役框锚点 (0) 还是留在原生行原位 (1)。留在原位时不允许
  * 钳屏内位移, 否则和原生行分家, 合并黑板失效。 */
 static int ce_AtNative = 1;
@@ -159,7 +157,7 @@ static void CE_EnsureInit(void)
         q = AppendCStr(sb, q, "chatedit: ", sizeof(sb));
         q = AppendCStr(sb, q, ce_Enable ? "box ON" : "box OFF", sizeof(sb));
         q = AppendCStr(sb, q, " ChatBoxSP=", sizeof(sb));
-        q += UtoA((unsigned)ce_ChatBoxSP, t1);
+        UtoA((unsigned)ce_ChatBoxSP, t1);
         q = AppendCStr(sb, q, t1, sizeof(sb));
         q = AppendCStr(sb, q, " ChatNameSP=", sizeof(sb));
         UtoA((unsigned)ce_ChatNameSP, t1);
@@ -177,6 +175,13 @@ static int CE_NativeFieldW(void)
 {
     int w = *(int*)(CE_MSGLIST + CE_OFF_FIELDW);
     return w;
+}
+
+/* 输入域宽 (原生值, 过窄回退 640)。 */
+static int CE_FieldW(void)
+{
+    int w = CE_NativeFieldW();
+    return (w < 80) ? 640 : w;
 }
 
 static void CE_SelRange(int* lo, int* hi)
@@ -207,30 +212,16 @@ static int CE_TextWidth(const wchar_t* s, int n)
 /* 文本镜像进原生缓冲 (提交/原生路径永远看到有效文本)。
  * 光标置尾, 起点置 0 (空=取消, 非空=发送, 与原生语义一致)。
  * 对话框层也会直接改这块 (Delete/方向键不走 Input 钩), 帧级覆盖回去。 */
-static int ce_DivCnt = 0;
-static unsigned ce_DivT = 0;
 static void CE_Mirror(void)
 {
     wchar_t* nb = (wchar_t*)(CE_MSGLIST + CE_OFF_EDITBUF);
     int i;
     if (!IsPlausiblePtr(nb)) return;
     if (ce_Len > CE_BUF_N - 1) ce_Len = CE_BUF_N - 1;
-    for (i = 0; i < ce_Len; i++) if (nb[i] != ce_Buf[i]) { ce_DivCnt++; break; }
-    if (nb[ce_Len] != 0) ce_DivCnt++;
     for (i = 0; i < ce_Len; i++) nb[i] = ce_Buf[i];
     nb[ce_Len] = 0;
     *(int*)(CE_MSGLIST + CE_OFF_CURPOS) = ce_Len;
     *(int*)(CE_MSGLIST + CE_OFF_INITPOS) = 0;
-    if (ce_DivCnt && GetTickCount() - ce_DivT > 2000)
-    {
-        char sb[64], t1[16];
-        unsigned q = 0;
-        ce_DivT = GetTickCount();
-        q = AppendCStr(sb, q, "chatedit: native buffer edited behind us x", sizeof(sb));
-        q += UtoA((unsigned)ce_DivCnt, t1);
-        AppendCStr(sb, q, t1, sizeof(sb));
-        ce_DivCnt = 0;
-        LogLine(sb);    }
 }
 
 /* ---------------- 编辑操作 (调用后须 CE_Mirror + 闪烁复位) ---------------- */
@@ -274,7 +265,6 @@ static void CE_DeleteRange(int lo, int hi)
 {
     int i;
     if (lo < 0 || hi <= lo) return;
-    if (lo < 0) lo = 0;
     if (hi > ce_Len) hi = ce_Len;
     for (i = hi; i <= ce_Len; i++) ce_Buf[i - (hi - lo)] = ce_Buf[i];
     ce_Len -= (hi - lo);
@@ -525,38 +515,27 @@ static LRESULT WINAPI CE_WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
         (void)w; (void)l;
         return 0;
     }
-    if (orig)
-    {
-        if (IsWindowUnicode(h))
-            return CallWindowProcW(orig, h, m, w, l);
-        return CallWindowProcA(orig, h, m, w, l);
-    }
     if (IsWindowUnicode(h))
-        return DefWindowProcW(h, m, w, l);
-    return DefWindowProcA(h, m, w, l);
+        return orig ? CallWindowProcW(orig, h, m, w, l)
+                    : DefWindowProcW(h, m, w, l);
+    return orig ? CallWindowProcA(orig, h, m, w, l)
+                : DefWindowProcA(h, m, w, l);
 }
 
 static void CE_SubclassEnsure(HWND h)
 {
     WNDPROC cur, want;
+    int uni;
     if (!h || !IsWindow(h)) return;
     want = (WNDPROC)CE_WndProc;
-    if (IsWindowUnicode(h))
-    {
-        cur = (WNDPROC)GetWindowLongPtrW(h, GWLP_WNDPROC);
-        if (cur == want) return;
-        if (!ce_OrigWndProc) ce_OrigWndProc = cur;
-        else if (cur != ce_OrigWndProc) return;
-        SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)want);
-    }
-    else
-    {
-        cur = (WNDPROC)GetWindowLongPtrA(h, GWLP_WNDPROC);
-        if (cur == want) return;
-        if (!ce_OrigWndProc) ce_OrigWndProc = cur;
-        else if (cur != ce_OrigWndProc) return;
-        SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)want);
-    }
+    uni = IsWindowUnicode(h) ? 1 : 0;
+    cur = uni ? (WNDPROC)GetWindowLongPtrW(h, GWLP_WNDPROC)
+              : (WNDPROC)GetWindowLongPtrA(h, GWLP_WNDPROC);
+    if (cur == want) return;
+    if (!ce_OrigWndProc) ce_OrigWndProc = cur;
+    else if (cur != ce_OrigWndProc) return;
+    if (uni) SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)want);
+    else SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)want);
 }
 
 static void CE_PositionIME(int sx, int sy, int surfW, int surfH)
@@ -620,8 +599,7 @@ static void CE_NavMove(int vk, int shift, int ctrl)
     case VK_END:   ce_Cur = ce_Len; break;
     default: break;
     }
-    if (!shift) ce_Anchor = -1;
-    else if (ce_Anchor == ce_Cur) ce_Anchor = -1;
+    if (shift && ce_Anchor == ce_Cur) ce_Anchor = -1;
     if (ce_ViewX < 0) ce_ViewX = 0;
     CE_BlinkReset();
 }
@@ -723,7 +701,6 @@ static void CE_Activate(void)
     wchar_t* nb = (wchar_t*)(CE_MSGLIST + CE_OFF_EDITBUF);
     int n = 0;
     unsigned k;
-    ce_Len = 0; ce_Cur = 0; ce_Anchor = -1; ce_ViewX = 0;
     ce_CompLen = 0; ce_CompCur = 0;
     /* 同步原生缓冲: 只认领, 不显示。AddEdit 预填的发送模板原样未动则发送时剥离,
      * 自己和原生缓冲都归零 (镜像覆盖模板)。 */
@@ -792,32 +769,6 @@ static void CE_FillRect(void* surf, int x, int y, int w, int h,
     fn(surf, NULL, &rc, &c, op);
 }
 
-/* 输入框落位只记一次 (排查用: 改 CampBottom/PosX/分辨率/字号后好核对) */
-static void CE_LogWhere(const char* what, int x, int y,
-                        int fieldW, int surfW, int surfH)
-{
-    char lb[128], t1[16], t2[16];
-    unsigned q = 0;
-    if (ce_AnchorLogged) return;
-    ce_AnchorLogged = 1;
-    q = AppendCStr(lb, q, "chatedit: ", sizeof(lb));
-    q = AppendCStr(lb, q, what, sizeof(lb));
-    q = AppendCStr(lb, q, " x=", sizeof(lb));
-    q += UtoA((unsigned)x, lb + q);
-    q = AppendCStr(lb, q, " y=", sizeof(lb));
-    q += UtoA((unsigned)y, lb + q);
-    q = AppendCStr(lb, q, " fieldW=", sizeof(lb));
-    UtoA((unsigned)fieldW, t1);
-    q = AppendCStr(lb, q, t1, sizeof(lb));
-    q = AppendCStr(lb, q, " surf=", sizeof(lb));
-    UtoA((unsigned)surfW, t2);
-    q = AppendCStr(lb, q, t2, sizeof(lb));
-    AppendCh(lb, q, 'x', sizeof(lb));
-    UtoA((unsigned)surfH, t1);
-    AppendCStr(lb, q, t1, sizeof(lb));
-    LogLine(lb);
-}
-
 static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
                      int surfPitch)
 {
@@ -847,7 +798,6 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
         {
             lx = ax; ly = ay;
             ce_AtNative = 0;
-            CE_LogWhere("camp-anchor", lx, ly, fieldW, surfW, surfH);
         }
         else
         {
@@ -864,7 +814,6 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
                     if (qx >= 0 && qx < surfW && qy >= 0 && qy < surfH) { lx = qx; ly = qy; }
                 }
             }
-            CE_LogWhere("native-pos", lx, ly, fieldW, surfW, surfH);
         }
     }
     if (!GdiEnsure(lineH, ce_Bold, CE_GDI_SLOT, ce_Face)) return 0;
@@ -980,7 +929,7 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
         int w = RenderLine(ce_Comp, compFit);
         if (w > 0)
         {
-            int ccx = compX, k;
+            int k;
             int acc = 0;
             int showW = w + 2;
             int maxW = tx + bw - 2 - compX;
@@ -1003,8 +952,7 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
                              255, 255, 0, 100);
                 CE_FillRect(surf, compX, ty + th - 1, showW, 1, 255, 255, 0, 100);
             }
-            ccx = compX + acc;
-            compX = ccx;
+            compX += acc;
         }
     }
     /* 光标 (有选中则隐藏, 530ms 闪烁; 钳到盒内) */
@@ -1016,7 +964,6 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     unlockFn(surf, NULL);
     /* 输入法跟随 (surface 已解锁): 候选框指到输入框下面, 每帧设一次。 */
     CE_PositionIME(compX, boxY + bh, surfW, surfH);
-    (void)i;
     return 1;
 }
 
@@ -1142,8 +1089,7 @@ extern "C" void CE_CharAdopt2(void* this_)
     w = ring[idx];
     if (w >= 0x100) return;             /* 非原文 (标志字/其它), 留给原生 */
     if (w < 0x20 || w == 0x7F) return;  /* 控制符走原生 */
-    fieldW = CE_NativeFieldW();
-    if (fieldW < 80) fieldW = 640;
+    fieldW = CE_FieldW();
     CE_InsertOne((wchar_t)w, fieldW);
     CE_Mirror();
     CE_BlinkReset();
@@ -1219,7 +1165,7 @@ int __fastcall ChatEdit_InputHook(void* t, void* edxUnused,
     ukey = (unsigned)key & 0xFFFFu;
     if (CE_CompActiveNow())
     {
-        if (ukey >= 0x20u && ukey < 0x80u && ukey != 0x20u)
+        if (ukey > 0x20u && ukey < 0x80u)
         { *keySlot = 0; CE_BlinkReset(); return 0; }   /* 组字键吞掉, 不照打 */
     }
     if (ukey == 0x0Du)
@@ -1262,8 +1208,7 @@ int __fastcall ChatEdit_InputHook(void* t, void* edxUnused,
     if (ctrl)
     {
         wchar_t c = (wchar_t)ukey;
-        int fieldW = CE_NativeFieldW();
-        if (fieldW < 80) fieldW = 640;
+        int fieldW = CE_FieldW();
         if (c == L'C' || c == L'c' || ukey == 0x03u) CE_DoCopy(0);
         else if (c == L'X' || c == L'x' || ukey == 0x18u) CE_DoCopy(1);
         else if (c == L'V' || c == L'v' || ukey == 0x16u) CE_DoPaste(fieldW);
@@ -1271,16 +1216,14 @@ int __fastcall ChatEdit_InputHook(void* t, void* edxUnused,
         { ce_Anchor = 0; ce_Cur = ce_Len; CE_BlinkReset(); }
         else if (ukey < 0x20u) { *keySlot = 0; return 0; }   /* 原生拒收 */
         else CE_InsertOne(c, fieldW);   /* 与原生一致: 照打 */
-        if (c == L'V' || c == L'v' || ukey == 0x16u) { /* paste 内已 mirror */ }
-        else CE_Mirror();
+        if (c != L'V' && c != L'v' && ukey != 0x16u) CE_Mirror();
         ce_CmdTick = GetTickCount();
         *keySlot = 0;
         return 0;
     }
     if (ukey >= 0x20u && ukey < 0x10000u)
     {
-        int fieldW = CE_NativeFieldW();
-        if (fieldW < 80) fieldW = 640;
+        int fieldW = CE_FieldW();
         CE_InsertOne((wchar_t)ukey, fieldW);
         CE_Mirror();
         CE_BlinkReset();
@@ -1313,6 +1256,8 @@ void ChatEdit_Install(void)
     int rel, i;
     DWORD old;
     CE_EnsureInit();
+    /* 非 gamemd 宿主由 DllMain 宿主守卫拦截 (见 MOExperience.cpp),
+     * 到这里必是游戏本体, 0x5D4510 恒在镜像内, 直接版本校验即可。 */
     /* [MsgText] ChatEdit=0 = 全走原生: Input 补丁永久有效 (无还原路径),
      * 装了就等于接管, 必须提前返回。 */
     if (!ce_Enable)
@@ -1347,7 +1292,6 @@ void ChatEdit_Install(void)
  * 那段上下文未初始化, 硬闯必崩。 */
 extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_HideNative(void* regs)
 {
-    static int s_logged = 0;
     unsigned char* ecx;
     int isEdit;
     (void)regs;
@@ -1358,18 +1302,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl ChatEdit_HideNative(void* regs)
      * 同一帧 ChatEdit_Frame 见 IsEdit 即激活并画盒, 不空框。 */
     if (!isEdit) return CE_NATIVE_SKIP;   /* 0x5D4A8D */
     if (!ce_Enable) return CE_NATIVE_ENTER;/* 0x5D49BF: 引擎原生路径, 画原生行 */
-    if (!s_logged)
-    {
-        /* 一次性日志 */
-        char sb[128], t1[16];
-        unsigned q = 0;
-        s_logged = 1;
-        q = AppendCStr(sb, q, "chatedit: native line hidden (this=", sizeof(sb));
-        UtoA((unsigned)(size_t)ecx, t1);
-        q = AppendCStr(sb, q, t1, sizeof(sb));
-        AppendCh(sb, q, ')', sizeof(sb));
-        LogLine(sb);
-    }
     return CE_NATIVE_SKIP;   /* 0x5D4A8D */
 }
 
@@ -1449,8 +1381,8 @@ int ChatEdit_Frame(void* surf, int bitLineH, int screenW,
     CE_PollIME();
     if (ce_CompLen <= 0)
     {
-        fieldW = CE_NativeFieldW();
-        if (fieldW < 80 || fieldW > surfW) fieldW = 640;
+        fieldW = CE_FieldW();
+        if (fieldW > surfW) fieldW = 640;
         /* 轮询只在游戏自己当前台时动手 (GetAsyncKeyState 是全局状态)。 */
         if (CE_GameForeground()) CE_PollKeys(fieldW);
     }

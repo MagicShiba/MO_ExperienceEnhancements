@@ -37,6 +37,7 @@
 #include "SWSBar.h"
 #include "SWPanel.h"
 #include "TreeChop.h"
+#include "WeaponRange.h"
 #include "ScaleBar.h"
 #include "MOExperience.h"
 
@@ -50,6 +51,59 @@
 /* ---------------- 初始化 ---------------- */
 
 static int g_InitDone = 0;
+
+/* ---------------- 宿主守卫 ----------------
+ * DLL 与游戏同目录, 日志按 exe 所在目录落盘, 非游戏宿主 (启动器等)
+ * 被加载时会往同一个 MOExperience.log 里追加, 看着像“执行了两次”。
+ * 且 0x5D4510 等引擎地址在别的进程里是别的数据, 直接读即 AV
+ * (本次 CRASH: eip 在本 DLL +0x27DBF, cmp byte [0x5D4510],0x53,
+ * tgt=0x5D4510, 第一程 blit 读到 "atan2" 即非游戏镜像)。
+ * 非 gamemd.exe 一律不装钩, 只留一行 host 供区分进程。无 CRT,
+ * 后缀大小写不敏感匹配。 */
+static int g_HostChecked = 0;
+static int g_HostOk = 0;
+
+static int MOE_HostIsGame(void)
+{
+    char pb[260];
+    DWORD n, i, base, blen, k;
+    static const char kWant[] = "gamemd.exe";
+    if (g_HostChecked) return g_HostOk;
+    g_HostChecked = 1;
+    g_HostOk = 0;
+    n = GetModuleFileNameA(NULL, pb, (DWORD)sizeof(pb));
+    if (n == 0 || n >= (DWORD)sizeof(pb)) return 0;
+    pb[n] = 0;
+    i = n;
+    while (i > 0 && pb[i - 1] != '\\' && pb[i - 1] != '/' && pb[i - 1] != ':') i--;
+    base = i;
+    blen = n - base;
+    if (blen != 10) return 0;
+    for (k = 0; k < 10; k++)
+    {
+        char a = pb[base + k], b = kWant[k];
+        if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
+        if (a != b) return 0;
+    }
+    g_HostOk = 1;
+    return 1;
+}
+
+/* host 一行 (start 之前打, 双进程各留一行, 下次直接按 pid 区分)。 */
+static void MOE_LogHost(void)
+{
+    char pb[260], buf[512], b1[16];
+    unsigned p = 0;
+    DWORD n = GetModuleFileNameA(NULL, pb, (DWORD)sizeof(pb));
+    if (n == 0 || n >= (DWORD)sizeof(pb)) pb[0] = 0;
+    else pb[n] = 0;
+    p = AppendCStr(buf, p, "moe: host ", sizeof(buf));
+    p = AppendCStr(buf, p, pb, sizeof(buf));
+    p = AppendCStr(buf, p, " pid=", sizeof(buf));
+    UtoA((unsigned)GetCurrentProcessId(), b1);
+    p = AppendCStr(buf, p, b1, sizeof(buf));
+    LogLine(buf);
+}
 
 /* ---------------- 崩溃定位: 全局阶段标记 ----------------
  * 引擎里到处是钩子, 崩了只看寄存器常常定位不到 (栈已经没了)。各入口把正在做的
@@ -75,16 +129,19 @@ void MOE_SetPhase(unsigned id) { g_MoePhase = id; }
 
 void MOE_EnsureInit(void)
 {
-    char buf[128];
+    char buf[128], b1[16];
     unsigned p;
     if (g_InitDone) return;
     g_InitDone = 1;
     GtEnsureLog();
     if (!g_Log) return;
+    if (!MOE_HostIsGame()) return;   /* 非游戏宿主: DllMain 已留 host 行, 这里不再初始化各模块 */
     LogLine("==================================================");
     p = AppendCStr(buf, 0, "MOExperience ", sizeof(buf));
     p = AppendCStr(buf, p, MOE_VERSION, sizeof(buf));
-    p = AppendCStr(buf, p, " start", sizeof(buf));
+    p = AppendCStr(buf, p, " start pid=", sizeof(buf));
+    UtoA((unsigned)GetCurrentProcessId(), b1);
+    p = AppendCStr(buf, p, b1, sizeof(buf));
     LogLine(buf);
     /* 各模块首次载入 (各自打自己的 ini 节, 幂等) */
     VecText_EnsureInit();
@@ -629,6 +686,7 @@ int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch)
     SmartArea_Draw(surf, surfW, surfH, surfPitch);
     TreeChop_Draw(surf, surfW, surfH, surfPitch);
     DeployPreview_Draw(surf, surfW, surfH, surfPitch);
+    WeaponRange_Draw(surf, surfW, surfH, surfPitch);
     if (FM_DrawRadarTo(surf)) drew = 1;
     return drew;
 }
@@ -891,6 +949,13 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         p = AppendCStr(buf, p, " fault=", sizeof(buf));
         UtoA(r->NumberParameters ? (unsigned)(size_t)r->ExceptionInformation[0] : 0u, b1);
         p = AppendCStr(buf, p, b1, sizeof(buf));
+        /* 出错的数据地址 (读/写目标, fault= 只是读写标志别再误读)。 */
+        if (r->NumberParameters >= 2)
+        {
+            p = AppendCStr(buf, p, " tgt=", sizeof(buf));
+            UtoA((unsigned)(size_t)r->ExceptionInformation[1], b1);
+            p = AppendCStr(buf, p, b1, sizeof(buf));
+        }
         LogLine(buf);
 
         p = 0;
@@ -961,6 +1026,13 @@ extern "C" __declspec(dllexport) BOOL __stdcall DllMain(HINSTANCE h, DWORD reaso
     if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(h);
+        GtEnsureLog();
+        MOE_LogHost();
+        if (!MOE_HostIsGame())
+        {
+            LogLine("moe: host not gamemd, hooks skipped");
+            return TRUE;
+        }
         AddVectoredExceptionHandler(1, Moe_CrashFilter);
         MOE_EnsureInit();
         VecText_Install();
