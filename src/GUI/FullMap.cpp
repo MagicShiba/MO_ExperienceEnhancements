@@ -1058,8 +1058,12 @@ static void Fm_ApplyViewWidth(void)
          * 之后紧跟一次按 1920 建裁剪器, 之后没人重建)。
          * 安全阀: 只在宽度真变时调; 引擎帧号门控一帧一次 (prepare 一帧上百次);
          * WWMouseClass 必须在 (0x4A89C2 不判空就解引用); s_InSetViewDims 防它
-         * 末尾 InitGUI 重入。*/
-        if (w != oldW && !s_InSetViewDims)
+         * 末尾 InitGUI 重入。
+         * ⚠ **缩小档 (SB_Out) 下绝不能调**: Set_View_Dimensions 会把两块裁剪器
+         * 按 ViewBounds (此时是 R) 重建, 立刻把缩放刚建好的 R 大缓冲顶回 A;
+         * 下一帧 SB_PrepareSurface 又按 R 重建一次 —— 两边来回抢, 而且它末尾
+         * 还会 InitGUI。缩小档的缓冲归 ScaleBar 独占 (见 SB_ResizeBufs)。*/
+        if (w != oldW && !s_InSetViewDims && !SB_Out())
         {
             void* mouse = *(void**)ADDR_WWMOUSE;
             FnSetViewDims setDims = (FnSetViewDims)(size_t)ADDR_SET_VIEW_DIMS;
@@ -1506,12 +1510,20 @@ int FM_DrawRadarTo(void* surf)
 /* ---------------- 视口 gadget 收窄 ----------------
  * GadgetClass::Input (0x4E1640) 的命中测试是 ExtractGadgetAt (0x4E15A0):
  *   X/W/H 直接当屏幕坐标比, 沿 GetPrev 走; 命中里取**面积最小**的那个。
- * 输入链上只有一个 gadget, 矩形恒等于 ViewBounds (实测 {0,0,1920x1048})。
- * 态1 视口全宽 ⇒ 它把侧栏列整个吞进命中区, 那一列的点击全被判成"点在视口上";
- * 收窄成"视口减去侧栏列"即与原版几何完全一致 (苏联列在右则右边界收到列起点,
- * 盟军列在左则左边界推到列尾)。指针取自 Input 的 this —— 是真 gadget 指针。 */
+ * 引擎把横跨整个视口的容器 gadget 摆在 ViewBounds 上; 视口铺满/被缩放后它会连
+ * 侧栏列一起吞掉, 那一列的点击全被判成"点在视口上"。指针取自 Input 的 this
+ * —— 是真 gadget 指针。
+ * ★ 矩形是四个 int: +0x0C=X / +0x10=Y / +0x14=Width / +0x18=Height
+ *   (ExtractGadgetAt 0x4E15CF-0x4E15F3 就是这四个)。**Y/Height 也必须收窄**:
+ *   缩小档 ViewBounds = R, 高度 R.Height (2x 时 2096) 远超窗口 1080 ⇒ 只改
+ *   X/Width 的话这个容器仍盖住整屏高度, 侧栏那一列的点被判成"在视口上"
+ *   (症状: 缩小档下原版侧栏点击全失效)。
+ * 命中区一律按 A (满视图区) 算, 不跟缩放走 —— 见 Fm_ViewNoSidebar。*/
 #define GAD_LOG_X       0x0Cu
+#define GAD_LOG_Y       0x10u
 #define GAD_LOG_W       0x14u
+#define GAD_LOG_H       0x18u
+
 
 static void* s_ViewGadget = NULL;
 static unsigned s_TrimOldW = 0;
@@ -1547,7 +1559,7 @@ void FM_TrimViewGadget(void)
 {
     unsigned char* g;
     RectangleStruct keep;
-    int gx, gw, wasX, wasW;
+    int gx, gy, gw, gh;
 
     if (!s_Enable) return;
     g = (unsigned char*)s_ViewGadget;
@@ -1555,48 +1567,60 @@ void FM_TrimViewGadget(void)
     if ((unsigned)(size_t)g < 0x00400000u
         || (unsigned)(size_t)g > 0x008A0000u) { s_ViewGadget = NULL; return; }
     gx = *(int*)(g + GAD_LOG_X);
+    gy = *(int*)(g + GAD_LOG_Y);
     gw = *(int*)(g + GAD_LOG_W);
-    if (gx < 0 || gw <= 0) return;
+    gh = *(int*)(g + GAD_LOG_H);
+    if (gx < 0 || gw <= 0 || gy < 0 || gh <= 0) return;
     if (!Fm_ModeTrim())
     {
-        /* 不收窄 (全屏态): 命中区必须是整宽 (按 A, 缩放时整块 A 都是地图)。
-         * 引擎每帧从 ViewBounds 重设, 这里只是在切模式的当帧把上一次收窄的结果
-         * 主动改回去, 不依赖那套重设。*/
+        /* 不收窄 (全屏态): 命中区必须是整块 A (缩放时 A 全是地图)。引擎每帧从
+         * ViewBounds 重设, 这里只是在切模式的当帧把上一次收窄的结果改回去。*/
         const RectangleStruct* vb = &s_ViewA;
         if (vb->Width < 64 || vb->Width > 8192) return;
-        if (gx == vb->X && gw == vb->Width) return;
+        if (gx == vb->X && gy == vb->Y && gw == vb->Width && gh == vb->Height)
+            return;
         *(int*)(g + GAD_LOG_X) = vb->X;
+        *(int*)(g + GAD_LOG_Y) = vb->Y;
         *(int*)(g + GAD_LOG_W) = vb->Width;
+        *(int*)(g + GAD_LOG_H) = vb->Height;
         g[0x20] = 1;
         return;
     }
     if (!Fm_ViewNoSidebar(&keep)) return;
-    /* 只动"横向宽度 == ViewBounds 宽"那一个 (实测 {0,0,1920x1048}); 别的
-     * gadget 不归我们管。引擎每帧从 ViewBounds 重设, 所以每次命中都要重做。*/
-    if (gx == keep.X && gw == keep.Width) return;
-    wasX = gx; wasW = gw;
+    /* 只动"横向跨过侧栏分界线"那一个; 别的 gadget 不归我们管。引擎每帧从
+     * ViewBounds 重设, 所以每次命中都要重做。*/
+    if (gx == keep.X && gy == keep.Y && gw == keep.Width && gh == keep.Height)
+        return;
     *(int*)(g + GAD_LOG_X) = keep.X;
+    *(int*)(g + GAD_LOG_Y) = keep.Y;
     *(int*)(g + GAD_LOG_W) = keep.Width;
+    *(int*)(g + GAD_LOG_H) = keep.Height;
     g[0x20] = 1;                         /* NeedsRedraw */
-    if (s_TrimOldW != (unsigned)wasW || s_TrimLogged == 0)
+    /* 日志只在形状真的变了时打一条 (缩放档下 Y/Height 一直跟 R 变, 否则刷屏)。*/
     {
-        char t1[16], t2[16], t3[16], buf[192];
-        unsigned q = 0;
-        s_TrimOldW = (unsigned)wasW;
-        if (!s_TrimLogged)
+        unsigned sig = (unsigned)(((gw & 0xFFFFu) << 16) | (gh & 0xFFFFu));
+        if (s_TrimOldW != sig || s_TrimLogged == 0)
         {
+            char t1[16], t2[16], buf[160];
+            unsigned q = 0;
+            s_TrimOldW = sig;
             s_TrimLogged = 1;
             q = AppendCStr(buf, q, "fullmap: view gadget ", sizeof(buf));
-            UtoA((unsigned)wasX, t1); q = AppendCStr(buf, q, t1, sizeof(buf));
-            q = AppendCStr(buf, q, ",", sizeof(buf));
-            UtoA((unsigned)wasW, t2); q = AppendCStr(buf, q, t2, sizeof(buf));
+            UtoA((unsigned)gx, t1); q = AppendCStr(buf, q, t1, sizeof(buf));
+            q = AppendCh(buf, q, ',', sizeof(buf));
+            UtoA((unsigned)gy, t2); q = AppendCStr(buf, q, t2, sizeof(buf));
+            q = AppendCh(buf, q, ' ', sizeof(buf));
+            UtoA((unsigned)gw, t1); q = AppendCStr(buf, q, t1, sizeof(buf));
+            q = AppendCh(buf, q, 'x', sizeof(buf));
+            UtoA((unsigned)gh, t2); q = AppendCStr(buf, q, t2, sizeof(buf));
             q = AppendCStr(buf, q, " -> ", sizeof(buf));
             UtoA((unsigned)keep.X, t1); q = AppendCStr(buf, q, t1, sizeof(buf));
-            q = AppendCStr(buf, q, ",", sizeof(buf));
-            UtoA((unsigned)keep.Width, t2); q = AppendCStr(buf, q, t2, sizeof(buf));
-            q = AppendCStr(buf, q, " sidebar=", sizeof(buf));
-            UtoA((unsigned)(((RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS)->X), t3);
-            q = AppendCStr(buf, q, t3, sizeof(buf));
+            q = AppendCh(buf, q, ',', sizeof(buf));
+            UtoA((unsigned)keep.Y, t2); q = AppendCStr(buf, q, t2, sizeof(buf));
+            q = AppendCh(buf, q, ' ', sizeof(buf));
+            UtoA((unsigned)keep.Width, t1); q = AppendCStr(buf, q, t1, sizeof(buf));
+            q = AppendCh(buf, q, 'x', sizeof(buf));
+            UtoA((unsigned)keep.Height, t2); q = AppendCStr(buf, q, t2, sizeof(buf));
             LogLine(buf);
         }
     }
@@ -1625,7 +1649,9 @@ void FM_NoteGadgetInput(void* gadget)
     if (sbw < 64 || sbw > 512) return;
     gx = *(int*)(g + GAD_LOG_X);
     gw = *(int*)(g + GAD_LOG_W);
-    /* 认它 = 矩形恒等于 ViewBounds (实测 {0,0,1920x1048}); 别的 gadget 不归我们管 */
+    /* 认它 = 矩形恒等于 ViewBounds (缩放档下是 R); 别的 gadget 不归我们管。
+     * 判据只比 X/Width —— Y/Height 由引擎每帧从 ViewBounds 重设, 比不比都一样,
+     * 而缩放档下它们会随 R 变, 拿来当判据会在换挡那一帧认不出自己。 */
     if (gw <= 0) return;
     if (gw != vb->Width) return;
     if (gx != vb->X) return;
@@ -1634,7 +1660,7 @@ void FM_NoteGadgetInput(void* gadget)
     if (gx >= sb->X + sbw) return;
     s_ViewGadget = gadget;
     /* 在命中判定之前收窄: 钩子跑在原函数体之前, 而原函数紧接着就调
-     * ExtractGadgetAt, 所以此刻改宽度能立刻影响这一次命中。
+     * ExtractGadgetAt, 所以此刻改矩形能立刻影响这一次命中。
      * (FM_Poll 里做无效 —— 那里排在 Input 之后, 引擎每帧从 ViewBounds 重设。) */
     FM_TrimViewGadget();
 }

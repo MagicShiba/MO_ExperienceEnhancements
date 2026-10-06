@@ -13,6 +13,9 @@
  * "r" 让编译器在 pushal 之前用 ecx/edx 传操作数地址, 恰好盖掉入口活寄存器
  * (prepare/blitsb 的 ecx=this, update 的 edx=surface) -> 跳板/原函数拿到
  * 垃圾 -> 启动即崩。"m" 不占寄存器, 绝对安全。
+ * ★ **函数体中间的钩再加一条**: 那里的 eax/ecx/... 是活的寄存器, 栈上是**外层函数
+ *   自己的帧槽**, 不能按"入口钩读栈参数"的方式取。入口 eax 只能用 pushal 之后的
+ *   EAX 槽 [esp+0x1C] (见 MOExperience_PreCurEntry)。
  *
  * 构建见 build-fast.bat (32 位 mingw, 无 CRT)。
  */
@@ -27,6 +30,7 @@
 #include "ChatEdit.h"
 #include "DeployPreview.h"
 #include "FuzzyAttack.h"
+#include "AttackMove.h"
 #include "MindSelect.h"
 #include "MsgText.h"
 #include "PatrolCircle.h"
@@ -207,6 +211,7 @@ static void PowerDrawBoth(void)
     SmartOrder_Poll(); /* 裸中键智能下令 (点按自适应/划线散开; Z 让路巡逻, Ctrl 让路模糊, 组合中键让路区域自适应) */
     TreeChop_Poll(); /* Ctrl+Z+中键快速砍树 (开关关/无触发时直接返回) */
     FuzzyAttack_Poll(); /* Ctrl+中键模糊攻击 (开关关/无触发时直接返回) */
+    AttackMove_Poll(); /* 自定义移动攻击 (默认 X2, Mission=29, 直接/队列与 Z 同义) */
     SmartArea_Poll(); /* Shift+中键范围智能下令 (开关关/无触发时直接返回) */
     DeployPreview_Poll(); /* 单基地车裸中键点按: 开过去+到位自动展开 (预览框见渲染) */
     MindSelect_Poll(); /* Shift+P 一步选中被心控单位 (开关关/无组合键时直接返回) */
@@ -322,6 +327,540 @@ __attribute__((naked)) void MOExperience_UpdateEntry(void)
         : "memory", "cc");
 }
 
+/* ---------------- 缩小档: 渲染期把 Composite/地图面换成大离屏面 ----------------
+ * GScreenClass::Render (0x4F4480, 首8B = 83 EC 08 A1 1C 73 88 00 = sub esp,8 /
+ * mov eax,[0x88731C])。缩小档 (scale>1) 时 R 比窗口大, 引擎必须画进一张 R 大的面,
+ * 所以在这条入口把 [0x88731C]/[0x8872FC] 临时换成 SB 自建的大面 (TacticalClass::
+ * Render 内部会把这两个互换, 尺寸必须相同); 渲染期间三趟与引擎原生 UI 都落在大面上。
+ * 渲染完在消息帧钩 (MOExperience_MessageDrawHook) 立刻 SB_RenderSwapOut 还原, 再做
+ * 降采样 + UI。这样大面只在一次 Render 内出现, 窗口期的其它代码看到的仍是窗口面。
+ * 首8B 恰好两条完整指令 (sub esp,8 / mov eax,imm32), 跳回 0x4F4488。
+ * 入口 naked: pushal/pushfl 平衡, C 函数不碰栈; 跳板照跑被抄的 8B。 */
+void* g_RenderTramp = NULL;
+
+static void RenderEntrySwap(void)
+{
+    SB_RenderSwapIn();
+}
+static void* g_CallRender = (void*)RenderEntrySwap;
+__attribute__((naked)) void MOExperience_RenderEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "pushfl\n\t"
+        "call *%0\n\t"
+        "popfl\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallRender), "m" (g_RenderTramp)
+        : "memory", "cc");
+}
+
+/* ---------------- 缩小档: 把"大面被暴露的窗口"压到只剩三趟地图 ----------------
+ * GScreenClass::Render 入口 (0x4F4480) 我们把 [0x88731C]/[0x8872FC] 换成了 R 大的
+ * 离屏面。但从 0x4F4492 到 0x4F44CB 之间还有一串**按窗口坐标**画的指令:
+ *   0x4F4492  [0x887314] = eax
+ *   0x4F44A2  WWMouse::vt+0x40(面, 0)      ← 光标擦除/重绘
+ *   0x4F44B7..0x4F44C2  mode 记账 + `call 0x53BAE0`
+ *   0x4F453E / 0x4F4593  (三趟之后, 我们已经还原了)
+ * 那些像素落进 R 大的大面, 降采样后就在**画面中部**闪出一条底栏/刻度条残影 (实测图1)。
+ * 之前试过"每帧抹掉 R 里 y∈[A.Height,winH) 那条带"来盖住它 —— 错: 那一带在 R 里是
+ * **地图**, 而地图是增量画的, 抹完不一定回来 ⇒ 留一条黑带 (实测图1 的黑带就是它)。
+ * 正解是**别让窗口坐标的绘制碰到大面**: 0x4F4492 让回窗口面, 0x4F44CB 装回去。
+ *
+ * ⚠ 这两条都是**函数体中间**的钩: 此刻 eax/ecx/... 是活的寄存器, 栈上是 Render 自己
+ *   的帧槽, 不能按"入口钩读栈参数"取。这里一条寄存器都不改, 所以不用碰 eax:
+ *   入口壳只 pushal/popal + 调 C。
+ *   (第一版在这里写 `movl 4(%esp),%eax` —— 那是"`ret` 后第一个栈参数"的偏移, 在函数体
+ *    中间取到的是 Render 的局部, 写进 [0x887314] 后有人拿它虚表派发 ⇒ eip=0x400007。) */
+void* g_PreCurTramp = NULL;
+void* g_MapTramp = NULL;
+/* SB_RenderSuspend 置 1 时把 eax 换成 g_PreCurSurf (光标那几笔直接吃 eax, 不看全局)。*/
+int   g_PreCurWin = 0;
+void* g_PreCurSurf = NULL;
+
+static void PreCurC(void)
+{
+    SB_RenderSuspend(1);
+}
+static void* g_CallPreCur = (void*)PreCurC;
+
+/* ⚠ 0x4F4492 在函数体中间: eax 是活的寄存器, 栈上是 Render 自己的帧槽, **不能**按
+ *   "入口钩读栈参数"取 (那偏移是 `ret` 后第一个参数)。要拿/换 eax 只能用 pushal 帧里
+ *   的 EAX 槽 `[esp+0x1C]` (pushal 压入次序 EDI,ESI,EBP,ESP,EBX,EDX,ECX,EAX)。
+ *   踩过的坑: 误用 `movl 4(%esp),%eax` 拿到 Render 的局部写进 [0x887314] ⇒
+ *   `call [eax+0x2c]` 把像素当虚表 → eip=0x400007。 */
+__attribute__((naked)) void MOExperience_PreCurEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "cmpl $0, %0\n\t"             /* SB_RenderSuspend 让出了没有 */
+        "je 2f\n\t"
+        "movl %1, %%ecx\n\t"
+        "movl %%ecx, 28(%%esp)\n\t"   /* 改 pushal 帧的 EAX 槽 → popal 还原回去 */
+        "2:\n\t"
+        "popal\n\t"
+        "jmp *%2\n\t"
+        :
+        : "m" (g_PreCurWin), "m" (g_PreCurSurf), "m" (g_PreCurTramp)
+        : "memory", "cc");
+}
+
+static void MapC(void)
+{
+    SB_RenderResume();
+}
+static void* g_CallMap = (void*)MapC;
+__attribute__((naked)) void MOExperience_MapEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "call *%0\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallMap), "m" (g_MapTramp)
+        : "memory", "cc");
+}
+
+/* ---------------- 缩小档: chrome pass 那一趟也要拿到窗口面 ----------------
+ * Render (0x4F4480) 在**第二趟与第三趟地图之间**还有一笔
+ *   0x4F44F9 mov eax,[esp+0x10] / 0x4F44FD mov edx,[esi] / 0x4F44FF push eax /
+ *   0x4F4500 mov ecx,esi        / 0x4F4502 call [edx+0x40]
+ * 虚表 +0x40 = **0x6D0A20** (实测 ChromeC 打出来的 t40 邻位; 之前笔记把 +0x44
+ * 认成 0x6D0A20 是错的, +0x44 是 0x4F45B0 的呈现那一趟)。那一趟是"底栏/侧栏
+ * chrome":
+ *   0x6D0AC2/0x6D0BF8/0x6D0CDC  取 [0xB0FC58] = 底栏矩形 (1x: 0,H-32,W-168,32)
+ *   0x6D0C3B/0x6D0D29/0x6D0DC8  往 [0x887314] blit (侧栏图标/底栏条)
+ *   0x6D0D7A/0x6D0E38 一带       SidebarClass::Draw (0x6A6C30, 内含
+ *                                ToolTipManager::Draw(1) = 悬停提示盒)
+ * 全部按**窗口坐标**。此刻大面还装着 (0x4F44CB 才刚装回去), 于是:
+ *   - 底栏被烙进 R 的 y∈[A.Height,winH) 那条带 ⇒ 降采样后落在画面正中
+ *     (y = H*A.H/R.H, 1.43 倍档 = 733, 实测图1), 而窗口面上那条底栏因为 chrome
+ *     脏缓存 ([0xB0CC00]) 记的是大面而**永不重画** ⇒ 选中单位时按钮反馈全落在
+ *     中部那条"错误底栏"上 (实测图1), 底下那条是 1x 留下的死像素;
+ *   - 悬停提示盒同样被烙进大面并降采样 (缩小 1/scale 倍、位置上移), 之后再由
+ *     0x4F4564 那次正确绘制一遍 ⇒ **同一个提示显示两次** (实测图2)。
+ * 于是让出窗口面 (0x4F44FD) / 装回大面 (0x4F4505)。这仍是纯渲染面切换 + 只读
+ * 查询, 联机安全。
+ *
+ * ⚠ 两条都是函数体中间/入口之间的钩: 一条寄存器都不改 (eax 是给 chrome pass 的
+ *   flags 实参, ecx/edx 由原指令重读), 所以壳只 pushal/popal。*/
+void* g_ChromePreTramp = NULL;
+void* g_ChromePostTramp = NULL;
+
+static void ChromePreC(void)
+{
+    SB_RenderSuspend(0);
+}
+static void* g_CallChromePre = (void*)ChromePreC;
+__attribute__((naked)) void MOExperience_ChromePreEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "call *%0\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallChromePre), "m" (g_ChromePreTramp)
+        : "memory", "cc");
+}
+
+static void ChromePostC(void)
+{
+    SB_RenderResume();
+}
+static void* g_CallChromePost = (void*)ChromePostC;
+__attribute__((naked)) void MOExperience_ChromePostEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "call *%0\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallChromePost), "m" (g_ChromePostTramp)
+        : "memory", "cc");
+}
+
+/* ---------------- 缩小档: 三趟地图画完、引擎 UI 之前还原窗口面 ----------------
+ * GScreenClass::Render 0x4F4480 的三趟地图 (0x4F44DF/0x4F44F4/0x4F4515) 之后,
+ * 紧接着 0x4F451B 就是引擎原生 UI: 0x4F4547 (侧栏/cameo, 往"当前绘制面"画) 与
+ * 0x4F455D MessageList::Draw。缩小档地图画在大面上的时候, 这些 UI 也会落进大面
+ * (坐标按窗口算) ⇒ (1) 底栏残影被一起降采样到画面中部; (2) 侧栏 cameo 往尺寸
+ * 不符的大面里拉伸 ⇒ 越界写坏堆 (切侧栏模式时崩)。
+ * 所以在这里 (0x4F451B) 就把 [0x88731C]/[0x8872FC]/[0x887314] 还原成窗口面,
+ * 并做降采样 —— 之后的引擎 UI 与本项目 *_Draw 全部 1:1 落在窗口 Composite 上。
+ * 首 5B = `A0 19 B5 B0 00` (mov al,[0xB0B519]), 跳回 0x4F4520。 */
+void* g_AfterMapTramp = NULL;
+
+static void AfterMapC(void)
+{
+    MOE_EnsureInit();
+    SB_RenderAfterMap();
+}
+static void* g_CallAfterMap = (void*)AfterMapC;
+__attribute__((naked)) void MOExperience_AfterMapEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "pushfl\n\t"
+        "call *%0\n\t"
+        "popfl\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallAfterMap), "m" (g_AfterMapTramp)
+        : "memory", "cc");
+}
+
+/* ---------------- chrome pass 前的探针 (只诊断) ----------------
+ * GScreenClass::Render 0x4F4596: `8B 16` (mov edx,[esi]) / 0x4F4598: `8B CE`
+ * (mov ecx,esi) / 0x4F459A: `FF 52 44` (call [edx+0x44]) —— 这一笔是引擎在
+ * 三趟地图与原生 UI 之后唯一剩下的"呈现"调用, 底栏就在它里面画。
+ * ⚠ 之前笔记里"虚表 +0x44 = 0x6D0A20"是**错的**: 0x6D0A20 在整个 gamemd 里零引用,
+ *   不可能是任何虚表项。这里直接把 this 与虚表项打出来。
+ * in-body 钩取 this 用 **esi**: 0x4F4490 `mov esi,ecx` 之后 esi 一直就是 this,
+ * 而且 esi 是 callee-saved ⇒ pushal 帧的 ESI 槽固定在 [esp+0x04]。
+ * ⚠ 别用"Render 栈帧 [esp+0x14]"那种偏移: 中途 0x4F44D6 还有 push edi,
+ *   栈深不是常量, 算错了 self 就是野指针 (实测探针一声不吭)。*/
+void* g_ChromeTramp = NULL;
+
+static unsigned ChromeSurfStr(char* buf, unsigned p, unsigned sz, const char* tag, void* s)
+{
+    char b1[16];
+    p = AppendCStr(buf, p, tag, sz);
+    UtoA((unsigned)(size_t)s, b1); p = AppendCStr(buf, p, b1, sz);
+    if (s && IsPlausiblePtr(s))
+    {
+        p = AppendCh(buf, p, '(', sz);
+        UtoA((unsigned)GtSurfGet(s, GtVT_GET_WIDTH), b1); p = AppendCStr(buf, p, b1, sz);
+        p = AppendCh(buf, p, 'x', sz);
+        UtoA((unsigned)GtSurfGet(s, GtVT_GET_HEIGHT), b1); p = AppendCStr(buf, p, b1, sz);
+        p = AppendCh(buf, p, ')', sz);
+    }
+    p = AppendCh(buf, p, ' ', sz);
+    return p;
+}
+
+static void ChromeC(void* self)
+{
+    static int s_n = 0;
+    void** vt = 0;
+    char b1[16], buf[224];
+    unsigned p = 0;
+    if (++s_n < 5) return;                  /* 前几帧不刷屏 */
+    s_n = 0;
+    if (self && IsPlausiblePtr(self)) vt = *(void***)self;
+    p = AppendCStr(buf, p, "moe: chrome self=", sizeof(buf));
+    UtoA((unsigned)(size_t)self, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCStr(buf, p, " t44=", sizeof(buf));
+    UtoA((unsigned)(size_t)(vt ? vt[0x44 / 4] : 0), b1);
+    p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCh(buf, p, ' ', sizeof(buf));
+    p = ChromeSurfStr(buf, p, sizeof(buf), "cur=", *(void**)0x00887314u);
+    p = ChromeSurfStr(buf, p, sizeof(buf), "comp=", *(void**)0x0088731Cu);
+    p = ChromeSurfStr(buf, p, sizeof(buf), "map=", *(void**)0x008872FCu);
+    p = ChromeSurfStr(buf, p, sizeof(buf), "sb=", *(void**)0x00887300u);
+    LogLine(buf);
+}
+static void* g_CallChrome = (void*)ChromeC;
+__attribute__((naked)) void MOExperience_ChromeEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "movl 0x04(%%esp), %%eax\n\t"   /* esi == this (0x4F4490 mov esi,ecx) */
+        "pushl %%eax\n\t"
+        "call *%0\n\t"
+        "addl $4, %%esp\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallChrome), "m" (g_ChromeTramp)
+        : "memory", "cc");
+}
+
+/* ---------------- BlitImage (0x4AED70) 目标面探针 (只诊断) ----------------
+ * 底栏鬼影 = 底栏按**窗口坐标**被 blit 进 R 大的面。0x4F4596 那个 chrome 调用点已验证
+ * [0x887314] 是窗口面 (t44=0x4F4780 UpdatePrimarySurface), 所以画它的是三趟地图里的
+ * 某个 overlay。0x4AED70 是全二进制唯一的图像 blit 入口, 目标面在 ecx。命中我们的大面
+ * 时把返回地址 + 前 6 个栈参数打出来, 一次就能定位调用方与几何。同一返回地址只打一次。
+ * 首 6B = `83 EC 94 53 56 57` (sub esp,0x94 / push ebx/esi/edi), 跳回 0x4AED76。*/
+void* g_BlitTramp = NULL;
+
+static void BlitDiagC(unsigned* frame, void* dest, void* ra)
+{
+    static unsigned s_seen[12];
+    static int s_nseen;
+    const unsigned* a = frame + 9;         /* pushal 帧 0x24 起 = 原函数栈参数 */
+    unsigned k, i;
+    char b1[16], buf[224];
+    unsigned p = 0;
+    /* 只关心"比窗口大的面" = 我们自己造的大面 (R = A*scale, scale>1)。
+     * 不必和 ScaleBar 内部状态耦合, 也不必新开导出。*/
+    if (!dest || !IsPlausiblePtr(dest)) return;
+    if (GtSurfGet(dest, GtVT_GET_WIDTH) <= GtGameW()
+        || GtSurfGet(dest, GtVT_GET_HEIGHT) <= GtGameH()) return;
+    for (i = 0; i < (unsigned)s_nseen; i++) if (s_seen[i] == (unsigned)(size_t)ra) return;
+    if (s_nseen < 12) s_seen[s_nseen++] = (unsigned)(size_t)ra;
+    p = AppendCStr(buf, p, "moe: blitbig ra=", sizeof(buf));
+    UtoA((unsigned)(size_t)ra, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCStr(buf, p, " dst=", sizeof(buf));
+    UtoA((unsigned)(size_t)dest, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCh(buf, p, '(', sizeof(buf));
+    if (dest && IsPlausiblePtr(dest))
+    {
+        UtoA((unsigned)GtSurfGet(dest, GtVT_GET_WIDTH), b1);
+        p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCh(buf, p, 'x', sizeof(buf));
+        UtoA((unsigned)GtSurfGet(dest, GtVT_GET_HEIGHT), b1);
+        p = AppendCStr(buf, p, b1, sizeof(buf));
+    }
+    p = AppendCh(buf, p, ')', sizeof(buf));
+    for (k = 0; k < 6; k++)
+    {
+        p = AppendCh(buf, p, ' ', sizeof(buf));
+        UtoA(a[k], b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    }
+    LogLine(buf);
+}
+static void* g_CallBlit = (void*)BlitDiagC;
+__attribute__((naked)) void MOExperience_BlitDiagEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "movl 0x18(%%esp), %%eax\n\t"   /* pushal 帧 ECX 槽 = 目标面 */
+        "movl 0x20(%%esp), %%edx\n\t"   /* 返回地址 */
+        "pushl %%edx\n\t"
+        "pushl %%eax\n\t"
+        "pushl %%esp\n\t"            /* pushal 帧基址 */
+        "call *%0\n\t"
+        "addl $12, %%esp\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallBlit), "m" (g_BlitTramp)
+        : "memory", "cc");
+}
+
+/* ---------------- 缩放: 边缘卷屏的死区按屏幕空间算 ----------------
+ * DisplayClass 的边缘自动卷屏 0x00692B60 (每帧由 0x00692F30 驱动, 唯一调用点
+ * 0x69304E) 把传入点当视口坐标, 再拿 `pt + ViewBounds.xy` 去和面的宽高比。
+ * 缩放后 +0x34 给的是视口点 (物理*R/A) ⇒ 死区跟着缩放, 缩小档下"中部就能卷屏、
+ * 判定还留在左上角"。在入口把点换回物理鼠标 (SB_EdgeScrollPointFix)。
+ * 首 7B = `83 EC 18 53 55 56 57` (sub esp,0x18 / push ebx/ebp/esi/edi),
+ * 跳回 0x692B67。arg1 (Point2D*) = 入口 [esp+4], pushal 之后在 [esp+36]。 */
+void* g_EdgeFixTramp = NULL;
+
+static void EdgeFixC(Point2D* pt)
+{
+    MOE_EnsureInit();
+    SB_EdgeScrollPointFix(pt);
+}
+static void* g_CallEdgeFix = (void*)EdgeFixC;
+__attribute__((naked)) void MOExperience_EdgeFixEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "movl 36(%%esp), %%eax\n\t"
+        "pushl %%eax\n\t"
+        "call *%0\n\t"
+        "addl $4, %%esp\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallEdgeFix), "m" (g_EdgeFixTramp)
+        : "memory", "cc");
+}
+
+/* ---------------- 缩小档: 视口外的点不许变成地图点击 ----------------
+ * `DisplayClass::ProcessClickCoords` (0x692300, thiscall + 6 栈参 = `ret 0x18`)
+ * 是**所有**地图点击路径的总闸: 点选下单击 (窗口过程 0x693126/0x6931F9/0x6932A4)、
+ * 框选 (<900px 那条 0x4AE538)、ClientToCoords 那两条 (0x4AAC6D/0x4FB405)、边缘
+ * 卷屏驱动 (0x692FFC)。它的判据只有两条:
+ *   0x69234B  mov eax,[ebp] ; test eax,eax ; jl 0x6925FC   → X < 0 拒
+ *   0x692356  mov ebx,[ebp+4] ; test ebx,ebx ; jl 0x6925FC → Y < 0 拒
+ * **没有上界判定** ⇒ "点在视口之外"这件事引擎自己是不管的。
+ *
+ * 1x / 放大档下 R ≤ A, 落在窗口里但不在视图区 A 的点 (底栏带 y∈[1048,1080)、
+ * 侧栏列 x ≥ 1752) 经 SB_MapPoint 原样放行后仍然在 R 之外, 而那两条 ViewBounds
+ * 边界判定 (ClientToCoords / 橡皮线 / Scroll_Map) 会把它拒掉 —— 一直是对的。
+ *
+ * 缩小档 (R = A*scale > 窗口) 下就全错了: 底栏的物理 y=1060 落在 R(0..1497) **之内**
+ * ⇒ 引擎把"底栏"当成"地图上 y=1060 那一带", 于是**选中单位点底部底栏 = 对画面中部
+ * 的那个地图像素下令**(实测图: 点底栏 → 单位朝画面正中跑)。
+ * 修法两半:
+ *   (a) ScaleBar.cpp 的 SB_MapPoint: 缩小档下 A 外的**窗口内**点也走同一个线性变换,
+ *       折完必然落在 R 之外 ⇒ "不是地图上的点"在视口坐标里也成立;
+ *   (b) 这里在入口把视口外的点明确拒掉 (SB_PtInView), 让 ProcessClickCoords 返回 0
+ *       —— 0x201/0x203 两条分支本来就 `test al,al; je 0x693408` 直接跳出,
+ *       `LeftMouseButtonClick` (0x4AC310) 也就不会记框选锚点, DecideAction 无从下手。
+ * 只在 SB_Out() 时动手 ⇒ 1x/放大档逐位不变。纯本地摄像机 + 只读判定, 联机安全。
+ *
+ * 首 7B = `8B 44 24 10 83 EC 18` (mov eax,[esp+0x10] / sub esp,0x18), 跳板跳回
+ * 0x692307。入口栈: [esp]=ret, [esp+4]=arg1 = Point2D* (0x692325 `mov ebp,[esp+0x28]`
+ * 折回原栈偏移 0x4 证实); pushal 之后它在 [esp+0x24]。拒掉时自己 `ret 0x18`。*/
+void* g_ClickCoordsTramp = NULL;
+
+static int ClickCoordsReject(void* pt)
+{
+    static int s_tick = 0;
+    if (!pt || !IsPlausiblePtr(pt)) return 0;
+    if (SB_PtInView(((const int*)pt)[0], ((const int*)pt)[1])) return 0;
+    /* 只在真拒掉的时候打一条 (2 秒一条): 用来确认这条钩确实在命中
+     * "点在视口外" 的那类调用。若一直打不出来, 说明底栏点击根本没走
+     * ProcessClickCoords, 那就得往 gadget 命中链那边查。*/
+    if (--s_tick <= 0)
+    {
+        char b1[16], b2[16], buf[128];
+        unsigned q = 0;
+        unsigned now = GetTickCount();
+        s_tick = 120;
+        q = AppendCStr(buf, q, "sbar: click outside view ", sizeof(buf));
+        UtoA((unsigned)((const int*)pt)[0], b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCh(buf, q, ',', sizeof(buf));
+        UtoA((unsigned)((const int*)pt)[1], b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+        q = AppendCStr(buf, q, " tick=", sizeof(buf));
+        UtoA(now, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        LogLine(buf);
+    }
+    return 1;
+}
+static void* g_CallClickCoords = (void*)ClickCoordsReject;
+__attribute__((naked)) void MOExperience_ClickCoordsEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "movl 0x24(%%esp), %%eax\n\t"     /* pushal 帧之上 = 原栈 arg1 = Point2D* */
+        "pushl %%eax\n\t"
+        "call *%0\n\t"
+        "addl $4, %%esp\n\t"
+        "testl %%eax, %%eax\n\t"
+        "jnz 1f\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        "1:\n\t"
+        "popal\n\t"
+        "xorl %%eax, %%eax\n\t"
+        "ret $0x18\n\t"
+        :
+        : "m" (g_CallClickCoords), "m" (g_ClickCoordsTramp)
+        : "memory", "cc");
+}
+
+/* ---------------- 通用拉伸 blit (0x6BA580) 的野面守卫 ----------------
+ * 引擎的 cameo/图标拉伸在缩放档下会拿到野面指针 (实测 eip=0x6BA643 的
+ * `mov [ecx],dx`, ecx=0xFFxxxxxx 野指针; SWS 隐藏→AddCameo→重画、F11 切态、
+ * 刚进缩小档都会触发)。1x 时这里恒走原函数。
+ * 守卫只在面指针明显非法时跳过 (返回 0 = 绘制失败, 调用方本来就有失败分支),
+ * 合法时原样跑跳板 ⇒ 正常帧零行为变化。只在 SB_Zoomed() 时检查, 1x 零开销。
+ * 首 5B = `83 EC 14 55 56` (sub esp,0x14 / push ebp/esi), 跳回 0x6BA585。
+ * arg2 (面) = 入口 [esp+8], arg3 (面) = 入口 [esp+0xC]; pushal 之后在
+ * [esp+40]/[esp+44]。原函数 __thiscall + ret 0x10 (4 实参), 跳过时同样 ret 0x10。 */
+void* g_BlitGuardTramp = NULL;
+
+static int BlitGuardC(void* r, void* s1, void* s2)
+{
+    void** vt;
+    int* ri;
+    int i;
+    if (!SB_Zoomed()) return 1;
+    /* 面指针野了直接跳过。*/
+    if (!s1 || !IsPlausiblePtr(s1) || !s2 || !IsPlausiblePtr(s2))
+    {
+        static int l = 0;
+        if (!l) { l = 1; LogLine("blit: skip wild surf"); }
+        return 0;
+    }
+    vt = *(void***)s1;
+    if (!vt || !IsPlausiblePtr(vt))
+    {
+        static int l = 0;
+        if (!l) { l = 1; LogLine("blit: skip wild surf vt"); }
+        return 0;
+    }
+    vt = *(void***)s2;
+    if (!vt || !IsPlausiblePtr(vt))
+    {
+        static int l = 0;
+        if (!l) { l = 1; LogLine("blit: skip wild surf vt2"); }
+        return 0;
+    }
+    /* 面尺寸离谱 (被释放后复用的野对象) 也跳过。用 GtSurfGet 读, 虚表已验过。
+     * ★ 还要验 pitch: 拉伸循环用 pitch/2 步进 (0x6BA608/0x6BA61B), pitch 野了
+     * 行指针直接飞 (实测 ecx=0xFFxxxxxx, 而宽高看着都正常)。16bpp 面 pitch
+     * 恒为 width*2 按 4 对齐, 超出即野。*/
+    {
+        int w1 = GtSurfGet(s1, GtVT_GET_WIDTH), h1 = GtSurfGet(s1, GtVT_GET_HEIGHT);
+        int w2 = GtSurfGet(s2, GtVT_GET_WIDTH), h2 = GtSurfGet(s2, GtVT_GET_HEIGHT);
+        int p1 = GtSurfGet(s1, GtVT_GET_PITCH), p2 = GtSurfGet(s2, GtVT_GET_PITCH);
+        if (w1 < 1 || w1 > 8192 || h1 < 1 || h1 > 8192
+            || w2 < 1 || w2 > 8192 || h2 < 1 || h2 > 8192
+            || p1 < w1 * 2 || p1 > w1 * 2 + 1024
+            || p2 < w2 * 2 || p2 > w2 * 2 + 1024)
+        {
+            static int l = 0;
+            if (!l) { l = 1; LogLine("blit: skip insane surf dims/pitch"); }
+            return 0;
+        }
+    }
+    /* 矩形参数野了 (R 坐标算飞/野指针) 也跳过。arg1 是调用方栈上 16 字节,
+     * 按 4 个 int 读, 任何一个超出屏幕量级就判野 (R 最大 3504, 留足余量)。*/
+    if (!r || !IsPlausiblePtr(r))
+    {
+        static int l = 0;
+        if (!l) { l = 1; LogLine("blit: skip wild rect ptr"); }
+        return 0;
+    }
+    ri = (int*)r;
+    for (i = 0; i < 4; i++)
+    {
+        int v = ri[i];
+        if (v < -32768 || v > 32767)
+        {
+            static int l = 0;
+            if (!l)
+            {
+                char b1[16], buf[128];
+                unsigned q = 0;
+                l = 1;
+                q = AppendCStr(buf, q, "blit: skip wild rect v=", sizeof(buf));
+                UtoA((unsigned)(v < 0 ? -v : v), b1);
+                q = AppendCStr(buf, q, b1, sizeof(buf));
+                LogLine(buf);
+            }
+            return 0;
+        }
+    }
+    return 1;
+}
+static void* g_CallBlitGuard = (void*)BlitGuardC;
+__attribute__((naked)) void MOExperience_BlitGuardEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "movl 36(%%esp), %%eax\n\t"
+        "movl 40(%%esp), %%ecx\n\t"
+        "movl 44(%%esp), %%edx\n\t"
+        "pushl %%edx\n\t"
+        "pushl %%ecx\n\t"
+        "pushl %%eax\n\t"
+        "call *%0\n\t"
+        "addl $12, %%esp\n\t"
+        "testl %%eax, %%eax\n\t"
+        "popal\n\t"
+        "jnz 1f\n\t"
+        "xorl %%eax, %%eax\n\t"
+        "ret $0x10\n\t"
+        "1:\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallBlitGuard), "m" (g_BlitGuardTramp)
+        : "memory", "cc");
+}
+
+
 /* ---------------- 缩放: 放大前那次提示框绘制要跳过 ----------------
  * 放大档下悬停提示显示两遍: 一份 1:1 正确, 一份字号大一倍、位置偏到 2 倍远。
  * 字号来自全局字体 [0x89C4D0], 永不随缩放变 ⇒ 大那份是 SB_CompositeMagnify 的
@@ -435,7 +974,7 @@ static void MOE_MousePos(void* out)
     my = *(int*)((char*)m + WWMOUSE_OFF_Y);
     s_MouseVp.X = mx;
     s_MouseVp.Y = my;
-    if (!SB_Safe() && SB_In()) SB_MapPoint(&s_MouseVp, 0);
+    if (SB_Zoomed()) SB_MapPoint(&s_MouseVp, 0);
     /* 调用点全都用返回值 (11 处都只 `mov reg,[eax]` / `mov reg,[eax+4]`),
      * 传进来的那个出参没人读 —— 但它本来就是调用者的栈上临时量, 顺手填上
      * 与原版同口径, 读不出参的老调用点也不会拿到脏值。*/
@@ -589,7 +1128,7 @@ static void MOE_WndFixLParam(unsigned slot)
     lp = *(unsigned*)(size_t)slot;
     x = (int)(short)(lp & 0xFFFFu);
     y = (int)(short)((lp >> 16) & 0xFFFFu);
-    if (!SB_Safe() && SB_In())
+    if (SB_Zoomed())
     {
         pt.X = x;
         pt.Y = y;
@@ -771,6 +1310,9 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     (void)regs;
     MOE_EnsureInit();
     MOE_SetPhase(MP_MSGDRAW);
+    /* 缩小档: 渲染期 Composite/地图面被换成了 R 大的离屏面, 这里必须**先**还原成
+     * 窗口面, 后面取到的 surf 才是 UI 该画的那张 (窗口面)。1x/放大档恒空操作。*/
+    SB_RenderSwapOut();
 
     tick = GtTickNow();
 
@@ -783,6 +1325,9 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     surfH = GtSurfGet(surf, GtVT_GET_HEIGHT);
     surfPitch = GtSurfGet(surf, GtVT_GET_PITCH);
     if (surfW <= 0 || surfH <= 0 || surfPitch <= 0) { StatTick(tick, 3); return 0; }
+    /* 喂给缩放模块: 窗口 Composite 的尺寸。VecText 的"这块面是不是主画布"判据
+     * (超武列表收表/拦截) 要用它, 且必须在**缩放没开**时也有值。*/
+    SB_NoteWindowSurface(surf, surfW, surfH);
     {   /* 鼠标映射基准取整帧 Primary (见 GtGameW 注释); 读不到就清零,
          * GtMouseGameXY 回退到原始坐标 (恒等, 不强行套 Composite 宽度)。 */
         void* prim = *(void**)ADDR_SURF_PRIMARY;
@@ -793,13 +1338,18 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     }
     GtRefreshWinSize(tick);
 
-    /* 放大档 (视口比视图区小): 先把视口放大结果写进 Composite 的视图区, 再跑
-     * UI 链 —— 这些层于是 1:1 落在放大后的地图上。
+    /* 缩放呈现 (在 UI 链之前):
+     *   放大档 (视口比视图区小): 把 Composite 里视口 R 的像素最近邻放大铺回 A;
+     *   缩小档 (视口比视图区大): 渲染期 Composite/地图面被临时换成 R 大的离屏面,
+     *     这里先还原全局, 再把大面的 R 降采样铺回真 Composite 的 A。
+     * 之后 UI 链仍 1:1 落在缩放后的地图上。
      * ⚠ 必须改 **Composite** 而不是 Primary: UpdatePrimarySurface (把地图面 blit
      * 到 Primary) 一帧要跑很多次, 写屏上的东西只会闪一瞬 (洋红判定框验证过)。
-     * Composite 是这些 blit 的源, 改它 ⇒ 后面每次 blit 都把放大结果搬上屏,
-     * 次数再多也一样, 而且完全不需要"blit 之后"的钩子。*/
+     * Composite 是这些 blit 的源, 改它 ⇒ 后面每次 blit 都把结果搬上屏。*/
     if (SB_In()) SB_CompositeMagnify();
+    /* 缩小档的还原+降采样已提前到 0x4F451B (MOExperience_AfterMapEntry), 这样
+     * 引擎 UI 不会落进大面。钩子没装上时才回退到这里的旧路径。 */
+    else if (SB_Out() && !g_AfterMapTramp) SB_CompositeDemagnify();
 
     drew = MOE_DrawUILayers(surf, surfW, surfH, surfPitch);
 

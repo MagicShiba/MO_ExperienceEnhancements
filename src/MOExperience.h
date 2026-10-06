@@ -7,7 +7,7 @@
  */
 #pragma once
 
-#define MOE_VERSION "0.2.208"
+#define MOE_VERSION "0.2.210"
 
 /* 一次性初始化: 建日志路径 + 各模块首次载入配置。幂等, 各入口都先调它。 */
 void MOE_EnsureInit(void);
@@ -40,6 +40,59 @@ const char* MOE_PhaseName(unsigned id);
 /* UpdatePrimarySurface (0x4F4780) 前置跳板 (naked): 只保栈形平衡, 顺便打阶段标记。*/
 void MOExperience_UpdateEntry(void);
 extern void* g_UpdateTramp;
+/* GScreenClass::Render (0x4F4480) 入口钩 (naked): 缩小档 (scale>1) 时把
+ * [0x88731C]/[0x8872FC] 临时换成 SB 的 R 大离屏面, 让引擎 1:1 画进大面;
+ * 三趟地图之后在 0x4F451B 还原 + 降采样。1x/放大档/未启用时恒为空操作。*/
+void MOExperience_RenderEntry(void);
+extern void* g_RenderTramp;
+/* GScreenClass::Render 里"[0x887314] = 渲染面"那条 (0x4F4492, 5B) 的钩 (naked):
+ * 缩小档下把三个渲染面全局**让回窗口面** (SB_RenderSuspend)。那之后到三趟地图之间
+ * 引擎还有一串按**窗口坐标**画的指令 (WWMouse::vt+0x40 光标擦除、
+ * `[0xB0B518]/[0xB0B519]`、`GScreenClass::vt+0x40`); 它们若拿到 R 大的离屏大面,
+ * 那些像素就混进地图, 降采样后在画面中部闪出一条底栏/刻度条残影。
+ * 0x4F44CB 那条把大面装回去 (SB_RenderResume), 于是大面被暴露的窗口只剩三趟地图。*/
+void MOExperience_PreCurEntry(void);
+extern void* g_PreCurTramp;
+/* GScreenClass::Render 里 chrome pass 调用点 (0x4F44FD, 5B = `8B 16 50 8B CE`,
+ * 下一条正是 `call [edx+0x40]`) 的钩 (naked): 缩小档把三个渲染面全局**让回窗口面**
+ * (SB_RenderSuspend(0))。虚表 +0x40 = 0x6D0A20 那趟"底栏/侧栏 chrome"全按**窗口
+ * 坐标**画 (底栏矩形 [0xB0FC58]、SidebarClass::Draw、ToolTipManager::Draw(1)),
+ * 拿到 R 大的大面就会把底栏与提示盒烙进地图, 降采样后落在画面中部 (实测图1/图2)。
+ * 0x4F44FD 之前挡不住它 —— 之前只挡了入口那串。*/
+void MOExperience_ChromePreEntry(void);
+extern void* g_ChromePreTramp;
+/* chrome pass 之后 (0x4F4505, 6B = `8B 0D 1C 73 88 00`, 第三趟地图之前) 把大面
+ * 装回全局 (SB_RenderResume), 跳回 0x4F450B 让原指令照跑重读全局。*/
+void MOExperience_ChromePostEntry(void);
+extern void* g_ChromePostTramp;
+/* 由缩放模块维护: 非 0 时上面那条钩还把**入口 eax** 换成 g_PreCurSurf
+ * (0x4F44A2 的光标擦除直接吃 eax, 不读全局)。*/
+extern int   g_PreCurWin;
+extern void* g_PreCurSurf;
+/* GScreenClass::Render 里三趟地图前那条 (0x4F44CB, 5B = `A1 1C 73 88 00`) 的钩
+ * (naked): 缩小档把大面装回全局 (SB_RenderResume), 跳回 0x4F44D0 让原指令照跑。*/
+void MOExperience_MapEntry(void);
+extern void* g_MapTramp;
+/* GScreenClass::Render 三趟地图画完、引擎 UI 之前 (0x4F451B) 的钩 (naked):
+ * 缩小档还原窗口面 + 降采样; 1x/放大档恒空操作。 */
+void MOExperience_AfterMapEntry(void);
+extern void* g_AfterMapTramp;
+void MOExperience_ChromeEntry(void);
+extern void* g_ChromeTramp;
+void MOExperience_BlitDiagEntry(void);
+extern void* g_BlitTramp;
+/* 边缘卷屏 0x692B60 入口钩 (naked): 缩放档把传入点换回物理鼠标 (屏幕空间死区)。 */
+void MOExperience_EdgeFixEntry(void);
+extern void* g_EdgeFixTramp;
+/* 通用拉伸 blit 0x6BA580 入口钩 (naked): 缩放档下面指针野了就跳过 (防崩)。 */
+void MOExperience_BlitGuardEntry(void);
+extern void* g_BlitGuardTramp;
+/* DisplayClass::ProcessClickCoords (0x692300) 入口钩 (naked): 缩小档下把**视口外**的
+ * 点明确拒掉 (该函数只判 X<0 / Y<0, 没有上界判定)。ViewBounds = R 比窗口大时,
+ * 底栏带 (y∈[A.Height,winH)) 的物理坐标落在 R 之内 ⇒ 引擎把底栏当成地图上那一带,
+ * 选中单位点底栏 = 对画面中部的地图像素下令 (SB_PtInView)。1x/放大档恒空操作。 */
+void MOExperience_ClickCoordsEntry(void);
+extern void* g_ClickCoordsTramp;
 /* 帧准备钩入口 (naked): 每循环必跑, 底部电量"始终绘制"靠它。 */
 void MOExperience_PrepareEntry(void);
 extern void* g_PrepareTramp;

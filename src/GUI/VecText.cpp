@@ -675,6 +675,23 @@ static void VecSWStore(int kind, const wchar_t* s, int n, int fore, int x,
     r->tick = now;
 }
 
+/* ---------------- 主画布判据 (窗口面 or 缩小档大面) ----------------
+ * 引擎的 Simple_Text_Print / Print 把**渲染面**当实参传下来, 而超武列表的收表/
+ * 拦截就是靠"这块面是不是主画布"这一句把原版那批行摘掉 (见 VecSimpleEntry)。
+ * 缩小档 (scale>1) 三趟地图期间渲染面 = R 大的离屏大面 (2503x1497), 只认窗口面
+ * ⇒ 整批漏出拦截带被放行, 原版名/计时器/底色条画进大面, 降采样后挤在画面右缘
+ * (实测图4), 而自定义面板因为收不到行整块消失。
+ * `SB_IsBigSurface` 是指针判定, 不受窗口改尺寸影响; 1x/放大档下它恒 0 ⇒
+ * 下面的判据与原版逐位相同。*/
+static int VecIsCanvas(void* surf, int w, int h)
+{
+    if (!surf || w <= 0 || h <= 0) return 0;
+    if (g_SWCompW > 0 && w == g_SWCompW && h == g_SWCompH) return 1;
+    if (SB_IsBigSurface(surf)) return 1;
+    if (h == SB_CanvasH(w)) return 1;
+    return 0;
+}
+
 /* Print 层后备收集 (Simple_ 钩漏网时才跑到这): 同带同面即收并跳过。
  * fore 在 Print 层不可见 (a6=a7=0 实证), 记 -1 用名青/计时器白。 */
 static int VecSWCapture(void* surf, int kind, const wchar_t* s, int x, int y)
@@ -682,22 +699,24 @@ static int VecSWCapture(void* surf, int kind, const wchar_t* s, int x, int y)
     int sw = 0, sh = 0, n = 0;
     if (!g_SWPanelOn) return 0;
     if (!s || !IsPlausiblePtr(s)) return 0;
-    /* y 带固定 (顶部 32 是横条, 下面到画布底); x **不设上界** ——
+    /* y 带固定 (顶部 32 是横条, 下面到**这块面**的底); x **不设上界** ——
      * 这层只兜计时器 (靠冒号判别), 引擎侧栏隐藏后把它们挪到 ~1890,
      * 放大档下它们跟着视口缩到 ~846 (见 VecSWBand), 任何写死的下界都会让
      * 这层漏 (只剩黑底, 因为底色条不走这层)。
      * 名不在这里收 (见 Simple_ 入口注释: Print 层的名与悬浮提示不可区分)。*/
-    {
-        int lo, hi;
-        VecSWBand(&lo, &hi);
-        if (x < lo || x > hi || y < 32 || y > g_SWCompH) return 0;
-    }
     if (surf && IsPlausiblePtr(surf))
     {
         int* b = (int*)surf;
         sw = b[1]; sh = b[2];
     }
-    if (sw <= 0 || sh <= 0 || sw != g_SWCompW || sh != g_SWCompH) return 0;
+    /* ⚠ 缩小档 (scale>1): 三趟地图期间渲染面 = R 大的离屏大面 (2503x1497),
+     * 只认窗口面 (1920x1080) 会让这一层整批漏 ⇒ 底色条画出来、计时器丢光。*/
+    if (!VecIsCanvas(surf, sw, sh)) return 0;
+    {
+        int lo, hi;
+        VecSWBand(&lo, &hi);
+        if (x < lo || x > hi || y < 32 || y > sh) return 0;
+    }
     while (s[n] && n < 63) n++;
     if (g_SWCapN >= SWCAP_MAX && n > 0)
     {
@@ -1123,7 +1142,13 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
         IsPlausiblePtr((void*)a1))
     {
         int* b = (int*)a1;
-        if (b[1] == g_SWCompW && b[2] == g_SWCompH &&
+        /* ⚠ 缩小档 (scale>1): 三趟地图期间渲染面 = R 大的离屏大面 (2503x1497),
+         * 只认窗口面 (1920x1080) 会让整批 inband 判成 false ⇒ `return
+         * g_OrigSimple(...)` 放行 ⇒ 原版名/计时器/底色条原样画进大面, 降采样
+         * 后挤在画面右缘 (实测图4), 而自定义面板因为收不到行而整块消失。
+         * VecIsCanvas 窗口面与大面都认; 1x/放大档下它恒等价于
+         * `b[1]==g_SWCompW && b[2]==g_SWCompH`。*/
+        if (VecIsCanvas((void*)a1, b[1], b[2]) &&
             IsPlausiblePtr((void*)a2) && IsPlausiblePtr((void*)a3))
         {
             int* p2 = (int*)a2;
@@ -1139,16 +1164,16 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
              *
              * 横向带**必须跟着 ViewBounds 走** (见 VecSWBand): 这批行的 x 是
              * `ViewBounds.Width - 30` (名) / `-3` (计时器), 而 ViewBounds 就是
-             * 缩放用的视口 R = A*scale。放大档下它们缩到 ~846/873, 写死任何
-             * 固定下界 (1300 / 1752 / g_MapRight) 都会把它们整批踢出 inband ⇒
-             * 收表也不收、拦截也不拦, 原版列表照画, 再被 R→A 那一步放大两倍。
+             * 缩放用的视口 R = A*scale。放大档下它们缩到 ~846/873, 缩小档下撑到
+             * ~2473/2500, 写死任何固定下界 (1300 / 1752 / g_MapRight) 都会把
+             * 它们整批踢出 inband ⇒ 收表也不收、拦截也不拦。
              *
-             * y 侧 32..g_SWCompH 保留: 挡顶部横条与世界悬浮提示 (c=0x73AC616A
+             * y 侧 32..**这块面的高** 保留: 挡顶部横条与世界悬浮提示 (c=0x73AC616A
              * 那条在 VecSimpleEntry 入口就按发起者挡掉了, 这里只是双保险)。*/
             {
                 int lo, hi;
                 VecSWBand(&lo, &hi);
-                inband = (sx >= lo && sx <= hi && sy >= 32 && sy <= g_SWCompH);
+                inband = (sx >= lo && sx <= hi && sy >= 32 && sy <= b[2]);
             }
             if (text) { while (text[n] && n < 64) n++; }
             if (inband)
@@ -1664,9 +1689,13 @@ static int VecRender(void* t, wchar_t wch, int adv, int h, int x, int y,
          * c=0,0,-1,-1 pp=1752)。 */
         int cR = VecNormC(*(int*)((char*)t + 0x38));
         if (cR >= 0 && B >= 0) { g_VecWhy = 5; return VC_FAIL; }
-        if (pitchW != g_SWCompW || g_SWCompW <= 0 || g_SWCompH <= 0)
-        { g_VecWhy = 5; return VC_FAIL; }
-        Tp = 0; B = g_SWCompH - 1;
+        /* 缩小档下这块面可能是 R 大的离屏大面, 用 SB_CanvasH 两张面都认
+         * (见 ScaleBar.cpp); 只认窗口面会让大面上的文本全回落 1bpp 光栅。*/
+        {
+            int sh = SB_CanvasH(pitchW);
+            if (sh < 1) { g_VecWhy = 5; return VC_FAIL; }
+            Tp = 0; B = sh - 1;
+        }
     }
     if (Tp < 0) Tp = 0;
     if (B > 4096) B = 4096;
@@ -2543,6 +2572,175 @@ void VecText_Install(void)
                 LogLine("vtext: update hook ON");
             else { LogLine("vtext: update hook OFF"); g_UpdateTramp = NULL; }
         }
+    }
+/* 缩放 (缩小档): GScreenClass::Render (0x4F4480) 入口, 首8B = 83 EC 08 A1 1C 73
+     * 88 00 (sub esp,8 / mov eax,[Composite])。缩小档 (scale>1) 时把 [0x88731C]/
+     * [0x8872FC] 临时换成 SB 自建的 R 大离屏面; 渲染完消息帧钩还原 + 降采样。
+     * 安装见 MOExperience (MOExperience_RenderEntry/g_RenderTramp)。 */
+    {
+        static const unsigned char kWantRender[8] =
+            { 0x83, 0xEC, 0x08, 0xA1, 0x1C, 0x73, 0x88, 0x00 };
+        if (BytesSame((unsigned char*)0x4F4480u, kWantRender, 8))
+        {
+            g_RenderTramp = BuildTrampAt(0x4F4480u, 8, 0x4F4488u);
+            if (g_RenderTramp && PatchAt(0x4F4480u, (void*)MOExperience_RenderEntry, 8))
+                LogLine("vtext: render hook ON");
+            else { LogLine("vtext: render hook OFF"); g_RenderTramp = NULL; }
+        }
+        else { LogLine("vtext: render bytes mismatch"); LogBytes((unsigned char*)0x4F4480u); }
+    }
+/* 缩放 (缩小档): Render 里 "[0x887314] = 渲染面" 那条 (0x4F4492, 首5B =
+ * `A3 14 73 88 00`) 与紧跟着三趟地图前那条 (0x4F44CB, 首5B = `A1 1C 73 88 00`),
+ * 一让一装: 大面被暴露的窗口因此只剩三趟地图, 引擎那串按**窗口坐标**画的指令
+ * (光标擦除等) 碰不到大面 ⇒ 画面中部不再闪底栏残影。安装见 MOExperience
+ * (MOExperience_PreCurEntry/g_PreCurTramp, MOExperience_MapEntry/g_MapTramp)。 */
+    {
+        static const unsigned char kWantPreCur[5] = { 0xA3, 0x14, 0x73, 0x88, 0x00 };
+        if (BytesSame((unsigned char*)0x4F4492u, kWantPreCur, 5))
+        {
+            g_PreCurTramp = BuildTrampAt(0x4F4492u, 5, 0x4F4497u);
+            if (g_PreCurTramp && PatchAt(0x4F4492u, (void*)MOExperience_PreCurEntry, 5))
+                LogLine("vtext: precur hook ON");
+            else { LogLine("vtext: precur hook OFF"); g_PreCurTramp = NULL; }
+        }
+        else { LogLine("vtext: precur bytes mismatch"); LogBytes((unsigned char*)0x4F4492u); }
+    }
+    {
+        static const unsigned char kWantMap[5] = { 0xA1, 0x1C, 0x73, 0x88, 0x00 };
+        if (BytesSame((unsigned char*)0x4F44CBu, kWantMap, 5))
+        {
+            g_MapTramp = BuildTrampAt(0x4F44CBu, 5, 0x4F44D0u);
+            if (g_MapTramp && PatchAt(0x4F44CBu, (void*)MOExperience_MapEntry, 5))
+                LogLine("vtext: mapentry hook ON");
+            else { LogLine("vtext: mapentry hook OFF"); g_MapTramp = NULL; }
+        }
+        else { LogLine("vtext: mapentry bytes mismatch"); LogBytes((unsigned char*)0x4F44CBu); }
+    }
+/* 缩放 (缩小档): Render 里 chrome pass (虚表 +0x40 = 0x6D0A20, 底栏/侧栏那一趟)
+ * 调用点 0x4F44FD (首5B = `8B 16 50 8B CE`, 下一条 0x4F4502 就是
+ * `FF 52 40` = call [edx+0x40]) 让回窗口面, 它之后 0x4F4505 (首6B =
+ * `8B 0D 1C 73 88 00`) 装回大面。这一趟全按**窗口坐标**画: 底栏矩形 [0xB0FC58]、
+ * 侧栏图标、SidebarClass::Draw 里的 ToolTipManager::Draw(1) (悬停提示盒)。
+ * 挡不住它 ⇒ 底栏残影闪在画面中部 (实测图1) + 悬停提示显示两次 (实测图2)。
+ * 安装见 MOExperience (MOExperience_ChromePreEntry/PostEntry)。 */
+    {
+        static const unsigned char kWantChromePre[5] =
+            { 0x8B, 0x16, 0x50, 0x8B, 0xCE };
+        if (BytesSame((unsigned char*)0x4F44FDu, kWantChromePre, 5))
+        {
+            g_ChromePreTramp = BuildTrampAt(0x4F44FDu, 5, 0x4F4502u);
+            if (g_ChromePreTramp && PatchAt(0x4F44FDu, (void*)MOExperience_ChromePreEntry, 5))
+                LogLine("vtext: chrome-pre hook ON");
+            else { LogLine("vtext: chrome-pre hook OFF"); g_ChromePreTramp = NULL; }
+        }
+        else { LogLine("vtext: chrome-pre bytes mismatch"); LogBytes((unsigned char*)0x4F44FDu); }
+    }
+    {
+        static const unsigned char kWantChromePost[6] =
+            { 0x8B, 0x0D, 0x1C, 0x73, 0x88, 0x00 };
+        if (BytesSame((unsigned char*)0x4F4505u, kWantChromePost, 6))
+        {
+            g_ChromePostTramp = BuildTrampAt(0x4F4505u, 6, 0x4F450Bu);
+            if (g_ChromePostTramp && PatchAt(0x4F4505u, (void*)MOExperience_ChromePostEntry, 6))
+                LogLine("vtext: chrome-post hook ON");
+            else { LogLine("vtext: chrome-post hook OFF"); g_ChromePostTramp = NULL; }
+        }
+        else { LogLine("vtext: chrome-post bytes mismatch"); LogBytes((unsigned char*)0x4F4505u); }
+    }
+/* 缩放 (缩小档): 三趟地图之后、引擎 UI 之前 (0x4F451B) 还原窗口面 + 降采样。
+     * 首 5B = `A0 19 B5 B0 00` (mov al,[0xB0B519]), 跳回 0x4F4520。
+     * 安装见 MOExperience (MOExperience_AfterMapEntry/g_AfterMapTramp)。 */
+    {
+        static const unsigned char kWantAfterMap[5] = { 0xA0, 0x19, 0xB5, 0xB0, 0x00 };
+        if (BytesSame((unsigned char*)0x4F451Bu, kWantAfterMap, 5))
+        {
+            g_AfterMapTramp = BuildTrampAt(0x4F451Bu, 5, 0x4F4520u);
+            if (g_AfterMapTramp && PatchAt(0x4F451Bu, (void*)MOExperience_AfterMapEntry, 5))
+                LogLine("vtext: aftermap hook ON");
+            else { LogLine("vtext: aftermap hook OFF"); g_AfterMapTramp = NULL; }
+        }
+        else { LogLine("vtext: aftermap bytes mismatch"); LogBytes((unsigned char*)0x4F451Bu); }
+    }
+/* 诊断: chrome pass 调用点前的探针 (0x4F4589), 把 this/虚表 +0x44/各渲染面打出来。
+     * 首 5B = `A1 1C 73 88 00` (mov eax,[0x88731C]), 跳回 0x4F458E。
+     * (0x4F4596 只有 4 字节 `8B 16 8B CE`, PatchAt 要求 n>=5, 装不上 —— 就往前挪到
+     *  这个 5 字节对齐点; 中间只隔着一条 WWMouse::vt+0x3C, 它不改 [0x887314]。)*/
+    {
+        static const unsigned char kWantChrome[5] =
+            { 0xA1, 0x1C, 0x73, 0x88, 0x00 };
+        if (BytesSame((unsigned char*)0x4F4589u, kWantChrome, 5))
+        {
+            g_ChromeTramp = BuildTrampAt(0x4F4589u, 5, 0x4F458Eu);
+            if (g_ChromeTramp && PatchAt(0x4F4589u, (void*)MOExperience_ChromeEntry, 5))
+                LogLine("vtext: chrome probe ON");
+            else { LogLine("vtext: chrome probe OFF"); g_ChromeTramp = NULL; }
+        }
+        else { LogLine("vtext: chrome probe bytes mismatch"); LogBytes((unsigned char*)0x4F4589u); }
+    }
+/* 诊断: BlitImage (0x4AED70) 目标面探针 —— 谁在把窗口坐标的东西画进大面。
+     * 首 6B = `81 EC 94 00 00 00` (sub esp,0x94 的**长**立即数形式, 不是 83 EC 94),
+     * 跳回 0x4AED76。
+     * ⚠ 别跟 ADDR_BLIT 搞混: 那是**字形** blitter (VecText_BlitHook 画单个字符),
+     *   和这里的 BlitImage(整张位图) 是两回事。*/
+    {
+        static const unsigned char kWantBlit[6] =
+            { 0x81, 0xEC, 0x94, 0x00, 0x00, 0x00 };
+        if (BytesSame((unsigned char*)0x4AED70u, kWantBlit, 6))
+        {
+            g_BlitTramp = BuildTrampAt(0x4AED70u, 6, 0x4AED76u);
+            if (g_BlitTramp && PatchAt(0x4AED70u, (void*)MOExperience_BlitDiagEntry, 6))
+                LogLine("vtext: blit-big probe ON");
+            else { LogLine("vtext: blit-big probe OFF"); g_BlitTramp = NULL; }
+        }
+        else { LogLine("vtext: blit-big bytes mismatch"); LogBytes((unsigned char*)0x4AED70u); }
+    }
+/* 缩放: 边缘卷屏 (DisplayClass 0x692B60) 入口把点换回物理鼠标 (屏幕空间死区)。
+     * 首 7B = `83 EC 18 53 55 56 57` (sub esp,0x18 / push ebx/ebp/esi/edi),
+     * 跳回 0x692B67。安装见 MOExperience (MOExperience_EdgeFixEntry/g_EdgeFixTramp)。 */
+    {
+        static const unsigned char kWantEdgeFix[7] =
+            { 0x83, 0xEC, 0x18, 0x53, 0x55, 0x56, 0x57 };
+        if (BytesSame((unsigned char*)0x692B60u, kWantEdgeFix, 7))
+        {
+            g_EdgeFixTramp = BuildTrampAt(0x692B60u, 7, 0x692B67u);
+            if (g_EdgeFixTramp && PatchAt(0x692B60u, (void*)MOExperience_EdgeFixEntry, 7))
+                LogLine("vtext: edgefix hook ON");
+            else { LogLine("vtext: edgefix hook OFF"); g_EdgeFixTramp = NULL; }
+        }
+        else { LogLine("vtext: edgefix bytes mismatch"); LogBytes((unsigned char*)0x692B60u); }
+    }
+/* 缩放 (缩小档): DisplayClass::ProcessClickCoords (0x692300) 入口把**视口外**的点
+ * 拒掉。首 7B = `8B 44 24 10 83 EC 18`, 跳板跳回 0x692307。
+ * 该函数只判 X<0 / Y<0 (0x69234B / 0x692356), 没有上界判定; 而缩小档下
+ * ViewBounds = R 比窗口大, 底栏带的物理 y (1048..1080) 落在 R 之内 ⇒ 引擎把底栏
+ * 当成"地图上 y=1060 那一带", 选中单位点底部底栏 = 对**画面中部**的地图像素下令。
+ * 安装见 MOExperience (MOExperience_ClickCoordsEntry/g_ClickCoordsTramp)。 */
+    {
+        static const unsigned char kWantClickCoords[7] =
+            { 0x8B, 0x44, 0x24, 0x10, 0x83, 0xEC, 0x18 };
+        if (BytesSame((unsigned char*)0x692300u, kWantClickCoords, 7))
+        {
+            g_ClickCoordsTramp = BuildTrampAt(0x692300u, 7, 0x692307u);
+            if (g_ClickCoordsTramp && PatchAt(0x692300u, (void*)MOExperience_ClickCoordsEntry, 7))
+                LogLine("vtext: clickcoords hook ON");
+            else { LogLine("vtext: clickcoords hook OFF"); g_ClickCoordsTramp = NULL; }
+        }
+        else { LogLine("vtext: clickcoords bytes mismatch"); LogBytes((unsigned char*)0x692300u); }
+    }
+/* 通用拉伸 blit (0x6BA580, cameo/图标) 的野面守卫钩。
+     * 首 5B = `83 EC 14 55 56` (sub esp,0x14 / push ebp/esi), 跳回 0x6BA585。
+     * 安装见 MOExperience (MOExperience_BlitGuardEntry/g_BlitGuardTramp)。 */
+    {
+        static const unsigned char kWantBlitGuard[5] =
+            { 0x83, 0xEC, 0x14, 0x55, 0x56 };
+        if (BytesSame((unsigned char*)0x6BA580u, kWantBlitGuard, 5))
+        {
+            g_BlitGuardTramp = BuildTrampAt(0x6BA580u, 5, 0x6BA585u);
+            if (g_BlitGuardTramp && PatchAt(0x6BA580u, (void*)MOExperience_BlitGuardEntry, 5))
+                LogLine("vtext: blitguard hook ON");
+            else { LogLine("vtext: blitguard hook OFF"); g_BlitGuardTramp = NULL; }
+        }
+        else { LogLine("vtext: blitguard bytes mismatch"); LogBytes((unsigned char*)0x6BA580u); }
     }
 /* 缩放: 鼠标折算在**源头**做 —— 换掉 WWMouseClass 虚表 +0x34
      * (GetMousePosition), 让引擎拿到的已经是视口空间的点。11 个调用点一次

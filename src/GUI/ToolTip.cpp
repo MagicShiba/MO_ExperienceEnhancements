@@ -330,7 +330,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl ToolTip_Clamp(void* regs)
      * 右界会把盒子连字整体往左拽最多一整个视口宽, 且位移随档位缩放。
      * CCToolTip 的选面/量宽右界已被改指到同一块影子 (VecText.cpp 的 rep[],
      * notes/地图缩放.md §5.2), 这里必须同源。1x 时 A == R。*/
-    if (SB_In())
+    if (SB_Zoomed())
     {
         const unsigned* av = SB_AViewBlock();
         minX = (int)av[0];
