@@ -1,32 +1,14 @@
 /* WeaponRange.cpp - 单选按住 Ctrl 显示单位攻击范围圈。
  *
- * 触发: 只选中 1 个单位 (Unit/Infantry/Aircraft) 且按住 Ctrl 才画。
- * 内容: 地面圈 (蓝, 当前武器最大射程, 与引擎原生圈同色) + 最小射程
- * (红, MinimumRange==0 不画) + 空中圈 (青虚线, 本单位对空武器射程)。
- * 当前武器 = CurrentWeaponNumber 下标 + 精英级换 EliteWeapon (实际数据);
- * 对空武器在下标 0/1 里找第一个可对空者 (找不到则无青圈;
- * 与当前同把时同半径, 虚线区分)。
- * 高度: 只取单位自身所在高度定圆心, 半径不做地形修正。
- *
- * 取数 (全只读, 失败静默不画, 联机安全):
- *   类型: Unit/Aircraft+0x6C4, Infantry+0x6C0 (ToolTip/DeployPreview 同式),
- *   经 TechnoType 数组 (0xA8EB00) 做 InTypeSet 校验。
- *   武器: TechnoType::GetWeapon(0x7177C0)/GetEliteWeapon(0x7177E0)
- *   (thiscall ECX=类型, 栈下标, 回 WeaponStruct*, 首 dword=WeaponType*)。
- *   精英/下标: Techno 内 Owner 指针锚定 (本家 CurrentPlayer 0xA83D4C):
- *   命中 house 的槽位若 +4 处浮点在 [-0.5,3] 且 -20 处下标在 [0,17]
- *   且 -16 处军衔在 [0,2], 即 InitialOwner, 由此得 Veterancy(+4,
- *   >=2.0 为精英) 与 CurrentWeaponNumber(-20)。找不到则按 0/0 退化。
- *   Range: WeaponType 内 (Range,MinimumRange) 相邻 int 对, 运行时投票
- *   pin (多把武器一致才缓存, 失败不画)。对空经 WeaponType::
- *   AllowedThreats(0x772A90) & Air(0x4)。铁律:
- *   (a) ECX 必须是 WeaponType*, 传弹头进去必崩;
- *   (b) 只判 Air 位, 不得加 <=0xFFFF 上限 (掩码最大位 0x10000)。
- *
- * 绘制: 圆心经 TacticalClass::CoordsToClient(0x6D2140) 投影 (与
- * DeployPreview 同系, 之后过 SB_ViewToScreen 折缩放档), 世界圆按
- * 72 点逐点投影连线 (1px 细线, Blend16)。圆上各点取圆心同一 Z
- * (自身高度, 不跟地形起伏)。
+ * 蓝=当前武器最大射程, 红=最小射程 (0 不画), 青虚线=对空射程
+ * (+AirRangeBonus), 绿=部署武器作用半径 (弹头 CellSpread 为主),
+ * 黄=隐形探测, 紫=间谍识别 (0 不画)。只认 Unit/Infantry/Aircraft。
+ * 当前武器 = CurrentWeaponNumber 下标 + 精英换 EliteWeapon;
+ * 对空在下标 0/1 里找 (威胁位 Air 位); 部署按 DeployFireWeapon
+ * (0=主,1=副,默认1), 不可用顺延另一槽; 占位扫描器按名跳过
+ * (搜索分支另加低伤害 backstop; 心控/辐射爆发等真武器不受影响)。
+ * 圆心取单位自身高度, 半径不做地形修正。全只读 + 渲染面绘制, 联机安全。
+ * 细节见 notes/攻击范围显示.md。
  * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
  * 渲染挂 MOExperience_MessageDrawHook (见 MOExperience.cpp)。
  */
@@ -121,9 +103,9 @@ static void* WR_TypeOf(void* u, int w)
     return p;
 }
 
-/* ---------------- 精英/当前武器下标 (Owner 锚定自校准) ----------------
- * InitialOwner 命中时: +4=Veterancy(float), -20=CurrentWeaponNumber,
- * -16=CurrentRanking。找不到锚点则退化 elite=0/idx=0。 */
+/* ---------------- 精英/当前武器下标 (Owner 指针锚定) ----------------
+ * InitialOwner: +4=Veterancy(float,>=2 精英), -20=CurrentWeaponNumber,
+ * -16=CurrentRanking。找不到则 elite=0/idx=0。 */
 
 static int WR_EliteIndex(void* u, int* eliteOut, int* idxOut)
 {
@@ -155,8 +137,7 @@ static int WR_EliteIndex(void* u, int* eliteOut, int* idxOut)
 }
 
 /* ---------------- Range 偏移投票 pin ----------------
- * (Range,MinimumRange) 为 WeaponType 内相邻 int 对: 256<=Range<=40 格,
- * 0<=Min<=Range。多把武器 (主/精英/副) 一致才缓存。 */
+ * (Range,MinimumRange) 相邻 int 对, 多把武器一致才缓存。 */
 
 #define WR_OFF_NONE -1
 
@@ -242,19 +223,15 @@ static int WR_FindRangeOff(void** wts, int n)
 }
 
 /* ---------------- 对空加成 AirRangeBonus ----------------
- * TechnoType+0x68C (YRpp 字段顺序手算: AirRangeBonus→Weapon[0] 共 0x20C,
- * TypeList=0x1C 含 unknown_18, 与 DP 向量偏移 items+4/count+16 自洽;
- * CameoFile 对齐注释 align_6EF 交叉确认)。
- * 结构双锚: Weapon[0] 偏移 ==0x898 且 Elite[0]-Weapon[0]==0x1FC
- * (实测: W0 与手算 0x20C 完全一致, 但两数组间隔比 YRpp 多 0x18,
- * 中间有未建模字段, 以实测为准), 否则本局禁用加成。
- * 编码: int 轻子数 (与 Range 同制, GGI 实测 768=3 格);
- * 超 10 格按 float 格试, 都不像则 0 (fail-soft)。
- * 每类型缓存 (含失败), 引擎真值。 */
+ * TechnoType+0x68C, int 轻子数 (与 Range 同制)。结构锚: Weapon[0]
+ * 偏移 0x898 且 Elite[0] 差 0x1FC, 不符则本类型无加成 (fail-soft)。 */
 
 #define WR_OFF_AIRRANGE 0x68Cu
 #define WR_EXP_W0 0x898
 #define WR_EXP_WSPAN 0x1FC
+/* 隐形探测 SensorsSight +0x5F0, 间谍识别 DetectDisguiseRange +0x5F4 (格)。 */
+#define WR_OFF_SENSORSSIGHT 0x5F0u
+#define WR_OFF_DISGRANGE 0x5F4u
 
 static void* g_WrBonusType = 0;
 static int g_WrBonus = 0;
@@ -296,7 +273,7 @@ static int WR_AirBonus(void* type)
     }
     raw = *(unsigned*)((char*)type + WR_OFF_AIRRANGE);
     f = *(float*)((char*)type + WR_OFF_AIRRANGE);
-    if (raw <= 10u * 256u) g_WrBonus = (int)raw;   /* int 轻子数 */
+    if (raw <= 10u * 256u) g_WrBonus = (int)raw;
     else if (f >= 0.0f && f <= 10.0f) g_WrBonus = (int)(f * 256.0f);
     else return 0;   /* 数值不像加成: 当 0 (已缓存, 不刷日志) */
     {
@@ -319,18 +296,148 @@ typedef struct
     int ok;
     int range;   /* 当前武器最大射程, leptons */
     int minRange;/* 当前武器最小射程, leptons */
-    int aaRange; /* 对空武器射程, leptons (0=无) */
+    int aaRange; /* 对空武器射程 (+AirRangeBonus), leptons (0=无) */
+    int depRange;  /* 部署武器作用半径 (弹头 CellSpread 为主), leptons (0=无) */
+    int thCur;     /* 诊断: 当前武器威胁位掩码 */
+    int depDf;     /* 诊断: DeployFire 标志读值 */
+    int depFw;     /* 诊断: DeployFireWeapon 读值 */
+    int depCs;     /* 诊断: 部署弹头 CellSpread 轻子 */
+    int depWhy;    /* 诊断: 0=画出 1=副空 2=同蓝半径 4=射程离谱 */
+    int sensRange; /* 隐形探测 SensorsSight, leptons (0=无) */
+    int disRange;  /* 间谍识别 DetectDisguiseRange, leptons (0=无) */
     CoordStruct center;
 } WRInfo;
 
-/* 可对空? (ECX=WeaponType, 只判 Air 位, 无上限门。) */
+/* 探测/识别格数 (0=无能力; 范围外当无, fail-soft)。 */
+static void WR_SenseRanges(void* type, int* sensCells, int* disCells)
+{
+    int s, d;
+    *sensCells = 0;
+    *disCells = 0;
+    if (!type || !IsPlausiblePtr(type)) return;
+    if (!IsPlausiblePtr((char*)type + WR_OFF_DISGRANGE + 4)) return;
+    s = *(int*)((char*)type + WR_OFF_SENSORSSIGHT);
+    d = *(int*)((char*)type + WR_OFF_DISGRANGE);
+    if (s >= 1 && s <= 40) *sensCells = s;
+    if (d >= 1 && d <= 40) *disCells = d;
+}
+
+/* 威胁位掩码 (ECX=WeaponType)。可对空 = Air 位。 */
+static int WR_Threats(void* wt)
+{
+    if (!wt || !IsPlausiblePtr(wt)) return 0;
+    return FN_WR_THREATS(wt);
+}
+
 static int WR_CanAir(void* wt)
 {
-    int th;
-    if (!wt || !IsPlausiblePtr(wt)) return 0;
-    th = FN_WR_THREATS(wt);
-    return (th & WR_THREAT_AIR) ? 1 : 0;
+    return (WR_Threats(wt) & WR_THREAT_AIR) ? 1 : 0;
 }
+
+/* 搜索分支跳过低伤害占位扫描器 (Damage 在 Range-16; 当前/部署分支不用,
+ * 心控与辐射爆发 Damage 也是 0/1)。 */
+static int WR_LowDamage(void* wt, int rangeOff)
+{
+    int dmg;
+    if (!wt || !IsPlausiblePtr(wt)) return 1;
+    if (rangeOff < 28) return 1;
+    dmg = *(int*)((char*)wt + rangeOff - 16);
+    if (dmg < -100000 || dmg > 1000000) return 1;
+    return (dmg <= 1) ? 1 : 0;
+}
+
+/* 类型/武器注册名读取 (SmartArea 同式自校准; 武器名允许小写)。
+ * 单位与武器各 pin 各的偏移, 读不到回 0 (不过滤, fail-open)。 */
+static int g_WrIdOff = -1;
+static int g_WrWIdOff = -1;
+
+static int WR_StrOk(const char* s, int lower)
+{
+    int n = 0;
+    if (!s || !IsPlausiblePtr(s)) return 0;
+    while (n < 24)
+    {
+        char c = s[n];
+        if (!c) return (n > 0) ? 1 : 0;
+        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '_' || c == '.' || c == '-') { n++; continue; }
+        if (lower && (c >= 'a' && c <= 'z')) { n++; continue; }
+        return 0;
+    }
+    return 0;
+}
+
+static int WR_IDAt(void* p, int* pinOff, int lower, char* out)
+{
+    static const unsigned cands[3] = { 0x20u, 0x24u, 0x28u };
+    int i, k;
+    if (!p || !IsPlausiblePtr(p) || !pinOff || !out) return 0;
+    if (*pinOff >= 0)
+    {
+        const char* s = (const char*)p + (unsigned)*pinOff;
+        if (!WR_StrOk(s, lower)) *pinOff = -1;
+        else { for (k = 0; k < 24; k++) out[k] = s[k]; return 1; }
+    }
+    for (i = 0; i < 3; i++)
+    {
+        const char* s = (const char*)p + cands[i];
+        if (!WR_StrOk(s, lower)) continue;
+        *pinOff = (int)cands[i];
+        for (k = 0; k < 24; k++) out[k] = s[k];
+        return 1;
+    }
+    return 0;
+}
+
+static int WR_Streq(const char* a, const char* b)
+{
+    int i;
+    for (i = 0; i < 24; i++)
+    {
+        if (a[i] != b[i]) return 0;
+        if (!a[i]) return 1;
+    }
+    return 1;
+}
+
+/* 已知占位武器名 (精确匹配; 误杀率为零, 真武器不可能叫这名)。 */
+static int WR_DummyName(void* wt)
+{
+    static const char* dums[3] = { "VirtualScanner", "EngineerScanner", "TankScanner" };
+    char id[24];
+    int k, d;
+    for (k = 0; k < 24; k++) id[k] = 0;
+    if (!wt || !IsPlausiblePtr(wt)) return 0;
+    if (!WR_IDAt(wt, &g_WrWIdOff, 1, id)) return 0;
+    for (d = 0; d < 3; d++)
+        if (WR_Streq(id, dums[d])) return 1;
+    return 0;
+}
+
+/* 部署开火: 标志 +0x6AC, 用哪把 +0x6A8 (0=主,1=副,默认1), 不可用顺延。
+ * 半径看弹头 CellSpread: WarheadType+0x124 float 格, 弹头指针在
+ * Range-8; 读不到回落武器 Range。 */
+#define WR_OFF_DEPLOYF 0x6ACu
+#define WR_OFF_DEPLOYFW 0x6A8u
+#define WR_OFF_WARHEAD 8
+#define WR_OFF_CELLSPREAD 0x124u
+
+/* 弹头 CellSpread (轻子, 0=不可用)。 */
+static int WR_CellSpread(void* wt, int rangeOff)
+{
+    void* wh;
+    float cs;
+    if (!wt || !IsPlausiblePtr(wt)) return 0;
+    if (rangeOff < 28) return 0;
+    wh = *(void**)((char*)wt + rangeOff - WR_OFF_WARHEAD);
+    if (!wh || !IsPlausiblePtr(wh)) return 0;
+    if (!IsPlausiblePtr((char*)wh + WR_OFF_CELLSPREAD + 4)) return 0;
+    cs = *(float*)((char*)wh + WR_OFF_CELLSPREAD);
+    if (cs < 0.5f || cs > 40.0f) return 0;
+    return (int)(cs * 256.0f);
+}
+
+static void* s_WrLogWt = 0;
 
 static WRInfo WR_Resolve(void* u)
 {
@@ -340,7 +447,11 @@ static WRInfo WR_Resolve(void* u)
     void* ws;
     void* wt;
     int j;
+    int sensC = 0, disC = 0;
     r.ok = 0; r.range = 0; r.minRange = 0; r.aaRange = 0;
+    r.thCur = 0;
+    r.depRange = 0; r.depDf = 0; r.depFw = 1; r.depCs = 0; r.depWhy = 0;
+    r.sensRange = 0; r.disRange = 0;
     r.center.X = r.center.Y = r.center.Z = 0;
     w = OU_WhatAmI(u);
     if (w != ABS_UNIT && w != ABS_AIRCRAFT && w != ABS_INFANTRY) return r;
@@ -379,8 +490,10 @@ static WRInfo WR_Resolve(void* u)
     r.minRange = *(int*)((char*)wt + g_WrRangeOff + 4);
     if (r.range < 256 || r.range > 40 * 256) return r;
     if (r.minRange < 0 || r.minRange > r.range) r.minRange = 0;
-    /* 地面圈=当前武器; 空中圈=下标 0/1 里第一个可对空者 (同精英档)。 */
-    if (WR_CanAir(wt)) r.aaRange = r.range;
+    /* 地面圈=当前武器; 空中圈=下标 0/1 里第一个可对空者
+     * (占位扫描器按名 + 低伤害跳过)。 */
+    r.thCur = WR_Threats(wt);
+    if ((r.thCur & WR_THREAT_AIR) != 0) r.aaRange = r.range;
     else
     {
         for (j = 0; j < 2; j++)
@@ -393,6 +506,8 @@ static WRInfo WR_Resolve(void* u)
             if (!wsj || !IsPlausiblePtr(wsj)) continue;
             wtj = *(void***)wsj;
             if (!wtj || !IsPlausiblePtr(wtj)) continue;
+            if (WR_LowDamage(wtj, g_WrRangeOff)) continue;
+            if (WR_DummyName(wtj)) continue;
             if (!WR_CanAir(wtj)) continue;
             if (!WR_PairSane(wtj, g_WrRangeOff)) continue;
             rj = *(int*)((char*)wtj + g_WrRangeOff);
@@ -403,8 +518,103 @@ static WRInfo WR_Resolve(void* u)
     }
     /* 空中圈 = 对空武器射程 + 本类型 AirRangeBonus (地面圈不加)。 */
     if (r.aaRange >= 256) r.aaRange += WR_AirBonus(type);
+    /* 部署圈: 仅 DeployFire 单位 (门控 +0x6AC; 单字节读无对齐要求,
+     * 不得用 IsPlausiblePtr guard)。
+     * 部署用哪把严格按 DeployFireWeapon (+0x6A8): 0=主, 1=副, 缺键默认 1
+     * (YURI/DESO/GGI 均无此键且部署都用副; 自爆类显式填 0 用主)。
+     * 所选不可用 (空/占位) 则顺延另一槽; 半径 = 弹头 CellSpread
+     * (原地生效按落点杀伤), 读不到回落武器 Range; 与蓝圈同半径不画。 */
+    {
+        void* wsd;
+        void* wtd;
+        int rd, cs, rr;
+        int depfw = 1;
+        int depIdx;
+        r.depDf = *(unsigned char*)((char*)type + WR_OFF_DEPLOYF);
+        if (r.depDf != 1) r.depDf = 0;
+        if (IsPlausiblePtr((char*)type + WR_OFF_DEPLOYFW + 4))
+        {
+            depfw = *(int*)((char*)type + WR_OFF_DEPLOYFW);
+            if (depfw < 0 || depfw > 17) depfw = 1;
+        }
+        r.depFw = depfw;
+        if (r.depDf == 1)
+        {
+            depIdx = (depfw == 0) ? 0 : 1;
+            wsd = elite ? FN_WR_ELITEWEAPON(type, depIdx) : FN_WR_WEAPON(type, depIdx);
+            wtd = (wsd && IsPlausiblePtr(wsd)) ? *(void***)wsd : 0;
+            if (!wtd || !IsPlausiblePtr(wtd))
+            {
+                depIdx = depIdx ? 0 : 1;
+                wsd = elite ? FN_WR_ELITEWEAPON(type, depIdx) : FN_WR_WEAPON(type, depIdx);
+                wtd = (wsd && IsPlausiblePtr(wsd)) ? *(void***)wsd : 0;
+            }
+            if (!wtd || !IsPlausiblePtr(wtd)) r.depWhy = 1;
+            else if (WR_DummyName(wtd)) r.depWhy = 3;
+            else if (!WR_PairSane(wtd, g_WrRangeOff)) r.depWhy = 4;
+            else
+            {
+                rd = *(int*)((char*)wtd + g_WrRangeOff);
+                cs = WR_CellSpread(wtd, g_WrRangeOff);
+                r.depCs = cs;
+                rr = 0;
+                if (cs >= 128) rr = cs;
+                else if (rd >= 256 && rd <= 40 * 256) rr = rd;
+                if (rr >= 128 && rr != r.range) r.depRange = rr;
+                else r.depWhy = (rr == r.range && rr >= 128) ? 2 : 4;
+            }
+        }
+    }
+    /* 探测/识别圈 (格→轻子, 0 即无能力不画)。 */
+    WR_SenseRanges(type, &sensC, &disC);
+    r.sensRange = sensC * 256;
+    r.disRange = disC * 256;
     if (!OU_GetCoords(u, &r.center)) return r;
     r.ok = 1;
+    /* 诊断 (每把新武器一行, 远测用)。 */
+    if (wt != s_WrLogWt)
+    {
+        char buf[224], b1[16], b2[16], b3[16], b4[16], b5[16];
+        char tid[24], wid[24];
+        int k;
+        unsigned q = 0;
+        s_WrLogWt = wt;
+        for (k = 0; k < 24; k++) tid[k] = wid[k] = 0;
+        WR_IDAt(type, &g_WrIdOff, 0, tid);
+        WR_IDAt(wt, &g_WrWIdOff, 1, wid);
+        q = AppendCStr(buf, q, "wrange: wt=", sizeof(buf));
+        HtoA((unsigned)(size_t)wt, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " tid=", sizeof(buf));
+        q = AppendCStr(buf, q, tid, sizeof(buf));
+        q = AppendCStr(buf, q, " wid=", sizeof(buf));
+        q = AppendCStr(buf, q, wid, sizeof(buf));
+        q = AppendCStr(buf, q, " elite=", sizeof(buf));
+        UtoA((unsigned)elite, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+        q = AppendCStr(buf, q, " idx=", sizeof(buf));
+        UtoA((unsigned)(idx < 0 ? 0 : idx), b3); q = AppendCStr(buf, q, b3, sizeof(buf));
+        q = AppendCStr(buf, q, " r=", sizeof(buf));
+        UtoA((unsigned)r.range, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " aa=", sizeof(buf));
+        UtoA((unsigned)r.aaRange, b4); q = AppendCStr(buf, q, b4, sizeof(buf));
+        q = AppendCStr(buf, q, " sens=", sizeof(buf));
+        UtoA((unsigned)sensC, b5); q = AppendCStr(buf, q, b5, sizeof(buf));
+        q = AppendCStr(buf, q, " dis=", sizeof(buf));
+        UtoA((unsigned)disC, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " dep=", sizeof(buf));
+        UtoA((unsigned)r.depRange, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " depf=", sizeof(buf));
+        UtoA((unsigned)r.depDf, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " dfw=", sizeof(buf));
+        UtoA((unsigned)r.depFw, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " csp=", sizeof(buf));
+        UtoA((unsigned)r.depCs, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " why=", sizeof(buf));
+        UtoA((unsigned)r.depWhy, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " th=", sizeof(buf));
+        UtoA((unsigned)r.thCur, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        (void)q;
+        LogLine(buf);
+    }
     return r;
 }
 
@@ -520,12 +730,19 @@ void WeaponRange_Draw(void* surf, int w, int h, int pitch)
     locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
     if (!locked || !IsPlausiblePtr(locked)) return;
     s_WrLocked = locked; s_WrW = w; s_WrH = h; s_WrPitch = pitch;
-    /* 地面蓝圈 (当前武器) + 最小红圈 (0 不画) + 空中青虚线圈。 */
+    /* 地面蓝圈 (当前武器) + 最小红圈 (0 不画) + 空中青虚线圈
+     * + 隐形探测黄圈 + 间谍识别紫圈 (后两者 0 不画)。 */
     WR_Circle(r.center.X, r.center.Y, r.center.Z, r.range, 64, 128, 255, 230, 0);
     if (r.minRange >= 256)
         WR_Circle(r.center.X, r.center.Y, r.center.Z, r.minRange, 255, 64, 64, 230, 0);
     if (r.aaRange >= 256)
         WR_Circle(r.center.X, r.center.Y, r.center.Z, r.aaRange, 64, 255, 255, 230, 1);
+    if (r.depRange >= 256)
+        WR_Circle(r.center.X, r.center.Y, r.center.Z, r.depRange, 0, 255, 0, 230, 0);
+    if (r.sensRange >= 256)
+        WR_Circle(r.center.X, r.center.Y, r.center.Z, r.sensRange, 255, 215, 0, 230, 0);
+    if (r.disRange >= 256)
+        WR_Circle(r.center.X, r.center.Y, r.center.Z, r.disRange, 180, 100, 255, 230, 0);
     s_WrLocked = 0;
     unlockFn(surf, NULL);
 }
