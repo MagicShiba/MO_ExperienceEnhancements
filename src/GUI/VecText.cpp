@@ -57,11 +57,9 @@ static const unsigned char kWantSimple[7] = { 0x83, 0xEC, 0x28,
 static const unsigned char kWantGetDim[6] = { 0x83, 0xEC, 0x1C,
                                               0x8B, 0x41, 0x04 };
 
-/* 场景区分只认位置条带 (Blit 层 y<32 的数字, 见 BlitHook), 不认函数。
- * 函数白名单已删除: 顶栏那几个函数也会画别的文本 (如按 House 遍历的
- * 函数连超武列表一起画), 函数粒度分不开, CreditPx 漏过去造成列表
- * 大小闪烁 (vlen 实证: 同一调用者既画顶栏也画它处小字)。
- * 发起者查找 (栈上找 + call 指令校验) 保留, 只给诊断日志 (vcall) 用。 */
+/* 场景区分只认位置条带 (Blit 层 y<32 的数字, 见 BlitHook), 不认函数:
+ * 同一调用者既画顶栏也画它处小字, 函数粒度分不开。发起者查找 (栈上找 +
+ * call 指令校验) 只留给诊断日志 (vcall)。 */
 
 typedef struct {
     int Enable;
@@ -155,7 +153,7 @@ static int VecNormC(int v)
     return (int)(short)(v & 0xFFFF);
 }
 
-/* DrawText 字形计数 / 行跨度 (探针已删, 只留正文盒判据) */
+/* DrawText 嵌套深度 + 正文盒判据 (只认位置条带那个除外, 见上) */
 static int g_DTDepth = 0;
 /* 简报正文盒内 (引擎按自有宽度换行): 步进保持原笔位, 不加宽 */
 static int g_DTBody = 0;
@@ -195,10 +193,8 @@ static int g_BriefState = 0;
 static int g_BriefOwnLogged = 0;   /* 自绘接管只记一次 */
 static int g_BriefWhyLogged = 0;   /* 退回引擎原因只记一次 */
 
-/* ---------------- Blit 层超武区接管已删除 ----------------
- * SuperPx 经游戏内验证无可见作用 (置 0 对比无变化): 列表行经 Print->Simple_
- * 已被 SWPanel 整块收集+隐藏, DrawText 系叠字未观测到漏网。整机移除
- * (VecSWRegion/深度计数/swForce/失败诊断), 右侧区文字走通用 Render 路径。 */
+/* Blit 层超武区接管已整块移除: 列表行经 Print->Simple_ 已被 SWPanel 收集+
+ * 隐藏, SuperPx 无可见作用。右侧区文字走通用 Render 路径。 */
 static int VecPickPx(void* t);
 static int VecMeasure(void* t, wchar_t wch, int* ph);
 static void VecBriefProbeW(wchar_t wch, int oa, int cw, int full);
@@ -577,19 +573,8 @@ static int VecSWColon(const wchar_t* s)
     return 0;
 }
 
-/* ---------------- 超武列表横向带 (收表/拦截共用) ----------------
- * 引擎把这批行画在**视口右缘**: PowerBarClass::Draw (0x6DA9D0, 由
- * TacticalClass::Render 的第三趟 0x4F4515 调用, 画进 Composite 0x887314)
- * 里行 x 是 `f(...) + ViewBounds.Width` —— 0x6DAF57 `add eax,[0x886FA4]`,
- * 且同一函数的 0x6DB005 把 `&ViewBounds` 当裁剪矩形传给 Simple_Text_Print。
- * 1x 实测: 视口右缘 1752, 名 x=1722 (=右缘-30), 计时器 x=1749 (=右缘-3);
- * 侧栏隐藏后视口右缘 1920, 整批挪到 ~1890 (=右缘-30)。
- *
- * ⚠⚠ ViewBounds 就是缩放用的视口 R (放大档 R = A*scale)。放大时这批行跟着
- * 视口缩到**视口右缘** (2x 下 846/873, 落在 R 里面), 随后被我们把 R 放大铺到
- * A 的那一步原样放大两倍 —— 于是原版列表又大又偏, 正好压在自定义面板上。
- * ⇒ 带必须跟着 ViewBounds 走, 一个像素都不能写死: 写死下界让放大档的行整批漏出拦截带 (`return g_OrigSimple` 放行) → 原版列表直接画出来
- * ⇒ 带必须跟着 ViewBounds 走, 一个像素都不能写死。*/
+/* 超武列表横向带 (收表/拦截共用): 行 x = 右缘-30/-3, 带须跟 ViewBounds 走
+ * (缩放时右缘会动, 写死即漏拦截)。名右对齐, 左界多留。 */
 #define SW_BAND_BACK 400      /* 左界留够: 名越长起点越靠左 (右对齐在右缘-30) */
 #define SW_BAND_FWD  8         /* 右界只留一点: 再往右就是侧栏列 (cameo 名) */
 
@@ -597,18 +582,25 @@ static void VecSWBand(int* lo, int* hi)
 {
     RectangleStruct vb;
     int right;
+    /* 同 right 直接复用 (lo/hi 是 right 的纯函数, ViewBounds 帧内不变)。 */
+    static int s_BandRight = -1, s_BandLo = 0, s_BandHi = 0;
     vb = *(const RectangleStruct*)(size_t)ADDR_SURF_VIEWBOUNDS;
     right = vb.X + vb.Width;
+    if (right == s_BandRight && right >= 128 && right <= 0x10000)
+    {
+        *lo = s_BandLo; *hi = s_BandHi;
+        return;
+    }
     if (right < 128 || right > 0x10000)
     {
-        /* ViewBounds 还没写好 (开局/切分辨率那一瞬): 退回老口径 (1300 .. 画布宽),
-         * 只是比现在宽, 别把整块原版列表漏出去。几何一好就自动让位给上面那条。*/
+        /* ViewBounds 没写好时退回老口径 (只宽不窄, 不漏拦截)。 */
         *lo = 1300;
         *hi = (g_SWCompW > 1300) ? g_SWCompW : 1300;
         return;
     }
     *lo = right - SW_BAND_BACK;
     *hi = right + SW_BAND_FWD;
+    s_BandRight = right; s_BandLo = *lo; s_BandHi = *hi;
 }
 
 SWCapRow g_SWCap[SWCAP_MAX];
@@ -626,15 +618,8 @@ static void VecSWStore(int kind, const wchar_t* s, int n, int fore, int x,
     int i;
     int idx = -1;
     SWCapRow* r;
-    unsigned now = GetTickCount();
-    /* ★★ 归并键 = (y, kind), **不是** (y, |dx|<=6)。
-     * 引擎这批行的位置会随侧栏模式**整体平移** (名 1722/计时器 1749 -> 侧栏
-     * 隐藏后 ~1890/~1917, 差 ~168)。用 x 邻近归并时, 平移后的行一律判成"新行"
-     * => 表里同时留着旧模式的行和新模式的行 => 很快撑爆 SWCAP_MAX(32)
-     * => `if (g_SWCapN >= SWCAP_MAX) return;` 把后来的行整批丢掉
-     * => 面板条目变少 (实测 11 条只剩 5 条, 且丢的是先画的那几条)。
-     * 按 (y,kind) 归并, 平移只是就地更新 x (下面本来就有 `r->x = x` 跟随漂移),
-     * 表大小恒定 = 行数 x 2。x 抖动 (±3, 1722~1725 实证) 由 x 跟随天然吸收。*/
+    /* now 延迟取: 归并搜索先行, 仅 FRESH 判定与 tick 赋值处现取 (省热路径时钟调用)。 */
+    /* 归并键 = (y,kind): 侧栏模式平移 x 时就地更新, 表大小恒定。 */
     for (i = 0; i < g_SWCapN; i++)
         if (g_SWCap[i].y == y && g_SWCap[i].kind == kind) { idx = i; break; }
     if (idx < 0)
@@ -648,8 +633,7 @@ static void VecSWStore(int kind, const wchar_t* s, int n, int fore, int x,
         }
         else
         {
-            /* 满了: 踢掉最陈旧的一行再收, 而不是直接丢弃。
-             * 直接丢弃会让"最后几行永远进不来" (表被前面的陈旧行占死)。*/
+            /* 满了踢最陈旧的一行 (直接丢弃会饿死后来的行)。 */
             int old = 0;
             for (i = 1; i < g_SWCapN; i++)
                 if (g_SWCap[i].tick < g_SWCap[old].tick) old = i;
@@ -664,7 +648,7 @@ static void VecSWStore(int kind, const wchar_t* s, int n, int fore, int x,
         r = &g_SWCap[idx];
         r->x = x;   /* 跟随漂移 + 模式平移 */
         if (src == 1 && fore < 0 && r->fore >= 0 &&
-            now - r->tick <= SW_FRESH_MS) return;   /* 新鲜正文, 后备碎片靠边 */
+            GetTickCount() - r->tick <= SW_FRESH_MS) return;   /* 新鲜正文, 后备碎片靠边 */
     }
     if (n > 63) n = 63;
     for (i = 0; i <= n; i++) r->s[i] = s[i];
@@ -672,17 +656,10 @@ static void VecSWStore(int kind, const wchar_t* s, int n, int fore, int x,
     r->kind = kind;
     if (fore >= 0) r->fore = fore;
     else if (r->fore < 0) r->fore = (kind == 0) ? 0x07FF : 0xFFFF;
-    r->tick = now;
+    r->tick = GetTickCount();
 }
 
-/* ---------------- 主画布判据 (窗口面 or 缩小档大面) ----------------
- * 引擎的 Simple_Text_Print / Print 把**渲染面**当实参传下来, 而超武列表的收表/
- * 拦截就是靠"这块面是不是主画布"这一句把原版那批行摘掉 (见 VecSimpleEntry)。
- * 缩小档 (scale>1) 三趟地图期间渲染面 = R 大的离屏大面 (2503x1497), 只认窗口面
- * ⇒ 整批漏出拦截带被放行, 原版名/计时器/底色条画进大面, 降采样后挤在画面右缘
- * (实测图4), 而自定义面板因为收不到行整块消失。
- * `SB_IsBigSurface` 是指针判定, 不受窗口改尺寸影响; 1x/放大档下它恒 0 ⇒
- * 下面的判据与原版逐位相同。*/
+/* 主画布判据 (窗口面 or 缩小档大面): 三趟期间渲染面就是大面, 只认窗口面会漏拦截。 */
 static int VecIsCanvas(void* surf, int w, int h)
 {
     if (!surf || w <= 0 || h <= 0) return 0;
@@ -699,18 +676,13 @@ static int VecSWCapture(void* surf, int kind, const wchar_t* s, int x, int y)
     int sw = 0, sh = 0, n = 0;
     if (!g_SWPanelOn) return 0;
     if (!s || !IsPlausiblePtr(s)) return 0;
-    /* y 带固定 (顶部 32 是横条, 下面到**这块面**的底); x **不设上界** ——
-     * 这层只兜计时器 (靠冒号判别), 引擎侧栏隐藏后把它们挪到 ~1890,
-     * 放大档下它们跟着视口缩到 ~846 (见 VecSWBand), 任何写死的下界都会让
-     * 这层漏 (只剩黑底, 因为底色条不走这层)。
-     * 名不在这里收 (见 Simple_ 入口注释: Print 层的名与悬浮提示不可区分)。*/
+    /* y 带固定 (顶部 32 是横条); x 不设上界 (侧栏隐藏/缩放会挪计时器)。 */
     if (surf && IsPlausiblePtr(surf))
     {
         int* b = (int*)surf;
         sw = b[1]; sh = b[2];
     }
-    /* ⚠ 缩小档 (scale>1): 三趟地图期间渲染面 = R 大的离屏大面 (2503x1497),
-     * 只认窗口面 (1920x1080) 会让这一层整批漏 ⇒ 底色条画出来、计时器丢光。*/
+    /* 主画布判据见 VecIsCanvas (缩小档大面也要认)。 */
     if (!VecIsCanvas(surf, sw, sh)) return 0;
     {
         int lo, hi;
@@ -721,8 +693,7 @@ static int VecSWCapture(void* surf, int kind, const wchar_t* s, int x, int y)
     if (g_SWCapN >= SWCAP_MAX && n > 0)
     {
         int i, found = 0;
-        /* 找重必须用与 VecSWStore **同一个键** (y,kind), 否则这里判"没有重复"
-         * 而 Store 里又新建一行, 表反而更容易满。*/
+    /* 找重与 VecSWStore 同键 (y,kind), 否则表更容易满。 */
         for (i = 0; i < g_SWCapN; i++)
             if (g_SWCap[i].y == y && g_SWCap[i].kind == kind) { found = 1; break; }
         if (!found) return 1;   /* 满了: 照跳, 不收 */
@@ -731,16 +702,13 @@ static int VecSWCapture(void* surf, int kind, const wchar_t* s, int x, int y)
     return n > 0 ? 1 : 0;   /* 空串不跳过 (底色行为与原版一致) */
 }
 
-/* (旧捕获/重画/探针已删除: 定案为 Simple_ 当场收集 + 整块重绘) */
 
 /* ---------------- 菜单按钮整体替换 ----------------
- * 路径定案 (vmenu 探针, 已删): DrawText caller=0x00621144 (与简报正文
- * 同一调用者, 再用标志+尺寸区分), flags=5, 123x24 (正文, 如 1773,231
- * 游戏控制) / 121x20 (阴影, +2,+2 偏移)。
- * 入口时表面尚未锁定 (t+0x0C 无效), 故入口只收串+矩形 (t 在此不可靠,
- * 不建字形); 首个 Blit 建全串字形 (Blit 的 t 才是真 BitFont)、算总宽、
- * 矩形内居中起笔, 之后按实际墨水宽度走笔, 引擎 x 不用。
- * 原字形一次不画 (灾难失败才回落原版保底可读)。 */
+ * DrawText caller=0x00621144 (与简报正文同一调用者, 用标志+尺寸区分),
+ * flags=5, 123x24 (正文) / 121x20 (阴影, +2,+2)。入口时表面尚未锁定
+ * (t+0x0C 无效), 故入口只收串+矩形; 首个 Blit 建全串字形 (Blit 的 t 才是
+ * 真 BitFont)、算总宽、矩形内居中起笔, 之后按实际墨水宽度走笔。原字形
+ * 一次不画 (灾难失败才回落原版保底可读)。 */
 static int g_MenuDepth = 0;
 #define MENU_MAXCH 64
 static wchar_t g_MenuStr[MENU_MAXCH + 1];
@@ -759,11 +727,6 @@ static int VecMenuMatch(unsigned caller, int w, int h, int flags)
     if ((w == 123 && h == 24) || (w == 121 && h == 20)) return 1;
     return 0;
 }
-
-/* ---------------- 悬浮提示背景盒自适应已删除 ----------------
- * ToolBox=0 关闭定案 (三条原因见 notes/VecText矢量文本.md (顶栏资金/简报正文)), 1/2 已退役,
- * 代码整机移除 (收串/取样拓盒/自有笔位)。悬浮提示走通用 Render 路径,
- * 电力提示出界修复由 TipBox 接管。 */
 
 
 /* PUA 串行步进: max(原步进, 矢量字号, 串内最大图标高), 只增不减。
@@ -1129,25 +1092,14 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
     int a1, int a2, int a3, int a4, int a5, int a6, int a7)
 {
     if (!g_OrigSimple) return 0;
-    /* 提示盒跟字走 (电力提示出界修复): Simple_Wide 的盒 R 参数 a6
-     * (盒右界=a6+2, 反汇编双盒路径同源) 取自上游旧字宽; GetDim 接管已把
-     * 宽字宽替换, 盒由引擎自画 (半透明+红边框原样, 一像素不碰)。 */
-    /* 超武名单行只出自侧栏绘制者 0x004A6345 (vswcaller 取证:
-     * 名/计时器行 c=0x004A6345, fore=0x07FF/0xFFFF, 名 x=1722 计时器 x=1749;
-     * 世界悬浮提示出自扩展模块 (c=0x73AC616A, 如红字 fore=0xA92A)。
-     * 同带同形但发起者不同, 在此按发起者一刀切: 非侧栏一律放行,
-     * 提示串再也进不了收集表。 */
+    /* 提示盒跟字走: GetDim 接管已换宽字宽, 盒由引擎自画 (一像素不碰)。 */
+    /* 名单行只出自侧栏绘制者 0x004A6345: 按发起者一刀切, 提示串进不了收集表。 */
     if (g_SWPanelOn && g_SWCompW &&
         (unsigned)__builtin_return_address(0) == 0x004A6345u &&
         IsPlausiblePtr((void*)a1))
     {
         int* b = (int*)a1;
-        /* ⚠ 缩小档 (scale>1): 三趟地图期间渲染面 = R 大的离屏大面 (2503x1497),
-         * 只认窗口面 (1920x1080) 会让整批 inband 判成 false ⇒ `return
-         * g_OrigSimple(...)` 放行 ⇒ 原版名/计时器/底色条原样画进大面, 降采样
-         * 后挤在画面右缘 (实测图4), 而自定义面板因为收不到行而整块消失。
-         * VecIsCanvas 窗口面与大面都认; 1x/放大档下它恒等价于
-         * `b[1]==g_SWCompW && b[2]==g_SWCompH`。*/
+        /* 主画布判据见 VecIsCanvas (大面也要认, 否则漏拦截)。 */
         if (VecIsCanvas((void*)a1, b[1], b[2]) &&
             IsPlausiblePtr((void*)a2) && IsPlausiblePtr((void*)a3))
         {
@@ -1159,28 +1111,16 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
             int n = 0, sx, sy;
             int inband, isEmpty;
             sx = p2[0] + p3[0]; sy = p2[1] + p3[1];
-            /* ★ 这条 inband 是"隐藏原版超武列表"的**唯一开关**: inband=0 直接
-             * `return g_OrigSimple(...)` 放行, 原版名/计时器/底色条原封动画出来。
-             *
-             * 横向带**必须跟着 ViewBounds 走** (见 VecSWBand): 这批行的 x 是
-             * `ViewBounds.Width - 30` (名) / `-3` (计时器), 而 ViewBounds 就是
-             * 缩放用的视口 R = A*scale。放大档下它们缩到 ~846/873, 缩小档下撑到
-             * ~2473/2500, 写死任何固定下界 (1300 / 1752 / g_MapRight) 都会把
-             * 它们整批踢出 inband ⇒ 收表也不收、拦截也不拦。
-             *
-             * y 侧 32..**这块面的高** 保留: 挡顶部横条与世界悬浮提示 (c=0x73AC616A
-             * 那条在 VecSimpleEntry 入口就按发起者挡掉了, 这里只是双保险)。*/
+            /* inband 是隐藏原版列表的唯一开关: 横向带跟 ViewBounds 走 (见
+             * VecSWBand, 写死下界即整批踢出), y 取 32..面高 (挡横条与悬浮)。 */
             {
                 int lo, hi;
                 VecSWBand(&lo, &hi);
                 inband = (sx >= lo && sx <= hi && sy >= 32 && sy <= b[2]);
             }
-            if (text) { while (text[n] && n < 64) n++; }
             if (inband)
             {
-                /* 空串 = 该行的**底色条** (Simple_ 画背景时文本为空)。
-                 * 设计目的就是整体隐藏原版列表, 底色必须一起藏, 否则只剩黑底。
-                 * 只拦不收 —— 收进去会多出一个空行。*/
+                /* 空串 = 该行底色条: 只拦不收 (收了多空行), 一起藏掉。 */
                 isEmpty = (!IsPlausiblePtr((void*)raw) || raw[0] == 0);
                 if (isEmpty)
                 {
@@ -1191,6 +1131,8 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
                     }
                     return ecxIn;
                 }
+                /* 长度只在命中后数 (大多数普通文本走不到这里)。 */
+                if (text) { while (text[n] && n < 64) n++; }
                 if (text && !VecSWHasEq(text) && n > 0)
                 {
                     VecSWStore(kind, text, n, a4, sx, sy, 0);
@@ -1482,12 +1424,10 @@ static void VecRefCalibrate(int px)
     CopyFace(g_RefFace, g_VTFace);
 }
 
-/* ---------------- 原版墨水盒 ----------------
- * 已删除 (改版 game.fnt 的墨水盒本身就是错位的, 照抄等于抄错)。
- * 原版哲学: 每个字在格内垂直居中, 与字体具体多高无关。
- * 摆位只用三样全自适应量: 格高 h (引擎度量)、现墨水盒 (GDI 实掃)、
- * 用户偏移。16/12/19/原版/改版/任意 FontPx, 全走同一条居中公式。 */
-/* (Blit 取字形寻址结论记 notes, 代码里不再测字体文件) */
+/* ---------------- 原版墨水盒的摆位哲学 ----------------
+ * 每个字在格内垂直居中, 与字体具体多高无关。摆位只用三样自适应量: 格高 h
+ * (引擎度量)、现墨水盒 (GDI 实扫)、用户偏移 —— 任意 FontPx 走同一条公式。
+ * 墨水盒本身**不能**照抄原版: 改版 game.fnt 的墨水盒是错位的。 */
 
 /* ---------------- 字号校准 ----------------
  * GDI 字号对格高 h (引擎度量, 自适应 12/16/19): 试渲染"永",
@@ -1914,9 +1854,8 @@ static int VecMenuRender(void* t, wchar_t wch, int adv, int h, int x, int y,
     return x + adv;
 }
 
-/* ---------------- 超武逐行绘制已删除 ----------------
- * 整体接管改为: Print 入口隐藏+收集, 消息帧统一整块重绘 (见 MOExperience 超武面板)。
- * 逐行背景/自锁/虚表 (旧 VecSWRowDraw/VecSWBandFill/VecSWVt/VecSWDoLog) 不再需要。 */
+/* 超武逐行绘制已移除: 整体接管改为 Print 入口隐藏+收集, 消息帧统一整块重绘
+ * (见 MOExperience 超武面板)。 */
 
 int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y, int color)
 {
@@ -2013,9 +1952,7 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                 int cR = oldR > R0 ? R0 : oldR;
                 /* 真裁剪 (无模式切换): 盒与字永远同宽同锚
                  * ([anchor-4, tipx+tot+4]), 作为一个整体进出屏幕;
-                 * 出屏侧不画边框。
-                 * v67 序号证 Print:Simple_=1:1, 无额外绘制;
-                 * 此前"突然缩短"是出界回落在 tipx≈4 处跳变, 已删。 */
+                 * 出屏侧不画边框。Print:Simple_ 是 1:1, 无额外绘制。 */
                 if (L0 <= R0 && yT >= 0 && yB <= 4096)
                 {
                     unsigned bc = 0xF800u;
@@ -2173,7 +2110,7 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                     LogLine(ff);
                 }
             }
-            if (r != VC_FAIL) return r - (x - ox);
+            if (r != VC_FAIL) return r;   /* x == ox (本函数内 x 只读)。 */
         }
     }
     return g_OrigBlit(t, NULL, wch, ox, y, color);
@@ -2218,16 +2155,30 @@ static int PatchBlit(void)
     return 1;
 }
 
-/* 通用跳板/补丁 (入口钩用, 字节数按指令边界取)
- * ⚠ `n` 必须落在一条**完整指令的末字节**上。跳板把 [at, at+n) 原样搬走再跳回
- *   at+n; 若 at+n 落在某条指令中间, 跳板就从半个指令开始重新反汇编 → 执行到
- *   莫名其妙的指令直接飞掉 (本项目已踩过一次: 0x6A8061 那处抄 10B 实际是 12B,
- *   跳回点落在 call [eax+0x34] 中间, 游戏闪退)。
- *   用法: 先 an.py dis 确认末字节再填 n, 复制粘贴时逐条核对。 */
+/* 通用跳板/补丁 (入口钩用)。
+ * `n` 须落在完整指令末字节上 (落半截即从半个指令反汇编跑飞)。
+ * `n` 范围禁 E8/E9 (rel32 基准变跳板自己 ⇒ 跳数据地址去，见 notes §23)，
+ * 这里直接拒绝。用前先反汇编确认末字节。 */
 static void* BuildTrampAt(unsigned at, int n, unsigned back)
 {
     unsigned char* b;
     int i;
+    if (n < 1 || n > 16) return NULL;
+    for (i = 0; i < n; i++)
+    {
+        unsigned char c = ((unsigned char*)at)[i];
+        if (c == 0xE8 || c == 0xE9)
+        {
+            char m[80], n1[16];
+            unsigned q = 0;
+            q = AppendCStr(m, q, "tramp refused: PC-relative at ", sizeof(m));
+            UtoA(at, n1); q = AppendCStr(m, q, n1, sizeof(m));
+            q = AppendCh(m, q, ' ', sizeof(m));
+            UtoA((unsigned)c, n1); q = AppendCStr(m, q, n1, sizeof(m));
+            LogLine(m);
+            return NULL;
+        }
+    }
     b = (unsigned char*)VirtualAlloc(NULL, 32, MEM_COMMIT | MEM_RESERVE,
                                      PAGE_EXECUTE_READWRITE);
     if (!b) return NULL;
@@ -2376,9 +2327,6 @@ void VecText_EnsureInit(void)
 
 void VecText_Install(void)
 {
-    char b1[16], buf[192];
-    unsigned p;
-    (void)b1; (void)buf; (void)p;
     VecText_EnsureInit();
     if (!g_Log) return;   /* 日志都打不开就不装钩 (无意义) */
     if (!g_VT.Enable) { LogLine("vtext: disabled"); return; }
@@ -2452,12 +2400,7 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: blitsb bytes mismatch"); LogBytes((unsigned char*)0x6A70E0u); }
     }
-    /* 缩放: 放大前那次提示框绘制 (0x6A7089, 抢 7B = 8B 11 6A 01 FF 52 0C =
-     * `mov edx,[ecx]` / `push 1` / `call [edx+0x0C]`)。那是 SidebarClass::Draw
-     * 里的 `ToolTipManager::Draw(1)`, 落在 SB_CompositeMagnify **之前** ⇒ 放大档
-     * 提示框出两份 (大的那份被放大成 2 倍字号 + 2 倍偏)。Entry 里改成"只跑
-     * Process 不画", 留 GScreenClass::Render 里 0x4F4564 那次。
-     * 安装见 MOExperience (MOExperience_TipPreDrawEntry/g_TipPreDrawTramp)。 */
+    /* 放大前那次提示框绘制 (SidebarClass::Draw 里那次): 放大档改"只跑 Process 不画"。 */
     {
         static const unsigned char kWantTipPre[7] =
             { 0x8B, 0x11, 0x6A, 0x01, 0xFF, 0x52, 0x0C };
@@ -2470,21 +2413,15 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: tip-pre bytes mismatch"); LogBytes((unsigned char*)0x6A7089u); }
     }
-    /* CCToolTip 的"选面/量宽"矩形改指到 A 影子 (ScaleBar.cpp 的 g_AView,
-         * notes/地图缩放.md §5.2)。引擎把 ViewBounds 的**绝对地址**写死在指令
-         * imm32 里, 所以改指 = 改那几条 imm32, 指令长度不变:
-         *   ToolTipManager::Update 0x478BA0: 0x478BD1 [X] / 0x478BD7 [Width] /
-         *     0x478C17 mov edi,ViewBounds (之后 [edi]/[edi+8] 量宽与居中走影子)
-         *   CCToolTip::DrawText 0x478E30: 0x478E4A [X] / 0x478E50 [Width]
-         * 侧栏两处 SidebarBounds 不动; 1x 时 A==R ⇒ 无变化; 不写回 ViewBounds。*/
+    /* CCToolTip "选面/量宽"矩形改指到 A 影子: 引擎把 ViewBounds 绝对地址写死在
+     * imm32 里, 改那几条 imm32 (长度不变)。侧栏 SidebarBounds 不动。 */
         {
             unsigned char* p;
             DWORD old;
             unsigned i, n;
             int bad = -1;
             unsigned abase = (unsigned)(size_t)SB_AViewBlock();
-            /* at / imm = imm32 在指令内的偏移 / off = 影子内偏移 / op = opcode 字节
-             * (⚠ `A1 <imm32>` / `BF <imm32>` 形态第 2 字节已是立即数, 不能当 opcode) */
+            /* at/imm = imm32 在指令内偏移 / off = 影子内偏移。 */
             static const struct {
                 unsigned at; unsigned imm; unsigned off; unsigned oplen;
                 unsigned char op[2];
@@ -2528,12 +2465,8 @@ void VecText_Install(void)
                 LogLine(buf);
             }
     }
-    /* ⇒ UpdatePrimarySurface 的两个调用点 (0x777717 / 0x77776F) 挂过字节校验和安装都成功, 但运行时**一次都没被调用**
-     * ——— 5 字节被 Ares 在初始化之后改写掉了。所以不能对这两个地址挂任何功能钩,
-     * 只留一个“补丁是否还在”的监听 (MOE_CheckUpsPatch): 万一以后要里这里, 先确认没人抢。*/
-    /* 侧栏列纠正钩 (DisplayClass::InitGUI 0x6ABD30, 抢 5B = 83 EC 24 53 55)。
-     * 那里有一批一次性的侧栏布局写入全用 SidebarBounds.X, 必须在它之前纠正,
-     * 否则 FM_Poll 每循环纠正来不及。见 MOExperience.cpp 的 FM_SyncSidebarColumn。*/
+    /* UpdatePrimarySurface 两调用点字节被 Ares 改写过, 不挂功能钩, 只监听补丁存活。 */
+    /* 侧栏列纠正钩 (InitGUI 一次性布局须先纠, FM_Poll 每循环纠来不及)。 */
     {
         static const unsigned char kWantInitGui[5] = { 0x83, 0xEC, 0x24, 0x53, 0x55 };
         if (BytesSame((unsigned char*)0x6ABD30u, kWantInitGui, 5))
@@ -2545,10 +2478,7 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: initgui bytes mismatch"); LogBytes((unsigned char*)0x6ABD30u); }
     }
-    /* 视口 gadget 输入钩 (0x4E1640, 首6B = 83 EC 0C 53 55 56 = sub esp,0x0C / push
-     * ebx / push ebp)。这是 gadget 命中链的入口, FullMap 要在
-     * ExtractGadgetAt 之前把横跨视口那个容器 gadget 收窄。
-     * 安装见 MOExperience (MOExperience_GadgetInputEntry/g_GadgetInputTramp)。 */
+    /* 视口 gadget 输入钩 (命中链入口, FullMap 在此收窄横跨视口的容器)。 */
     {
         static const unsigned char kWantGadgetInput[6] =
             { 0x83, 0xEC, 0x0C, 0x53, 0x55, 0x56 };
@@ -2561,8 +2491,7 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: gadgetinput bytes mismatch"); LogBytes((unsigned char*)0x4E1640u); }
     }
-/* 呈现入口钩 (0x4F4780, 首7B=83 EC 5C 8B 44 24 60): 缩放模块在这条路之后做放大呈现。
-     * 安装见 MOExperience (MOExperience_UpdateEntry/g_UpdateTramp)。 */
+/* 呈现入口钩 (缩放模块在这条路之后做放大呈现)。 */
     {
         static const unsigned char kWantUpdate[7] = { 0x83, 0xEC, 0x5C, 0x8B, 0x44, 0x24, 0x60 };
         if (BytesSame((unsigned char*)0x4F4780u, kWantUpdate, 7))
@@ -2589,11 +2518,7 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: render bytes mismatch"); LogBytes((unsigned char*)0x4F4480u); }
     }
-/* 缩放 (缩小档): Render 里 "[0x887314] = 渲染面" 那条 (0x4F4492, 首5B =
- * `A3 14 73 88 00`) 与紧跟着三趟地图前那条 (0x4F44CB, 首5B = `A1 1C 73 88 00`),
- * 一让一装: 大面被暴露的窗口因此只剩三趟地图, 引擎那串按**窗口坐标**画的指令
- * (光标擦除等) 碰不到大面 ⇒ 画面中部不再闪底栏残影。安装见 MOExperience
- * (MOExperience_PreCurEntry/g_PreCurTramp, MOExperience_MapEntry/g_MapTramp)。 */
+/* Render 里两条 (0x4F4492 让出 / 0x4F44CB 装回): 大面暴露窗口只剩三趟地图。 */
     {
         static const unsigned char kWantPreCur[5] = { 0xA3, 0x14, 0x73, 0x88, 0x00 };
         if (BytesSame((unsigned char*)0x4F4492u, kWantPreCur, 5))
@@ -2616,13 +2541,7 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: mapentry bytes mismatch"); LogBytes((unsigned char*)0x4F44CBu); }
     }
-/* 缩放 (缩小档): Render 里 chrome pass (虚表 +0x40 = 0x6D0A20, 底栏/侧栏那一趟)
- * 调用点 0x4F44FD (首5B = `8B 16 50 8B CE`, 下一条 0x4F4502 就是
- * `FF 52 40` = call [edx+0x40]) 让回窗口面, 它之后 0x4F4505 (首6B =
- * `8B 0D 1C 73 88 00`) 装回大面。这一趟全按**窗口坐标**画: 底栏矩形 [0xB0FC58]、
- * 侧栏图标、SidebarClass::Draw 里的 ToolTipManager::Draw(1) (悬停提示盒)。
- * 挡不住它 ⇒ 底栏残影闪在画面中部 (实测图1) + 悬停提示显示两次 (实测图2)。
- * 安装见 MOExperience (MOExperience_ChromePreEntry/PostEntry)。 */
+/* chrome pass 那趟 (窗口坐标画): 0x4F44FD 让出, 0x4F4505 装回。 */
     {
         static const unsigned char kWantChromePre[5] =
             { 0x8B, 0x16, 0x50, 0x8B, 0xCE };
@@ -2647,9 +2566,7 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: chrome-post bytes mismatch"); LogBytes((unsigned char*)0x4F4505u); }
     }
-/* 缩放 (缩小档): 三趟地图之后、引擎 UI 之前 (0x4F451B) 还原窗口面 + 降采样。
-     * 首 5B = `A0 19 B5 B0 00` (mov al,[0xB0B519]), 跳回 0x4F4520。
-     * 安装见 MOExperience (MOExperience_AfterMapEntry/g_AfterMapTramp)。 */
+/* 三趟地图后、引擎 UI 前还原 + 降采样 (0x4F451B)。 */
     {
         static const unsigned char kWantAfterMap[5] = { 0xA0, 0x19, 0xB5, 0xB0, 0x00 };
         if (BytesSame((unsigned char*)0x4F451Bu, kWantAfterMap, 5))
@@ -2661,42 +2578,7 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: aftermap bytes mismatch"); LogBytes((unsigned char*)0x4F451Bu); }
     }
-/* 诊断: chrome pass 调用点前的探针 (0x4F4589), 把 this/虚表 +0x44/各渲染面打出来。
-     * 首 5B = `A1 1C 73 88 00` (mov eax,[0x88731C]), 跳回 0x4F458E。
-     * (0x4F4596 只有 4 字节 `8B 16 8B CE`, PatchAt 要求 n>=5, 装不上 —— 就往前挪到
-     *  这个 5 字节对齐点; 中间只隔着一条 WWMouse::vt+0x3C, 它不改 [0x887314]。)*/
-    {
-        static const unsigned char kWantChrome[5] =
-            { 0xA1, 0x1C, 0x73, 0x88, 0x00 };
-        if (BytesSame((unsigned char*)0x4F4589u, kWantChrome, 5))
-        {
-            g_ChromeTramp = BuildTrampAt(0x4F4589u, 5, 0x4F458Eu);
-            if (g_ChromeTramp && PatchAt(0x4F4589u, (void*)MOExperience_ChromeEntry, 5))
-                LogLine("vtext: chrome probe ON");
-            else { LogLine("vtext: chrome probe OFF"); g_ChromeTramp = NULL; }
-        }
-        else { LogLine("vtext: chrome probe bytes mismatch"); LogBytes((unsigned char*)0x4F4589u); }
-    }
-/* 诊断: BlitImage (0x4AED70) 目标面探针 —— 谁在把窗口坐标的东西画进大面。
-     * 首 6B = `81 EC 94 00 00 00` (sub esp,0x94 的**长**立即数形式, 不是 83 EC 94),
-     * 跳回 0x4AED76。
-     * ⚠ 别跟 ADDR_BLIT 搞混: 那是**字形** blitter (VecText_BlitHook 画单个字符),
-     *   和这里的 BlitImage(整张位图) 是两回事。*/
-    {
-        static const unsigned char kWantBlit[6] =
-            { 0x81, 0xEC, 0x94, 0x00, 0x00, 0x00 };
-        if (BytesSame((unsigned char*)0x4AED70u, kWantBlit, 6))
-        {
-            g_BlitTramp = BuildTrampAt(0x4AED70u, 6, 0x4AED76u);
-            if (g_BlitTramp && PatchAt(0x4AED70u, (void*)MOExperience_BlitDiagEntry, 6))
-                LogLine("vtext: blit-big probe ON");
-            else { LogLine("vtext: blit-big probe OFF"); g_BlitTramp = NULL; }
-        }
-        else { LogLine("vtext: blit-big bytes mismatch"); LogBytes((unsigned char*)0x4AED70u); }
-    }
-/* 缩放: 边缘卷屏 (DisplayClass 0x692B60) 入口把点换回物理鼠标 (屏幕空间死区)。
-     * 首 7B = `83 EC 18 53 55 56 57` (sub esp,0x18 / push ebx/ebp/esi/edi),
-     * 跳回 0x692B67。安装见 MOExperience (MOExperience_EdgeFixEntry/g_EdgeFixTramp)。 */
+/* 边缘卷屏入口: 点换回物理鼠标 (0x692B60)。 */
     {
         static const unsigned char kWantEdgeFix[7] =
             { 0x83, 0xEC, 0x18, 0x53, 0x55, 0x56, 0x57 };
@@ -2709,12 +2591,7 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: edgefix bytes mismatch"); LogBytes((unsigned char*)0x692B60u); }
     }
-/* 缩放 (缩小档): DisplayClass::ProcessClickCoords (0x692300) 入口把**视口外**的点
- * 拒掉。首 7B = `8B 44 24 10 83 EC 18`, 跳板跳回 0x692307。
- * 该函数只判 X<0 / Y<0 (0x69234B / 0x692356), 没有上界判定; 而缩小档下
- * ViewBounds = R 比窗口大, 底栏带的物理 y (1048..1080) 落在 R 之内 ⇒ 引擎把底栏
- * 当成"地图上 y=1060 那一带", 选中单位点底部底栏 = 对**画面中部**的地图像素下令。
- * 安装见 MOExperience (MOExperience_ClickCoordsEntry/g_ClickCoordsTramp)。 */
+/* ProcessClickCoords 入口: 视口外的点拒掉 (该函数无上界判定, 见 .cpp)。 */
     {
         static const unsigned char kWantClickCoords[7] =
             { 0x8B, 0x44, 0x24, 0x10, 0x83, 0xEC, 0x18 };
@@ -2727,13 +2604,7 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: clickcoords bytes mismatch"); LogBytes((unsigned char*)0x692300u); }
     }
-/* 缩放: TacticalClass::Clamp_Center (0x6D8640) 入口接管夹位。首 5B =
- * `A1 E4 F8 87 00`。视口 > 地图时原版的 min>max 自相矛盾 ⇒ TacticalPos 每帧跳
- * ⇒ 抖动 + 残影, 这里把该轴钉在地图正中 (推导见 ScaleBar.cpp 的 SB_ClampFix)。
- * ★ **不再建跳板**: 边界改成直接读引擎全局自己算, 不回调原版了 —— 原版结尾是
- *   裸 `ret 4`, 跨边界调它踩过调用约定 (cdecl 双清栈把 `Set_View_Dimensions`
- *   的栈踩烂, 崩在 Ares 的 .data)。所以这里只做字节校验 + 入口跳板。
- * 安装见 MOExperience (MOExperience_ClampCenterEntry)。 */
+/* Clamp_Center 入口接管 (不回调原版: 它是裸 ret 4, 跨边界调会双清栈)。 */
     {
         static const unsigned char kWantClamp[5] =
             { 0xA1, 0xE4, 0xF8, 0x87, 0x00 };
@@ -2745,9 +2616,7 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: clampcenter bytes mismatch"); LogBytes((unsigned char*)0x6D8640u); }
     }
-/* 通用拉伸 blit (0x6BA580, cameo/图标) 的野面守卫钩。
-     * 首 5B = `83 EC 14 55 56` (sub esp,0x14 / push ebp/esi), 跳回 0x6BA585。
-     * 安装见 MOExperience (MOExperience_BlitGuardEntry/g_BlitGuardTramp)。 */
+/* 通用拉伸 blit 守卫钩 (0x6BA580, cameo/图标越界写拦)。 */
     {
         static const unsigned char kWantBlitGuard[5] =
             { 0x83, 0xEC, 0x14, 0x55, 0x56 };
@@ -2760,21 +2629,21 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: blitguard bytes mismatch"); LogBytes((unsigned char*)0x6BA580u); }
     }
-/* 缩放: 鼠标折算在**源头**做 —— 换掉 WWMouseClass 虚表 +0x34
-     * (GetMousePosition), 让引擎拿到的已经是视口空间的点。11 个调用点一次
-     * 覆盖 (框选橡皮线/点选/Scroll_Map/单位矩形命中全在里面), 不再需要按
-     * 调用点白名单去挂 ClientToCoords / CoordsToCell (那两个钩已拆, 留着
-     * 会折两次)。详见 MOExperience.cpp 的说明。 */
+/* 迷雾 DrawPixelEffects 越界写护栏 (挂函数入口, 不挂 E8 调用点)。 */
+    {
+        static const unsigned char kWantShroud[5] = { 0x83, 0xEC, 0x48, 0x56, 0x57 };
+        if (BytesSame((unsigned char*)0x6D7840u, kWantShroud, 5))
+        {
+            g_ShroudTramp = BuildTrampAt(0x6D7840u, 5, 0x6D7845u);
+            if (g_ShroudTramp && PatchAt(0x6D7840u, (void*)MOExperience_ShroudEntry, 5))
+                LogLine("sbar: shroudguard hook ON");
+            else { LogLine("sbar: shroudguard hook OFF"); g_ShroudTramp = NULL; }
+        }
+        else { LogLine("sbar: shroudguard bytes mismatch"); LogBytes((unsigned char*)0x6D7840u); }
+    }
+/* 鼠标折算在源头做: 换虚表 +0x34, 11 个消费点一次覆盖 (详见 .cpp)。 */
     MOE_InstallMousePosHook();
-/* 缩放 (补): 上面那个钩只覆盖"每帧读鼠标在哪"。鼠标**按钮**消息走的是另一条路
-     * —— 窗口过程 0x7775C0 在 0x777640 把 Win32 消息的 lParam 指针当第4实参交给
-     * 0x6930A0, 那里面 (左键下/上/双击、右键下/上 五个分支) 全程不过 WWMouseClass
-     * ⇒ 框选锚点 / 点选落格是**没折算**的物理点, 与"当前点"(已折算) 差 A/R 倍 ⇒
-     * 单击被判成拖框、橡皮线起点偏到 2 倍远。钩 0x6930A0 入口把第4实参那个
-     * **指针**换成我们折算好的副本 (那个槽在它自己的栈帧上, ret 0x10 会弹掉,
-     * 窗口过程那边的 lParam 一个字节都不动 —— 那个值后面还要给 0x54F790 更新
-     * 鼠标位置, 改了不还原会把光标和 gadget 命中一起带歪)。
-     * 安装见 MOExperience (MOExperience_WndMouseEntry/g_WndMouseTramp)。 */
+/* 鼠标按钮消息路 (0x6930A0): 第 4 实参指针换折算副本 (不过 WWMouse, 详见 .cpp)。 */
     {
         static const unsigned char kWantWndMouse[8] =
             { 0xA0, 0x78, 0xE3, 0xA8, 0x00, 0x83, 0xEC, 0x1C };

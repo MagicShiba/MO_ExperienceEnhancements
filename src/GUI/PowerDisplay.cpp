@@ -175,7 +175,7 @@ static void PwrBlitCache(unsigned char* dstBase, int pitch, int W, int H,
 }
 /* 闪电落面 (调用方保证面已锁定): 纯内存写, 锁内安全。
  * 二值不透明 (幂等, 无叠加闪烁); 颜色经 Blend16(a=255, 恒等于直写),
- * 与文本逐位同色 (手写 col16 曾把绿通道 <<2 写错致偏青, 且不分 565/555, 已删)。 */
+ * 与文本逐位同色。 */
 static void PwrBoltPx(unsigned char* dstBase, int pitch, int W, int H,
                       int x0, int by, unsigned char fr, unsigned char fg,
                       unsigned char fb)

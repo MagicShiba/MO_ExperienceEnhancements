@@ -217,9 +217,8 @@ extern "C" __declspec(dllexport) DWORD __cdecl ToolTip_Extend(void* regs)
     orig = (const wchar_t*)ADDR_TOOLTIP_BUF;
     if (!IsPlausiblePtr(orig)) return 0;
     origLen = TT_WLen(orig);
-    /* 66 字总长钳制已删: 盒宽由 GetDim 精确度量 (含图标按行取最大) +
-     * 钳制钩兜底位置, 长名不再整体放弃 (之前"部分建筑不显示"即此误杀);
-     * 缓冲 160 硬兜底, 下面逐个检查。 */
+    /* 总长只做宽上限 (盒宽由 GetDim 精确度量 + 钳制钩兜底位置), 不按字数
+     * 放弃 —— 否则长名整体不显示。下面逐个检查。 */
     if (origLen <= 0 || origLen > 120) return 0;
     /* 总长预算 (第三行: \n + 电量[图标+数字≤6+空格] + 图标 + MM:SS):
      * 只做 150 上限 sanity, 不再卡 66。 */

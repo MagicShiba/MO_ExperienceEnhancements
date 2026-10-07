@@ -105,8 +105,7 @@ static int MS_IsSelectable(void* u)
     vt = *(void***)u;                     /* 调用方已验 u 合理 */
     if (!vt || !IsPlausiblePtr(vt)) return 0;
     fn = (Fn_IsSelectable)vt[VT_ISSELECTABLE];
-    /* 槽坏理论不可达 (OU_WhatAmI 已成功走过 +0x2C 槽): 当"可选"放行,
-     * 后续 MS_SelectOne 仍会自校验, 不会真选中。 */
+    /* 槽坏时按"可选"放行 (OU_WhatAmI 已成功走过该槽); MS_SelectOne 会自校验。 */
     if (!fn || !IsPlausiblePtr((const void*)fn)) return 1;
     return fn(u) ? 1 : 0;
 }

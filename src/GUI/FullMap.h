@@ -63,6 +63,17 @@ void FM_GetViewRects(RectangleStruct* a, RectangleStruct* r);
  * 纯本地摄像机, 联机安全。 */
 unsigned FM_RadarClickGate(void* regs);
 
+
+
+
+
+
+/* ProcessClickCoords 拒点门要不要为"侧栏顶部那一块"(资金条/小地图/顶部两按钮)
+ * 放行。= 点击门武装好了 且物理鼠标点落在那一块 ⇒ 与点击门必然同进同退 (两处判定
+ * 同源, 不会出现"放行了却没人接")。缩放档下那一块在引擎眼里已不在视口里
+ * (ViewBounds=R), 不放行就等于小地图点不动。纯几何判定, 不写内存。*/
+int  FM_ShouldDeferClick(void);
+
 /* 把 SidebarBounds.X 纠正成"侧栏列在屏幕上的起点"(视口右边界 - 列宽)。引擎自己
  * 算的是 viewRect.X+viewRect.W, 视口铺满后会差 168。FM_Poll 每循环调一次 (全屏
  * 态改推成"恒不成立"的鼠标路由阈值), DisplayClass::InitGUI 入口钩也调 ——

@@ -75,7 +75,7 @@
  * 只改 imm32, 不加指令、不动寄存器。少改一处就有一处把判定落到屏外:
  *  a) 0x478BD7 MouseClass 鼠标钳制路由
  *  b) 0x65386B 顶部两个小按钮的光标形状区命中
- *  c) 0x654332 ★ RadarClass 摆三个 gadget 的 X (0xB04978/0xB04910/0xB04A10)。
+ *  c) 0x654332 RadarClass 摆三个 gadget 的 X (0xB04978/0xB04910/0xB04A10)。
  *     位置只在 DisplayClass::InitGUI 里算一次 ⇒ 运行时改 gadget 矩形撑不过
  *     下一帧/换分辨率, 必须改这处 imm32。
  *  d) 0x653A3F RadarClass::Action 把鼠标 X 换算成侧栏面内坐标
@@ -98,14 +98,14 @@
 
 #define VT_COPY_FROM_PART 0x08   /* DSurface::CopyFromPart */
 #define VT_FILL_RECT      0x14   /* DSurface::FillRect */
-#define WW_VT_FIX_CURSOR  0x3C   /* WWMouseClass: 按面恢复光标 */
+#define WW_VT_FIX_CURSOR  0x3C   /* WWMouseClass: 把光标精灵烙到指定面 (第二实参 = isNOD/miniMap 标志) */
 
 /* ---------------- 引擎函数原型 ---------------- */
 
 typedef int (__thiscall *FnCopyFromPart)(void* self,
     RectangleStruct* pDstRect, void* pSrcSurface,
     RectangleStruct* pSrcRect, int bUnk1, int bUnk2);
-typedef void (__thiscall *FnMouseFixSurface)(void* mouse, void* surface, int flag);
+typedef void (__thiscall *FnMouseFixSurface)(void* mouse, void* surface, int isNodMiniMap);
 typedef int (__thiscall *FnFillRect)(void* self, RectangleStruct* rect, unsigned color);
 
 /* ---------------- 显示模式 (F11 循环切换) ----------------
@@ -128,14 +128,10 @@ static int s_Mode = FM_MODE_FULL;
 static int s_ToggleVk = 0x7A;   /* VK_F11 */
 static int s_Enable = 0;
 static int s_ExtraH = 5;
-static int s_JumpLogged = 0;
 /* 左键"本次按下已处理"标记 —— 只由点击门维护 (读 GetAsyncKeyState, 松开时清) */
 static int s_LbPress = 0;
 static int s_Warned = 0;
 static int s_SurfWarned = 0;
-static int s_ClickLogged = 0;
-static unsigned s_nPoll = 0;
-static unsigned s_nBlit = 0;
 /* 缩放 (ScaleBar): A = 满视图区, R = 引擎实际视口 (A 居中的 1/m)。每循环刷新。 */
 static RectangleStruct s_ViewA = { 0, 0, 640, 448 };
 static RectangleStruct s_ViewR = { 0, 0, 640, 448 };
@@ -194,8 +190,16 @@ static int Fm_ModeDisarm(void)
     return !Fm_ModeFull();            /* 侧栏不呈现时必须摘, 否则隐形按钮吃地图点击 */
 }
 /* 小地图点击门 (自己跳视口 + 吞穿透)。态0 让位给引擎 widget 分派, 态2 没有面板
- * 可点, 只有态1 开这道门。 */
-static int Fm_ModeGate(void)     { return Fm_ModeFull() ? 0 : !Fm_ModeBare(); }
+ * 可点, 只有态1 开这道门。**但缩放档例外**: 缩放时 ViewBounds=R, 小地图那块在
+ * 引擎眼里已经"不在视口里" (缩小档连 ProcessClickCoords 的入口都会被 ScaleBar
+ * 的 SB_PtInView 拒掉), 原生 RadarClass::Action 那条 gadget 链也不可靠 ⇒ 缩放档
+ * 一律自己接, 不看模式。1x 且非缩小档时逐位沿用原版 (Fm_ModeGate 为 0)。 */
+static int Fm_ModeGate(void)
+{
+    if (Fm_ModeBare()) return 0;
+    if (Fm_ModeFull()) return (SB_Zoomed() && !SB_Safe()) ? 1 : 0;
+    return 1;
+}
 /* 视口 gadget 要不要横向收窄成"视口减去侧栏列" */
 static int Fm_ModeTrim(void)
 {
@@ -209,7 +213,7 @@ static int Fm_ModeTrim(void)
  *   y >= 158 : 页签 + cameo + 底部电力条                   <- 丢掉
  * 所以直接 blit {0,0,SidebarBounds.Width,SidebarBounds.Y}, 分界线是引擎自己
  * 定的, 不用猜。FM_DrawRadarTo (画进 Composite) 用的是同一个矩形。 */
-static int Fm_KeepRect(RectangleStruct* out)
+static int Fm_KeepRect(RectangleStruct* out, int* swOut, int* shOut)
 {
     RectangleStruct* sb = (RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS;
     void* strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
@@ -225,6 +229,8 @@ static int Fm_KeepRect(RectangleStruct* out)
     {
         if (sw < 32 || sh < 32) return 0;
         out->X = 0; out->Y = 0; out->Width = sw; out->Height = sh;
+        if (swOut) *swOut = sw;
+        if (shOut) *shOut = sh;
         return 1;
     }
     k = sb->Y;
@@ -233,7 +239,76 @@ static int Fm_KeepRect(RectangleStruct* out)
     if (k > sh) k = sh;
     if (k < 32) return 0;
     out->X = 0; out->Y = 0; out->Width = sw; out->Height = k;
+    if (swOut) *swOut = sw;
+    if (shOut) *shOut = sh;
     return 1;
+}
+/* ---------------- 侧栏"顶部那一块" (资金条 + 小地图 + 顶部两个按钮) -------------
+ * Fm_KeepRect 在态0 返回的是**整条**侧栏面 (那是"呈现哪一块"的问题)。但
+ * "点击该不该落到地图上"问的是另一件事: 只有顶部那一块点了没意义 (纯 UI),
+ * 页签/cameo 点了是要下单的, 必须放行给引擎 gadget 链。所以单独一个函数,
+ * 三态一致 = {0,0,列宽,SidebarBounds.Y} (侧栏面内坐标)。
+ * ⚠️ **不加 s_ExtraH**: 那是"呈现上再多露几像素"的偏好, 不是点击语义。
+ * 加上去会把页签那一行最上面 5px 也吞掉, 页签就难点了。
+ * 态2 (全屏) 侧栏一块都不显示 ⇒ 返回 0。*/
+static int Fm_KeepTopRect(RectangleStruct* out)
+{
+    RectangleStruct* sb = (RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS;
+    void* strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
+    int sw = 168, sh = 1080, k;
+    if (!out) return 0;
+    if (Fm_ModeBare()) return 0;
+    if (strip && IsPlausiblePtr(strip))
+    {
+        int w = GtSurfGet(strip, GtVT_GET_WIDTH);
+        int h = GtSurfGet(strip, GtVT_GET_HEIGHT);
+        if (w > 0 && h > 0) { sw = w; sh = h; }
+    }
+    if (sw < 32 || sh < 32) return 0;
+    k = sb->Y;
+    if (k < 32 || k > 512) k = 158;
+    if (k > sh) k = sh;
+    if (k < 32) return 0;
+    out->X = 0; out->Y = 0; out->Width = sw; out->Height = k;
+    return 1;
+}
+
+static int Fm_RadarRect(RectangleStruct* out);   /* 定义在下面 §小地图矩形 */
+static int Fm_ColumnX(int bare);                   /* 定义在下面 §侧栏列起点 */
+
+/* 屏幕物理坐标是否落在侧栏"顶部那一块"(资金条 + 小地图 + 顶部两个按钮)。
+ * 缩放档下这一块在引擎眼里不在视口里 (ViewBounds=R), 所以 ScaleBar 的
+ * ProcessClickCoords 拒点门要拿它**放行**: 那一小块是我们画的 UI, 点击由
+ * FM_RadarClickGate 吞掉, 当成"点在视口外"拒掉就等于小地图点不动 (物理点被
+ * 折到 R 之外, 入口那道 SB_PtInView 先拒)。
+ * 列起点用 `Fm_ColumnX(0)` 现算, 不读 SidebarBounds.X (那个全局缩小档下会被
+ * 引擎按 R 重算, 瞬时值不可信)。*/
+static int FM_PtInKeepRegion(int px, int py)
+{
+    RectangleStruct radar, top;
+    RectangleStruct* sb = (RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS;
+    int colX;
+    if (!s_Enable) return 0;
+    /* ★ 武装判据与 FM_RadarClickGate 逐条同源 —— 两边任何一条不一致, 就会出现
+     * "拒点门放行了但点击门不接" (点成对某个地图点的下令, 比点不动更糟)。*/
+    if (!Fm_ModeKeep() || !Fm_ModeGate()) return 0;
+    if (!Fm_RadarRect(&radar)) return 0;      /* 顺带验雷达矩形可用 */
+    if (!Fm_KeepTopRect(&top)) return 0;
+    colX = Fm_ColumnX(0);
+    if (colX < 0) colX = sb->X;
+    if (colX < 0 || colX > 8192) return 0;
+    if (px < colX + top.X || px >= colX + top.X + top.Width) return 0;
+    if (py < top.Y || py >= top.Y + top.Height) return 0;
+    return 1;
+}
+
+/* 视口拒点门要放行吗 (ScaleBar 的 ClickCoordsReject 调)。判据是**物理**鼠标位置:
+ * 传进来的 pt 是折算出来的, 已被移到 R 之外, 反算回去才无歧义。*/
+int FM_ShouldDeferClick(void)
+{
+    int mx = 0, my = 0;
+    if (!GtMouseGameXY(&mx, &my)) return 0;
+    return FM_PtInKeepRegion(mx, my);
 }
 /* ---------------- 把侧栏面里除保留区以外的部分抹掉 ----------------
  * 面板是**被画进 Composite** 的 (Render 之后 DSurface::Temp 就是 Composite),
@@ -241,21 +316,17 @@ static int Fm_KeepRect(RectangleStruct* out)
  * blit 时把侧栏面里保留区以外的部分全抹黑, 无论哪条路去呈这块面都最多呈出
  * 保留的那一块。态0 不抹 (会把引擎刚画好的面板擦掉); 态2 连小地图也不要,
  * keep 传 NULL = 整块抹。 */
-static void Fm_ClearStripExceptRadar(const RectangleStruct* keep)
+static void Fm_ClearStripExceptRadar(const RectangleStruct* keep, int sw, int sh)
 {
     void* strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
     void** vt;
     FnFillRect fn;
     RectangleStruct r;
-    int sw = 168, sh = 1080;
-    int w, h, top, bot;
+    int top, bot;
     /* 完全显示: 不抹任何东西, 否则会把引擎刚画好的面板擦掉 */
     if (Fm_ModeFull()) return;
     if (!strip || !IsPlausiblePtr(strip)) return;
-    w = GtSurfGet(strip, GtVT_GET_WIDTH);
-    h = GtSurfGet(strip, GtVT_GET_HEIGHT);
-    if (w <= 0 || h <= 0) { sw = 168; sh = 1080; }
-    else { sw = w; sh = h; }
+    if (sw <= 0 || sh <= 0) { sw = 168; sh = 1080; }
     vt = *(void***)(size_t)strip;
     fn = (FnFillRect)vt[VT_FILL_RECT >> 2];
     if (!fn) return;
@@ -287,6 +358,18 @@ static void Fm_ClearStripExceptRadar(const RectangleStruct* keep)
     }
 }
 
+/* 每帧只抹一次。同一帧里两个调用点 (条带上屏 / 小地图自绘) 算出的 keep 完全
+ * 相同, 而两次之间没有任何代码写条带 (小地图自绘之后才是 PowerDisplay_DrawSb),
+ * 所以第二次是纯浪费 —— 态1 下那是每帧最多 4 次整幅 FillRect。 */
+static int s_ClearFrame = -1;
+static void Fm_ClearStripOnce(const RectangleStruct* keep, int sw, int sh)
+{
+    int fr = *(int*)(size_t)ADDR_FRAME_COUNT;
+    if (fr == s_ClearFrame) return;
+    s_ClearFrame = fr;
+    Fm_ClearStripExceptRadar(keep, sw, sh);
+}
+
 /* 客户区屏幕原点: 与原版 BlitSidebar 完全相同的算法 (GetClientRect +
  * ClientToScreen), 原版就是拿它当 blit 目标基准的。取不到就退回 (0,0),
  * 全屏下正是 (0,0)。 */
@@ -314,14 +397,13 @@ static void Fm_ClientOrigin(int* ox, int* oy)
  * 一个函数, 面和视口一起变全宽。两处字节补丁 (等长改写):
  *   0x72AD69 `sub edx,0xA8` 的 imm32 -> 0   : W 不再扣 168
  *   0x72AD60 `mov ecx,0xA8`     -> 5x nop   : 盟军侧栏那 168 偏移也去掉
- * ★ 光改 0x72AD20 不够 —— `GScreenClass::CreateAll` (0x533FD0) 有三个调用点,
+ * 光改 0x72AD20 不够 —— `GScreenClass::CreateAll` (0x533FD0) 有三个调用点,
  *   两个用它的输出, 第三个 (**新开一局** 0x6BDE14) 自己算:
  *     0x6BDDC8 `sub eax,edx` -> `nop nop` : 让它不减 168。
- *   ⚠️ **绝不能写成 `sub eax,eax` (2B C0)** —— 那是"结果恒 0"而不是"不减 168",
+ *   `sub eax,eax` (2B C0) 是"结果恒 0"不是"不减", 会跳过建面 ⇒ 新游戏必崩,
  *     CreateAll 里两处 `test W; jle` 被跳过 ⇒ [0x88731C]/[0x8872FC] 保持 NULL
- *     ⇒ 0x6D410D 解引用空指针, **新游戏必崩**。"让算术不生效"只能 nop。
- * ★ 不要钩 CreateAll 改建面矩形: 崩 (函数里有未判空的
- *   `mov edx,[eax]; call [edx+0x18]`)。改调用点的字节就行。 */
+ *     ⇒ 0x6D410D 解引用空指针新游戏必崩。"让算术不生效"只能 nop。
+ * 不要钩 CreateAll 改建面矩形 (未判空解引用)。改调用点的字节就行。 */
 
 #define ADDR_VIEWRECT       0x0072AD20u
 #define ADDR_PATCH_SUBW     0x0072AD69u   /* imm32 of `sub edx,0xA8` */
@@ -401,13 +483,8 @@ static int Fm_ViewPatchDetect(void);
 static int s_ViewPatched = -1;   /* -1=未探测, -2=字节不符不碰, 0=原版宽, 1=全宽 */
 static RectangleStruct* __fastcall Fm_ViewRectStub(RectangleStruct* out);
 
-/* ★ 宿主映像在不在。本模块由 DllMain 调用, 而 Syringe/CnCNet 链路上它可能在
- * gamemd 映像还没落到 0x400000 时就被装进某个进程 —— 那时读 0x72AD69 会
- * 0xC0000005。所有落点都是 gamemd 里的**绝对地址**, 宿主不在就一个字节都
- * 不写 (原版几何, 侧栏照旧), 比半装状态好得多。
- * 判据: 0x400000 已提交且是 PE 头, 且该模块文件名是 gamemd.exe / ra2md.exe。
- * ⚠️ 别只查 GetModuleHandleA("gamemd.exe") —— 换个壳启动就查不到, 功能会
- *   静默失效。 */
+/* 宿主映像在不在 (DllMain 调用时 gamemd 可能还没映射, 那就一个字节都不写)。
+ * 判据: 0x400000 已提交且是 PE 头, 且模块文件名是 gamemd.exe / ra2md.exe。 */
 static int Fm_HostImageOk(void)
 {
     HMODULE h = NULL;
@@ -464,10 +541,7 @@ void FM_Install(void)
         LogLine("fullmap: gamemd image not mapped yet, patch skipped");
         return;
     }
-    /* ★ 从**当前字节**判态, 不许"假定自己装过"。别拿"相反态"当预期: 初始态
-     * (Mode=0) 磁盘上本来就是原版态, 拿全宽态当预期必然 mismatch, 于是
-     * s_ViewPatched 被打死成 -2, **之后 0x72AD20 永远不会被打开** ——
-     * 态1/2 下另外三十个调用点仍拿 1752 宽矩形去配 1920 的 ViewBounds = 花屏。*/
+    /* 从当前字节判态, 不许假定自己装过 (初始态本来就是原版态)。 */
     s_ViewPatched = Fm_ViewPatchDetect();
     if (s_ViewPatched == -2)
         LogLine("fullmap: viewrect bytes are neither vanilla nor wide, patch OFF");
@@ -491,11 +565,14 @@ void FM_Install(void)
     {
         LogLine(Fm_SiteBad("newwidth", ADDR_PATCH_SURFW));
     }
-    /* 五处"侧栏横向偏移"取数改指 SidebarBounds.X: 让小地图/顶上一簇按钮重新
-     * 既画在屏幕内、又能收点击。逐条核对原字节, 全部一致才一起改。 */
+    /* 五处"侧栏横向偏移"取数改指 SidebarBounds.X: 让小地图/顶上一簇按钮既画在
+     * 屏幕内、又能收点击。原生 `RadarClass::Action` (0x6539D0) 全靠这个偏移把
+     * 鼠标X 换成侧栏面内坐标, 它不生效小地图点击就完全没反应。
+     * ★ 逐处安装: 某一处字节对不上只该坏它自己那一处, 不能连坐。
+     * ★ 已经是 kDone 的算打过 (幂等)。装完逐处复核并记进日志。*/
     {
-        static const unsigned char kWant[4] = { 0xA8, 0x6F, 0x88, 0x00 };
-        static const unsigned char kToSbX[4] = { 0x90, 0x6F, 0x88, 0x00 };
+        static const unsigned char kWant[4]  = { 0xA8, 0x6F, 0x88, 0x00 };
+        static const unsigned char kDone[4]  = { 0x90, 0x6F, 0x88, 0x00 };
         static const struct { unsigned at; int off; const char* name; } kSites[5] = {
             { ADDR_SIDEBARBR_X, 1, "route" },
             { ADDR_RADARHIT_X, 2, "topcursor" },
@@ -503,25 +580,65 @@ void FM_Install(void)
             { ADDR_RADARACT_X, 2, "radaract" },
             { ADDR_TOPCURSOR_X, 2, "stripcursor" },
         };
-        int i, ok = 1, done = 0;
-        char b1[16], buf[192];
-        unsigned q;
+        int i, done = 0;
         for (i = 0; i < 5; i++)
         {
-            if (!Fm_BytesSame((unsigned char*)(size_t)(kSites[i].at + kSites[i].off), kWant, 4))
+            unsigned at = kSites[i].at + kSites[i].off;
+            if (Fm_BytesSame((unsigned char*)(size_t)at, kDone, 4)) { done++; continue; }
+            if (!Fm_BytesSame((unsigned char*)(size_t)at, kWant, 4))
             {
-                ok = 0;
                 LogLine(Fm_SiteBad(kSites[i].name, kSites[i].at));
+                continue;
             }
+            if (Fm_PatchBytes(at, kDone, 4)) done++;
+            else LogLine(Fm_SiteBad(kSites[i].name, kSites[i].at));
         }
-        if (ok)
         {
-            for (i = 0; i < 5; i++)
-                if (Fm_PatchBytes(kSites[i].at + kSites[i].off, kToSbX, 4)) done++;
-            q = 0;
+            char b1[16], buf[128];
+            unsigned q = 0;
             q = AppendCStr(buf, q, "fullmap: sidebar-hit patch ON ", sizeof(buf));
             UtoA((unsigned)done, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
             q = AppendCStr(buf, q, "/5 sites", sizeof(buf));
+            LogLine(buf);
+        }
+    }    /* ★ 复核 (逐处): 每处 imm32 都必须真的变成 0x00886F90 (SidebarBounds.X)。
+     * 单独点名 radaract —— 原生小地图命中判定就靠它, 它不行其余都白搭。*/
+    {
+        static const unsigned char kDone[4] = { 0x90, 0x6F, 0x88, 0x00 };
+        static const struct { unsigned at; int off; const char* name; } kChk[5] = {
+            { ADDR_SIDEBARBR_X, 1, "route" },
+            { ADDR_RADARHIT_X, 2, "topcursor" },
+            { ADDR_RADARPOS_X, 2, "radarpos" },
+            { ADDR_RADARACT_X, 2, "radaract" },
+            { ADDR_TOPCURSOR_X, 2, "stripcursor" },
+        };
+        int i;
+        for (i = 0; i < 5; i++)
+        {
+            char b1[16], buf[160];
+            unsigned q = 0;
+            int ok = Fm_BytesSame((unsigned char*)(size_t)(kChk[i].at + kChk[i].off),
+                kDone, 4);
+            q = AppendCStr(buf, q, "fullmap: verify ", sizeof(buf));
+            q = AppendCStr(buf, q, kChk[i].name, sizeof(buf));
+            q = AppendCStr(buf, q, ok ? " ok" : " BAD", sizeof(buf));
+            if (!ok)
+            {
+                q = AppendCStr(buf, q, " bytes=", sizeof(buf));
+                UtoA(kChk[i].at, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+                q = AppendCh(buf, q, ':', sizeof(buf));
+                {
+                    unsigned char* p = (unsigned char*)(size_t)kChk[i].at;
+                    int j2;
+                    for (j2 = 0; j2 < 6; j2++)
+                    {
+                        b1[0] = "0123456789ABCDEF"[(p[j2] >> 4) & 15];
+                        b1[1] = "0123456789ABCDEF"[p[j2] & 15];
+                        b1[2] = 0;
+                        q = AppendCStr(buf, q, b1, sizeof(buf));
+                    }
+                }
+            }
             LogLine(buf);
         }
     }
@@ -603,9 +720,13 @@ static void Fm_DisarmAt(unsigned g, int colX, int topH)
     p[GAD_REDRAW] = 1;
 }
 
+static int s_DisarmFrame = -1;
 static void Fm_DisarmSidebarGadgets(int colX, int topH)
 {
-    int i;
+    int i, fr = *(int*)(size_t)ADDR_FRAME_COUNT;
+    /* 帧门: 同帧重复 poll 写同值, 每帧摘一次即可 (引擎帧内 Enable 回去下帧重摘)。 */
+    if (fr == s_DisarmFrame) return;
+    s_DisarmFrame = fr;
     for (i = 0; i < FM_CAMEO_N; i++)
         Fm_DisarmAt(ADDR_CAMEO_ARRAY + (unsigned)i * FM_CAMEO_STRIDE, colX, topH);
     for (i = 0; i < FM_TAB_N; i++)
@@ -641,26 +762,13 @@ static void Fm_RearmSidebarGadgets(int colX, int topH)
         Fm_RearmAt(ADDR_TAB_ARRAY + (unsigned)i * FM_TAB_STRIDE, colX, topH);
 }
 
-/* 侧栏列起点: 引擎判定"鼠标在不在侧栏上"、小地图/按钮摆放、cameo/页签滚动
- * 偏移全用它。引擎自己算的是 `SidebarBounds.X = viewRect.X + viewRect.W`
- * (0x6A51C0, viewRect 来自 0x72AD90) —— 视口铺满后那个和从 1752 变成 1920,
- * 于是 radar gadget 被摆到屏外、InitGUI 里 `mov [0xB0B3E4], -SidebarBounds.X`
- * 之类一次性写入也全错 168 ⇒ 侧栏布局混乱。
- * 所以每循环按"视口右边界 - 列宽"改回来, 并且必须在 InitGUI (0x6ABD30)
- * **之前**就改好 —— 那批一次性写入只发生一次, 下一帧再纠正已晚 (MOExperience.cpp
- * 在 InitGUI 入口挂了裸钩)。
- * ⚠️ 不要补 0x72AD90: W 变 1920 会让 SidebarBounds.X 更错。
- * ⚠️ 必须跟着**实际视口宽度**走, 不看模式 (切换当帧两者会短暂不一致)。 */
+/* 侧栏列起点 (cameo/页签/雷达摆放与鼠标判定的基准)。视口铺满后引擎算出来错 168,
+ * 每循环按"视口右边界 - 列宽"改回, 且须在 InitGUI 之前改好 (一次性写入)。
+ * 不碰 0x72AD90; 跟实际视口宽度走, 不看模式。 */
 typedef void (__thiscall *FnSyncViewBounds)(void* tactical, void* rect);
 #define ADDR_SYNC_VIEW       0x006D5F60u   /* TacticalClass 视口同步 (Set_View_Dimensions 内部第二步) */
-/* ★ `[0xB0CE28/2C/30/34]` = ViewBounds 的**缓存副本**, 由 0x6D5F60 抄。引擎有两处
- * 读的是这份缓存而不是 ViewBounds:
- *   `Update_Tactical_Position` (0x6D8B30): TacticalPos = 中心 - [0xB0CE30/34]/2
- *   `ClientToCoords`           (0x6D2280): 用它判点在不在视口内
- * 所以缓存必须**始终等于 R**。本模块为修侧栏布局有一处故意拿 **A** 调
- * `DisplayClass::Set_View_Dimensions`, 顺手就把缓存留成了 A ⇒ TacticalPos 按 A 算
- * 而渲染按 R ⇒ 恒定偏移 (A-R)/2, 放大档下 = 视野整体偏左上 (左上出界/右下少一圈)
- * + 引擎悬浮提示错位(与我们自己那份重影)。详见 notes §2.1。*/
+/* [0xB0CE28/2C/30/34] = ViewBounds 缓存副本 (0x6D5F60 抄)。缓存须恒等于 R,
+ * 否则 TacticalPos/ClientToCoords 按旧值算出恒定偏移。详见 notes §2.1。 */
 #define ADDR_VIEW_CACHE_W    0x00B0CE30u
 #define ADDR_VIEW_CACHE_H    0x00B0CE34u
 
@@ -674,29 +782,66 @@ static void Fm_SyncViewCache(void* tac, int w, int h)
     sync(tac, (void*)(size_t)ADDR_VIEWBOUNDS);
 }
 
-/* DisplayClass::Set_View_Dimensions (0x4A8960): 视口尺寸变化的**引擎正门**。
- * 比 SetTacticalViewBounds 多做三件我们必须一起做的事:
- *   (a) 用 ViewBounds 重建两个可见区裁剪器 [0x887644] / [0x87E8A4]
- *   (b) 重建 WWMouseClass 的视口 (vtable+0x0C)
- *   (c) 末尾 call InitGUI 重排侧栏
- * 建面走 Fm_ViewRectStub (恒全宽) 时 (a)(b) 会按全宽建好; 我们随后把视口收回
- * clientW-168, 不同步 ⇒ 引擎内部长期"视口 1752 / 裁剪 1920", 鼠标落在侧栏列上
- * 会被当成"还在地图里"去查格, 那一格在地图外 ⇒ 侧栏标题栏报"未探索的区域"。
- * this = 0x87F7E8 (与 MouseClass/TabClass/... 共用槽)。*/
+/* Set_View_Dimensions (视口尺寸变化的引擎正门): 附带重建裁剪器/鼠标视口/InitGUI。 */
 typedef void (__thiscall *FnSetViewDims)(void* self, const void* rect);
+typedef void (__thiscall *FnInitGui)(void* self);
 #define ADDR_SET_VIEW_DIMS   0x004A8960u
+#define ADDR_INIT_GUI        0x006ABD30u   /* DisplayClass::InitGUI (thiscall, 无栈参) */
 #define ADDR_DISPLAY_INSTANCE 0x0087F7E8u
 /* 重入保护: 它末尾会调 InitGUI, 侧栏布局里可能又回到本模块 */
 static int s_InSetViewDims = 0;
+static int s_InInitGui = 0;
 /* 一帧只允许重建一次裁剪器 (prepare 一帧能跑上百次) */
 static int s_SyncViewFrame = -1;
 
-/* 当前视口是不是"全宽"那套 (态1/2)。按 A 与客户宽比, 而不是按模式 ——
- * 切换的当帧两者会短暂不一致, 而侧栏列起点必须跟着**实际视口**走。
+/* 侧栏一次性布局需要按 **A** 重算的标记 (几何一变就置, FM_Poll 消费)。 */
+static int s_LayoutDirty = 0;
+
+/* ---------------- 侧栏一次性布局: 单独跑一遍 InitGUI(A) ----------------
+ * InitGUI 里那批**一次性**写入 (页签/cameo 位置与滚动偏移 `-SidebarBounds.X`、
+ * 三个 radar gadget 的位置、底栏矩形 `[0xB0FC58..]`) 全都按**当时的 ViewBounds**
+ * 算, 而且只在跑的时候算一次 ⇒ 视口几何一变就必须拿正确的矩形重跑, 否则侧栏
+ * 图标就摆在上一次那个宽度算出来的位置上 (读档最明显: CreateAll 走我们改指的全宽
+ * 矩形 1920x1080, 侧栏布局按 1920 算完就一直留着)。
  *
- * ★ 缩放后引擎拿到的是 R (居中那一小块), 但**屏幕布局**相关的量一律按 A 算:
- * 侧栏列起点 / 地图右边界 / 视口 gadget 命中区都跟着 R 走的话, 放大时侧栏会被
- * 摆到屏幕中间 (R 右边界 = 1095/1314), 凭空多出第二条侧栏。 */static int Fm_ViewWide(void)
+ * 为什么不用 Set_View_Dimensions (0x4A8960) 重跑: 它顺带按传入矩形重建
+ * ZBuffer/ABuffer (缩小档下 R>A, 重建出来的缓冲比 ScaleBar 的小 ⇒ 野写)、
+ * 重建 WWMouse 视口 (死区/光标判据全错)、还动消息区矩形。而这里要的**只是布局**。
+ * 做法: 临时把 ViewBounds 摆成 A → 调 InitGUI → 摆回 R。列起点由 InitGUI 入口
+ * 钩 (FM_SyncSidebarColumn) 纠, 完事再兜一层。
+ * ⚠️ 只在真正需要时调 (缩小档 / 引擎重建了面), 否则每帧跑一遍纯属浪费。 */
+static int Fm_InitGuiForA(void)
+{
+    RectangleStruct* vb = (RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
+    void* strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
+    void* self = (void*)(size_t)ADDR_DISPLAY_INSTANCE;
+    FnInitGui fn = (FnInitGui)(size_t)ADDR_INIT_GUI;
+    RectangleStruct keep;
+    if (!fn || s_InInitGui || s_InSetViewDims) return 0;
+    /* InitGUI 会解引用侧栏面 (0x887300) 调虚表, 面还没建好时不能进。 */
+    if (!strip || !IsPlausiblePtr(strip)) return 0;
+    if (s_ViewA.Width < 64 || s_ViewA.Width > 8192) return 0;
+    if (s_ViewA.Height < 64 || s_ViewA.Height > 8192) return 0;
+    keep = *vb;
+    vb->X = s_ViewA.X; vb->Y = s_ViewA.Y;
+    vb->Width = s_ViewA.Width; vb->Height = s_ViewA.Height;
+    s_InInitGui = 1;
+    fn(self);
+    s_InInitGui = 0;
+    *vb = keep;
+    FM_SyncSidebarColumn();
+    LogLine("fullmap: sidebar layout refreshed for A");
+    return 1;
+}
+
+/* 脏标记的消费口: 真跑成了才清 (跑不成就留着, 下一趟再试)。*/
+static void Fm_ConsumeLayoutDirty(void)
+{
+    if (!s_LayoutDirty) return;
+    if (Fm_InitGuiForA()) s_LayoutDirty = 0;
+}
+
+/* 当前视口是不是"全宽"那套。屏幕布局量一律按 A 算 (跟 R 走会多出第二条侧栏)。 */static int Fm_ViewWide(void)
 {
     const RectangleStruct* vb = &s_ViewA;
     RectangleStruct* wb = (RectangleStruct*)(size_t)ADDR_WINDOWBOUNDS;
@@ -704,20 +849,8 @@ static int s_SyncViewFrame = -1;
     return (vb->Width >= wb->Width - 8) ? 1 : 0;
 }
 
-/* 侧栏列起点算出来 (bare=1 时是"全屏"那套路由阈值)。返回 -1 = 数据不可信。
- *
- * bare=0 是"侧栏列真的存在"的几何: 紧贴视口右边界 (苏联) 或左边界 (盟军)。
- * 全宽视口时视口多出那 168, 起点要减掉它才落在屏幕内 (1920-168=1752);
- * 原版视口 (1752) 时不能减 —— 减了会变成 1584, 而 InitGUI 用它摆三个 radar
- * gadget 且摆完不再重算, 小地图/顶部按钮会永远偏 168、点了没反应。
- *
- * bare=1 动 SidebarBounds.X 是因为引擎有两处拿它当**鼠标路由**阈值:
- *   苏联 0x478BD7 (已改读 SidebarBounds.X): `cmp mouseX,(ViewBounds.X+
- *     SidebarBounds.X)` ⇒ 全屏态要让它 = 视口右边界。
- *   盟军 0x478BF4: `cmp mouseX,(SidebarBounds.X+SidebarBounds.Width)`
- *     ⇒ 全屏态要让它 = -(168+8)。
- * 两者都让任何鼠标 X 判成地图。0x478DBE/0x478DD6 (鼠标在不在侧栏列 ⇒ 强制
- * 面板全量重画) 用同一组阈值, 取值后恒不成立, 顺带避免每次点击都强刷面板。 */
+/* 侧栏列起点 (bare=1 是全屏路由阈值)。全宽时减 168 落回屏内; 原版视口不减。
+ * bare=1 顺带让面板全量重画判据恒不成立 (免每次点击强刷)。 */
 static int Fm_ColumnX(int bare)
 {
     const RectangleStruct* vb = &s_ViewA;   /* 满视图区, 不跟缩放走 (见 Fm_ViewWide) */
@@ -739,6 +872,27 @@ static int Fm_ColumnX(int bare)
     return colX;
 }
 
+/* 侧栏列在屏幕上的起点。条带上屏 (FM_BlitSb) 与小地图自绘 (FM_DrawRadarTo)
+ * 必须算出同一个值, 所以只留这一处; 判据仍从视口算, 不读 SidebarBounds.X
+ * (那个全局在"全屏"态会被推成路由阈值)。取值不成时退回"贴右缘"。 */
+static int Fm_ColumnPlace(void)
+{
+    int sbw = *(int*)(size_t)ADDR_SIDEBAR_W;
+    int winW = ((int*)(size_t)ADDR_WINDOWBOUNDS)[2];
+    int colX;
+    if (sbw < 64 || sbw > 512) sbw = 168;
+    if (winW < 640 || winW > 8192) winW = 1920;
+    colX = Fm_ColumnX(0);
+    if (colX < 0 || colX > winW) colX = winW - sbw;
+    if (colX < 0) colX = 0;
+    return colX;
+}
+
+/* 把侧栏列起点钉在 1x 的值上。⚠️ `SidebarBounds.X` 同时是那五处 imm32 补丁读的
+ * 值 (含 0x653A3F = `RadarClass::Action`), 它一抖小地图原生点击链就断, 所以
+ * 这里必须稳定 —— **不要**补调 `SidebarClass::ComputeLayout` (0x6A5130) 去"按纠正
+ * 后的值重推派生锚点", 那函数在 `flag!=0` 时会照 `ViewBounds`(= R) 重算它。
+ * 详见 notes/隐藏侧栏.md §4.3b。*/
 static void Fm_SyncColumn(int bare)
 {
     RectangleStruct* sb = (RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS;
@@ -749,9 +903,7 @@ static void Fm_SyncColumn(int bare)
     if (sb->X != colX) sb->X = colX;
 }
 
-/* InitGUI 入口钩专用: 永远按"侧栏存在"的几何纠正。
- * 那一批一次性写入 (cameo/页签滚动偏移 = -SidebarBounds.X) 必须用这个值, 否则
- * 全屏态下开局的话偏移会按 1920 算, 之后切回完全显示/只显示小地图时侧栏布局错 168。 */
+/* InitGUI 入口钩专用: 永远按"侧栏存在"的几何纠正 (全屏态开局偏移不错 168)。 */
 void FM_SyncSidebarColumn(void)
 {
     Fm_SyncColumn(0);
@@ -765,34 +917,21 @@ int FM_MapRightEdge(void)
     int r;
     if (!s_Enable) return 0;
     if (vb->Width < 64 || vb->Width > 8192) return 0;
-    /* 视口右边界: 态0 = 1752 (侧栏在它右边), 态1/2 = 1920 (侧栏没了)。跟着它走
-     * ⇒ 两种形态各自贴边, 就是"适应侧栏显示/隐藏"。
-     * ⚠️ 别改回 Fm_ColumnX(0) (三态恒 1752): 隐藏侧栏后列表会缩在 1752。*/
+    /* 视口右边界 (态0=1752, 态1/2=1920): 各自贴边, 自适应侧栏显隐。 */
     r = vb->X + vb->Width;
     if (r < 64 || r > 8192) return 0;
     return r;
 }
 
-/* ---------------- 视口宽度: 原版 (clientW-168) <-> 全宽, 动态切 ----------------
- * ★ 三条腿, 缺一条就出花屏/残影:
- *   (1) **字节窗口按模式翻**。0x72AD20 全仓有 32 个调用点 (CreateAll 两处 +
- *       Set_View_Dimensions + 0x63xxxx 那一片格/视图求交 + 0x77830C 的缩放
- *       中心); 只改 ViewBounds 不够, 那些地方会继续拿到全宽矩形。态0 把两个
- *       窗口恢复原字节, 引擎所有几何判定于是自动正确。
- *   (2) `Fm_ApplyViewWidth` 每循环纠正 ViewBounds 并同步 view_bound —— 引擎
- *       自己不会重算它 (只有建面那条路才会, 而建面矩形我们在 (3) 里始终给
- *       全宽), 所以这一步必须每循环做。
- *   (3) 建面永远全宽: CreateAll 两个调用点改指 `Fm_ViewRectStub`, 新开局那条
- *       (0x6BDE14) 走 nop。态0 期间改分辨率也不会把渲染面缩窄。
- * 安全阀: 视口不许比 Composite 实际宽度还大 (面按旧宽度建时会有), 夹窄而不
- * skip —— 视口比面宽时引擎照旧往面外画, 那就是花屏的直接原因。 */
+/* 视口宽度动态切 (三条腿: 字节窗口翻态 + 每循环纠 ViewBounds + 建面恒全宽)。
+ * 安全阀: 视口不许比面宽 (否则往面外画即花屏), 只夹窄不 skip。 */
 
 /* 两个字节窗口的"已知两态"字节 (供探测用):
  *   原版态: 0x72AD69 imm32 = A8 00 00 / 0x72AD60 = B9 A8 00 00 00
  *   全宽态: 0x72AD69 imm32 = 00 00 00 / 0x72AD60 = 90 x5            */
 static const unsigned char kVanSub[3] = { 0xA8, 0x00, 0x00 };
 static const unsigned char kVanGdi[5] = { 0xB9, 0xA8, 0x00, 0x00, 0x00 };
-static const unsigned char kWideSub[4] = { 0x00, 0x00, 0x00 };
+static const unsigned char kWideSub[3] = { 0x00, 0x00, 0x00 };
 static const unsigned char kWideGdi[5] = { 0x90, 0x90, 0x90, 0x90, 0x90 };
 
 /* 视口字节窗口现在处在哪一态: 0=原版宽, 1=全宽, -2=两种都不像 (外部改过)。 */
@@ -838,14 +977,8 @@ static int Fm_ViewPatchSet(int wide)
     return 1;
 }
 
-/* 建面用的"永远全宽"矩形。签名照 0x72AD20: ecx = 出参, 返回出参指针。
- * ★ 高度**不减**那 32 的上下栏高, 必须与"新开局"那条 (0x6BDE14) 逐字段一致:
- *   CreateAll 用这个矩形建 Composite (0x88731C) 与地图面 (0x8872FC, 高度另取
- *   WindowBounds.Height), 紧接着 Set_View_Dimensions 又拿它去重建两个裁剪器。
- *   原版函数给 H-32 ⇒ **读档**这条路 Composite 只有 1920x1048 (新开局是 1080),
- *   侧栏列底下 32 行既没被条带 blit 到 (条带 168x1080 放不下) 又不会被地图重画
- *   (视口高 1048) = 永远留着旧像素的残影带。
- *   ViewBounds.Height 由 Fm_ApplyViewWidth 立刻纠正回 clientH-32, 这里给满是安全的。 */
+/* 建面矩形恒全宽全高 (读档路 Composite 会矮 32 出残影带, 高不减才一致)。
+ * ViewBounds.Height 事后由 Fm_ApplyViewWidth 纠回。 */
 static RectangleStruct* __fastcall Fm_ViewRectStub(RectangleStruct* out)
 {
     RectangleStruct* wb = (RectangleStruct*)(size_t)ADDR_WINDOWBOUNDS;
@@ -860,20 +993,7 @@ static RectangleStruct* __fastcall Fm_ViewRectStub(RectangleStruct* out)
     return out;
 }
 
-/* ---------------- 换几何后催地图重画 (残影的真正修法) ----------------
- *
- * ★ 残影的根因 (不是"呈现只搬脏区", 那个方向是错的): 地图是**增量**画进地图面
- *   (0x8872FC) 的, 只有标脏的格子才重画; 而视口宽度的所有改法都**只改矩形,
- *   一个格子都不标脏**。态0 (窄) -> 态1/2 (宽) 时右边新露出的 168px 从没进过
- *   脏队列, 留的还是上一模式的像素; 它跟着地图一起动 (都在同一块面里), 所以看着
- *   像"贴在地图上"。反方向 (缩窄) 同样会留。
- *
- * 修法: 几何变了之后连着几帧把**整窗**推进脏区队列, 让引擎把地图重画一遍。
- *   `TacticalClass::RegisterDirtyArea` = 0x6D2790, 坐标**客户区相对**
- *   (Phobos/Ares 的调用点都先减 TacticalPos, 因为它们传绝对矩形);
- *   **不碰 TacticalPos**, 视口不许跳。只推渲染脏区, 联机安全。
- * ★ 标**整窗**而不是标视口: 视口宽度一变, 视口外那条 (侧栏列所在) 从来没被
- *   引擎当视口的一部分标过脏, 留的还是上一模式的像素; 只标视口治不好那条带。 */
+/* 换几何后催地图重画: 增量面只重画标脏格, 新露出的边必须连推几帧整窗脏区。 */
 #define ADDR_REG_DIRTY_AREA 0x006D2790u
 typedef void (__fastcall *FnRegDirtyArea)(void*, RectangleStruct, int);
 
@@ -895,7 +1015,7 @@ static void Fm_DirtyRedraw(void)
     if (r.Width < vb->Width) r.Width = vb->Width;
     if (r.Height < vb->Height) r.Height = vb->Height;
     fn = (FnRegDirtyArea)(size_t)ADDR_REG_DIRTY_AREA;
-    if (fn) fn(tac, r, 1);
+    fn(tac, r, 1);
     s_DirtyFrames--;
 }
 
@@ -958,7 +1078,6 @@ static void Fm_ApplyViewWidth(void)
         w = cw;
         if (x > w - 16) x = 0;
     }
-    if (x < 0) x = 0;
     /* ---------------- 缩放 (ScaleBar): 视口改成 A*scale ----------------
      * 引擎只会 1:1 逐格画, 所以缩放只能靠"视口大小 + 呈现时重采样":
      *   A = 满视图区 (上面算出来的), R = A * scale (ScaleBar 算, 含落点)。
@@ -969,9 +1088,10 @@ static void Fm_ApplyViewWidth(void)
     {
         RectangleStruct r;
         int sig;
-        /* A 永远记"引擎本该用的满视图区", 与缩放无关。 */
+        double sc = SB_Scale();   /* 一次算好, GetViewRect 与 sig 门共用。 */
+        /* A 永远是"满屏本该有的视口矩形", 与缩放无关。 */
         s_ViewA.X = x; s_ViewA.Y = 0; s_ViewA.Width = w; s_ViewA.Height = h;
-        if (SB_GetViewRect(&r))
+        if (SB_GetViewRect(&r, sc))
         {
             x = r.X;
             y = r.Y;
@@ -979,7 +1099,7 @@ static void Fm_ApplyViewWidth(void)
             h = r.Height;
         }
         else { y = 0; }
-        sig = (int)(SB_Scale() * 256.0);
+        sig = (int)(sc * 256.0);
         if (s_ZoomLast != sig)
         {
             /* 换挡时视口变了, 但**不要**走下面"左边界钉住"那套: 缩放要的是中心
@@ -990,13 +1110,15 @@ static void Fm_ApplyViewWidth(void)
         s_ViewR.X = x; s_ViewR.Y = y; s_ViewR.Width = w; s_ViewR.Height = h;
     }
     tac = *(void**)(size_t)0x00887324u;
-    /* 早退前也自愈一次: 下面那个"拿 A 调 Set_View_Dimensions"的分支会把缓存
-     * 留在 A 上 (见 Fm_SyncViewCache), 而几何没变时这里直接 return, 救不回来。*/
+    /* "拿 A 调 setDims"分支会把缓存留成 A, 早退前先自愈。 */
     if (vb->X == x && vb->Y == y && vb->Width == w && vb->Height == h)
     {
         Fm_SyncViewCache(tac, w, h);
         return;
     }
+    /* 几何变了 ⇒ 侧栏那批一次性布局写入也得按 A 重跑。缩小档不走 setDims,
+     * 所以那条路完全没人替我们刷新它 ⇒ 这里无条件置脏 (是否真跑见 FM_Poll)。*/
+    s_LayoutDirty = 1;
 
     oldW = vb->Width;
     oldH = vb->Height;
@@ -1004,9 +1126,7 @@ static void Fm_ApplyViewWidth(void)
     vb->Y = y;
     vb->Width = w;
     vb->Height = h;
-    /* 几何变了 => 催引擎把整块重画一遍, 否则视口外那条留残影。判"几何变了"
-     * 而不是"宽度变了": 态0 <-> 态1/2 的高度/起点也可能不同。
-     * 连续几帧都推, 覆盖"切模式那一帧 + 之后重建面/改分辨率"的窗口。 */
+    /* 几何变了催整块重画 (判几何不判宽度, 高/起点也可能变)。连推几帧盖住重建窗口。 */
     {
         static int s_LastDirtyW = -1, s_LastDirtyH = -1, s_LastDirtyX = -1;
         if (w != s_LastDirtyW || h != s_LastDirtyH || x != s_LastDirtyX)
@@ -1034,11 +1154,7 @@ static void Fm_ApplyViewWidth(void)
     tac = *(void**)(size_t)0x00887324u;
     if (tac && IsPlausiblePtr(tac))
     {
-        /* ★ 换宽度时把**左边界**钉住 (用户要求"左侧固定, 右侧收缩或扩展")。引擎存的是
-         * 视口中心格 (+0xD64, +0xD74 是它的目标值), 而 `0x6D8B30` 用
-         * `中心 - ViewBounds.Width/2` 算出左上角 (TacticalPos) 供 cell->client
-         * 换算用 ⇒ 宽度一变左边界就跑半个差值 (1920↔1752 = 84px)。把中心按
-         * ±ΔW/2 挪回去左边界就不动; 只挪中心, 让引擎照旧钳位 (地图边缘该夹还夹)。 */
+        /* 换宽度钉左边界: 中心按 ±ΔW/2 挪回 (引擎按中心-W/2 算左上)。只挪中心。 */
         d = (w - oldW) / 2;
         if (d && s_ZoomChanged)
             d = 0;              /* 只是换了缩放挡: 中心保持不动 */
@@ -1048,37 +1164,20 @@ static void Fm_ApplyViewWidth(void)
             *(int*)((char*)tac + 0xD64) += d;
             *(int*)((char*)tac + 0xD74) += d;
         }
-        /* 便宜的每循环路径: 只把矩形同步给 TacticalClass (照抄引擎
-         * Set_View_Dimensions 的第二步)。幂等; 缓存对不上时才真调。*/
+        /* 便宜路径: 只同步矩形给 TacticalClass (幂等, 缓存对上才真调)。 */
         Fm_SyncViewCache(tac, w, h);
-        /* ★ 宽度真的变了还要走一次引擎自己的 Set_View_Dimensions ——
-         * 只调 0x6D5F60 不会重建那两个裁剪器/鼠标视口, 引擎内部就长期停在
-         * "视口 1752 / 裁剪 1920" ⇒ 鼠标落在侧栏列上被当成"还在地图里"去查格,
-         * 那一格在地图外 ⇒ 侧栏标题栏报"未探索的区域"。**读档必现** (CreateAll
-         * 之后紧跟一次按 1920 建裁剪器, 之后没人重建)。
-         * 安全阀: 只在宽度真变时调; 引擎帧号门控一帧一次 (prepare 一帧上百次);
-         * WWMouseClass 必须在 (0x4A89C2 不判空就解引用); s_InSetViewDims 防它
-         * 末尾 InitGUI 重入。
-         * ⚠ **缩小档 (SB_Out) 下绝不能调**: Set_View_Dimensions 会把两块裁剪器
-         * 按 ViewBounds (此时是 R) 重建, 立刻把缩放刚建好的 R 大缓冲顶回 A;
-         * 下一帧 SB_PrepareSurface 又按 R 重建一次 —— 两边来回抢, 而且它末尾
-         * 还会 InitGUI。缩小档的缓冲归 ScaleBar 独占 (见 SB_ResizeBufs)。*/
+        /* 宽度真变了走一次正门重建裁剪器/鼠标视口 (只调它俩不会重建)。
+         * 缩小档禁调 (它按 R 重建会顶掉 ScaleBar 的缓冲, 且末尾 InitGUI)。 */
         if (w != oldW && !s_InSetViewDims && !SB_Out())
         {
             void* mouse = *(void**)ADDR_WWMOUSE;
             FnSetViewDims setDims = (FnSetViewDims)(size_t)ADDR_SET_VIEW_DIMS;
             int fr = *(int*)(size_t)ADDR_FRAME_COUNT;
-            if (setDims && mouse && IsPlausiblePtr(mouse) && fr != s_SyncViewFrame)
+            if (mouse && IsPlausiblePtr(mouse) && fr != s_SyncViewFrame)
             {
                 s_SyncViewFrame = fr;
                 s_InSetViewDims = 1;
-                /* ★ 用 **A** 重建, 完事把 ViewBounds 写回 R。
-                 * Set_View_Dimensions 末尾会 InitGUI, 侧栏页签/cameo 行/底部工具栏
-                 * 那些"一次性写入"的偏移全按传进去的矩形算。传 R 的话引擎是按
-                 * 438x262 摆的 ⇒ 侧栏下半截空掉、底部工具栏落到侧栏中段、鼠标命中
-                 * 也跟着错。隐藏侧栏那套之所以没事, 正是因为它传进去的就是 A。
-                 * 渲染那边仍然读 ViewBounds, 所以这里结束前必须还原成 R ——
-                 * 视口小正是缩放的实现手段, 渲染期必须是 R。*/
+                /* 用 A 重建 (InitGUI 一次性布局按它算, 传 R 侧栏全错), 完事写回 R。 */
                 {
                     RectangleStruct keep = *vb;      /* = R */
                     vb->X = s_ViewA.X; vb->Y = s_ViewA.Y;
@@ -1090,18 +1189,20 @@ static void Fm_ApplyViewWidth(void)
                 s_InSetViewDims = 0;
                 /* 重建裁剪器顺带改了侧栏的一次性布局 —— 立刻纠正列起点。*/
                 FM_SyncSidebarColumn();
-                /* 上面那次 setDims 顺手把 [0xB0CE30/34] 留成了 A ⇒ 每帧
-                 * TacticalPos 按 A 算而渲染按 R, 视野恒偏 (A-R)/2。纠正回 R。*/
+                /* setDims 把缓存留成 A, 纠回 R (否则视野恒偏 (A-R)/2)。 */
                 Fm_SyncViewCache(tac, w, h);
-                Fm_SyncViewCache(tac, w, h);
+                /* setDims 末尾已经按 A 跑过一次 InitGUI ⇒ 布局这块它包了。 */
+                s_LayoutDirty = 0;
             }
         }
+        /* 缩小档 (以及宽度没变 / 帧门挡住的那几次) 没人跑 InitGUI ⇒ 补上。
+         * 这是"其它缩放挡位下侧栏图标不按位摆"的那一半: 一次性布局只有
+         * setDims 那条路会重算, 而那条路恰好在缩小档被禁掉了。 */
+        Fm_ConsumeLayoutDirty();
     }
 }
 
-/* 缩放改档后立刻同步一次视口 (ScaleBar 的 SB_Poll 里调, 见 FullMap.h 注释)。
- * 与 FM_Poll 里同一套 (Fm_ApplyViewWidth + Fm_DirtyRedraw), 幂等, 可重入。
- * setDims 有帧门控 (s_SyncViewFrame), 同一帧调两次第二次是空操作。*/
+/* 缩放改档后立刻同步视口 (幂等, setDims 有帧门控)。 */
 void FM_SyncViewNow(void)
 {
     if (!s_Enable) return;
@@ -1155,6 +1256,45 @@ static void Fm_PollToggle(void)
     s_TogKeyDown = down;
 }
 
+/* 引擎重建了渲染面 (读档 CreateAll / 改分辨率) ⇒ 侧栏面是**空白的新面**, 而
+ * 那批一次性布局写入 (页签/cameo 位置、三个 radar gadget 位置、底栏矩形) 在
+ * 上一次几何下就写完了, 引擎不会自己重算 —— 不补一遍就是"读档后侧栏图标不按位
+ * 摆 / 整片空"。判据用侧栏面指针换人 (比尺寸更硬: 尺寸可能碰巧一样)。
+ *
+ * 顺带把缩放退回 1x: 下面压的 `s_ForceRedraw = 8` 会逼 `SidebarClass::Draw`
+ * 走全量重画, 那条路里的 `ComputeLayout` 照当时的 `ViewBounds` 重推 cameo 落点
+ * 锚点 —— ViewBounds 是 R 时锚点全错, 侧栏图标照样错乱。退到 1x 后同一个
+ * `FM_Poll` 趟里 `Fm_ApplyViewWidth` 就把 ViewBounds 写回 A, 全程 A 口径。
+ * 必须在 Fm_ApplyViewWidth 之前调 (本函数已是 FM_Poll 的第一个动作)。 */
+static void Fm_NoteSurfaceRebuild(void)
+{
+    static void* s_LastStrip = NULL;
+    void* strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
+    if (!s_Enable) return;
+    if (!strip || !IsPlausiblePtr(strip)) { s_LastStrip = NULL; return; }
+    if (strip == s_LastStrip) return;
+    if (s_LastStrip)
+    {
+        char b1[16], b2[16], buf[128];
+        unsigned q = 0;
+        q = AppendCStr(buf, q, "fullmap: surfaces rebuilt ", sizeof(buf));
+        UtoA((unsigned)(size_t)s_LastStrip, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " -> ", sizeof(buf));
+        UtoA((unsigned)(size_t)strip, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+        LogLine(buf);
+        /* 新面尺寸可能不同 ⇒ 小地图矩形的锁定值作废 (Fm_RadarRect 自己会重锁)。*/
+        s_RadarLockOk = 0;
+        /* 缩放退 1x (ViewBounds 因此是 A, 见上)。1x 时空转。*/
+        SB_ResetZoom1x();
+        /* 一次性布局按 A 重跑 + 面板全量重画几帧 (新面是空的)。*/
+        s_LayoutDirty = 1;
+        s_ForceRedraw = 8;
+        s_ForceRedrawFrame = -1;
+        s_DirtyFrames = 3;
+    }
+    s_LastStrip = strip;
+}
+
 void FM_Poll(void)
 {
     RectangleStruct* sb;
@@ -1162,37 +1302,37 @@ void FM_Poll(void)
     RectangleStruct* vb;
     int* wb;
     int winW, sbW, colX, topH, colXcalc;
+    int radarOk = 0;
 
     if (!s_Enable) return;
     if (!g_Log) return;
-    /* ★ 这里**不要**碰 s_LbPress: 那是点击门自己维护的"本次按下已处理"标记。
-     * 门直接读 GetAsyncKeyState, 不依赖 prepare 与点击事件的先后。*/
+    /* 引擎重建了面? (读档/改分辨率) —— 要在 Apply 之前知道, 好让它这一趟就把
+     * 布局按 A 重跑。 */
+    Fm_NoteSurfaceRebuild();
+    /* 不碰 s_LbPress (点击门自己的标记, 门直接读按键状态)。 */
     Fm_PollToggle();
-    /* 视口宽度跟着模式走 (内部幂等)。必须在纠正侧栏列之前 —— 后者要用视口
-     * 右边界。*/
+    /* 视口宽度跟模式走 (幂等, 须在侧栏列纠正之前)。 */
     Fm_ViewPatchSet(!Fm_ModeFull());
-    /* ViewBounds 引擎自己不会重算, 每循环按当前模式纠正 + 同步 view_bound。*/
+    /* ViewBounds 引擎不重算, 每循环纠正。 */
     Fm_ApplyViewWidth();
-    /* 催地图重画 (换几何后新露出的那条没人标脏 => 残影)。必须在
-     * ApplyViewWidth 之后: 那儿才知道几何变了没有。*/
+    /* 几何没变但面换过人 (读档) 时, 上面的 Apply 会早退, 布局脏标记还在这儿。*/
+    Fm_ConsumeLayoutDirty();
+    /* 催重画 (须在 Apply 之后, 那儿才知道几何变没变)。 */
     Fm_DirtyRedraw();
-    s_nPoll++;
     sb = (RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS;
     vb = (RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
     wb = (int*)(size_t)ADDR_WINDOWBOUNDS;
     sbW = *(int*)(size_t)ADDR_SIDEBAR_W;
     if (sbW < 64 || sbW > 512) return;
-    colXcalc = Fm_ColumnX(0);
     winW = wb[2];
     if (winW < 640 || winW > 8192) return;
     /* 只有态1/2 才需要小地图矩形 (态0 整条交给引擎) */
-    if (!Fm_RadarRect(&radar) && Fm_ModeKeep()) return;
+    radarOk = Fm_RadarRect(&radar);
+    if (!radarOk && Fm_ModeKeep()) return;
 
-    /* 侧栏列起点纠正。态0 也要调: 否则从"全屏"态切回来时 SidebarBounds.X
-     * 还留着 1920 的路由阈值, 整条侧栏会 blit 到屏外。*/
+    /* 侧栏列起点纠正 (态0 也调, 否则切回来路由阈值留 1920)。 */
     Fm_SyncColumn(Fm_SidebarGone());
-    /* 诊断以**模式**为触发条件 (拿 vb->Width != before 当条件永远相等, 等于
-     * 没有诊断)。一次打两行: 几何 + 引擎内部与视口是否同源。*/
+    /* 诊断以模式为触发 (拿宽度比永远相等, 等于没诊断)。 */
     if (s_Mode != s_LastLoggedMode || SB_Level() != s_LastLoggedZoom)
     {
         char b1[16], b2[16], buf[256];
@@ -1224,12 +1364,13 @@ void FM_Poll(void)
         q = AppendCStr(buf, q, " col=", sizeof(buf));
         UtoA((unsigned)sb->X, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         q = AppendCStr(buf, q, " colCalc=", sizeof(buf));
+        colXcalc = Fm_ColumnX(0);   /* 诊断分支内现算 (平时每 poll 省一次)。 */
         UtoA((unsigned)colXcalc, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         q = AppendCStr(buf, q, " wide=", sizeof(buf));
         UtoA((unsigned)Fm_ViewWide(), b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         q = AppendCStr(buf, q, " keep=", sizeof(buf));
         UtoA((unsigned)Fm_ModeKeep(), b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        okR = Fm_RadarRect(&rr);
+        okR = radarOk; rr = radar;   /* 1077 已取 (副作用幂等, 值相同)。 */
         q = AppendCStr(buf, q, " radar=", sizeof(buf));
         if (okR)
         {
@@ -1288,10 +1429,7 @@ void FM_Poll(void)
     if (topH < 32 || topH > 512) topH = 158;
     /* 摘/复 gadget 一律按"侧栏列真实起点"筛选: 全屏态 sb->X 已经被推成路由阈值
      * (1920 / -176), 拿它当筛选条件会让整列 gadget 全部漏掉, 隐形按钮就又活了。*/
-    colX = Fm_ColumnX(0);
-    if (colX < 0)
-        colX = *(unsigned char*)(size_t)ADDR_ISNOD_SIDEBAR
-             ? vb->X + vb->Width - sbW : 0;
+    colX = Fm_ColumnPlace();
     if (Fm_ModeDisarm())
     {
         Fm_DisarmSidebarGadgets(colX, topH);
@@ -1308,9 +1446,7 @@ void FM_Poll(void)
      * 原版 1752, 本来就不含侧栏列)。每循环都做一遍 (幂等) —— FM_NoteGadgetInput
      * 那条路在态2 会被"gadget 是否跨过侧栏列"的判据挡掉, 光靠它恢复不了。*/
     FM_TrimViewGadget();
-    /* 进态0 后压几帧强制面板全量重画 (见 Fm_PollToggle 的说明)。prepare 一帧能
-     * 跑上百次, 所以用引擎帧号门控, 保证真的跨了几帧而不是一帧内耗光。放在最后:
-     * 置位之后同一帧的 TabClass::Draw 就会走全量重画, FM_BlitSb 尾声再清 0x53A8。*/
+    /* 进态0 压几帧强制面板全量重画 (引擎帧号门控, 跨帧不耗光)。 */
     if (s_ForceRedraw > 0)
     {
         int fr = *(int*)(size_t)ADDR_FRAME_COUNT;
@@ -1324,25 +1460,11 @@ void FM_Poll(void)
         *(unsigned char*)(size_t)ADDR_SIDEBAR_BGNEEDRD = 1;
     }
 }
-/* ★ 不要在每帧强制面板面重画。
- * 曾经为了治"内容随鼠标漂"去置 [this+0x53A6]/[0x53A7], 结果 SidebarClass::Draw
- * 每帧走全量重画分支 (0x6A6CFD 起的 CC_Draw_Shape 会把侧栏面整块重铺), 把先前
- * TabClass::Draw (0x6D0BBE -> 0x4A2370) 画进去的小地图擦掉; 小地图要等
- * RadarClass 自己判定视口变了才重画 —— 于是每帧擦一次、隔几帧补一次, 就是闪烁。
- * 面板面里小地图那块由 RadarClass 维护, 本来就是持久的, 不需要外力催它重画。
- * "内容随鼠标漂"那个症状的真正原因是当初 blit 用了错矩形 (0xB04A00 那个 72x18
- * 的小控件), 换成 RadarClass+0x120C 之后已经没有了。*/
+/* 不要每帧强制面板重画 (会擦掉小地图致闪烁; 面板面本就持久)。 */
 
-/* ---------------- 目标矩形必须整个落在目标面内 ----------------
- * ★ 这是"新开一局花屏"的直接原因: Composite 偶尔是按**旧宽度** (1920-168=1752)
- *   建的 (建面时机早于 0x72AD20 的字节补丁, 或者走了别的重建路径)。
- *   保留区在右边 (dst.X = 1752+11 = 1763, 宽 168), 往 1752 宽的面上 blit
- *   会越过行尾 116 像素 -> 直接踩坏后面的行/内存 -> 画面混乱。
- *   所以任何一笔 blit 之前都先按目标面实际尺寸夹一刀。返回 0 = 不画。 */
-static int Fm_FitRectToSurf(void* surf, RectangleStruct* dst, RectangleStruct* src)
+/* 目标矩形须整个落在目标面内 (面偶按旧宽度建, 越行尾即花屏/踩内存)。 */
+static int Fm_FitRectToSurf(RectangleStruct* dst, RectangleStruct* src, int w, int h)
 {
-    int w = GtSurfGet(surf, GtVT_GET_WIDTH);
-    int h = GtSurfGet(surf, GtVT_GET_HEIGHT);
     RectangleStruct s2 = *src;
     if (w <= 0 || h <= 0) return 0;
     if (dst->X < 0 || dst->Y < 0) return 0;
@@ -1358,24 +1480,15 @@ static int Fm_FitRectToSurf(void* surf, RectangleStruct* dst, RectangleStruct* s
     return 1;
 }
 
-/* ---------------- 侧栏列"没被 blit 覆盖到"的那几条抹黑 ----------------
- * 态0 视口是 clientW-168, 侧栏列不在视口里 ⇒ 地图永远不会画它; 条带若比目标面
- * 矮, blit 够不到的那几条就永远留着上一帧/上一模式的像素 = 残影带。抹掉。
- * ⚠️ **态1/2 绝对不能抹**: 那两态视口整宽, 侧栏列归**地图**所有, 抹黑等于把
- *   地图擦成一条黑带 (地图是增量画的, 擦完不会自己回来)。症状: "小地图模式
- *   下侧栏列下面一片黑"。判断依据是"这一列归谁"(视口覆不覆盖它), 不是
- *   "条带有没有盖全"。
- * dst 是**已被 Fm_FitRectToSurf 夹过**的矩形。 */
-static void Fm_CoverColumnTail(void* surf, const RectangleStruct* dst)
+/* 侧栏列 blit 够不到的尾巴抹黑 (只态0: 态1/2 那列归地图, 抹了变黑带)。 */
+static void Fm_CoverColumnTail(void* surf, const RectangleStruct* dst, int w, int h)
 {
     void** vt;
     FnFillRect fn;
     RectangleStruct r;
-    int w, h, y0, x0, cw;
+    int y0, x0, cw;
     if (!Fm_ModeFull()) return;         /* 侧栏列归地图, 不许碰 */
     if (!surf || !IsPlausiblePtr(surf)) return;
-    w = GtSurfGet(surf, GtVT_GET_WIDTH);
-    h = GtSurfGet(surf, GtVT_GET_HEIGHT);
     if (w <= 0 || h <= 0) return;
     y0 = dst->Y + dst->Height;
     if (y0 >= h) return;                       /* 整列都盖到了 */
@@ -1401,16 +1514,52 @@ __attribute__((naked)) static void Fm_Ret4(void)
     __asm__ volatile ("ret $4\n\t");
 }
 
+/* 把光标精灵烙进侧栏条带, 借用 ViewBounds.Width 让它落在 blit 真正会去的位置。
+ *
+ * 原版 BlitSidebar (0x6A70E0) 在同一处用**同一个**基准做两件事:
+ *   0x6A71B7  mouse->vtable[0x3C](Sidebar面, 1)   烙光标精灵进条带
+ *   0x6A71D0  dst.X = 客户原点X + (isNOD ? ViewBounds.Width : 0)
+ * 而 vtable[0x3C] 的 isNOD 分支 (0x7B910E) 读的也正是 ViewBounds.Width 取负 ——
+ * 精灵在条带内的落点 = 光标屏幕X − ViewBounds.Width, 与 blit 目标严丝合缝。
+ *
+ * 我们把侧栏列钉在 **A** (满视图区) 的右缘 (Fm_ColumnX 读 s_ViewA, 不跟缩放走),
+ * 于是 1x 时 A==R 两者相等, 缩放档下差 (A.Width − R.Width): 精灵落到错的位置 ⇒
+ * 真实光标处被普通侧栏内容盖掉、列上多一道鬼影, 且 R 每次换挡/滚动重新居中,
+ * 偏差就在 0..差值之间跳 ⇒ 忽隐忽现。态2 不 blit 条带 ⇒ 那块不闪。
+ *
+ * 修法: 调用期间把 ViewBounds.Width 借给 colX, 调完立刻还原。整条 flag=1 分支
+ * 只读这一个字段 (flag=0 分支读 SidebarBounds.Y 与面高, 与此无关), 中间没有
+ * 引擎代码。盟军侧栏 (isNOD=0) 引擎本来就用 0、colX 也是 0, 不用动。 */
+static void Fm_CursorStampStrip(void* mouse, void* strip, int colX)
+{
+    RectangleStruct* vb = (RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
+    void** vt;
+    FnMouseFixSurface fn;
+    int save, want;
+    if (!mouse || !IsPlausiblePtr(mouse)) return;
+    if (!strip || !IsPlausiblePtr(strip)) return;
+    vt = *(void***)(size_t)mouse;
+    if (!vt || !IsPlausiblePtr(vt)) return;
+    fn = (FnMouseFixSurface)vt[WW_VT_FIX_CURSOR >> 2];
+    if (!fn) return;
+    want = (*(unsigned char*)(size_t)ADDR_ISNOD_SIDEBAR) ? colX : 0;
+    if (!vb) { fn(mouse, strip, 1); return; }
+    save = vb->Width;
+    if (want > 0 && want != save) vb->Width = want;
+    fn(mouse, strip, 1);
+    if (want > 0 && want != save) vb->Width = save;
+}
+
 unsigned long FM_BlitSb(void)
 {
     void* strip;
     void* prim;
     void* mouse;
     RectangleStruct src, dst;
-    int ox, oy, sbw, winW, colX;
+    int ox, oy, colX;
+    int stripW = 0, stripH = 0, primW = 0, primH = 0;
 
     if (!s_Enable) return 0;
-    s_nBlit++;
 
     /* 与原版尾声 (0x6A7481/0x6A748A) 一致: 标脏标记给下帧 Render 用, 清脏旗。
      * 只在真正接管时做 —— 原版提前返回的那几条路并不会置 0xB0B519。 */
@@ -1423,24 +1572,20 @@ unsigned long FM_BlitSb(void)
     mouse = *(void**)(size_t)ADDR_WWMOUSE;
     if (!strip || !prim || !IsPlausiblePtr(strip) || !IsPlausiblePtr(prim))
         return (unsigned long)(size_t)Fm_Ret4;
+    stripW = GtSurfGet(strip, GtVT_GET_WIDTH);
+    stripH = GtSurfGet(strip, GtVT_GET_HEIGHT);
+    primW = GtSurfGet(prim, GtVT_GET_WIDTH);
+    primH = GtSurfGet(prim, GtVT_GET_HEIGHT);
 
     /* 全屏: 侧栏面整块抹黑, 一笔都不上屏 (原版整条 blit 已被换掉, 所以屏幕上
      * 什么都没有 —— 地图本来就已经铺满整宽了)。 */
     if (!Fm_ModeKeep())
     {
-        Fm_ClearStripExceptRadar(NULL);
+        Fm_ClearStripOnce(NULL, stripW, stripH);
         return (unsigned long)(size_t)Fm_Ret4;
     }
 
-    /* 原版 blit 前先把光标区域从侧栏面上还原, 跟着做一次, 否则小地图上留洞 */
-    if (mouse && IsPlausiblePtr(mouse))
-    {
-        void** vt = *(void***)(size_t)mouse;
-        FnMouseFixSurface fn = (FnMouseFixSurface)vt[WW_VT_FIX_CURSOR >> 2];
-        if (fn) fn(mouse, strip, 1);
-    }
-
-    if (Fm_KeepRect(&src))
+    if (Fm_KeepRect(&src, &stripW, &stripH))
     {
         void** vt;
         FnCopyFromPart fn;
@@ -1448,24 +1593,21 @@ unsigned long FM_BlitSb(void)
          * 改成用侧栏列真实起点 —— 但**从视口算** (Fm_ColumnX), 不读
          * SidebarBounds.X: 那个全局在"全屏"态会被推成 1920 的路由阈值, 拿它当
          * 呈现位置就会把整条侧栏画到屏外/地图中间 (切换瞬间的残留)。*/
-        sbw = *(int*)(size_t)ADDR_SIDEBAR_W;
-        if (sbw < 64 || sbw > 512) sbw = 168;
-        winW = ((int*)(size_t)ADDR_WINDOWBOUNDS)[2];
-        if (winW < 640 || winW > 8192) winW = src.X + sbw;
-        colX = Fm_ColumnX(0);
-        if (colX < 0) colX = winW - sbw;      /* 兜底也贴右缘, 绝不画到屏幕中间 */
-        if (colX < 0) colX = 0;
+        colX = Fm_ColumnPlace();
         Fm_ClientOrigin(&ox, &oy);
         dst.X = ox + colX + src.X;
         dst.Y = oy + src.Y;
         dst.Width = src.Width;
         dst.Height = src.Height;
-        if (!Fm_FitRectToSurf(prim, &dst, &src))
+        if (!Fm_FitRectToSurf(&dst, &src, primW, primH))
             return (unsigned long)(size_t)Fm_Ret4;
         vt = *(void***)(size_t)prim;
         fn = (FnCopyFromPart)vt[VT_COPY_FROM_PART >> 2];
-        Fm_ClearStripExceptRadar(&src);
-        Fm_CoverColumnTail(prim, &dst);
+        Fm_ClearStripOnce(&src, stripW, stripH);
+        Fm_CoverColumnTail(prim, &dst, primW, primH);
+        /* 原版 blit 前那笔光标烙印: 横坐标基准必须与上面的 blit 目标同源,
+         * 所以只能排在 colX 算出来之后 (原版本来也在 blit 之前)。*/
+        Fm_CursorStampStrip(mouse, strip, colX);
         if (fn) fn(prim, &dst, strip, &src, 0, 1);
     }
     else if (!s_Warned && !Fm_ModeBare())
@@ -1475,60 +1617,44 @@ unsigned long FM_BlitSb(void)
     }
     return (unsigned long)(size_t)Fm_Ret4;
 }
-/* ---------------- 把小地图画进指定面 (每帧必跑的呈现前) ----------------
- * Composite 每帧都被地图重画并呈现, 所以把小地图直接画进 Composite, 它就是
- * 画面的一部分 —— 不再依赖侧栏何时上屏, 闪烁在构造上消失。
- * 坐标与呈到 Primary 时一致: SidebarBounds.X + 面内X (见 FM_BlitSb)。 */
+/* 小地图画进 Composite (不再依赖侧栏上屏时机, 构造上不闪)。 */
 int FM_DrawRadarTo(void* surf)
 {
     RectangleStruct src, dst;
     void* strip;
     void** vt;
     FnCopyFromPart fn;
-    int sbw, winW, colX;
+    int colX;
+    int stripW = 0, stripH = 0, surfW = 0, surfH = 0;
 
     if (!s_Enable || !Fm_ModeKeep()) return 0;
     if (!surf || !IsPlausiblePtr(surf)) return 0;
     strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
     if (!strip || !IsPlausiblePtr(strip)) return 0;
-    if (!Fm_KeepRect(&src)) return 0;
+    if (!Fm_KeepRect(&src, &stripW, &stripH)) return 0;
+    surfW = GtSurfGet(surf, GtVT_GET_WIDTH);
+    surfH = GtSurfGet(surf, GtVT_GET_HEIGHT);
 
-    sbw = *(int*)(size_t)ADDR_SIDEBAR_W;
-    if (sbw < 64 || sbw > 512) sbw = 168;
-    winW = ((int*)(size_t)ADDR_WINDOWBOUNDS)[2];
-    if (winW < 640 || winW > 8192) winW = 1920;
-    colX = Fm_ColumnX(0);          /* 同 FM_BlitSb: 从视口算, 不读 SidebarBounds.X */
-    if (colX < 0 || colX > winW) colX = winW - sbw;
-    if (colX < 0) colX = 0;
+    colX = Fm_ColumnPlace();       /* 与 FM_BlitSb 同一个值, 见 Fm_ColumnPlace */
 
     dst.X = colX + src.X;
     dst.Y = src.Y;
     dst.Width = src.Width;
     dst.Height = src.Height;
-    if (!Fm_FitRectToSurf(surf, &dst, &src)) return 0;
+    if (!Fm_FitRectToSurf(&dst, &src, surfW, surfH)) return 0;
 
     vt = *(void***)(size_t)surf;
     fn = (FnCopyFromPart)vt[VT_COPY_FROM_PART >> 2];
     if (!fn) return 0;
-    Fm_ClearStripExceptRadar(&src);
+    Fm_ClearStripOnce(&src, stripW, stripH);
     /* 目标面比条带矮时, blit 够不到的那几条先抹黑 (见 Fm_CoverColumnTail) */
-    Fm_CoverColumnTail(surf, &dst);
+    Fm_CoverColumnTail(surf, &dst, surfW, surfH);
     fn(surf, &dst, strip, &src, 0, 1);
     return 1;
 }
 
-/* ---------------- 视口 gadget 收窄 ----------------
- * GadgetClass::Input (0x4E1640) 的命中测试是 ExtractGadgetAt (0x4E15A0):
- *   X/W/H 直接当屏幕坐标比, 沿 GetPrev 走; 命中里取**面积最小**的那个。
- * 引擎把横跨整个视口的容器 gadget 摆在 ViewBounds 上; 视口铺满/被缩放后它会连
- * 侧栏列一起吞掉, 那一列的点击全被判成"点在视口上"。指针取自 Input 的 this
- * —— 是真 gadget 指针。
- * ★ 矩形是四个 int: +0x0C=X / +0x10=Y / +0x14=Width / +0x18=Height
- *   (ExtractGadgetAt 0x4E15CF-0x4E15F3 就是这四个)。**Y/Height 也必须收窄**:
- *   缩小档 ViewBounds = R, 高度 R.Height (2x 时 2096) 远超窗口 1080 ⇒ 只改
- *   X/Width 的话这个容器仍盖住整屏高度, 侧栏那一列的点被判成"在视口上"
- *   (症状: 缩小档下原版侧栏点击全失效)。
- * 命中区一律按 A (满视图区) 算, 不跟缩放走 —— 见 Fm_ViewNoSidebar。*/
+/* 视口 gadget 收窄: 容器摆在 ViewBounds 上会吞掉侧栏列, 在命中前收成"视口减侧栏"。
+ * XYWH 也要收 (缩小档 R 高超窗口)。命中区按 A 算。 */
 #define GAD_LOG_X       0x0Cu
 #define GAD_LOG_Y       0x10u
 #define GAD_LOG_W       0x14u
@@ -1583,8 +1709,7 @@ void FM_TrimViewGadget(void)
     if (gx < 0 || gw <= 0 || gy < 0 || gh <= 0) return;
     if (!Fm_ModeTrim())
     {
-        /* 不收窄 (全屏态): 命中区必须是整块 A (缩放时 A 全是地图)。引擎每帧从
-         * ViewBounds 重设, 这里只是在切模式的当帧把上一次收窄的结果改回去。*/
+        /* 不收窄时恢复成整块 A (引擎每帧从 ViewBounds 重设, 只改切模式当帧)。 */
         const RectangleStruct* vb = &s_ViewA;
         if (vb->Width < 64 || vb->Width > 8192) return;
         if (gx == vb->X && gy == vb->Y && gw == vb->Width && gh == vb->Height)
@@ -1646,9 +1771,7 @@ void FM_NoteGadgetInput(void* gadget)
 
     if (!gadget || !IsPlausiblePtr(gadget)) return;
     g = (unsigned char*)gadget;
-    /* ★ 内存安全: 只认 gamemd.exe 自己映像 (.text .data .bss) 里的 gadget。
-     * 这里要往对象里写 X/Width, 万一 this 是别的模块 (Ares 之类) 造出来的
-     * gadget 或野指针, 写进去就是内存破坏。 */
+    /* 只认 gamemd 自己映像里的 gadget (往别处写即内存破坏)。 */
     if ((unsigned)(size_t)gadget < 0x00400000u
         || (unsigned)(size_t)gadget > 0x008A0000u) return;
     vt = *(void***)g;
@@ -1659,9 +1782,7 @@ void FM_NoteGadgetInput(void* gadget)
     if (sbw < 64 || sbw > 512) return;
     gx = *(int*)(g + GAD_LOG_X);
     gw = *(int*)(g + GAD_LOG_W);
-    /* 认它 = 矩形恒等于 ViewBounds (缩放档下是 R); 别的 gadget 不归我们管。
-     * 判据只比 X/Width —— Y/Height 由引擎每帧从 ViewBounds 重设, 比不比都一样,
-     * 而缩放档下它们会随 R 变, 拿来当判据会在换挡那一帧认不出自己。 */
+    /* 认它 = 矩形恒等于 ViewBounds (判据只比 X/Width, Y/H 随 R 变认不准)。 */
     if (gw <= 0) return;
     if (gw != vb->Width) return;
     if (gx != vb->X) return;
@@ -1669,214 +1790,77 @@ void FM_NoteGadgetInput(void* gadget)
     if (gx + gw <= sb->X) return;
     if (gx >= sb->X + sbw) return;
     s_ViewGadget = gadget;
-    /* 在命中判定之前收窄: 钩子跑在原函数体之前, 而原函数紧接着就调
-     * ExtractGadgetAt, 所以此刻改矩形能立刻影响这一次命中。
-     * (FM_Poll 里做无效 —— 那里排在 Input 之后, 引擎每帧从 ViewBounds 重设。) */
+    /* 此刻改矩形能立刻影响这次命中 (钩子跑在 ExtractGadgetAt 之前)。 */
     FM_TrimViewGadget();
 }
 
-/* ---------------- 地图格范围 + 原生视口滚动 ----------------
- * 小地图点击要把"雷达像素"换算成"地图格", 再让引擎把视口对准那一格。
- * 格范围用 Fm_ScanTacticalMapRect 只读扫描 TacticalClass 得到 (见其注释)。
- * 滚动: RadarClass::ScrollTo (0x653F70), 它是
- *   TacticalClass::SetTacticalPosition (0x6D6070) 的包装。
- * ★ 引擎自带的 RadarClass::Action (0x6539D0) 里有"点雷达跳视口"但那是死代码:
- *   入口要求 [0x880C98]==1 && [0x880C94]==1, 这两个全局全二进制只有读没有写,
- *   .data 初值 0 ⇒ 恒 bail。这条链在原版里也不通, 只能自己接。
- * 联机安全: 只动本地摄像机, 逐客户端各自决定看哪里。 */
-#define ADDR_SCROLL_TO       0x00653F70u   /* RadarClass::ScrollTo(CoordStruct*) */
-#define ADDR_VISIBLE_MIN_X   0x00880C84u   /* 单例+0x149C 可见区最小格 X */
-#define ADDR_VISIBLE_MIN_Y   0x00880C88u   /* 单例+0x14A0 可见区最小格 Y */
-#define ADDR_VISIBLE_MAX_X   0x00880C8Cu   /* 单例+0x14A4 可见区最大格 X */
-#define ADDR_VISIBLE_MAX_Y   0x00880C90u   /* 单例+0x14A8 可见区最大格 Y */
-
-typedef struct { int X, Y, Z; } CoordStruct;
-
-typedef void (__thiscall *FnScrollTo)(void* self, const CoordStruct* c);
-
-static RectangleStruct s_MapRect;
-static int s_MapRectOk = 0;
-static int s_MapLogged = 0;
-
-/* ---------------- 地图格矩形: 从 TacticalClass 只读扫描 ----------------
- * ⚠️ 不要钩 MapClass::CreateEmptyMap (0x653F50) 拿入参: 崩 (0xC0000005,
- *   发生在跳板返回之后)。为一个矩形去钩引擎内部函数收益/风险比太差。
- * 无钩扫描: MapRect / MaxWidth / MaxHeight 都在 TacticalClass 的 0x0E0..0x200,
- * 确切偏移没核实过 (YRpp 头文件那段是占位名), 所以**不写死偏移**, 逐 4 字节
- * 试, 用两条判据筛:
- *   1) 宽高像地图尺寸: 16..512 格, X/Y 在 -64..512;
- *   2) 可见区格坐标 `[0x880C84..90]` 必须落在里面。两种语义都试:
- *      (a) {minX,minY,maxX,maxY}  (b) {X,Y,W,H}
- * 命中即锁定。区间已判过 IsPlausiblePtr, 只读, 联机安全。 */
-#define ADDR_TACTICAL        0x00887324u
-
-static int Fm_VisFits(const RectangleStruct* r)
-{
-    int a = *(int*)(size_t)ADDR_VISIBLE_MIN_X;
-    int b = *(int*)(size_t)ADDR_VISIBLE_MIN_Y;
-    int c = *(int*)(size_t)ADDR_VISIBLE_MAX_X;
-    int d = *(int*)(size_t)ADDR_VISIBLE_MAX_Y;
-    int x0 = r->X, y0 = r->Y, x1 = r->X + r->Width, y1 = r->Y + r->Height;
-    /* 语义 (a): {minX,minY,maxX,maxY} 四个都必须在地图内 */
-    if (a >= x0 && a < x1 && b >= y0 && b < y1
-        && c >= x0 && c <= x1 && d >= y0 && d <= y1) return 1;
-    /* 语义 (b): {X,Y,W,H} 的可见区也必须在地图内 */
-    if (a >= x0 && a + c <= x1 && b >= y0 && b + d <= y1) return 1;
-    return 0;
-}
-
-static int Fm_ScanTacticalMapRect(void)
-{
-    void* tc = *(void**)(size_t)ADDR_TACTICAL;
-    char* base;
-    RectangleStruct r;
-    int off;
-    if (!tc || !IsPlausiblePtr(tc)) return 0;
-    base = (char*)tc;
-    for (off = 0x0E0; off <= 0x200; off += 4)
-    {
-        r = *(RectangleStruct*)(base + off);
-        if (r.Width < 16 || r.Width > 512) continue;
-        if (r.Height < 16 || r.Height > 512) continue;
-        if (r.X < -64 || r.X > 512) continue;
-        if (r.Y < -64 || r.Y > 512) continue;
-        if (!Fm_VisFits(&r)) continue;
-        s_MapRect = r;
-        s_MapRectOk = 1;
-        if (!s_MapLogged)
-        {
-            char b1[16], b2[16], buf[192];
-            unsigned q = 0;
-            s_MapLogged = 1;
-            q = AppendCStr(buf, q, "fullmap: map rect scan off=", sizeof(buf));
-            UtoA((unsigned)off, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCStr(buf, q, " ", sizeof(buf));
-            UtoA((unsigned)r.X, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCStr(buf, q, ",", sizeof(buf));
-            UtoA((unsigned)r.Y, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCStr(buf, q, ",", sizeof(buf));
-            UtoA((unsigned)r.Width, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCStr(buf, q, "x", sizeof(buf));
-            UtoA((unsigned)r.Height, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
-            LogLine(buf);
-        }
-        return 1;
-    }
-    return 0;
-}
-
-/* 雷达矩形内的相对像素 -> 地图格。整块雷达图就是整张地图的等比缩略图,
- * 所以按比例线性映射; 结果夹回地图范围内。 */
-static int Fm_RadarPixelToCell(int px, int py, const RectangleStruct* radar,
-    int* outX, int* outY)
-{
-    int lx, ly, cx, cy;
-    if (!s_MapRectOk && !Fm_ScanTacticalMapRect()) return 0;
-    if (radar->Width < 8 || radar->Height < 8) return 0;
-    lx = px - radar->X;
-    ly = py - radar->Y;
-    if (lx < 0) lx = 0;
-    if (ly < 0) ly = 0;
-    if (lx > radar->Width - 1) lx = radar->Width - 1;
-    if (ly > radar->Height - 1) ly = radar->Height - 1;
-    cx = s_MapRect.X + (lx * s_MapRect.Width) / radar->Width;
-    cy = s_MapRect.Y + (ly * s_MapRect.Height) / radar->Height;
-    if (cx < s_MapRect.X) cx = s_MapRect.X;
-    if (cy < s_MapRect.Y) cy = s_MapRect.Y;
-    if (cx > s_MapRect.X + s_MapRect.Width - 1) cx = s_MapRect.X + s_MapRect.Width - 1;
-    if (cy > s_MapRect.Y + s_MapRect.Height - 1) cy = s_MapRect.Y + s_MapRect.Height - 1;
-    *outX = cx;
-    *outY = cy;
-    return 1;
-}
-
-/* ---------------- 小地图点击: 自己接手 + 吞掉穿透 ----------------
+/* ---------------- 小地图点击门: 吞掉穿透, 跳转交给原生 ----------------
+ * 引擎把侧栏顶部这一块当普通地图点击 (框单位/打靶/下单), 所以在
+ * `DisplayClass::ProcessClickCoords` 里挂一道门: 落点在那块矩形内就跳 0x6925FC
+ * (原函数的"未处理"出口, 栈形在该落点对齐) 吞掉。
+ *
+ * ★ 视口跳转由**引擎原生** `RadarClass::Action` (0x6539D0) 做, 这里一个字都不算。
+ * 靠的就是 `FM_Install` 里那五处 imm32 补丁 —— 其中 0x653A3F 把
+ * `RadarClass::Action` 内部"鼠标X -> 侧栏面内X"的偏移从 ViewBounds.Width 改成读
+ * SidebarBounds.X, 它不生效小地图点击就完全没反应。原生链内部是
+ * `0x656750` -> `{格*256+0x80}` -> 视口跳格: 输入绝对屏幕点、参照框是雷达矩形
+ * (永远在 1x 位置, 与缩放无关), 所以"映射到原本那块地图矩形"由引擎完成。
+ *
+ * ⚠️ 别在这里自己换算坐标, 也别调 0x656750/0x578080 顶替原生链 (会重复跳/跳错)。
+ * 拿到一个"地图矩形"先量宽高比, 跟源的比例对不上就别往里映射: 小地图是俯视网格图
+ * 145x137≈1.06, `Clamp_Center` 那个等距矩形 7800x4035≈1.93, 不是同一个投影。
+ *
+ * 只吞左键 (右键是取消/强制移动); "一次按下只处理一次"由门里直接读
+ * GetAsyncKeyState + "已处理"标记实现 —— 不能靠 FM_Poll 采边沿, 点击事件与
+ * prepare (一帧能被调好几次) 的先后不可控, 边沿可能在 press **之后**才采到。
+ * 命中范围是**侧栏顶部那一块** (资金条 + 小地图 + 那两个按钮, Fm_KeepTopRect):
+ * 这一块是我们画的 UI, 点击不该再落到地图上。⚠️ **不能**用 Fm_KeepRect ——
+ * 态0 它是整条侧栏面, 缩放档开门后会把页签/cameo 一起吞掉 (那两样点了是要
+ * 下单的)。吞没只发生在 ProcessClickCoords 里, 侧栏自己的 widget 分派
+ * (0x6D0680) 不受影响, 顶部两个按钮的原生响应照旧。
+ * 联机安全: 只动本地摄像机, 不写模拟对象、不发事件。 *//* ---------------- 小地图点击: 自己接手 + 吞掉穿透 ----------------
  * 引擎把这一块当普通地图点击 (框单位/打靶/下单), 所以在
  * DisplayClass::ProcessClickCoords 里挂一道门: 落点在那块小地图矩形内就自己
  * 完成视口跳转, 再跳 0x6925FC (原函数的"未处理"出口, 栈形在该落点对齐) 吞掉。
  * 只吞左键 (右键是取消/强制移动); "一次按下只处理一次"由门里直接读
  * GetAsyncKeyState + "已处理"标记实现 —— 不能靠 FM_Poll 采边沿, 点击事件与
  * prepare (一帧能被调好几次) 的先后不可控, 边沿可能在 press **之后**才采到。
- * 命中范围是**整块保留区** (资金条 + 小地图 + 那两个按钮): 这一块是我们画的
- * UI, 点击不该再落到地图上。吞没只发生在 ProcessClickCoords 里, 侧栏自己的
- * widget 分派 (0x6D0680) 不受影响, 顶部两个按钮的原生响应照旧。
+ * 命中范围是**侧栏顶部那一块** (资金条 + 小地图 + 那两个按钮, Fm_KeepTopRect):
+ * 这一块是我们画的 UI, 点击不该再落到地图上。⚠️ **不能**用 Fm_KeepRect ——
+ * 态0 它是整条侧栏面, 缩放档开门后会把页签/cameo 一起吞掉 (那两样点了是要
+ * 下单的)。吞没只发生在 ProcessClickCoords 里, 侧栏自己的 widget 分派
+ * (0x6D0680) 不受影响, 顶部两个按钮的原生响应照旧。
  * 联机安全: 只动本地摄像机, 不写模拟对象、不发事件。 */
 unsigned FM_RadarClickGate(void* regs)
 {
     RectangleStruct radar, keep;
     RectangleStruct* sb = (RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS;
-    int winW, colX, mx, my, kx, ky, cx, cy, lb;
+    int colX, mx, my, kx, ky, lb;
 
     (void)regs;
-    if (!s_Enable || !Fm_ModeKeep() || !Fm_ModeGate()) return 0;
     if (!g_Log) return 0;
     lb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
     if (!lb) { s_LbPress = 0; return 0; }  /* 松开: 下一次按下重新允许处理 */
     if (s_LbPress) return 0;              /* 本次按下已处理过 (按住拖动不重复) */
     s_LbPress = 1;
+    if (!s_Enable || !Fm_ModeKeep() || !Fm_ModeGate()) return 0;
     if (!Fm_RadarRect(&radar)) return 0;
-    if (!Fm_KeepRect(&keep)) return 0;
+    if (!Fm_KeepTopRect(&keep)) return 0;
     if (!GtMouseGameXY(&mx, &my)) return 0;
-    winW = ((int*)(size_t)ADDR_WINDOWBOUNDS)[2];
-    if (winW < 640 || winW > 8192) return 0;
-    colX = sb->X;
-    if (colX < 0 || colX > winW) return 0;
+    /* 列起点与呈现位置同源 (Fm_ColumnX), 不读 SidebarBounds.X: 那个全局引擎
+     * 会按当前 ViewBounds (= R) 重算, 缩小档下瞬时值不是列起点。与
+     * FM_PtInKeepRegion 用同一个函数, 两边判定才不可能打架。 */
+    colX = Fm_ColumnX(0);
+    if (colX < 0) colX = sb->X;
+    if (colX < 0 || colX > 8192) return 0;
 
-    /* 保留区整块吞掉: 这一块是面板, 点击不该穿透到地图 */
+    /* 顶部那一块整块吞掉: 这一块是面板, 点击不该穿透到地图 */
     kx = colX + keep.X;
     ky = keep.Y;
     if (mx < kx || mx >= kx + keep.Width) return 0;
     if (my < ky || my >= ky + keep.Height) return 0;
 
-    /* 小地图本体才做视口跳转; 点那两个按钮 / 资金条只吞不跳 */
-    if (mx < colX + radar.X || mx >= colX + radar.X + radar.Width)
-        return (unsigned)ADDR_CLICKGATE_SKIP;
-    if (my < radar.Y || my >= radar.Y + radar.Height)
-        return (unsigned)ADDR_CLICKGATE_SKIP;
-
-    if (!Fm_RadarPixelToCell(mx - colX, my, &radar, &cx, &cy))
-    {
-        if (!s_ClickLogged)
-        {
-            s_ClickLogged = 1;
-            LogLine("fullmap: radar-click ignored (no map rect yet)");
-        }
-        return (unsigned)ADDR_CLICKGATE_SKIP;
-    }
-
-    {
-        CoordStruct c;
-        FnScrollTo fn = (FnScrollTo)(size_t)ADDR_SCROLL_TO;
-        c.X = cx * 256 + 0x80;
-        c.Y = cy * 256 + 0x80;
-        c.Z = 0;
-        if (fn) fn(NULL, &c);
-        if (!s_JumpLogged)
-        {
-            char b1[16], b2[16], buf[192];
-            unsigned q = 0;
-            s_JumpLogged = 1;
-            q = AppendCStr(buf, q, "fullmap: radar-click px=", sizeof(buf));
-            UtoA((unsigned)mx, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCStr(buf, q, ",", sizeof(buf));
-            UtoA((unsigned)my, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCStr(buf, q, " rect=", sizeof(buf));
-            UtoA((unsigned)(colX + radar.X), b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCStr(buf, q, ",", sizeof(buf));
-            UtoA((unsigned)radar.Y, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
-            q = AppendCStr(buf, q, ",", sizeof(buf));
-            UtoA((unsigned)radar.Width, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCStr(buf, q, "x", sizeof(buf));
-            UtoA((unsigned)radar.Height, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
-            q = AppendCStr(buf, q, " -> cell=", sizeof(buf));
-            UtoA((unsigned)cx, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCStr(buf, q, ",", sizeof(buf));
-            UtoA((unsigned)cy, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
-            q = AppendCStr(buf, q, " colX=", sizeof(buf));
-            UtoA((unsigned)colX, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-            LogLine(buf);
-        }
-    }
+    /* 落在小地图本体之外的 (那两个按钮 / 资金条) 也吞掉, 只是不跳 */
     return (unsigned)ADDR_CLICKGATE_SKIP;
 }
 

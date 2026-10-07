@@ -809,9 +809,9 @@ static void SwsLoadIniList(void)
             SwsStrEq(k, "ScrollStep") ||
             SwsStrEq(k, "Side") ||
             SwsStrEq(k, "DedupDefensePage");
-        /* 漏一个全局键的后果: 它会被当成“超武 ID”收进 s_Ini, 显示成一个
-         * 永远不亮的空条目。新增配置项**必须**同时加进这里, 并与
-         * SwsEnsureInit 里真正读取的那份保持一致 —— 两边不一致时会留下堆早已删除的键, 排查时以为它们还生效。*/
+        /* 漏一个全局键的后果: 它会被当成"超武 ID"收进 s_Ini, 显示成一个永远
+         * 不亮的空条目。新增配置项必须同时加进这里, 并与 SwsEnsureInit 里
+         * 真正读取的那份保持一致。*/
         if (!isGlobal && L < 31)
         {
             int v = GetPrivateProfileIntA(SWS_SECTION, k, 0, g_IniPath);
@@ -2249,12 +2249,11 @@ static int SwsDVecOk(const unsigned char* v, const unsigned char* lo,
  * 定位跟着 Ares 的代码走: 不扫数据段、不会误命中别的容器、ASLR 后依然对。
  * 找不到 / 两条对不上 / 容器不自洽一律 fail-closed。
  *
- * 只在确实在跑一局时才找: CurrentPlayer 有效 + 帧号走过 60 (主菜单里容器
- * 还没建好)。试一次就够 —— 上面两个前置条件已保证时机, 而那条指令永远在。
+ * 只在确实在跑一局时才找 (本家指针有效 + 帧号 > 60), 上面两个前置条件已保证
+ * 时机。
  *
- * > ⚠ **不要用 `Unsorted::ScenarioInit` (0xA8E7AC) 做"在跑一局"判断**。名字
- * > 像是"场景初始化中", 实际是计数器 (gamemd 里有 `inc dword [0xA8E7AC]`)
- * > 且实战中长期为 0, 两种判法都让定位器一次都没跑过。 */
+ * > ⚠ **不要用 `Unsorted::ScenarioInit` (0xA8E7AC) 做"在跑一局"判断**: 名字像是
+ * > "场景初始化中", 实际是个计数器且实战中长期为 0, 两种判法都让定位器从未跑过。 */
 #define ARES_SKIPCHECK "SidebarClass_AddCameo_SkipSizeCheck"
 #define ARES_SCAN_SPAN 0x60u
 static unsigned char* SwsAresFindTabCameos(void)
@@ -2374,11 +2373,9 @@ static void SwsDefenseRepair(void)
     strip = (unsigned char*)sb + OFF_STRIP_BASE +
             (unsigned)TAB_DEFENSE * OFF_STRIP_STRIDE;
     cnt = *(int*)(s_TabCam + (unsigned)TAB_DEFENSE * DVEC_SIZE + DVEC_OFF_COUNT);
-    /* Ares 维护两份计数: TabCameos[i].Count (我们只改这份) 和
-     * StripClass::CameoCount (页签布局按它算)。两份必须跟上, 否则页签会按
-     * 旧计数去画、点到已删掉的位置。所以这个写入是**必须的**; 写之前先确认
-     * 读出来的确实是个正常计数, 万一偏移又对不上宁可跳过 (宁可不修也不能
-     * 写坏别人的内存)。 */
+    /* Ares 维护两份计数: TabCameos[i].Count (我们只改这份) 与
+     * StripClass::CameoCount (页签布局按它算)。两份都要跟上, 否则页签按旧
+     * 计数画、点到已删掉的位置; 偏移对不上时宁可跳过, 不写坏别人的内存。 */
     if (SwsStripCameoCount(TAB_DEFENSE) >= 0)
         *(int*)(strip + OFF_STRIP_CAMCOUNT) = cnt;
     if (cnt > 0)
@@ -2646,19 +2643,14 @@ static int SwsDedupSync(void)
     int want, r;
     SwsEnsureInit();
     if (!s_Enable) { s_DedupDirty = 0; return 0; }
-    /* 目标态 = "去重开关 ∧ 侧栏此刻真的在显示"。
-     *
-     * `s_Visible` 必须参与: 收起 (F4) 之后侧栏一格都不画, 若目标态还停在"隐藏
-     * 重复", 那些刚被搬走的超武就**两头都没了** —— 收起期间玩家在防御页里再也
-     * 找不到它们, 而搬出是单向的, 展开时也不会补回防御页。原先注释写的理由
-     * ("防御页是引擎自己的页签, 侧栏藏了照样能用")只在**还没搬走过**的时候成立,
-     * 一旦搬走过就是反的。 */
+    /* 目标态 = "去重开关 ∧ 侧栏此刻真的在显示"。s_Visible 必须参与: 收起 (F4)
+     * 后侧栏一格都不画, 若还停在"隐藏重复", 刚被搬走的超武就两头都没了 ——
+     * 搬出是单向的, 展开时也不会补回防御页。 */
     want = (s_DedupHide && s_Visible) ? 1 : 0;
     if (want == s_DedupDone && !s_DedupDirty) return 0;
     if (want && !SwsAresFindTabCameos()) { s_DedupDirty = 0; return 0; }
     /* 想删, 但侧栏还没扫出任何条目 (开局/重开那一轮 SwsScan 早退, 本家还没进
-     * House 数组, 半初始化垃圾): **这一轮什么都不做**, dirty 留着等下一次扫描。
-     * 删了就是永久丢失, 晚 0.25s 无所谓。 */
+     * House 数组): 这一轮什么都不做, dirty 留着等下一次扫描。删了就是永久丢失。 */
     if (want && s_ItemN <= 0)
     {
         static int s_WaitAge = 0;
