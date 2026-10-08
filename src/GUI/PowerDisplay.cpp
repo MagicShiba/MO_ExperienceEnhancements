@@ -1,13 +1,11 @@
 /*
  * PowerDisplay.cpp - 底部电量指示, 见 PowerDisplay.h。
  *
- * 定案: 只画侧栏面, 随条带上屏——
- *   (1) 消息帧 (渲染内由 MOExperience.cpp 调), (2) prepare (每循环, 裸钩
- *   MOExperience_PrepareEntry), (3) BlitSidebar 入口 (每次条带呈现前先恢复,
- *   裸钩 MOExperience_BlitSbEntry)。呈出的帧必带字。
- * 不再往 Primary/Hidden/Composite 直画: 直画层级盖过鼠标, 且侧栏不呈现时
- * 仍冒字。侧栏面一份 (168 侧栏坐标, 喂条带上屏), 层级天然在鼠标之下,
- * 侧栏不画即不显示。上屏链反汇编实证见 VecText 笔记"底部电量"节。
+ * 只画侧栏面, 随条带上屏: (1) 消息帧 (渲染内由 MOExperience.cpp 调), (2) prepare
+ * (每循环, 裸钩 MOExperience_PrepareEntry), (3) BlitSidebar 入口 (每次条带呈现前
+ * 先恢复, 裸钩 MOExperience_BlitSbEntry)。直画 Primary/Hidden/Composite 会盖过
+ * 鼠标且侧栏不呈现时仍冒字; 侧栏面一份 (168 侧栏坐标) 层级天然在鼠标之下。
+ * 上屏链反汇编实证见 VecText 笔记"底部电量"节。
  *
  * 总开关: [VecText] PowerBottom=0 即关 (缺省 1 开)。
  * 内容 "闪电+负载/电力" (PowerMode=1 则"闪电+余量纯数字"): 侧栏内居中
@@ -15,8 +13,8 @@
  * 数值: CurrentPlayer(0xA83D4C)+0x53A4=PowerOutput/+0x53A8=PowerDrain
  * (UpdatePower 0x508C30 反汇编实证, VecText 笔记 v88 节)。
  * 颜色按游戏比例 (Phobos PowerDelta 默认 0.75/1.0): d*4<o*3 绿, d<=o 黄,
- * 否则红。字号/字体/粗体精确对标资金: CreditPx>0 (用户自定义, 如 16)
- * 即资金真字号 (同 GDI 管线, 面取 VecText_FontFace); CreditPx=0 时退原字行高 (无+4)。
+ * 否则红。字号/字体/粗体对标资金: CreditPx>0 即资金真字号 (同 GDI 管线, 面取
+ * VecText_FontFace); CreditPx=0 时退原字行高 (无+4)。
  */
 
 #include <windows.h>

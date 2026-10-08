@@ -131,6 +131,6 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈，`0x6A9C86` 的 `[ESP+0x3
 
 - 真分发( 右键先看[esp+0xB0]&0x10, 再看[esp+0x18]: null 走 0x6AB0AC 明路(旧钩); 非 null 且在产未暂停走 0x6AAFE1 暗暂停(SUSPEND 经 0x6AB02A, ec 调用者 0x6AB02F); 否则按 shift 走 0x6AAE4A(0x2E)/0x6AAFBD(0x10, 经 jmp 0x6AB1FF 共享尾, ec 调用者恒 0x6AB204, 故旧 ex 哨兵全被绕过)。剥离搬到暗路三钩: hd 哨兵(暂停不动)+AFBD/AE4A 弹尾减数(N==1/模拟<=1 走原生)。
 
-- 崩溃教训: DarkCancelPeel(0x6AAFBD,10B) 非零返回后跳 0x6AB28F, 落点 EIP=0x0693002D(C0000005, EBP=7), 疑 9/10B 钩非零返回触 Syringe 短桩问题(8B/6B 同模式无事, FreeShift-10B 仅 return 0 无事)。1暗路合并为单 6B-Jcc 钩 0x6AAE44(分发点, 与 H0 同构): 弹尾/拦下跳出口, 放行跳回原生去向(AFBD/AE4A)。
+- 崩溃定位: DarkCancelPeel(0x6AAFBD,10B) 非零返回后跳 0x6AB28F, 落点 EIP=0x0693002D(C0000005, EBP=7), 疑 9/10B 钩非零返回触 Syringe 短桩问题(8B/6B 同模式无事, FreeShift-10B 仅 return 0 无事)。1暗路合并为单 6B-Jcc 钩 0x6AAE44(分发点, 与 H0 同构): 弹尾/拦下跳出口, 放行跳回原生去向(AFBD/AE4A)。
 
 - 清理: 撤 H1/H2/H0P/ex×2/ec(6 钩, 全版本零触发, 日志为证)+对应代码/defines/inj 行; H0-state==1 改一律原生暂停(d=3 退役, 与暂停优先模型一致); DarkPeel 去 kind/shift 参数(d=6/7); 头注释重整(删“忽略 Shift”等过期规则, legend 去 h1/pa/sw/ex/ec/d=3/d=4/d=9)。现 8 钩: QueueClick/FreeShift/H0/CancelPeel/DarkDispatch/DarkPauseSeen/ShowCount/DrawNullFac。

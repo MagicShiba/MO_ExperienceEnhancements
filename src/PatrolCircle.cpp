@@ -1,54 +1,42 @@
 /* PatrolCircle.cpp - Z+中键一键巡逻圈 (选中单位直接巡逻)。
  *
  * 触发: 按住 Z (PlanningMode 键) 的同时按住鼠标中键 (Hotkey, 默认 Z+Middle),
- * 划线后松开在终点定圈:
- * 起终连线为中线, 四周各外扩 Size/2 (端点沿方向也外扩 Size/2) 成矩环;
- * 点按 (起终两格内) 则以松开格为中心布 4x4 方环 (±2 角) 并开始巡逻。
- * 拖线期间按 NodeStep 采样轨迹节点; 松开时起终距离 < LoopClose
- * (且节点>=4) 则走曲线闭环: 节点按 LoopStep 稀疏抽路点 (比散开稀疏),
- * 全员 Mega 建点 + 合环 Connect + Commit。
- * 起终距离远则保持原行为 (直线矩环/点按方环)。
- * 配置全在 MOExperience.ini [PatrolCircle]。全程不碰光标。
- * 与砍树互斥: Ctrl 按住时让路 TreeChop (见 TreeChop.cpp)。
- * 拖动期间渲染期画白橡皮线 (锚点→当前鼠标, 与 SmartOrder 同风格),
- * 挂 MOExperience_MessageDrawHook (见 MOExperience.cpp)。
- * 注意: 中键按住拖时游戏可能平移镜头, 起终格按各自时刻镜头映射。
+ * 划线后松开在终点定圈: 起终连线为中线, 四周各外扩 Size/2 (端点沿方向也
+ * 外扩) 成矩环; 点按 (起终两格内) 则以松开格为中心布 4x4 方环。拖线期间按
+ * NodeStep 采样轨迹节点; 松开时起终距离 < LoopClose (且节点>=4) 则走曲线闭环:
+ * 节点按 LoopStep 稀疏抽路点, 全员 Mega 建点 + 合环 Connect + Commit。
+ * 配置全在 MOExperience.ini [PatrolCircle]。全程不碰光标, 不限单位。
+ * 与砍树互斥: Ctrl 按住时让路 TreeChop (见 TreeChop.cpp)。拖动期间渲染期画
+ * 白橡皮线 (锚点→当前鼠标, 与 SmartOrder 同风格), 挂
+ * MOExperience_MessageDrawHook (见 MOExperience.cpp)。中键按住拖时游戏可能
+ * 平移镜头, 起终格按各自时刻镜头映射。
  *
- * 原理 (原生序列实证: OutList 抓包 pev + YRpp EventClass.h 交叉确认):
+ * 原生序列 (OutList 抓包 pev + YRpp EventClass.h 交叉确认):
  *   每点每单位各一 MegaMission (Type 4, ctor 0x4C6860, Whom=单位,
  *   Mission=Move, Target=空, Destination=格子, Follow=格子(同 Dst),
  *   IsPlanningEvent=1), 执行侧 0x638120 建节点 + 挂各单位独立 token。
  *   关环 = 全员 Connect 首节点 (Type 0x2A, Connect-only 无 Mega),
- *   最后 PlanCommit (0x2B, 空载荷)。全程标准事件, 各端同执行,
- *   联机安全。UI 的 0x639740 直调故意不用 (只改本机, 联机分叉)。
- *   事件布局 (TargetClass 5 字节: ID4+RTTI1):
- *   Whom@7, Mission@12, Target@14, Dst@19, Follow@24, Flag@29。
- *   闭环加新点由原生拦截 (消息+丢弃)。事件按序进 OutList,
- *   执行保序; 各阶段就绪即走, 无固定等待。
- *   TargetCell: 0x6E6B20 (ID=X+1000*Y, RTTI=11);
- *   TargetUnit: 0x6E6AB0 (ID=Fetch_ID, RTTI=Abstract=52)。
- *   入队走 OutList (与 BuildQueue 同式, 满则跨帧续发)。
- *   选中表 0xA8ECBC/0xA8ECC8; 本家 CurrentPlayer 0xA83D4C+[0x30];
+ *   最后 PlanCommit (0x2B, 空载荷)。事件布局 (TargetClass 5 字节:
+ *   ID4+RTTI1): Whom@7, Mission@12, Target@14, Dst@19, Follow@24, Flag@29。
+ *   TargetCell 0x6E6B20 (ID=X+1000*Y, RTTI=11); TargetUnit 0x6E6AB0
+ *   (ID=Fetch_ID, RTTI=Abstract=52)。入队走 OutList, 满则跨帧续发。
+ *   选中表 0xA8ECBC/0xA8ECC8; CurrentPlayer 0xA83D4C+[0x30];
  *   中心格经 Display::ProcessClickCoords 0x692300; 角校验经
  *   MapCells=[0x87F7E8+0x13C]/MaxCells=[0x87F7E8+0x140]。
  *
  * 约束 (勿踩):
- *   只发 Connect 无节点可链 (全丢弃)——故先全员 Mega 建点,
- *   挂满才发合环 Connect (同突发混发时 Connect 可能先于建节点
- *   执行而被丢弃); 关环绝不能带 Mega (已存在点再 Mega 建重复),
- *   更不能本地直调关环 (联机分叉); Follow 必须 =Dst (空则关环
- *   语义缺失, pev 对照原生 12/12 全带)。
- * 行为:
- *   不限单位 (OutList 满则 drip 跨帧续发, Mega 每点全员);
+ *   只发 Connect 无节点可链 (全丢弃) —— 故先全员 Mega 建点, 挂满才发合环
+ *   Connect (同突发混发时 Connect 可能先于建节点执行而被丢弃);
+ *   关环绝不能带 Mega (已存在点再 Mega 建重复), 也不能本地直调 0x639740
+ *   (只改本机, 联机分叉); Follow 必须 =Dst (空则关环语义缺失)。
  *   各阶段就绪即走无固定等待 (帧不动时 poll 数兜底防 busy 卡死);
  *   token 就绪须深度校验 (数组+计数+首节点, 防门控抢跑);
  *   快照跨帧须先经 Fetch_ID 索引验活 (自检失败则 fail-open);
- *   不删路径不拦添加——闭环加新点由原生拦截 (消息+丢弃),
- *   未闭环残留按原生语义延长。
+ *   不删路径不拦添加 —— 闭环加新点由原生拦截 (消息+丢弃), 未闭环残留按
+ *   原生语义延长。
  *
  * 联机: 只发标准事件, 各端同一份原版代码执行, 不影响联机。
  * 本地只读 + 标准事件入队, 不写模拟内存。
- *
  * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
  * 轮询挂 PowerDrawBoth (见 MOExperience.cpp), 开关关时直接返回。
  */
@@ -674,11 +662,10 @@ static void PC_TriggerAt(int ax, int ay, int bx, int by)
     PC_Drain();
 }
 
-/* 验证+提交 (一次做完, 同 Poll 内同步完成; 完即放行, FIFO 保序,
- * 无需等 commit 执行)。纯事件关环 (合环 Connect 已执行),
- * loop>0 才 Commit; 关不上则提交开环路径 (两端一致, 不崩只降级)。
- * 注意: 绝不能本地直调关环函数 0x639740 (只改本机不广播,
- * 联机两端 token 分叉不同步, 血泪教训)。 */
+/* 验证+提交 (同 Poll 内一次做完; 完即放行, FIFO 保序, 无需等 commit 执行)。
+ * 纯事件关环 (合环 Connect 已执行), loop>0 才 Commit; 关不上则提交开环
+ * 路径 (两端一致, 只降级不崩)。绝不能本地直调关环函数 0x639740: 只改本机
+ * 不广播, 联机两端 token 分叉不同步。 */
 static void PC_CloseCommit(void)
 {
     int loop;
@@ -712,14 +699,11 @@ void PatrolCircle_Poll(void)
         PC_Drain(); /* drip 续发 */
     else if (g_PcWaitExec)
     {
-        /* 二阶段就绪门控 (主标尺=逻辑帧, 与原生逐点全员同构):
-         * 阶段 1: 全员路点挂满 (各单位独立 token, 原生每点全员 Mega)
-         * → 发合环 (全员 Connect 首路点, Connect-only 无 Mega)。
-         * 阶段 2: 首单位 loop 落地 (合环执行到) → 提交。
-         * 闭环加新点由原生拦截 (Mega 执行侧消息+丢弃)。
-         * 全程纯事件, 无本地直调, 联机安全。
-         * 帧每推进记一行 wait; 各阶段超限 → 兜底提交 (开环也提交,
-         * 两端一致); 帧长期不动 → polls 放行防挂。 */
+        /* 二阶段就绪门控 (主标尺=逻辑帧):
+         * 阶段 1: 全员路点挂满 → 发合环 (全员 Connect 首路点, Connect-only)。
+         * 阶段 2: 首单位 loop 落地 → 提交。
+         * 帧每推进记一行 wait; 各阶段超限 → 兜底提交 (开环也提交, 两端一致);
+         * 帧长期不动 → polls 放行防挂。全程纯事件, 无本地直调, 联机安全。 */
         int live = 0, ready = 0;
         int fr;
         int cap;

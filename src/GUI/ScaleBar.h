@@ -6,7 +6,6 @@
 
 /* 读 [ScaleBar] 节 (幂等)。 */
 void SB_EnsureInit(void);
-int  SB_Safe(void);
 
 /* 每循环 (prepare 钩) 调: 摆刻度条矩形 + 处理点击换档 + 准备缩小档大面。 */
 void SB_Poll(void);

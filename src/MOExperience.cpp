@@ -700,7 +700,6 @@ __attribute__((naked)) void MOExperience_BlitGuardEntry(void)
 /* 放大前那次提示框绘制跳过: 放大档只跑 Process 不画, 否则重影。
  * 须自己跑 Process (刷 Dimension/计时), 只跳绘制。 */
 #define ADDR_TIPMANAGER      0x00887368u  /* CCToolTip::Instance */
-#define ADDR_TIP_PRO_DRAW    0x006A7089u  /* mov edx,[ecx]/push 1/call [edx+0x0C] */
 #define ADDR_TIP_PRO_NEXT    0x006A7090u  /* mov dl,[0xB0B518] —— 跳过点 */
 #define ADDR_TIP_PROCESS     0x00724AD0u  /* ToolTipManager::Process (thiscall, 无参) */
 
@@ -715,7 +714,7 @@ static void* TipPreDrawSkip(void)
     void* self;
     static int s_logged = 0;
     MOE_EnsureInit();
-    g_TipPreDrawDest = (SB_In() && !SB_Safe())
+    g_TipPreDrawDest = SB_In()
                        ? (void*)(size_t)ADDR_TIP_PRO_NEXT : g_TipPreDrawTramp;
     if (!g_TipPreDrawDest) g_TipPreDrawDest = (void*)(size_t)ADDR_TIP_PRO_NEXT;
     if (g_TipPreDrawDest == g_TipPreDrawTramp) return g_TipPreDrawTramp;
@@ -1063,10 +1062,9 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     GtRefreshWinSize(tick);
 
     /* 缩放呈现 (UI 链之前): 改 Composite (它是上屏 blit 的源, 改 Primary 只闪一瞬)。
-     * 缩小档还原+降采样已提前到 AfterMap (引擎 UI 不落进大面)。 */
+     * 缩小档的还原+降采样在 AfterMap (0x4F451B) 做, 这样引擎 UI 不会落进大面;
+     * 该钩没装上时才回退到这里跑。 */
     if (SB_In()) SB_CompositeMagnify();
-    /* 缩小档的还原+降采样已提前到 0x4F451B (MOExperience_AfterMapEntry), 这样
-     * 引擎 UI 不会落进大面。钩子没装上时才回退到这里的旧路径。 */
     else if (SB_Out() && !g_AfterMapTramp) SB_CompositeDemagnify();
 
     drew = MOE_DrawUILayers(surf, surfW, surfH, surfPitch, &bitLineH, &screenW);

@@ -12,7 +12,6 @@
  * 渲染: Microsoft YaHei 经 GDI 光栅化到 32 位内存 DIB (灰度抗锯齿取覆盖率),
  * 经启动校准得到的 16 位格式 (565/555) alpha 混入 Composite。
  * 取色: ColorScheme BaseColor 经 0x517440 转显示色 (Phobos 同用法)。
- *
  * 构建见 build-fast.bat (32 位 mingw, 无 CRT)。
  */
 
@@ -613,7 +612,9 @@ static int HasLiveCamp(void)
 }
 
 /* 提示框显隐跳变日志 (newestExpIn = 最新提示距引擎过期还剩多少 tick, 62.5 tick≈1秒;
- * 若 hide 时它还很大, 就是提前强制消失的实证) */
+     * 若 hide 时它还很大, 就是提前强制消失的实证)
+     * 与 MsgVisibleMul 同口径 (span=(expire-born)*mul), 否则 hide 行的
+     * 剩余数对不上真实判定。*/
 static void LogHintWhy(int on)
 {
     char sb[160], t1[16];
@@ -624,8 +625,6 @@ static void LogHintWhy(int on)
         ChatMsg* m = MsgAt(&g_HintRing, i);
         if (m->sp != 1) continue;
         found = 1;
-        /* 与 MsgVisibleMul 同口径 (span=(expire-born)*mul), 否则 hide 行的
-         * 剩余数对不上真实判定 (曾报出 -241 虚惊一场) */
         if (!m->expire) expIn = -1;
         else expIn = (int)((m->expire - m->born) * (unsigned)g_Cfg.HintTimeoutMul) -
                      (int)(GtClockNow() - m->born);
@@ -732,9 +731,7 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
     /* ★ 聊天输入框 (ChatEdit.cpp) 的锚点在这里缓存 —— 必须在下面**所有**提前
      * 返回之前。DrawBox 有两处提前返回: `picked<=0` (一条消息都没有) 和
      * `totalRows<=0` (窗口被滚空)。而输入框是在消息帧的最后一层才画的, 只能读
-     * 缓存。之前锚点是输入框自己按 `CampTriggerRect` 重算的, 于是"首次不对齐、
-     * 之后才对齐": 首次战役框通常还没消息 → 走估算那条路, 之后走真实矩形。
-     * 现在只读绘制时这份结果, 结构上不可能错开。
+     * 缓存; 只读绘制时这份结果, 结构上不可能错开。
      * 底部模式取**底边** (行数无关的不变量); 顶部模式只按 1 行, 免得随条数抖。*/
     if (B->pSkip)
     {
@@ -926,14 +923,13 @@ static int CampTriggerRect(int bitLineH, int screenW, int surfH, RectangleStruct
 /* 聊天输入框锚点 (供 ChatEdit.cpp): 与战役框对齐 (左缘同列 + 贴在它下沿)。
  * 返回 1=有锚点 (写 px/py), 0=无 (调用方退回原生位置)。
  *
- * ★ 底部模式必须读**实际画出来的**矩形 `g_CampRect` (DrawBox 存, 见 842 行),
- *   不要用 `CampTriggerRect` 的 1 行估算再自己算 `surfH - CampBottomMargin + gap`。
+ * ★ 底部模式必须读**实际画出来的**矩形 `g_CampRect` (DrawBox 存), 不要用
+ *   `CampTriggerRect` 的 1 行估算再自己算 `surfH - CampBottomMargin + gap`。
  *   两条路各算各的: 只要宽度来源/夹取顺序/居中基准有一处不同 (screenW vs
  *   surfW、maxW 夹取次序), 输入框就会和战役框错开, 而且两边都"看着合理",
  *   永远对不上。直接读绘制结果 = 构造上就对齐。
  * ★ 顶部模式**不能**用 g_CampRect: 战役框随消息条数向下长, 输入框会跟着抖。
- *   那里用 1 行触发矩形 (位置与行数无关, 稳定), 同样给锚点 —— 早期版本
- *   `if (!CampBottom) return 0` 让顶部模式退回原生位, 就对不齐了。*/
+ *   那里用 1 行触发矩形 (位置与行数无关, 稳定), 同样给锚点。*/
 int MsgText_ChatAnchor(int surfW, int surfH, int bitLineH, int* px, int* py)
 {
     RectangleStruct tr;

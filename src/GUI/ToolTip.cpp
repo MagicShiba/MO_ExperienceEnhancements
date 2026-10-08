@@ -1,34 +1,28 @@
 /* ToolTip.cpp - 建造列表耗时/耗电显示 (Phobos [ToolTips] ExtendedToolTips 移植简化版)。
  *
- * 原版行为 (StripClass::HelpText 0x6A92E0 反汇编实证):
- *   建造图标只显示 名字 + 价格 (TXT_MONEY_FORMAT_2 经 0x734E60 拼进
- *   0xB07BC4 TooltipBuffer, 0x42 wchar), 不显示耗时耗电。
- * Phobos 做法 (见 references/Phobos/src/Misc/PhobosToolTip.cpp):
- *   0x6A9316 取 Cameo→GetTechnoType→拼 UIName + CostLabel + TimeLabel(MM:SS)
- *   + PowerLabel, 自带大缓冲, 经 0x478EE1 换掉 Draw2 的 EDI。
- * 本移植只做最小可用 (Ares 只动了 ToolTipColor, 无冲突):
- *   退出点 0x6A93D9 (mov eax,TooltipBuffer, 5B 纯传送) 另起一行追加:
- *     原文($换费用图标) + "\n" + ▲N/▼N + " " + ○MM:SS (建筑)
- *     原文($换费用图标) + "\n" + ○MM:SS (单位/步兵/飞机)
- *   (▲=供电, ▼=耗电, N=绝对值; 图标列等宽, 与价格行图标列对齐)
- *   图标为 PNG 位图 (icons/icon_*.png, 黑=墨白=忽略, 见 icons/Icon.h):
- *   雅黑缺 ⚡U+26A1/⌚U+231A 字形 (GDI 实测皆回 .notdef), 文本方式必 tofu,
- *   故串里只放 PUA 占位码 (U+E000~E002), 由 VecText 按 PNG 实画,
- *   步进统一 (=归一宽度), 对齐天然成立。
- *   时间经 TechnoClass::TimeToBuild (0x6F47A0) 假对象求值 (Phobos 同式),
- *   电量只看 BuildingType PowerBonus-PowerDrain
- *   (0xEE0/0xEE4, UpdatePower 0x508C30 / GetPower 反汇编实证; Extra 不计),
- *   非建筑 (步兵/车辆/飞机) 不显示电量 (原版无 UnitPowerDrain 扩展)。
+ * 原版行为 (StripClass::HelpText 0x6A92E0 反汇编实证): 建造图标只显示
+ * 名字 + 价格 (TXT_MONEY_FORMAT_2 经 0x734E60 拼进 0xB07BC4 TooltipBuffer,
+ * 0x42 wchar), 不显示耗时耗电。Phobos 做法见 references/Phobos/src/Misc/
+ * PhobosToolTip.cpp (自带大缓冲换掉 Draw2 的 EDI), 本移植只做最小可用
+ * (Ares 只动了 ToolTipColor): 退出点 0x6A93D9 (mov eax,TooltipBuffer, 5B
+ * 纯传送) 另起一行追加:
+ *   原文($换费用图标) + "\n" + ▲N/▼N + " " + ○MM:SS (建筑)
+ *   原文($换费用图标) + "\n" + ○MM:SS (单位/步兵/飞机)
+ * (▲=供电, ▼=耗电, N=绝对值; 图标列等宽, 与价格行图标列对齐)
+ *   图标为 PNG 位图 (icons/icon_*.png, 黑=墨白=忽略, 见 icons/Icon.h)。雅黑缺
+ *   ⚡U+26A1/⌚U+231A 字形 (GDI 实测皆回 .notdef), 文本方式必 tofu, 故串里只放
+ *   PUA 占位码 (U+E000~E002), 由 VecText 按 PNG 实画, 步进统一。
+ *   时间经 TechnoClass::TimeToBuild (0x6F47A0) 假对象求值 (Phobos 同式)。
+ *   电量只看 BuildingType PowerBonus-PowerDrain (0xEE0/0xEE4, UpdatePower
+ *   0x508C30 反汇编实证; Extra 不计); 非建筑不显示电量。
  *   只读查询 + 自有静态缓冲, 不写模拟内存 (联机安全)。
- *   自有缓冲 160 字; 长行在拷贝时按 160px 估宽预断行 (引擎不再包行,
- *   包点可控); 盒宽精确 (PUA 串按行取最大; 非 PUA 多行串原版欠量时
- *   由 VecText grow-only 补足, 超武提示窄盒溢出即此修), 位置由钳制钩兜底。
+ *   自有缓冲 160 字; 长行拷贝时按 160px 估宽预断行 (引擎不再包行, 包点可控);
+ *   盒宽由 GetDim 精确度量, 位置由钳制钩兜底。
  *   EAX 指过去后跳 0x6A93DE (pop esi + ret, 跳过偷走的 mov, 无 rel 安全)。
  *
  * 钩子经 dist/MOExperience.dll.inj 由 Syringe 挂载:
  *   0x6A93D9 = ToolTip_Extend, 5 (mov eax,0xB07BC4)
  * 开关关/类型非法/求值失败一律返回 0 跑原指令 (=原版行为)。
- *
  * 配置 [ToolTips] (缺失=默认值, 改后重启):
  *   Enable=1 (1=追加第三行, 0=原版两行)
  *

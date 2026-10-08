@@ -33,6 +33,7 @@
 #define ADDR_REG_DIRTY_SB    0x006D2790u   /* TacticalClass::RegisterDirtyArea */
 #define ADDR_CUR_SURF_SB     0x00887314u   /* 引擎"当前绘制面" (Render 入口 = Composite) */
 #define ADDR_VIEWBOUNDS      0x00886FA0u   /* ViewBounds (缩放档 = R) */
+#define ADDR_SIDEBAR_W       0x007F5BF8u   /* 侧栏列宽 (168) */
 
 /* TacticalClass::RegisterDirtyArea (0x6D2790): 把一块矩形推进"脏区表"
  * ([0xB0CE7C] 起每条 20 字节, [0xB0CE88] 条数, [0xB0CE8C] 容量 10)。表里
@@ -46,32 +47,36 @@ typedef void (__fastcall *FnRegDirtyArea)(void*, RectangleStruct, int);
 /* ---------------- 配置 ---------------- */
 static int s_Init = 0;
 static int s_Enable = 0;
-static int s_Level = 2;
-static int s_X = -1;                    /* <0 = 靠视图区右缘 */
-static int s_Y = -1;                    /* <0 = 贴视图区下沿上方 */
-static int s_Len = 240;
-static int s_FontPx = 13;
-static int s_GrowZBuf = 0;              /* [ScaleBar] GrowZBuf: 1=按 R 放大 ZBuffer/ABuffer */
-static int s_VoidR = 0x20, s_VoidG = 0x20, s_VoidB = 0x28;  /* 图外底色 (深灰) */
+static int s_Level = 4;                 /* = 1x */
+static int s_X = 32;                    /* 条右端离"侧栏列左缘"的像素 */
+static int s_Y = 4;                     /* 下边距 (控件底边到窗口底边); -1 = 贴带顶 */
+static int s_Len = 360;
+static int s_FontPx = 12;
+static int s_VoidRgb = 0x202028;        /* 图外底色 (深灰), 0xRRGGBB 一个键 */
+
+/* R 的硬上限 = ZBuffer/ABuffer 建得出的尺寸 (SB_ResizeBufs 的守卫)。大面走 ddraw
+ * 能建得更大, 两者不一致时 R 会大过裁剪器 ⇒ 野读崩, 所以取 R 处必须跟这条线对齐。*/
+#define SB_BUF_MAX 8192
 
 /* ---------------- 档位表 ----------------
- * 6 档 (0 = 最左 = 放大最多):
- *   0.25 = 4 倍放大 / 0.5 = 2 倍 / 0.769 = 1.3 倍 / 1 = 原样
- *   1.4286 = 0.7 倍视野 / 2 = 半数视野 (缩小档, 需要 R 大的离屏面)
- * 缩小档的面建不出来时自动退回 A (等于 1x), 不会越界。*/
-#define SB_MAXLEV 6
+ * 9 档, 从最放大排到最小。标尺上的数字是"相对 1x 的倍率" 1/scale (见 notes §3)。
+ * scale>1 那几档视野比窗口大, 走 R 大的离屏面 (缩小档); 建不出来时自动退回 A。*/
+#define SB_MAXLEV 9
+#define SB_LEV_MAX (SB_MAXLEV - 1)     /* 最右那档: 整张地图塞进视图区 */
+/* MAX 那档的 scale 由 Sb_CalcMaxScale() 现算, 表里留 0。*/
 static const double s_LevAll[SB_MAXLEV] =
-    { 0.25, 0.5, 1.0 / 1.3, 1.0, 1.0 / 0.7, 2.0 };
+    { 0.25, 1.0 / 3.0, 0.5, 1.0 / 1.5, 1.0, 1.25, 1.5, 2.0, 0.0 };
 static const double* s_LevScale = s_LevAll;
 static int    s_NLev = SB_MAXLEV;
 static void Sb_SyncZoomed(void);
 static char s_LevLabel[SB_MAXLEV][SB_LABLEN];
-/* s_LevAll 里 scale==1.0 那档的下标。SB_EnsureInit 里按表填实 (不写死 3)。*/
-static int s_LevOne = 3;
+/* s_LevAll 里 scale==1.0 那档的下标。SB_EnsureInit 里按表填实 (不写死)。*/
+static int s_LevOne = 4;
+static double Sb_CalcMaxScale(void);   /* MAX 档的倍率, 定义在"档位查询"段 */
 
 /* 刻度条几何 */
 static int s_BarX, s_BarY, s_BarW, s_BarH;
-static int s_Safe = 0;      /* [Debug] Safe=1: 完全不接管 */
+static int s_LastX = -1, s_LastY = -1, s_LastW = -1;   /* 上次 geom, 只为少打日志 */
 static int s_LbDown = 0;
 static int s_BppWarned = 0;
 static int s_LockWarned = 0;
@@ -145,38 +150,37 @@ static unsigned Sb_Fmt1(char* p, double v)
 /* ---------------- 初始化 ----------------
  * 1 = 完全不接管: 消息钩不调放大/刻度条, prepare 不跑 SB_Poll, 查格不折算。
  * 用来二分"崩溃到底跟缩放有没有关系" (Enable=0 只是不画, 钩子还在跑)。*/
-int  SB_Safe(void) { return s_Safe; }
 
 void SB_EnsureInit(void)
 {
-    char b1[16], buf[192];
+    char b1[16], b2[16], b3[16], buf[192];
     unsigned p;
     if (s_Init) return;
     s_Init = 1;
     GtEnsureLog();
     if (!g_Log) return;
     s_Enable = GetPrivateProfileIntA(SB_SECTION, "Enable", 0, g_IniPath) ? 1 : 0;
-    s_X = GetPrivateProfileIntA(SB_SECTION, "X", -1, g_IniPath);
-    s_Y = GetPrivateProfileIntA(SB_SECTION, "Y", -1, g_IniPath);
+    s_X = GetPrivateProfileIntA(SB_SECTION, "X", 32, g_IniPath);
+    if (s_X < 0 || s_X > 4096) s_X = 32;
+    s_Y = GetPrivateProfileIntA(SB_SECTION, "Y", 4, g_IniPath);
+    if (s_Y > 4096) s_Y = 4096;
+    if (s_Y < -1) s_Y = -1;
     s_Len = GetPrivateProfileIntA(SB_SECTION, "Len", 240, g_IniPath);
-    s_FontPx = GetPrivateProfileIntA(SB_SECTION, "FontPx", 13, g_IniPath);
+    s_FontPx = GetPrivateProfileIntA(SB_SECTION, "FontPx", 12, g_IniPath);
     if (s_Len < 80 || s_Len > 2000) s_Len = 240;
     if (s_FontPx < 8) s_FontPx = 8;
     if (s_FontPx > 40) s_FontPx = 40;
-    s_Safe = GetPrivateProfileIntA("Debug", "Safe", 0, g_IniPath) ? 1 : 0;
-    s_GrowZBuf = GetPrivateProfileIntA(SB_SECTION, "GrowZBuf", 0, g_IniPath) ? 1 : 0;
-    /* 图外底色 (视口比地图大时露出来的那一大片)。0xRRGGBB, 分开三个键更易读。*/
-    s_VoidR = GetPrivateProfileIntA(SB_SECTION, "VoidR", 0x20, g_IniPath) & 0xFF;
-    s_VoidG = GetPrivateProfileIntA(SB_SECTION, "VoidG", 0x20, g_IniPath) & 0xFF;
-    s_VoidB = GetPrivateProfileIntA(SB_SECTION, "VoidB", 0x28, g_IniPath) & 0xFF;
+    /* 图外底色 (视口比地图大时露出来的那一大片): 一个键, 0xRRGGBB。*/
+    s_VoidRgb = GetPrivateProfileIntA(SB_SECTION, "Void", 0x202028, g_IniPath);
+    if (s_VoidRgb < 0 || s_VoidRgb > 0xFFFFFF) s_VoidRgb = 0x202028;
     s_NLev = SB_MAXLEV;
-    s_Level = GetPrivateProfileIntA(SB_SECTION, "Level", 3, g_IniPath);
-    if (s_Level < 0 || s_Level >= s_NLev) s_Level = 3;
     {
         int i;
         for (i = 0; i < (int)s_NLev; i++)
             if (s_LevScale[i] == 1.0) { s_LevOne = i; break; }
     }
+    s_Level = GetPrivateProfileIntA(SB_SECTION, "Level", s_LevOne, g_IniPath);
+    if (s_Level < 0 || s_Level >= s_NLev) s_Level = s_LevOne;
     Sb_SyncZoomed();
     if (!s_Enable) return;
     p = 0;
@@ -184,16 +188,21 @@ void SB_EnsureInit(void)
     UtoA((unsigned)s_Level, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " nlev=", sizeof(buf));
     UtoA((unsigned)s_NLev, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    if (s_Enable)
+    {
+        double ms = Sb_CalcMaxScale();
+        p = AppendCStr(buf, p, " maxscale=", sizeof(buf));
+        p += Sb_Fmt1(buf + p, ms);
+        if (ms <= 0.0) p = AppendCStr(buf, p, "(unsupported)", sizeof(buf));
+    }
     p = AppendCStr(buf, p, " len=", sizeof(buf));
     UtoA((unsigned)s_Len, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " growzbuf=", sizeof(buf));
-    UtoA((unsigned)s_GrowZBuf, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " void=", sizeof(buf));
-    UtoA((unsigned)s_VoidR, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    UtoA((unsigned)((s_VoidRgb >> 16) & 0xFF), b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCh(buf, p, ',', sizeof(buf));
-    UtoA((unsigned)s_VoidG, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    UtoA((unsigned)((s_VoidRgb >> 8) & 0xFF), b2); p = AppendCStr(buf, p, b2, sizeof(buf));
     p = AppendCh(buf, p, ',', sizeof(buf));
-    UtoA((unsigned)s_VoidB, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    UtoA((unsigned)(s_VoidRgb & 0xFF), b3); p = AppendCStr(buf, p, b3, sizeof(buf));
     LogLine(buf);
 }
 
@@ -206,27 +215,71 @@ static void Sb_InitLabels(void)
     for (i = 0; i < s_NLev; i++)
     {
         char* d = s_LevLabel[i];
-        int j;
+        int j = 0;
+        if (i == SB_LEV_MAX)
+        {
+            d[0] = 'm'; d[1] = 'a'; d[2] = 'x'; d[3] = 0;
+            continue;
+        }
         Sb_Fmt1(d, 1.0 / s_LevScale[i]);
-        j = 0;
         while (d[j]) j++;
         d[j] = 'x';
         d[j + 1] = 0;
     }
 }
 
+/* ---------------- MAX 档: 整张地图塞进视图区 ----------------
+ * 地图画进 R (尺寸 A*scale) 再按 scale 降采样铺回 A, 所以 scale>1 = 视野变大:
+ * 一个屏幕像素摊 scale 个图上像素。要两轴都装下整张图, scale 得取宽高约束里更松的
+ * 那一轴 = max(图宽/A.W, 图高/A.H); 另一边留余量, 余量露出的就是图外深灰。
+ * ⚠️ 必须是 max: 取 min 时 R 装不下整图, 右/下侧被裁, 看着反而像放大了。
+ * 建不出 R (超 SB_BUF_MAX 或低于 SB_EnsureBig 的 320x240 下限) 判为不支持,
+ * 由调用方退回最高那一档。*/
+static double s_MaxScale = 0.0;
+static int s_MaxOk = 0;
+static int Sb_MapPx(int* l, int* t, int* w, int* h);   /* 定义在文件后部 */
+static void Sb_DropMax(void) { s_MaxOk = 0; s_MaxScale = 0.0; }
+
+static double Sb_CalcMaxScale(void)
+{
+    RectangleStruct a;
+    int ml, mt, mw, mh, rw, rh;
+    double sx, sy, sc;
+    if (!Sb_MapPx(&ml, &mt, &mw, &mh)) return 0.0;
+    FM_GetViewRects(&a, 0);
+    if (a.Width < 64 || a.Height < 64) return 0.0;
+    if (mw < 16 || mh < 16) return 0.0;
+    sx = (double)mw / (double)a.Width;   /* 每横/纵一个视口像素要摊多少图上像素 */
+    sy = (double)mh / (double)a.Height;
+    sc = sx > sy ? sx : sy;              /* 取更松的那轴 ⇒ 两轴都装得下 = 全图可见 */
+    if (sc <= 0.02 || sc > 64.0) return 0.0;
+    rw = (int)((double)a.Width * sc + 0.5);
+    rh = (int)((double)a.Height * sc + 0.5);
+    if (rw < 320 || rh < 240) return 0.0;
+    if (rw > 8192 || rh > 8192) return 0.0;
+    return sc;
+}
+
+/* 不查缓存的原始倍率 (SB_Scale 会调它, 别再回头调 SB_Scale)。*/
+static double Sb_ScaleRaw(void)
+{
+    if (s_Level != SB_LEV_MAX) return s_LevScale[s_Level];
+    if (!s_MaxOk) { s_MaxScale = Sb_CalcMaxScale(); s_MaxOk = (s_MaxScale > 0.0); }
+    return s_MaxOk ? s_MaxScale : s_LevScale[s_LevOne];
+}
+
 /* ---------------- 档位查询 ----------------
- * SB_Zoomed 走缓存 (每 blit/每文本都问, 省 double 比较)。s_Enable/s_Safe/
+ * SB_Zoomed 走缓存 (每 blit/每文本都问, 省 double 比较)。s_Enable/s_Level/
  * s_Level 的写入点负责同步 (EnsureInit + Sb_SetLevel, 只增不减的读多写少)。 */
 static int s_ZoomedCache = 0;
 static void Sb_SyncZoomed(void)
 {
-    s_ZoomedCache = (s_Enable && !s_Safe && s_LevScale[s_Level] != 1.0) ? 1 : 0;
+    s_ZoomedCache = (s_Enable && Sb_ScaleRaw() != 1.0) ? 1 : 0;
 }
 int SB_Level(void)    { return s_Enable ? s_Level : s_NLev - 1; }
-double SB_Scale(void) { return SB_Zoomed() ? s_LevScale[s_Level] : 1.0; }
-int SB_In(void)       { return (s_Enable && s_LevScale[s_Level] < 1.0) ? 1 : 0; }
-int SB_Out(void)      { return (s_Enable && !s_Safe && s_LevScale[s_Level] > 1.0) ? 1 : 0; }
+double SB_Scale(void) { return s_Enable ? Sb_ScaleRaw() : 1.0; }
+int SB_In(void)       { return (s_Enable && Sb_ScaleRaw() < 1.0) ? 1 : 0; }
+int SB_Out(void)      { return (s_Enable && Sb_ScaleRaw() > 1.0) ? 1 : 0; }
 int SB_Zoomed(void)   { return s_ZoomedCache; }
 
 /* CCToolTip 的"选面/量宽"矩形必须是 A: 引擎把 ViewBounds 地址写死在指令里,
@@ -249,6 +302,7 @@ void SB_PublishAView(void)
 /* 缩小档大面 (定义在文件后部)。返回 1 = 可用; 0 = 建不出来, 调用方必须退回 A。*/
 static int SB_EnsureBig(int w, int h);
 static void SB_SurfaceDestroy(void);
+static void Sb_SetLevel(int lv, const char* why);
 
 /* 视口矩形 = 视图区 * scale。ViewBounds 恒为 (0,0,w,h), X/Y 非 0 则查格错位。
  * 缩小档须先建好大面 (否则按 R 往窗口面画即越界), 建不出返回 0 退回 A。 */
@@ -257,13 +311,18 @@ int SB_GetViewRect(RectangleStruct* out, double scale)
     RectangleStruct a;
     int w, h;
     double s = scale;
-    if (!s_Enable || s_Safe || !out) return 0;
+    if (!s_Enable || !out) return 0;
     FM_GetViewRects(&a, 0);
     if (a.Width < 32 || a.Height < 32) return 0;
     w = (int)((double)a.Width * s + 0.5);
     h = (int)((double)a.Height * s + 0.5);
     if (w < 32) w = 32;
     if (h < 32) h = 32;
+    /* R 超 SB_BUF_MAX ⇒ 这档不可用, 当场退回 A (=1x)。必须在这里挡: 大面是 ddraw
+     * 建的, 8548x4666 它建得出, 而两块裁剪缓冲建不出 ⇒ prepare 只能把缓冲退回 A,
+     * ViewBounds 却还留着那个 R ⇒ Render 拿 R 坐标寻址 A 尺寸的缓冲, 野读崩。
+     * F11 换模式改 A.Width 时最容易撞上 (MAX 档 R = A.Width*scale)。*/
+    if (w > SB_BUF_MAX || h > SB_BUF_MAX) return 0;
     if (s > 1.0 && !SB_EnsureBig(w, h)) return 0;   /* 大面缺失: 退回 A */
     out->X = 0;
     out->Y = 0;
@@ -346,24 +405,19 @@ static unsigned char* Sb_Scratch(int need)
     return (unsigned char*)s_Scratch;
 }
 
-/* 放大档: 每帧把视口 R 整块标脏。
- *
- * SB_CompositeMagnify 是**就地**放大 (SB_GetViewRect 让 R = {0,0,w,h} 恒在原点
- * 且不超过 A ⇒ R ⊆ A), 于是引擎的视口 R 每帧被换成放大过的像素; 而引擎光栅是
- * **增量**的 (没标脏的格子谁也不碰, 滚动只靠位移拷贝 + 画新空出来那条)。两者
- * 叠在一起 ⇒ 放大像素被当地图内容搬走、没标脏的格子拿它当源 ⇒ 新露出来的格子
- * 显示别处内容的残影, 越积越糊。1x 不做放大所以看不出来 (1x 那点残留只有 1px)。
- *
- * 修法: 引擎动 R 之前把 R 整块注册成脏区, 放大源于是永远是本帧引擎的干净输出。
- * 代价 = R ≤ A, 最多一次 1x 的整幅重画量 (1.3x 档最贵, 约 0.6 倍)。
- * 纯渲染脏区, 客户区相对坐标, 不碰 TacticalPos 与任何模拟状态, 联机安全。*/
+/* 放大档: 每帧把视口 R 整块注册成脏区。
+ * 放大是就地做的 (R ⊆ A), 于是视口里每帧都留着放大过的像素, 而引擎光栅是增量
+ * 的 (没标脏的格子不重画, 滚动只靠位移拷贝 + 画新空出来那条) ⇒ 没标脏的格子拿
+ * 放大像素当源, 新露出来的格子显示别处内容的残影。整块标脏后放大源永远是本帧
+ * 引擎的干净输出。代价 = 最多一次 1x 的整幅重画量。
+ * 纯渲染脏区, 不碰 TacticalPos 与任何模拟状态, 联机安全。*/
 void SB_MarkViewDirty(void)
 {
     RectangleStruct* vb = (RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
     void* tac = *(void**)(size_t)ADDR_TACTICAL_SB;
     FnRegDirtyArea fn;
     RectangleStruct r;
-    if (!s_Enable || s_Safe) return;
+    if (!s_Enable) return;
     if (!SB_In()) return;                 /* 缩小档的 R 比窗口大, 走另一套面 */
     if (!tac || !IsPlausiblePtr(tac)) return;
     if (!vb) return;
@@ -408,7 +462,7 @@ int SB_CompositeMagnify(void)
     void* comp;
     unsigned char *cb, *sb;
     int cp, cw, ch, need, y;
-    if (!s_Enable || s_Safe) return 0;
+    if (!s_Enable) return 0;
     if (!SB_In()) return 0;
     MOE_SetPhase(MP_COMPMAG);
     FM_GetViewRects(&a, &r);
@@ -508,9 +562,9 @@ static unsigned short Sb_VoidPixel(void)
     unsigned r, g, b, px;
     if (s_VoidPxOk) return s_VoidPx;
     if (!g_Calibrated) Calibrate();
-    r = (unsigned)(s_VoidR >> (8 - g_RBits)) & ((1u << g_RBits) - 1u);
-    g = (unsigned)(s_VoidG >> (8 - g_GBits)) & ((1u << g_GBits) - 1u);
-    b = (unsigned)(s_VoidB >> (8 - g_BBits)) & ((1u << g_BBits) - 1u);
+    r = (unsigned)(((s_VoidRgb >> 16) & 0xFF) >> (8 - g_RBits)) & ((1u << g_RBits) - 1u);
+    g = (unsigned)(((s_VoidRgb >> 8) & 0xFF) >> (8 - g_GBits)) & ((1u << g_GBits) - 1u);
+    b = (unsigned)((s_VoidRgb & 0xFF) >> (8 - g_BBits)) & ((1u << g_BBits) - 1u);
     px = (r << (g_GBits + g_BBits)) | (g << g_BBits) | b;
     s_VoidPx = (unsigned short)px;
     s_VoidPxOk = 1;
@@ -676,7 +730,7 @@ static int s_ShroudHit = 0;
 void SB_ShroudGuard(void)
 {
     void* cur;
-    if (!s_Enable || s_Safe) return;
+    if (!s_Enable) return;
     if (!SB_Out() || !s_SurfActive) return;
     if (!s_CurC || !IsPlausiblePtr(s_CurC)) return;
     cur = *(void**)ADDR_CUR_SURF_SB;
@@ -723,7 +777,7 @@ void SB_EdgeScrollPointFix(Point2D* pt)
 {
     void* m;
     if (!pt || !IsPlausiblePtr(pt)) return;
-    if (!s_Enable || s_Safe || !SB_Zoomed()) return;
+    if (!s_Enable || !SB_Zoomed()) return;
     m = *(void**)ADDR_WWMOUSE_SB;
     if (!m || !IsPlausiblePtr(m)) return;
     pt->X = *(int*)((char*)m + SB_WWMOUSE_OFF_X);
@@ -903,7 +957,7 @@ static int SB_ResizeBufs(int bw, int bh)
     void *nz, *na, *oz, *oa;
     char b1[16], b2[16], buf[96];
     unsigned p = 0;
-    if (bw < 64 || bh < 64 || bw > 8192 || bh > 8192) return 0;
+    if (bw < 64 || bh < 64 || bw > SB_BUF_MAX || bh > SB_BUF_MAX) return 0;
     t.X = 0; t.Y = 0; t.Width = bw; t.Height = bh;
     nz = Sb_BuildBuf(0, &t);
     na = Sb_BuildBuf(1, &t);
@@ -942,7 +996,7 @@ static int SB_BufIs(int w, int h)
 void SB_PrepareSurface(void)
 {
     RectangleStruct a, r;
-    if (!s_Enable || s_Safe) return;
+    if (!s_Enable) return;
     /* 载入中地图半重建, 别碰面和缓冲, 等门开。*/
     if (SB_Loading()) return;
     /* Render 在栈上时整个推迟 (见 s_InRender): 此时自愈会把后两趟赶进窗口面,
@@ -965,18 +1019,11 @@ void SB_PrepareSurface(void)
         if (s_SurfActive) SB_SurfaceDestroy();
         s_RedrawFrames = 0;
         s_SurfFail = 0;                 /* 离开缩小档: 下次可重试建面 */
-        /* 离开缩小档必须把 ZBuffer/ABuffer 缩回 A, 否则 R 坐标寻址越过 A 面的行尾。
-         * ⚠️ 不能只看 s_BufW: 引擎自己也会重建这两块 (读档 CreateAll 之后紧跟一次
-         * Set_View_Dimensions, 按建面用的全宽矩形 = clientW x clientH), 那时
-         * s_BufW 还是 0 而对象已经是全宽的了。视口是 A 而裁剪器是全宽 ⇒ 引擎
-         * 长期"视口 1752 / 裁剪器 1920", 鼠标落在侧栏列上时被当成还在地图里去
-         * 查格 (notes/隐藏侧栏.md §4.8)。SB_BufIs 读的是对象里的真实尺寸,
-         * 对不上就重建一次, 对得上零开销。 */
-        if (s_GrowZBuf && r.Width >= 64 && r.Height >= 64)
-        {
-            if (!SB_BufIs(r.Width, r.Height)) SB_ResizeBufs(r.Width, r.Height);
-        }
-        else if (a.Width >= 64 && a.Height >= 64 && !SB_BufIs(a.Width, a.Height))
+        /* 离开缩小档要把 ZBuffer/ABuffer 缩回 A。判据用 SB_BufIs (读对象里的
+         * 真实尺寸) 而不是 s_BufW: 引擎自己也会重建这两块, 那时 s_BufW 还是 0 而
+         * 对象已经是别的尺寸了, 于是长期"视口 A / 裁剪器另一个尺寸" ⇒ 鼠标落在
+         * 侧栏列上时被当成还在地图里去查格 (notes/隐藏侧栏.md §4.8)。*/
+        if (a.Width >= 64 && a.Height >= 64 && !SB_BufIs(a.Width, a.Height))
             SB_ResizeBufs(a.Width, a.Height);
         return;
     }
@@ -997,6 +1044,12 @@ void SB_PrepareSurface(void)
             SB_SurfaceDestroy();
             if (!s_SurfWarned) { s_SurfWarned = 1;
                 LogLine("sbar: zbuf alloc FAILED -> zoom-out off"); }
+            /* ⚠️ 光退面 + 退缓冲不够: ViewBounds 里还留着那个建不出来的 R, 而裁剪器
+             * 已经退回 A 尺寸 ⇒ 同帧 Render 拿 R 坐标寻址 A 缓冲 = 野读崩。必须当帧
+             * 把档位打回 1x 并重算视口 (R=A)。SB_GetViewRect 里有 s_SurfFail 兜底,
+             * 但那是**下一趟** Fm_ApplyViewWidth, 本帧 Render 已经在栈上了。*/
+            Sb_SetLevel(s_LevOne, "bufalloc-fail");
+            FM_SyncViewNow();
             return;
         }
     }
@@ -1036,7 +1089,7 @@ int SB_CompositeDemagnify(void)
     void* dst;
     unsigned char *sb, *db;
     int sp, sw, sh, dp, dww, dhh;
-    if (!s_Enable || s_Safe) return 0;
+    if (!s_Enable) return 0;
     if (!SB_Out() || !s_SurfActive || !src) return 0;
     /* 本帧 Render 入口没换过大面 = 引擎没往大面画, 降采样会铺一片空白, 跳过。*/
     if (!s_SwapSeen) return 0;
@@ -1110,6 +1163,7 @@ void SB_NoteWindowSurface(void* surf, int w, int h)
     {
         s_WinW = w;
         s_WinH = h;
+        Sb_DropMax();          /* 视图区跟着窗口变, MAX 的倍率要重算 */
     }
 }
 
@@ -1221,7 +1275,7 @@ int SB_ClampFix(Point2D* c)
 /* 视口比地图大时, 图外那一圈要不要钉住视口中心 (见 SB_ClampFix)。*/
 int SB_ClampNeeded(void)
 {
-    return (s_Enable && !s_Safe) ? 1 : 0;
+    return s_Enable ? 1 : 0;
 }
 
 /* 图外底色每帧重铺 (增量拷贝的旧像素没人覆盖 ⇒ 残影)。只铺两张大面。 */
@@ -1288,7 +1342,7 @@ static void Sb_PaintVoidOn(void* surf)
 /* chrome 前后铺图外底色。只铺两张大面 (降采样会带过去)。 */
 void SB_PaintVoid(void)
 {
-    if (!s_Enable || s_Safe) return;
+    if (!s_Enable) return;
     if (!SB_Zoomed()) return;
     if (!s_RenderSwapped) return;      /* 没接管渲染面就别乱画 */
     /* 只认我们自己的两张大面, 不认全局读出来的指针 (换挡中间态可能指向未知面)。*/
@@ -1305,7 +1359,7 @@ void SB_MapPoint(Point2D* p, unsigned ret)
 {
     RectangleStruct a, r;
     int vx, vy;
-    if (!s_Enable || s_Safe || !p) return;
+    if (!s_Enable || !p) return;
     if (!IsPlausiblePtr(p)) return;   /* 入参取错的话 p 会是野指针, 绝不能写 */
     if (!SB_Zoomed()) return;
     if (ret >= 0x00653700u && ret < 0x00653800u) return;   /* 雷达: 雷达面内坐标 */
@@ -1342,7 +1396,7 @@ void SB_MapPoint(Point2D* p, unsigned ret)
 int SB_PtInView(int vx, int vy)
 {
     RectangleStruct a, r;
-    if (!s_Enable || s_Safe) return 1;
+    if (!s_Enable) return 1;
     if (!SB_Out()) return 1;
     FM_GetViewRects(&a, &r);
     if (r.Width < 16 || r.Height < 16) return 1;
@@ -1374,7 +1428,27 @@ void SB_MapDeltaToScreen(int* dx, int* dy)
     *dy = (int)((long)(*dy) * (long)a.Height / (long)r.Height);
 }
 
-/* ---------------- 刻度条几何 ---------------- */
+/* ---------------- 刻度条几何 ----------------
+ * 控件 = 上面一条档位文字带 + 一道缝 + 下面的滑条带, 三段高度固定不重叠:
+ *   文字带 (FontPx+2) | 缝 2px | 滑条带 12px
+ * 滑条带里那条**贯穿的横线贴控件底部** (3px), 刻度与旋钮坐在它上面 —— 横线挪到底
+ * 之后滑条带从 21 压到 12, 整控件 (FontPx=12 时) 28px, 比底部工具栏带 (32px) 还矮。 */
+#define SB_BAND_H    32    /* 底部工具栏带高 (与 FullMap.cpp 的 winH-32 同一条) */
+#define SB_SLIDER_H  12    /* 滑条带总高 */
+#define SB_LINE_H    3     /* 贯穿横线高, 贴控件底 */
+#define SB_TEXT_GAP  2
+#define SB_TICK_H    (SB_SLIDER_H - SB_LINE_H)   /* 刻度/旋钮/+- 那截 */
+#define SB_BOT_PAD   2     /* 横线底下再留 2px: 任何笔画都不许贴控件最后一行 */
+
+/* + 和 - 画在刻度带里 (不骑在横线上): 骑横线的话竖笔画只剩 2px 露在横条上方,
+ * 整个字看着就是个三角, 而且紧贴控件最后一行。带里居中才画得出竖笔上下对称。 */
+#define SB_SIGN_C    (SB_TICK_H / 2)   /* 带内中心那一行 */
+#define SB_SIGN_BAR  3                 /* 横笔高 */
+#define SB_SIGN_STEM 7                 /* 竖笔高 (横条上下各露 2px) */
+static int s_TextH;     /* 档位文字带高 (按 s_FontPx 估) */
+static int s_WidgetH;   /* 文字带 + 缝 + 滑条带 */
+static int s_HoverLev = -1;   /* 鼠标悬着的档位, -1 = 不在条上 (SB_Poll 每帧填) */
+
 static int Sb_Gx0(void) { return s_BarX + 14; }
 static int Sb_Gx1(void) { return s_BarX + s_BarW - 14; }
 static int Sb_DetentX(int i, int a, int b, int n)
@@ -1396,26 +1470,51 @@ static int Sb_LevelAt(int mx)
 static int Sb_OverBar(int mx, int my)
 {
     return mx >= s_BarX - 8 && mx < s_BarX + s_BarW + 8 &&
-           my >= s_BarY - 4 && my < s_BarY + s_BarH + 4;
+           my >= s_BarY - 4 && my < s_BarY + s_WidgetH + 4;
 }
 
 static void Sb_Place(void)
 {
-    RectangleStruct a;
-    int gh;
-    FM_GetViewRects(&a, 0);
-    /* 条的高度: 字高 + 上下留白 (s_FontPx∈[8,40], 条高恒≥18)。*/
-    s_BarH = s_FontPx + 10;
+    int gw = GtGameW(), gh = GtGameH();
+    int sbw = *(int*)(size_t)ADDR_SIDEBAR_W;
+    if (sbw < 64 || sbw > 512) sbw = 168;
+    s_TextH = s_FontPx + 2;
+    s_BarH = SB_SLIDER_H;
+    s_WidgetH = s_TextH + SB_TEXT_GAP + s_BarH + SB_BOT_PAD;
     s_BarW = s_Len;
-    if (s_X >= 0) s_BarX = s_X;
-    else s_BarX = a.X + a.Width - s_BarW - 12;
-    /* 默认盖底部工具栏带 (缩放取样碰不到它, 工具栏与条都保持 1:1)。 */
-    gh = GtGameH();
-    if (s_Y >= 0) s_BarY = s_Y;
-    else s_BarY = gh - s_BarH;   /* 贴窗口底边, 整条都落在工具栏带子里 */
-    if (s_BarY + s_BarH > gh) s_BarY = gh - s_BarH;
-    if (s_BarX < a.X) s_BarX = a.X;
-    if (s_BarY < a.Y) s_BarY = a.Y;
+    /* 右侧基准恒为"侧栏列左缘" = 窗口宽 - 168: 与侧栏显隐 (F11 三态) 无关,
+     * 也不跟视口宽度走 —— 条子只跟着窗口摆。条右端再往左让 s_X 像素。*/
+    s_BarX = gw - sbw - s_X - s_BarW;
+    if (s_BarX < 0) s_BarX = 0;
+    if (s_BarX + s_BarW > gw) s_BarW = gw - s_BarX;
+    /* 默认盖底部工具栏带 (缩放取样碰不到它, 工具栏与条都保持 1:1)。
+     * s_Y 是**下边距** (控件底边到窗口底边), 不是控件上边的绝对 y。记成绝对 y 的
+     * 话填个 4 就把控件扔到屏幕顶上 (y=4..32), 落在地图视口 A 里面, 看着像整条
+     * 消失。Y=-1 自动 = 贴带顶 (gh-32); 控件 28px 时它等价于下边距 4。*/
+    if (s_Y >= 0) s_BarY = gh - s_Y - s_WidgetH;
+    else s_BarY = gh - SB_BAND_H;
+    if (s_BarY + s_WidgetH > gh) s_BarY = gh - s_WidgetH;
+    if (s_BarY < 0) s_BarY = 0;
+    /* 几何变了才打一条 (Sb_Place 每帧都跑)。 */
+    if (s_BarX != s_LastX || s_BarY != s_LastY || s_BarW != s_LastW)
+    {
+        char g1[16], buf[128];
+        unsigned q = 0;
+        s_LastX = s_BarX; s_LastY = s_BarY; s_LastW = s_BarW;
+        q = AppendCStr(buf, q, "sbar: geom x=", sizeof(buf));
+        UtoA((unsigned)s_BarX, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
+        AppendCh(buf, q, 'y', sizeof(buf));
+        UtoA((unsigned)s_BarY, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
+        AppendCh(buf, q, 'w', sizeof(buf));
+        UtoA((unsigned)s_BarW, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
+        AppendCh(buf, q, 'h', sizeof(buf));
+        UtoA((unsigned)s_WidgetH, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
+        q = AppendCStr(buf, q, " win=", sizeof(buf));
+        UtoA((unsigned)gw, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
+        AppendCh(buf, q, 'x', sizeof(buf));
+        UtoA((unsigned)gh, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
+        LogLine(buf);
+    }
 }
 
 static void Sb_SetLevel(int lv, const char* why)
@@ -1424,6 +1523,18 @@ static void Sb_SetLevel(int lv, const char* why)
     unsigned p = 0;
     if (!s_Enable) return;
     if (lv < 0 || lv >= s_NLev || lv == s_Level) return;
+    /* MAX 建不出来 (R 超上限 / 地图尺寸读不到) ⇒ 退到最高那一档, 不静默变 1x。*/
+    if (lv == SB_LEV_MAX)
+    {
+        Sb_DropMax();
+        if (Sb_CalcMaxScale() <= 0.0)
+        {
+            LogLine("sbar: max level unsupported -> highest listed level");
+            lv = s_NLev - 2;
+        }
+        else s_MaxOk = 1;
+    }
+    if (lv != s_Level) Sb_DropMax();
     s_Level = lv;
     Sb_SyncZoomed();
     p = AppendCStr(buf, p, "sbar: level=", sizeof(buf));
@@ -1434,24 +1545,30 @@ static void Sb_SetLevel(int lv, const char* why)
     p = AppendCStr(buf, p, why, sizeof(buf));
     p = AppendCStr(buf, p, " drew=", sizeof(buf));
     UtoA((unsigned)s_Drew, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    /* zbuf = 从引擎对象读出的裁剪器真实尺寸, zref = 我们自己记的。
+     * 缩小档两者都该等于 R, 其余档等于 A。*/
+    {
+        int zw = 0, zh = 0;
+        char b2[16], b3[16];
+        if (!SB_BufDims(&zw, &zh)) { zw = zh = -1; }
+        p = AppendCStr(buf, p, " zbuf=", sizeof(buf));
+        UtoA((unsigned)zw, b2); p = AppendCStr(buf, p, b2, sizeof(buf));
+        p = AppendCh(buf, p, 'x', sizeof(buf));
+        UtoA((unsigned)zh, b3); p = AppendCStr(buf, p, b3, sizeof(buf));
+        p = AppendCStr(buf, p, " zref=", sizeof(buf));
+        UtoA((unsigned)s_BufW, b2); p = AppendCStr(buf, p, b2, sizeof(buf));
+        p = AppendCh(buf, p, 'x', sizeof(buf));
+        UtoA((unsigned)s_BufH, b3); p = AppendCStr(buf, p, b3, sizeof(buf));
+    }
     LogLine(buf);
 }
 
 /* 引擎重建了渲染面 (读档 / 改分辨率) ⇒ 缩放退回 1x。
- *
- * 为什么必须退: 换面之后 `Fm_NoteSurfaceRebuild` 会压 `s_ForceRedraw = 8`,
- * 逼 `SidebarClass::Draw` 走全量重画分支 (`0x6A6CFD`), 而那条路会调
- * `SidebarClass::ComputeLayout` (`0x6A5130`) —— 它的 `flag != 0` 分支照
- * **当时的 ViewBounds** 重算 `SidebarBounds.X` 并重推 cameo 落点那组派生锚点
- * (`[0xB0B4F4] = X + 0x16`, notes/隐藏侧栏.md §4.3b)。这几帧 `ViewBounds`
- * 是 R ⇒ 锚点被写成 `R.Width + 22`, 拷贝落点 `R.Width + 22 - colX` 越出 168 宽
- * 的侧栏条带 ⇒ 侧栏图标错乱。1x 时 R == A, 这条链与原版逐位相同。
- *
- * 退到 1x 之后, 同一个 `FM_Poll` 趟里 `Fm_ApplyViewWidth` 就把 ViewBounds 写回
- * A, 顺带走一次 `Set_View_Dimensions(A)` (重建裁剪器/鼠标视口/InitGUI) —— 读档
- * 本来就该按 A 重建一次。事后无需补偿。
- *
- * 按"读档不保留缩放"的口径处理: 不记忆读档前挡位, 也不做冻结窗口。 */
+ * 换面会压 `s_ForceRedraw`, 逼侧栏走全量重画, 那条路调 `ComputeLayout` 并按
+ * **当时的 ViewBounds** 重推 cameo 锚点。这几帧 ViewBounds 是 R ⇒ 锚点被写成
+ * `R.Width + 22`, 拷贝落点越出 168 宽的侧栏条带。1x 时 R == A, 这条链与原版
+ * 逐位相同。细节见 notes/隐藏侧栏.md §4.3b。
+ * 按"读档不保留缩放"处理: 不记忆读档前挡位。*/
 void SB_ResetZoom1x(void)
 {
     char b1[16], buf[128];
@@ -1478,8 +1595,17 @@ void SB_Poll(void)
     /* 缩小档的离屏大面 + ZBuffer/ABuffer 尺寸必须在本帧 Render 之前准备好。 */
     SB_PrepareSurface();
     Sb_Place();
-    if (!GtMouseGameXY(&mx, &my)) { s_LbDown = 0; return; }
+    if (!GtMouseGameXY(&mx, &my)) { s_LbDown = 0; s_HoverLev = -1; return; }
     lv0 = s_Level;
+    /* 悬停档位 (给绘制用: 只有它和 4x/1x/0.5x 会画字)。窗口尺寸或地图变了之后
+     * MAX 可能不再支持, 在这里退到最高那一档 (lv0 之前取, 退档也能触发视口同步)。*/
+    s_HoverLev = Sb_OverBar(mx, my) ? Sb_LevelAt(mx) : -1;
+    if (s_Level == SB_LEV_MAX)
+    {
+        Sb_DropMax();
+        if (Sb_CalcMaxScale() <= 0.0)
+            Sb_SetLevel(s_NLev - 2, "max-unsupported");
+    }
     down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
     if (down && !s_LbDown)
     {
@@ -1487,8 +1613,14 @@ void SB_Poll(void)
         s_LbDown = 1;
     }
     else if (!down) s_LbDown = 0;
-    /* 改档当帧立刻同步视口 (FM_SyncViewNow 幂等), 否则本帧 Render 新旧混用。 */
-    if (s_Level != lv0) FM_SyncViewNow();
+    /* 改档当帧就要把视口和裁剪器都跟上: FM_SyncViewNow 同步视口 (幂等), 再跑一趟
+     * prepare 补裁剪器尺寸 —— 缩小档引擎拿 **R 坐标**寻址 ZBuffer/ABuffer, 停在旧
+     * 档尺寸就是野读写。prepare 幂等 (SB_BufIs 对得上零开销)。*/
+    if (s_Level != lv0)
+    {
+        FM_SyncViewNow();
+        SB_PrepareSurface();
+    }
 }
 
 /* ---------------- 刻度条绘制 (已 Lock 的 16 位面里直接写像素) ---------------- */
@@ -1513,43 +1645,49 @@ static void Sb_Fill(unsigned char* base, int pitch, int W, int H,
 /* 条的全部像素 (无底板/边框, 全 alpha=255 直写)。ox/oy = 原点偏移。 */
 static void Sb_Paint(unsigned char* base, int pitch, int W, int H, int ox, int oy)
 {
-    int bx = s_BarX + ox, by = s_BarY + oy;
-    int mid = by + s_BarH / 2;
-    int dx, i, tw, n;
+    int bx = s_BarX + ox, by = s_BarY + oy;   /* by = 控件顶 = 文字带顶 */
+    int rowY = by + s_TextH + SB_TEXT_GAP;    /* 滑条带顶 */
+    int lineY = rowY + SB_SLIDER_H - SB_LINE_H;  /* 贯穿横线, 贴控件底 */
+    int dx, i, tw, n, th;
     int ga = Sb_Gx0(), gb = Sb_Gx1(), gn = s_NLev > 1 ? s_NLev - 1 : 1;
     wchar_t buf[10];
     int gx0 = Sb_Gx0() + ox, gx1 = Sb_Gx1() + ox;
-    /* 槽 */
-    Sb_Fill(base, pitch, W, H, gx0, mid - 1, gx1 - gx0 + 1, 3, 88, 92, 100, 255);
-    /* 左"+" 右"-" */
-    dx = bx + 6;
-    Sb_Fill(base, pitch, W, H, dx - 3, mid - 1, 7, 3, 232, 236, 242, 255);
-    Sb_Fill(base, pitch, W, H, dx - 1, mid - 4, 3, 9, 232, 236, 242, 255);
-    dx = bx + s_BarW - 7;
-    Sb_Fill(base, pitch, W, H, dx - 4, mid - 1, 9, 3, 232, 236, 242, 255);
-    /* 刻度 */
+    /* 刻度 + 旋钮坐在横线上方 */
     for (i = 0; i < s_NLev; i++)
     {
         dx = Sb_DetentX(i, ga, gb, gn) + ox;
-        Sb_Fill(base, pitch, W, H, dx - 1, mid - 7, 2, 15, 198, 206, 216, 255);
+        Sb_Fill(base, pitch, W, H, dx - 1, rowY, 2, SB_TICK_H, 198, 206, 216, 255);
     }
-    /* 旋钮 (当前档): 深色描边 + 亮芯 */
+    /* 贯穿横线 (贴控件底, 底下还有 SB_BOT_PAD 留白) */
+    Sb_Fill(base, pitch, W, H, gx0, lineY, gx1 - gx0 + 1, SB_LINE_H, 88, 92, 100, 255);
+    /* 左"+" 右"-": 在刻度带里居中, 竖笔上下对称露出 2px */
+    dx = bx + 6;
+    Sb_Fill(base, pitch, W, H, dx - 4, rowY + SB_SIGN_C - 1, 9, SB_SIGN_BAR, 232, 236, 242, 255);
+    Sb_Fill(base, pitch, W, H, dx - 1, rowY + SB_SIGN_C - SB_SIGN_STEM / 2, 3, SB_SIGN_STEM,
+            232, 236, 242, 255);
+    dx = bx + s_BarW - 7;
+    Sb_Fill(base, pitch, W, H, dx - 4, rowY + SB_SIGN_C - 1, 9, SB_SIGN_BAR, 232, 236, 242, 255);
+    /* 当前档的黄色指示条: 与刻度同高 (SB_TICK_H), 比刻度宽, 一眼认得出 */
     dx = Sb_DetentX(s_Level, ga, gb, gn) + ox;
-    Sb_Fill(base, pitch, W, H, dx - 4, mid - 10, 8, 21, 12, 13, 16, 255);
-    Sb_Fill(base, pitch, W, H, dx - 2, mid - 8, 4, 17, 250, 214, 80, 255);
-    /* 档位文字 */
+    Sb_Fill(base, pitch, W, H, dx - 4, rowY, 8, SB_TICK_H, 12, 13, 16, 255);
+    Sb_Fill(base, pitch, W, H, dx - 3, rowY, 6, SB_TICK_H, 250, 214, 80, 255);
+    /* 档位文字: 只在文字带里 (by .. by+s_TextH-1), 不碰滑条。
+     * 常显的只有 4x / 1x / 0.5x 三档; 其余 (含 max) 只有鼠标悬在其上时才画。*/
     if (!GdiEnsure(s_FontPx, VecText_Bold(), 7, VecText_FontFace())) return;
+    th = g_G->adv;
+    if (th > s_TextH - 1) th = s_TextH - 1;
     for (i = 0; i < s_NLev; i++)
     {
         const char* lab = s_LevLabel[i];
+        if (i != 0 && i != s_LevOne && i != s_NLev - 2 && i != s_HoverLev) continue;
         n = 0;
         while (lab[n] && n < 9) { buf[n] = (wchar_t)lab[n]; n++; }
         buf[n] = 0;
         if (!n) continue;
         tw = RenderLine(buf, n);
         if (tw <= 0) continue;
-        BlitCoverage(base, pitch, W, H, Sb_DetentX(i, ga, gb, gn) + ox - tw / 2, by - 1,
-                     tw + 2, g_G->adv, 242, 246, 252, 100);
+        BlitCoverage(base, pitch, W, H, Sb_DetentX(i, ga, gb, gn) + ox - tw / 2, by,
+                     tw + 2, th, 242, 246, 252, 100);
     }
 }
 
@@ -1596,7 +1734,6 @@ static int Sb_PaintSurface(void* surf)
 int SB_DrawToComposite(void)
 {
     void* surf = *(void**)ADDR_SURF_COMPOSITE;
-    if (s_Safe) return 0;
     /* 条画窗口面: 画进大面会跟降采样落到画面中部。 */
     if (Sb_IsBigSurf(surf)) return 0;
     if (Sb_PaintSurface(surf)) { s_Drew = 1; return 1; }

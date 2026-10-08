@@ -3,8 +3,8 @@
  *
  * 预览: 物理中键按住时, 以光标格画展开后地基黄框 (引擎 CoordsToClient
  * 投影, 每角取其框内格高, 平地高地同式), 细框套目标格, 方便对墙对齐。
- * 落点 = 光标格 + (大地基 -1,-1), 预览=移动目标=
- * 实际落点同一套数学 (TryToDeploy 0x7393C0 反汇编+运行时双确认)。
+ * 落点 = 光标格 + (大地基 -1,-1), 预览=移动目标=实际落点同一套数学
+ * (TryToDeploy 0x7393C0 反汇编+运行时双确认)。
  *
  * 自动展开 ([DeployPreview] AutoDeploy=1): 选中含可展开单位 (UnitType+
  * 0x404 DeploysInto 非空) 的裸中键点按由本模块认领 (SmartOrder 让路)。
@@ -14,7 +14,6 @@
  * 下令: 移动 MegaMission(Move)+到位 Deploy 事件 (0x9, 与手按 D 同形);
  * 死车/换边/超时 (DeployTimeout 秒)/无处可铺则放弃, 新点按取代旧跟踪。
  * 认领态另画白色轨迹线 (SmartOrder 熄火时补上, 同观感)。
- *
  * 开销: 地基尺寸指纹缓存 (选中签名+500ms), 帧内一次 ClickCoords。
  * 日志: 启动行 + 首次命中 + 每次 plots/fired/timeout。
  * 构建见 build-fast.bat。渲染挂 MOExperience_MessageDrawHook。
@@ -208,8 +207,7 @@ static int DP_FootprintCached(int* wOut, int* hOut)
  * TacticalClass::CoordsToClient 0x6D2140 (thiscall ECX=单例[0x887324],
  * 栈传 coord/out, 回可见性, 坐标恒写入)。输出即游戏渲染同系像素,
  * 直接画到 Composite 面上, 与引擎画其它东西同精度。
- * 高度: 每角 Z 取其框内格地面高度 (下), 无效格回落光标高度。
- * 平地与高地同式, 不再有整体下沉。 */
+ * 高度: 每角 Z 取其框内格地面高度, 无效格回落光标高度 (平地与高地同式)。 */
 typedef int __attribute__((thiscall)) (*Fn_DPC2C)(void* tac,
     const CoordStruct* c, Point2D* out);
 #define FN_DP_C2C ((Fn_DPC2C)(void*)0x6D2140u)
@@ -1202,7 +1200,7 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
     if (!locked || !IsPlausiblePtr(locked)) return;
     s_DpLocked = locked; s_DpW = w; s_DpH = h; s_DpPitch = pitch;
     /* 认领态多框预览 (与松手执行同一套分配, 所见即所得): 起点=按下格,
-     * 终点=当前格, Shift 锁轴。未认领时走下面单框老路。 */
+     * 终点=当前格, Shift 锁轴。未认领时走下面单框路径。 */
     if (s_DpArmed && s_DpDepN0 > 0)
     {
         int ccx, ccy;
@@ -1306,7 +1304,7 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
             return;
         }
     }
-    /* 未认领单框老路: 投影四角 (与游戏渲染同系同精度, 吸格线;
+    /* 未认领单框路径: 投影四角 (与游戏渲染同系同精度, 吸格线;
      * 每角取其框内格高, 平地高地同式)。 */
     DP_CornerZ(bx, by, mlz, &z0);
     DP_CornerZ(bx + fw - 1, by, mlz, &z1);

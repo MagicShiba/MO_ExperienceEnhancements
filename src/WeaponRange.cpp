@@ -27,8 +27,7 @@
 #define WR_OFF_VEC_ITEMS 4u
 #define WR_OFF_VEC_COUNT 16u
 
-#define WR_OFF_T_UNIT 0x6C4u
-#define WR_OFF_T_AIRCRAFT 0x6C4u
+#define WR_OFF_T_UNIT 0x6C4u      /* 飞行单位与单位同偏移 */
 #define WR_OFF_T_INFANTRY 0x6C0u
 
 typedef void* __attribute__((thiscall)) (*Fn_WRGetWeapon)(void* type, int idx);
@@ -94,7 +93,7 @@ static void* WR_TypeOf(void* u, int w)
     unsigned off;
     void* p;
     if (!u || !IsPlausiblePtr(u)) return 0;
-    if (w == ABS_UNIT || w == ABS_AIRCRAFT) off = WR_OFF_T_UNIT;
+    if (w == ABS_UNIT || w == ABS_AIRCRAFT) off = WR_OFF_T_UNIT;   /* 两者同偏移 */
     else if (w == ABS_INFANTRY) off = WR_OFF_T_INFANTRY;
     else return 0;
     p = *(void**)((char*)u + off);

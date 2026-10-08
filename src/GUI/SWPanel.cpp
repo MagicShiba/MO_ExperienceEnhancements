@@ -5,7 +5,6 @@
  * 此处每帧从收集表取新鲜行画统一面板: 单个半透明底 + 右/底边距锚定右下 +
  * 名左/计时器右分栏 + Ready 变绿。收集不到新鲜行 (菜单/无超武) 即隐藏,
  * 不可能画到别处。
- *
  * 颜色用收集的原前景色; 150ms 未刷新即过期, 引擎闪烁原样透出。
  */
 
@@ -172,11 +171,9 @@ int SWPanel_Draw(void* surf, int bitLineH, int surfW, int surfH, int surfPitch)
     for (i = 0; i < g_SWCapN && i < SWCAP_MAX; i++)
     {
         SWCapRow* c = &g_SWCap[i];
-        /* ★ 150ms 过期只用来剔"陈旧碎片", 不能让它把整块面板判没。
-         * 侧栏隐藏时引擎照旧逐帧画这些行 (只是整体右移), 收集一直新鲜; 万一
-         * 碰上某一帧没收到 (切模式那几帧), 早退只会让**原版列表**趁虚画出来
-         * (inband 放行), 那才是真正难看的那种"位置不对"。所以放宽到 1000ms:
-         * 宁可短暂显示上一次的内容, 也不能让面板凭空消失。*/
+        /* ★ 过期只用来剔"陈旧碎片", 不能让它把整块面板判没: 某一帧没收到 (切模式
+         * 那几帧) 早退会让**原版列表**趁虚画出来 (inband 放行)。故放宽到
+         * 1000ms: 宁可短暂显示上一次的内容, 也不能让面板凭空消失。*/
         if (now - c->tick > (unsigned)SW_STALE_MS) continue;
         for (j = 0; j < n; j++) if (ys[j] == c->y) break;
         if (j >= n)
@@ -220,9 +217,9 @@ int SWPanel_Draw(void* surf, int bitLineH, int surfW, int surfH, int surfPitch)
     if (maxNW <= 0 && maxTW <= 0) return 0;
     board.R = board.G = board.B = 0;
     /* 右缘锚到**地图区**而不是画布: 侧栏显示时地图只到 1752, 锚画布 (1920) 会把
-     * 整块列表塞到侧栏底下 (看不见, 而且名/计时两列还会被侧栏切开看着像重影)。
+     * 整块列表塞到侧栏底下 (看不见, 名/计时两列还被侧栏切开像重影)。
      * ⚠️ 锚点拿不到时**不要**静默退回 surfW —— 那正是"隐藏侧栏后整块列表跳到
-     * 屏幕最右缘"的表现。退回 0 = 贴左缘, 至少位置是稳定的、可预期的。*/
+     * 屏幕最右缘"的表现。退回 0 = 贴左缘, 至少位置稳定可预期。*/
     if (g_MapRight > 0 && g_MapRight <= surfW) anchor = g_MapRight;
     else
     {

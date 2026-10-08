@@ -5,7 +5,7 @@
  * 用法: [RepairAll] Mode 三档
  *       0 = 保持原样 (本模块完全不介入, 两个钩子直接返回 0);
  *       1 = 半自动, 手动触发;
- *       2 = 自动修, 定时扫, 掉了血且还没在修的建筑自动进维修流程。
+ *       2 = 自动修, 定时扫, 掉了血且未在修的建筑自动进维修流程。
  * 手动触发 (Mode=1/2 都行, DoubleClick=0 可关掉后两条):
  *       Ctrl + 点维修图标 / Ctrl + 维修快捷键 / 双击维修图标 / 连按两下快捷键。
  * 触发点就是原版那两处, 不新增键位; 快捷键 VK 从 KeyboardMD.ini 的
@@ -29,23 +29,23 @@
  *     (DynamicVectorClass: Items@+4 / Count@+16, 传对象基址, 同 SWSBar)
  *   Frame 0xA8ED84
  *
- * 三条会再踩的坑 (都写在这里, 改本文件前先读):
+ * 三条引擎/构建铁律 (改本文件前先读):
  *
  * 1) **钩子返回 0 时 Syringe 把被偷的字节搬到跳板里原样重放**, 里面若有直接
  *    相对跳转 (E8/E9/0F 8x/短 jcc), 基址变了而 rel32 没跟着变 -> 跳野地址。
- *    所以钩点必须挑**无 rel** 的指令边界: 维修图标钩点因此在 0x6A78D9 偷 6B
- *    (`mov ecx,[0x8871E0]`), 而不是 0x6A78F6 偷 9B (第三条就是
- *    `call 0x4AC8C0`)。热键钩点 0x536FA0 偷的 `mov ecx,imm32` 里那个 E8 只是
- *    imm32 的一个字节, 无 rel。改任何 .inj 钩子后先跑 tools/hook-rel-audit.py。
+ *    所以钩点必须挑**无 rel** 的指令边界: 维修图标钩点在 0x6A78D9 偷 6B
+ *    (`mov ecx,[0x8871E0]`), 不用 0x6A78F6 偷 9B (第三条是 `call 0x4AC8C0`);
+ *    热键钩点 0x536FA0 偷的 `mov ecx,imm32` 里那个 E8 只是 imm32 的一个字节。
+ *    改任何 .inj 钩子后先跑 tools/hook-rel-audit.py。
  *
  * 2) **bool 返回值只保证在 AL**。引擎实现里出现 `xor al,al` / `mov al,x` 的,
- *    函数指针的返回类型必须声明成 unsigned char —— 声明成 int 会读到 EAX 高
- *    24 位的垃圾, 把"false"读成 true。RA_CanRepair 就是踩过这个。
- *    对照 WhatAmI(0x459EC0) 是 `mov eax,6; ret` 写满 EAX, 那个声明 int 才安全。
+ *    函数指针返回类型必须声明成 unsigned char —— 声明成 int 会读到 EAX 高 24 位
+ *    的垃圾, 把"false"读成 true (RA_CanRepair 必须这么声明)。对照
+ *    WhatAmI(0x459EC0) 是 `mov eax,6; ret` 写满 EAX, 那个声明 int 才安全。
  *
  * 3) **IsPlausiblePtr 不能当前置解引用或调虚表** —— 它只判 [64K,2G)+4 对齐,
- *    堆/栈里随便一个数都能过。要判"这真是个对象"看虚表指针是否落在 exe 映像内
- *    (RA_IsObj); 要判"这真是个函数"看目标是否落在 exe 内 (RA_InExe)。
+ *    堆/栈里随便一个数都能过。判"这真是个对象"看虚表指针是否落在 exe 映像内
+ *    (RA_IsObj); 判"这真是个函数"看目标是否落在 exe 内 (RA_InExe)。
  *
  * 另: 每帧路径上不允许 GetPrivateProfileIntA (同 SWSBar.cpp), 配置全部在
  *   RA_EnsureInit 读一次; 0x4F42F0 一帧跑 ~142 次, 故 Poll 内自门控帧号;
@@ -299,7 +299,7 @@ static void RA_Pop(void)
     s_RaQN--;
 }
 
-/* ---------------- 建筑数组稳定门 (同 SWSBar: 启动期半初始化垃圾曾致 fault) --- */
+/* ---------------- 建筑数组稳定门 (同 SWSBar: 启动期半初始化垃圾会致 fault) --- */
 
 static void* s_RaPrevItems = NULL;
 static int   s_RaPrevCount = 0;
@@ -329,7 +329,7 @@ static void RA_Observe(void)
 /* ---------------- 扫描 + 发事件 ---------------- */
 
 /* 该修就入队。便宜的字节判据排在虚表调用前面。
- * 不用"已试过"表: Repair 事件处理 (0x4C6EFD) 只查 IsAlive 就
+ * 不用"已报过"表: Repair 事件处理 (0x4C6EFD) 只查 IsAlive 就
  * SetRepairState(-1), 标志一定被置上, IsBeingRepaired 本身就是可靠的
  * "已经报过"标记, 下一轮自然跳过; 事件万一被丢, 下一轮重发才是想要的。 */
 static int RA_TryQueue(void* b, void* cur)

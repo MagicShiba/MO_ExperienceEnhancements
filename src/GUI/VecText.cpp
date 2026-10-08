@@ -7,14 +7,13 @@
  *   混入已 Lock 的 16 位面, advance 与原版逐字一致。
  * 任何异常 (度量失败/面信息非法/字形超大) 都走跳板调原版, 绝不花屏。
  *
- * 场景区分按路径, 不按坐标/内容 (坐标门曾误收右侧提示, 见笔记 v80 起):
+ * 场景区分按路径, 不按坐标/内容 (坐标门会误收右侧提示, 见笔记):
  *   顶栏条带 (y<32 数字吃 CreditPx/DY); 超武收集只认侧栏发起者 0x004A6345。
  * 坐标归一 (VecNormC): 引擎笔位/裁剪只低 16 位有效; 空裁剪哨兵退主面边界。
  *
  * BitFont 对象实测布局 (Lock 0x4348F0 反汇编实证):
  *   +0x0C 锁定的 WORD 像素缓冲, +0x10 pitch(WORD 数),
  *   +0x24 默认色 WORD, +0x30..+0x3C 裁剪 LTRB (含端)。
- *
  * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
  */
 #include <windows.h>
@@ -209,11 +208,10 @@ static int VecRender(void* t, wchar_t wch, int adv, int h, int x, int y,
  *   行高 font+0x1C   (0x434EC2  mov eax,[ecx+0x1C] / add edx,eax)
  *   字宽 idata+0x1C  (0x4346C0  add eax,[ecx+0x1C])
  *   换行按字宽在盒宽内累加, 盒高按行高切行
- * 行高能单独临时改 (见 VecDrawTextEntry), 字宽一动换行就跟着错, 想加
- * 字距必然撑出 453 宽的盒子。所以这里整个接管: 引擎那次调用不执行, 自己
- * 按矢量墨水排版 —— 行高跟 BriefLine, 字距跟 BriefTrack, 换行按墨水宽,
- * 空行原样保留。行数不再受盒高限制 (盒高 432 装不下 21 行, 原版就是靠
- * 面板裁剪漏掉末行), 只受屏高限制。
+ * 行高能单独临时改 (见 VecDrawTextEntry), 字宽一动换行就跟着错, 想加字距
+ * 必然撑出 453 宽的盒子。故整个接管: 引擎那次调用不执行, 自己按矢量墨水排版
+ * —— 行高跟 BriefLine, 字距跟 BriefTrack, 换行按墨水宽, 空行原样保留。
+ * 行数不受盒高限制 (盒高 432 装不下 21 行, 原版靠面板裁剪漏掉末行), 只受屏高限。
  * 面的取法与引擎一致 (0x4348F0 装裁剪那套): 像素缓冲 font+0x0C、
  * 行距 font+0x10、裁剪 LTRB = font+0x30/+0x34/+0x38/+0x3C。
  * 颜色取 font+0x24 (0x434D13 读的就是它, Blit 层同源)。
@@ -839,10 +837,10 @@ static int g_TipY = -9999;
 /* 当帧提示首字是否已扫描 (Print 入口清零, Blit 首字置位) */
 static int g_BlitTipSeen = 0;
 /* 提示边框色粘存 (玩家色一局不变): 顶行采样成功即更新;
- * 出界裁剪后顶行全黑采不到时沿用, 不再回落纯红 (图 3 的病)。 */
+ * 出界裁剪后顶行全黑采不到时沿用上次值, 不回落纯红。 */
 static unsigned g_TipBcCache = 0;
 static int g_TipBcOK = 0;
-/* 多槽宽度表 (单槽会被同帧其它串冲掉, 见 vfixq ow=30 教训):
+/* 多槽宽度表 (单槽会被同帧其它串冲掉):
  * ring 32 项, 按指针/首字+长度命中, 跨帧也有效。 */
 #define DIMCACHE_N 32
 typedef struct {
@@ -855,7 +853,7 @@ static int g_DimCPos = 0;
 /* 防冲 sticky (边缘修复): 主表是 ring, 出屏后 GetDim 不再刷新,
  * 槽位被其它串冲掉致 Print 查表 miss (盒跳过、宽字溢窄盒)。
  * 此处按 (首字,长度) 常驻 16 槽, 同槽只认同 key 覆盖,
- * 取用时全串比对 (内容不同不用, 与 v49 同口径), 永不丢。 */
+ * 取用时全串比对 (内容不同不用), 永不丢。 */
 #define STICKY_N 16
 typedef struct {
     int used;
@@ -992,9 +990,8 @@ int __fastcall VecPrintEntry(void* t, void* e,
      * (avg = nw/n, few-px error), ow scaled the same.
      * Gates (anti-misfire): tl in [8,64), y within +-24 of last tip,
      * a4 within [tipx-64, tipx+400]. tot < 40 -> miss.
-     * 注意: 不能再用 g_TipTot==0 当门 -- 它是全局量, 上一帧整串的宽会
-     * 留在这里, 子串帧永远等不到 0, 于是盒用旧整串宽 -> 右侧留大空隙。
-     * 改为: 非电字开头 (即不是精确整串) 或 表未命中时, 一律走子串匹配。 */
+     * 注意: 不能用 g_TipTot==0 当门 -- 它是全局量, 上一帧整串的宽会留在这里,
+     * 子串帧永远等不到 0, 盒就会用旧整串宽 -> 右侧留大空隙。 */
     {
         const wchar_t* qs = (const wchar_t*)a3;
         int ql = 0;
@@ -1908,9 +1905,9 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
          * 边缘出屏字会被引擎跳过 (不调 Blit), 首 Blit 未必是串首,
          * 故按跨度 [tipx-tot-16, tipx+tot+8] 认; 不按原点 ±8。
          * 右界 tot+8: 本串字 ENGINE x 不会超 a4+tot (账本即此)。
-         * 每批只进一次 (seen 守卫): 串内后续字的 tx 天然递增,
-         * 绝不能按"漂移"重画盒, 否则盒跟着字走、越走越偏 (v65 教训)。
-         * 单线程 Print→Blits 同步, 陈旧跨 Print 不可能, 无需漂移。 */
+         * 每批只进一次 (seen 守卫): 串内后续字的 tx 天然递增, 绝不能按"漂移"
+         * 重画盒, 否则盒跟着字走、越走越偏。单线程 Print→Blits 同步,
+         * 陈旧跨 Print 不可能, 无需漂移。 */
         if (!g_BlitTipSeen &&
             tx >= g_LastTipX - g_TipTot - 16 &&
             tx <= g_LastTipX + g_TipTot + 8 &&
@@ -1931,12 +1928,11 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                 bb && IsPlausiblePtr((void*)bb) &&
                 pp >= 64 && pp <= 4096)
             {
-                /* 盒锚点取 max(Print 落笔, 首 Blit x):
-                 * 中间两者一致; 首字出屏被跳过时首 Blit 偏右 (前面
-                 * 几个字已在屏外), 跟 Blit x 左沿才与可见字
-                 * 对齐, 右沿仍用 Print 真右沿 (tipx+tot, 不多占);
-                 * 取 min 会把盒钉在旧落笔、字溢出右沿 (图 2 的病)。
-                 * cx (引擎窄盒中心) 仍按 Print 版式取, 与裁剪无关。 */
+/* 盒锚点取 max(Print 落笔, 首 Blit x):
+                  * 首字出屏被跳过时首 Blit 偏右 (前面几个字已在屏外),
+                  * 跟 Blit x 左沿才与可见字对齐, 右沿仍用 Print 真右沿
+                  * (tipx+tot, 不多占); 取 min 会把盒钉在旧落笔、字溢出右沿。
+                  * cx (引擎窄盒中心) 仍按 Print 版式取, 与裁剪无关。 */
                 int anchor = (tx > g_LastTipX) ? tx : g_LastTipX;
                 int cx = g_LastTipX + g_TipTot / 2;
                 int oldHW = (g_TipOw > 0 ? g_TipOw : 118) / 2 + 4;

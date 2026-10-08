@@ -6,29 +6,24 @@
  * 预览限 128 线, 换格或 400ms 刷一次, 松手即消), 松开才在当前格执行:
  * 以鼠标格为基准扫 Range x Range (默认 4x4, 可配 2~16) 找敌方对象,
  * 选中单位分组强制攻击 (MegaMission Mission=Attack=1, Target=敌对象,
- * 直接下令 IsPlanningEvent=0)。
- * 点中敌人则它在 0 环必在首位; 点空地则扫附近敌人。
- * 端点坐标走 OU_GetCoords (vtbl+0x48, 范围校验), 投影与框同系。
- * 与巡逻圈/砍树/散开全互斥: 要 Ctrl 且不能按 Z
- * (Z+中键=巡逻, Ctrl+Z+中键=砍树, 裸中键=散开)。
+ * 直接下令 IsPlanningEvent=0)。点中敌人则它在 0 环必在首位, 点空地则扫
+ * 附近敌人。端点坐标走 OU_GetCoords (vtbl+0x48), 投影与框同系。
+ * 与巡逻圈/砍树/散开全互斥: 要 Ctrl 且不能按 Z (Z+中键=巡逻,
+ * Ctrl+Z+中键=砍树, 裸中键=散开)。
  *
  * 找敌 (YRpp 交叉确认):
- *   CellClass::FindObjectOfType (thiscall 0x47C4D0, ECX=格,
- *   栈 abs+alt) 按 Unit/Infantry/Aircraft/Building 各取链头,
- *   再沿 ObjectClass.NextObject (+0x30) 走链收同格堆叠
- *   (步兵一格 3 个, 只取链头会漏)。链步数上限 64, 指针 +
- *   WhatAmI 双重守卫, 偏移不对时自动退化不断链。
- *   敌我判定: Techno.Owner 指针 != 本家 (Owner 偏移用两个选中
- *   单位双确认自校准, 失败直接放弃, 绝不误击友军)。
- *   环扫顺序即由近及远, 首个即最近, 无需坐标排序。
- * 分组 (SquadSize=几打一, 默认 4):
- *   单位 <= SquadSize → 全员集火 enemies[0];
- *   否则 nUsed=clamp(nU/SquadSize,1,nE), 前 nUsed 个敌人均衡分
+ *   CellClass::FindObjectOfType (thiscall 0x47C4D0, ECX=格, 栈 abs+alt)
+ *   按 Unit/Infantry/Aircraft/Building 各取链头, 再沿 ObjectClass.NextObject
+ *   (+0x30) 走链收同格堆叠 (步兵一格 3 个, 只取链头会漏)。链步数上限 64,
+ *   指针 + WhatAmI 双重守卫, 偏移不对时自动退化不断链。
+ *   敌我判定: Techno.Owner 指针 != 本家 (Owner 偏移用两个选中单位双确认自
+ *   校准, 失败直接放弃, 绝不误击友军)。环扫顺序即由近及远, 首个即最近。
+ * 分组 (SquadSize=几打一, 默认 4): 单位 <= SquadSize → 全员集火
+ *   enemies[0]; 否则 nUsed=clamp(nU/SquadSize,1,nE), 前 nUsed 个敌人均衡分
  *   (sizes 差 <=1), 剩下的敌人没单 (集火优先, 不搞 1v1 添油)。
  *
  * 联机: 只发标准事件, 各端同一份原版代码执行, 不影响联机。
  * 本地只读 + 标准事件入队, 不写模拟内存。
- *
  * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
  * 轮询挂 PowerDrawBoth (见 MOExperience.cpp), 开关关时直接返回。
  */

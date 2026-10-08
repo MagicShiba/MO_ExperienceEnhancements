@@ -22,7 +22,6 @@
  *     (x=光标, y=盒底, surface→客户区换算); 系统组合窗由主窗子类化隐藏
  *     (WM_IME_SETCONTEXT 清位 + 吃掉 STARTCOMPOSITION), 候选条仍由系统画。
  *   代价: 打字时方向键镜头可能动一下 (不再吞键)。
- *
  * 构建见 build-fast.bat (32 位 mingw, 无 CRT, -limm32)。
  */
 

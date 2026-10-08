@@ -8,7 +8,7 @@
  *     槽位 (GetPrimaryFactory 0x500510, 槽位即权威), 故不存在 stale。
  *   - 左键跨型号点击: 忙时走原版拒绝路径 0x6AB689, 吞掉记入本地; 闲时原生下单
  *     第 1 个并顺手记 4 个 (Shift 一次记 5 个, 槽不够记到满)。
- *     切换清产的原生 abandon 路 (0x6AA7BC/0x6AA884) 全版本零触发, 不钩。
+* 切换清产的原生 abandon 路 (0x6AA7BC/0x6AA884) 零触发, 不钩 (见文件末说明)。
  *   - 图标数字 (DrawStrip 的 CountTotal 取数点 0x6A9C86): 本地有排队则
  *     EAX/EBX=原版数+本地数后跳 0x6A9CC9 借用原版绘制; 无排队跑原指令。
  *   - BuildQueue_Poll (每循环, 挂 PowerDrawBoth): 无对账无丢单, 只喂单 ——
@@ -211,11 +211,8 @@ static unsigned g_BQEvNext = 0;
 static int g_BQEvInit = 0;
 
 /* 规划事件抓包 (联机同步研究用, 量极小): Type + 前 48 字节 hex。
- * 用途: 原生巡逻建圈/关环/提交的真实事件序列
- * (Mega=0x04/Connect=0x2A/Commit=0x2B), 与我方构造逐字节对比,
- * 目标是去掉本地直调、纯事件关环 (联机安全)。
- * 测试法: 单机安静局, 不碰中键, 选 1 单位, Z+左键点 4 格,
- * 左键点首格关环, 松 Z 提交; 再用 Z+中键画一次矩环作对比。 */
+ * 用途: 取原生巡逻建圈/关环/提交的真实事件序列
+ * (Mega=0x04/Connect=0x2A/Commit=0x2B), 与我方构造逐字节对比。 */
 static void BQ_HexB(char* out, unsigned v)
 {
     static const char* dig = "0123456789ABCDEF";
@@ -278,12 +275,10 @@ static void BQ_EvWatch(void)
     g_BQEvNext = next;
 }
 
-/* 生产监视器 (纯诊断零行为): 每轮记各 (house,naval,cat) 线的
- * 工厂 Object 指针与 +0x70 暂停位, 变化才记一行 `bq: pw`。
- * 用途: 在产到底是被谁杀的 (Object 删除/置空), 还是自然完工换项
- * (Object 换新), 与点击 trace 做时间关联: cp 后 1~2 帧内 Object 变空/
- * 换新=点击杀的; 无 cp 关联的变化=自然推进或别路。+0x38 进度字每帧都变,
- * 故不监视 (防刷屏), 只看 Object 存亡与 +0x70 边沿 (暂停 hint)。 */
+/* 生产监视器 (纯诊断零行为): 每轮记各 (house,naval,cat) 线的工厂 Object 指针
+ * 与 +0x70 暂停位, 变化才记一行 `bq: pw`。用于把在产变化归因: cp 后 1~2 帧内
+ * Object 变空/换新=点击杀的, 无 cp 关联=自然推进或别路。+0x38 进度字每帧都变,
+ * 故只看 Object 存亡与 +0x70 边沿。 */
 #define BQ_WATCH_SLOTS 8
 typedef struct
 {
@@ -555,9 +550,8 @@ static int BQ_FireProduce(void* house, void* type)
 
     count = *(unsigned*)ADDR_OUT_COUNT;
     if (count >= EVT_CAP) return 0;
-    /* OutList_Next 是引擎的字段, 值必须是 0..EVT_CAP-1 才配当写下标。原来直接拿
-     * 它算 next*EVT_SIZE 写进事件槽, 脏值就是一次任意地址写。OrderUtil.cpp:28
-     * 那份已经 mask 过了, 这里漏了 (孪生代码不同步)。*/
+    /* OutList_Next 是引擎的字段, 值必须是 0..EVT_CAP-1 才配当写下标:
+     * 脏值直接算 next*EVT_SIZE 就是一次任意地址写, 故先 mask。*/
     next = *(unsigned*)ADDR_OUT_NEXT & 0x7Fu;
     if (next >= EVT_CAP) return 0;
 
@@ -579,7 +573,7 @@ static int BQ_FireProduce(void* house, void* type)
         /* 必须列出 ebx/esi/edi/ebp: 引擎这个回调是真实函数, 会动 callee-saved
          * 寄存器, 而编译器以为它不会 —— 于是下面用 next/count 写 OutList_Count /
          * OutList_Next 时可能拿到垃圾, 引擎同帧按这份坏账本去派发事件就会跳进堆
-         * (实测 0xC0000005, EIP 落在非代码区)。OrderUtil.cpp:46 早修好了。*/
+         * (0xC0000005, EIP 落在非代码区)。*/
         : "ecx", "edx", "ebx", "esi", "edi", "ebp", "cc", "memory");
     *(unsigned*)(ADDR_OUT_PAR + next * 4u) = eaxAfter;
 
@@ -881,12 +875,10 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_CancelPeel(void* regs)
     left = BQ_LocalCount(house, heap);
     if (left <= 0)
     {
-        /* 本地无本型: 按总数 (本地+模拟) 决策。
-         * 本地已 drain、模拟还抱着在产/在排时, 放行原生=下发 ABANDON:
-         * IsQueued 为真则 0x10, Shift 常驻手上更是 0x2E AbandonAll,
-         * 在产进度作废 ("5 个 50% 一点右键从头开始"即此)。
-         * 故总数>1 时什么都不做直接退 (在产继续); 总数<=1 (仅剩在产
-         * 单个或全空) 才走原生。 */
+        /* 本地无本型: 按总数 (本地+模拟) 决策。本地已 drain、模拟还抱着在产/在排
+         * 时放行原生=下发 ABANDON (IsQueued 为真则 0x10, Shift 常驻更是 0x2E
+         * AbandonAll), 在产进度作废。故总数>1 时直接退 (在产继续), 总数<=1
+         * (仅剩在产单个或全空) 才走原生。 */
         int sim = BQ_SimCount(house, pType);
         void* fac = BQ_Resolve(house,
             *(unsigned char*)((char*)pType + OFF_TT_NAVAL) ? 1u : 0u,
@@ -909,21 +901,13 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_CancelPeel(void* regs)
 
 /* 真分发 (反汇编定案, 右键点建筑图标):
  *   0x6AADB5: [esp+0xb0]&0x10 为右键 (否则跳原生出口);
-  *   0x6AADC3: [esp+0x18]==null→0x6AB0AC 明路 (H0 state 检查,
- *     空闲/过渡态才到, 旧钩全在此);
+ *   0x6AADC3: [esp+0x18]==null→0x6AB0AC 明路 (H0 state 检查, 只在空闲/过渡态到);
  *   0x6AAE0D: [[esp+0x18]+0x38]!=0(在产忙) 且 [[esp+0x18]+0x70]==0(未暂停)
  *     →0x6AAFE1 暗暂停 (SUSPEND#1, 经 0x6AB02A 构造, ec 调用者 0x6AB02F);
- *   否则 (空闲或已暂停) →音效→[esp+0x13]shift?
- *   0x6AAE44: 无 shift→0x6AAFBD 暗取消 (0x10, 经 jmp 0x6AB1FF 共享尾构造,
- *     ec 调用者恒为 0x6AB204——旧 ex 哨兵蹲的 0x6AB1F8/0x6AB22A 全被 jmp
- *     绕过, 这就是 "减数对、进度死" 的真凶路);
- *   有 shift→0x6AAE4A 暗清全部 (0x2E, 同共享尾)。
- * 在产时右键永远走暗路, 明路钩子 (H0/H3) 够不着 —— 别在这段找错分支,
- * 此版把剥离搬到真路上。暂停保持原生 (用户要"点一次暂停"); 取消按总数:
- * 本地有本型→弹尾减数 (在产/暂停不动); 本地空但模拟>1→拦下 (防 0x10 杀
- * 在产、0x2E 清全部); 仅剩在产单个→走原生真取消。
- * Shift+右键=取消全部 (用户定稿): 清空本地后跑原生 0x2E,
- * 显示归零; 未暂停的先走暗暂停 (天然两步防误删)。 */
+ *   否则 (空闲或已暂停) →音效→0x6AAE44 看 [esp+0x13]shift:
+ *     无 shift→0x6AAFBD 暗取消 (0x10), 有 shift→0x6AAE4A 暗清全部 (0x2E),
+ *     两者经 jmp 0x6AB1FF 共享尾构造。
+ * 在产时右键永远走暗路, 明路钩子够不着 —— 剥离必须挂在真分发点上。 */
 
 /* 0x6AAFE1 (5): 暗暂停入口 (mov eax,[0x8871e0], 无 rel)。
  * regs: EDI=图标类型 (存疑时 WhatAmI 守卫), EBP=abs。
@@ -1005,9 +989,8 @@ static DWORD BQ_DarkPeel(void* regs)
  * 到此=右键+非空闲态 (在产未暂停已由上游 0x6AAE0D 分走暗暂停;
  * 此处为已暂停/空闲)。EDI=图标类型, EBP=abs,
  * [esp+0x13]=shift (0→暗取消 0x6AAFBD, 1→暗清全 0x6AAE4A)。
- * Jcc 永跳 (铁律: 偷 rel 永不 return 0; 另 崩溃教训:
- * 9/10 字节钩非零返回疑触 Syringe 短桩问题, 此处改回 6 字节 Jcc
- * 模式, 与 H0/H1 同构)。去向: 剥离跳 0x6AB28F 原生出口;
+ * Jcc 永跳 (铁律: 偷 rel 永不 return 0; 9/10 字节钩非零返回疑触 Syringe
+ * 短桩问题, 故一律用 6 字节 Jcc 模式)。去向: 剥离跳 0x6AB28F 原生出口;
  * 放行跳回原生去向 (保持栈/寄存器与原生到达一致, 跳过仅为 je 本身)。 */
 extern "C" __declspec(dllexport) DWORD __cdecl BQ_DarkDispatchPeel(
     void* regs)
@@ -1157,9 +1140,8 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_ShowCount(void* regs)
     return TO_DRAWNUM;
 }
 
-/* 跨型号点击不切在产, 这是反汇编实证 (0x6AA7B6-0x6AA931: 左键点建筑图标, 原生先按
- * [[esp+0x2c]] 发 ABANDON 0x6AA7E7 + AbandonAll 0x6AA8CD) + 日志双证 (h1/sw 全程
- * 缺席): 它实际永远走"忙拒绝 + 本地记入", 在产从未被切掉。所以不钩切换清产,
- * 也不镜像取消/对账工厂指针 —— 前者会在放置瞬间误清队列 (放置与取消不可分),
- * 后者会在开工换指针时丢单。 */
+/* 跨型号点击不切在产 (反汇编实证 0x6AA7B6-0x6AA931 + 日志双证): 它实际永远走
+ * "忙拒绝 + 本地记入", 在产从未被切掉。故不钩切换清产, 也不镜像取消/对账工厂
+ * 指针 —— 前者会在放置瞬间误清队列 (放置与取消不可分), 后者会在开工换指针时
+ * 丢单。 */
 

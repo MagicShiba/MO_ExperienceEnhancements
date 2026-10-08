@@ -1,17 +1,17 @@
 /* SWSBar.cpp - 超武侧栏 (Phobos SuperWeaponSidebar 移植简化版)。
  *
- * 原理、设计取舍、踩过的坑与地址推导见 notes/超武侧栏.md。这里只留
+ * 原理、设计取舍与地址推导见 notes/超武侧栏.md。这里只留
  * "读/改这份代码时必须知道"的约束。
  *
  * 不建 Gadget、不碰模拟 (Ares 不动):
- *   - 数据: 只读扫 SuperClass::Array (Owner==本家 && IsPresent), 纯本地过滤
- *     +排序, 不写任何引擎状态 —— 联机安全。
+ *   - 数据: 引擎干净清单 (TabCameos 快照), 只读+本地过滤+排序, 不写任何
+ *     引擎状态 —— 联机安全。
  *   - 分组: 右侧 4 列 (盟/苏/厄/焚风), 空列隐藏; 归属查内建表 (96 个, 由
  *     rulesmo.ini 授予建筑 Owner/Prerequisite 链离线推导), 查不到落玩家阵营。
  *   - 排序/隐藏: `[SWSidebar]` 单节, 以超武 ID 为键: 负数=隐藏, 0/缺键=
  *     默认 (优先级 1000), 正数=优先级 (越小越靠前, 同值按 ArrayIndex)。
- *   - 图标: 走 PCX (rulesmo.ini 的 `SidebarPCX=`) 逐像素贴图。**不用 SHP** ——
- *     `SidebarImage` 指向引擎 XXICON.SHP 占位引用, 画出来是一堆紫球。
+ *   - 图标: 走 PCX (`SidebarPCX=`)。**不用 SHP** —— `SidebarImage` 指向引擎
+ *     XXICON.SHP 占位引用, 画出来是一堆紫球。
  *   - 绘制: 图标盒 60x48 + 阵营色边框 + 充能百分比 + 悬停名提示, 整体
  *     `[SWSidebar] Alpha` 可调; 画进**自有离屏缓存**, 15 个游戏逻辑帧重建
  *     一次 (交互时当帧重建), 每渲染帧只做一次带 alpha 的合成。
@@ -22,8 +22,6 @@
  *     显隐箭头左边的"禁入牌"按钮切换。见"隐藏防御支援页里的重复超武"。
  *     搬出**只能少删**: 判据是"侧栏此刻真的在画它"的真子集 (类型门 ∧ 实例门
  *     ∧ 扫描快照门), 因为搬出单向, 多删一条就是超武彻底消失。
- *   - 清单: 本家拥有的超武 (`SuperClass::Array` 里 owner==本家且 IsPresent==1),
- *     **不是 rules ini, 也不是防御支援页** —— 两者都只覆盖基础规则那一份数据。
  *   - 规则旗标 (ShowCameo / ManualFire / UseAITargeting / SidebarPCX /
  *     ChargeToDrainRatio 等): 一律读 Ares 已算好的 ExtData, 见下面的
  *     "Ares SWTypeExt::ExtData" 一节。
@@ -37,7 +35,6 @@
  *   Scenario PlayerSideIndex *(*(0xA8B230)+0x34B8);
  *   Display 对象 0x87F7E8, CurrentSWTypeIndex +0x11B8 (=0x8809A0)。
  * 任一校验失败即 fail-closed (不画/不点, 记日志), 绝不花屏误触。
- *
  * 构建见 构建.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
  */
 
@@ -66,12 +63,10 @@
  * 成功返回 Items 指针并写出 Count (Count==0 是合法的"还没有", 由调用方自己判),
  * 失败返回 NULL。IsPlausiblePtr 是纯算术 (GdiText.cpp), 不读内存, 怎么调都安全。
  *
- * ⚠⚠ **上界不许拍脑袋**。原先写 `count > 4096` 当"这是垃圾值"的判据, 而 MOE
- * 满编剧本里 `SuperClass::Array` 实测就有 **4480 条** (`items=0x322A3570
- * cap=4480 ini=1 cnt=4480 inc=10`, 容器完全自洽, ≈9 个 House × ~500 个超武
- * 类型) —— 于是那些剧本里整个超武侧栏**静默消失**, 症状就是"有时候能显示有时候
- * 不能"。真正的安全网是**逐项全校验** (type / owner==本家 / IsPresent / ID 可打印
- * / 标志位 0或1, 见 SwsScan), 上界只该卡"大到读不下去"。
+ * ⚠⚠ **上界不许拍脑袋**: MOE 满编剧本里 `SuperClass::Array` 实测就有 **4480 条**
+ * (≈9 个 House × ~500 个超武类型, 容器完全自洽), `count > 4096` 那道门会让整个
+ * 超武侧栏**静默消失**。真正的安全网是**逐项全校验** (type / owner==本家 /
+ * IsPresent / ID 可打印 / 标志位 0或1, 见 SwsScan), 上界只该卡"大到读不下去"。
  * `VectorClass::Add` 先 Reserve 再写 `Items[Count++]`, 所以 `Count <= Capacity`
  * 恒成立 —— 这一条可以当硬门, 它同时挡掉"Count 是野值"的真垃圾。 */
 #define SWS_VEC_HARD_MAX 65536
@@ -245,7 +240,7 @@ static int SwsAresLocateExt(void)
      *   询问时就已经映射进来 (SwsFillType 可能被 `SwsSidebarShows` 提前调到,
      *   那条路没有 `frame >= 60` 的门槛)。一旦在这里闩死, 后面再也不会重试,
      *   于是**全程 x0 且一行日志都没有** —— 卡在这上面很久。
-     *   判据: "还没准备好"是可恢复的, 只有"准备好了但内容不对"才是真失败。 */
+     *   判据: 资源没准备好是可恢复的, 只有"找到了但内容不对"才是真失败。 */
     if (!SwsAresImage(&base, &imgHi)) return 0;
     hook = GetProcAddress((HMODULE)base, ARES_HOOK_PCX);
     if (!hook || (unsigned char*)(size_t)hook < base ||
@@ -312,23 +307,9 @@ fail:
 
 /* 取某超武的 Ares ExtData; 取不到返回 NULL。
  *
- * ⚠ **键 = `SuperWeaponTypeClass*` 本身, 不是 ID 字符串**。
- *   - Ares 源码 `Ext/SWType/Hooks.Update.cpp:188`: `SWTypeExt::ExtMap.Find(pSuper->Type)`,
- *     `_Container.hpp:226` `using key_type = base_type*` (base_type = SuperWeaponTypeClass)。
- *   - 本机 3.0 二进制同一条路 (`0x1003961D`):
- *         mov eax,[esi]            ; SuperClass*
- *         mov ecx, <ExtMap>
- *         push [eax+0x28]          ; ← SuperClass+0x28 = Type 指针
- *         call ContainerMapBase::find
- *     同一函数里紧接着 `mov edi,[eax+0x98]` = `Type->ArrayIndex`, 反证 +0x28 取到的
- *     确实是 SuperWeaponTypeClass*。
- *   - `find` 的散列是对**指针自己的 4 个字节**做 FNV-1a (`movzx eax,bl` / `shr eax,8`
- *     / `xor 0x811C9DC5` / `imul 0x1000193`), 全程不解引用 ⇒ 键只可能是指针。
-* ⚠ 早先误把 `+0x24` 当成"存放 `char* ID` 的指针字段", 于是 `*(void**)(type+0x24)`
- *   读出来的是**字符串内容** (`oy1S` / `Warh` / `eadS` 之类), 三个候选键全错,
- *   还因此踩出一次 CRASH。实际它是**内联定长字符数组**, 键就是它的首地址。
- *
- * 失败不致命: 调用方全部退回旧的 ini 快照路径, 行为不倒退。 */
+ * ⚠ **键 = `SuperWeaponTypeClass*` 本身, 不是 ID 字符串** —— 证据见体内注释。
+ * `Type+0x24` 是**内联定长字符数组** (不是 `char*` 字段), 键只能取它的首地址。
+ * 失败不致命: 调用方全部退回 ini 快照路径, 行为不倒退。 */
 static void* SwsAresExt(void* type)
 {
     void* p;
@@ -347,10 +328,11 @@ static void* SwsAresExt(void* type)
      *     10039624  push [eax+0x28]          ; ★ 键 = pSuper->Type
      *     10039627  call find
      * 与源码 `SWTypeExt::ExtMap.Find(pSuper->Type)` 逐字一致; `_Container.hpp:226`
-     * `using key_type = base_type*` 佐证。
-     *
-     * ⚠ 曾被 `StripClass_Draw_SuperWeapon_PCX` 的 `push [eax+0x24]` 误导 —— 那里
-     *   eax 是**另一个**对象, 与本路径无关。按 &type->ID 查恒返回 NULL。
+     * `using key_type = base_type*` 佐证。`find` 的散列是对**指针自己的 4 个字节**
+     * 做 FNV-1a (`movzx eax,bl` / `shr eax,8` / `xor 0x811C9DC5` /
+     * `imul 0x1000193`), 全程不解引用 ⇒ 键只可能是指针。
+     * `StripClass_Draw_SuperWeapon_PCX` 里的 `push [eax+0x24]` 不可类比 —— 那里
+     * eax 是**另一个**对象, 与本路径无关。按 &type->ID 查恒返回 NULL。
      *
      * 取到之后必须校验 `AttachedToObject == type`: `find()` 按指针哈希查桶,
      * 碰撞会返回别人的 ExtData, 不校验就会把别的超武的 ShowCameo/PCX 套到这个
@@ -362,9 +344,8 @@ static void* SwsAresExt(void* type)
     return p;
 miss:
     /* 只记一次, 免得每帧刷屏。
-     * ⚠ `slot` 进来时已经是非 0 (1=NULL, 2=野指针), 所以判据必须用**函数级
-     *   static**, 不能用 `slot` —— 之前写成 `if (!slot)` 等于永远不成立,
-     *   把"`find()` 返回 NULL"这个最关键的现象整整藏了两轮。 */
+     * ⚠ `slot` 进来时已经非 0 (1=NULL, 2=野指针), 判据只能用**函数级 static**,
+     *   不能用 `slot`。 */
     {
         static int s_Said = 0;
         if (!s_Said)
@@ -1042,9 +1023,8 @@ static SwsTypeCache* SwsTypeEntry(void* type, const char* id)
  *   `SuperWeaponTypeClass_FindIndex` (0x6CEE60) 用 `add ecx,0x24` 取 ID,
  *   `SidebarClass::DrawCameo` 用 `mov edx,[eax+0xB8]` 取 SidebarImage ——
  *   三处互证 0xBC=Action / 0xE5=UseChargeDrain / 0xF5=ManualControl。
- * 下面那条对账日志现在拿 `ManualControl` (gamemd 的键名, .rdata 0x842644)
- * 比 `0xF5`; 以前写的是 `SW.ManualFire` (Ares 的键), 所以**永远**对不上,
- * 于是"偏移可疑"这个结论一直挂着, 而真正的判据形同虚设。 */
+ * 下面那条对账日志拿 `ManualControl` (gamemd 的键名, .rdata 0x842644) 比 `0xF5`;
+ * 用 `SW.ManualFire` (Ares 的键) 比**永远对不上**, 那条判据会形同虚设。 */
 static void SwsFlagsOf(SwsTypeCache* tc, void* type, const char* id)
 {
     int iniManual = 1, iniHasManual = 0;
@@ -1302,15 +1282,15 @@ return (tc->hide || !tc->show || !tc->manual) ? 0 : 1;
  * `StripClass_Draw_DrawPCX` blit 掉再清零), 且 **EAX 已被 Syringe trampoline 还原成
  * `SuperWeaponTypeClass*`** —— 我们要的 pSW 和图标都在手上。
  *
- * ★★ **钩 0x6A9958, 绝不碰 0x6A9952**。三条推论:
- *   ① 不要按"站点首字节是 E9"判断 —— **依赖别人补丁的字节编码 = 依赖一个你控制不了
- *      的实现细节**。
+ * ★★ **钩 0x6A9958, 绝不碰 0x6A9952**。三条禁令:
+ *   ① 不要按"站点首字节是 E9"判断 —— 依赖别人补丁的字节编码 = 依赖一个你控制不了的
+ *      实现细节。
  *   ② 不要 `GetProcAddress` 拿钩子体再自己 call —— Ares 的 `GET(pSW, EAX)` 编译成
  *      `mov eax,[esp+4]`, 那个"寄存器快照"是 Syringe trampoline 压在栈上的, 裸 call
  *      过去 `[esp+4]` 是游戏栈垃圾。
  *   ③ 不要自己造寄存器快照 —— Ares 压栈压的是 `[eax+0x24]`(= ID 串地址) 而不是 eax,
  *      与 `Container<TX,TCont>` 的 `key_type = base_type*` 对不上。
- *   ⇒ **改成"在 Ares 之后观察"**: 不读它的补丁、不造快照、不调它的函数体。
+ *   ⇒ **只在 Ares 之后观察**: 不读它的补丁、不造快照、不调它的函数体。
  *
  * 壳 (28 字节), 替换 0x6A9958 那 5 字节, 跑完跳 0x6A9966:
  * ```
@@ -1324,13 +1304,10 @@ return (tc->hide || !tc->show || !tc->manual) ? 0 : 1;
  * ```
  * ⚠ pushad/popad 必须成对: 中间那个是真实 call, 会破坏 ebx/esi/edi/ebp, 而编译器
  *   只当 ecx/edx/memory 被破坏 (笔记 §7 同一个坑)。
- * ⚠ `mov [slot],eax` 不能省: 抓取函数是**另一个函数**, 没有寄存器快照可读。漏了
- *   它 ⇒ 抓到的 type = 0。
+ * ⚠ `mov [slot],eax` 不能省: 抓取函数是**另一个函数**, 没有寄存器快照可读。
  * ⚠ 写 gamemd 的 .text **必须** `VirtualProtect(PAGE_EXECUTE_READWRITE)` +
- *   `FlushInstructionCache` —— **这是本项目所有装钩的地方的共同约定**
- *   (`AirWay.cpp:71` / `ChatEdit.cpp:1110` / `FullMap.cpp:421` / `VecText.cpp:2142`)。
- *   只**读** Ares / 只写**堆**的那两处不 protect 也没事 —— 别因为"那两处没炸"就
- *   以为可以省。
+ *   `FlushInstructionCache` —— 本项目所有装钩的地方都这样。只**读** Ares /
+ *   只写**堆**的那两处不 protect 也没事, 但别因此以为可以省。
  * ⚠ 必须**拷像素**, 不能留 `BSurface*`: 引擎切页签/重载美术会释放重建 (同 §7)。
  * 全程只读游戏状态 (读的都是 UI 绘制链上的对象), 不碰模拟 ⇒ 联机安全。
  */
@@ -1686,21 +1663,14 @@ static void SwsScan(void)
     for (i = 0; i < hCount; i++)
         if (hItems[i] == cur) break;
     if (i >= hCount) return;
-    /* ★ 数据源就是本家拥有的超武 (Super 对象, 见 SwsScan 里那段)。防御支援页
-     * 那一份是引擎按 SW_ShowCameo 挑过的滞后镜像, 而且会被我们单方面删条目 ——
-     * 拿它当数据源等于自己改自己 ("先复制一份再过滤" 就是现在这个结构)。 */
-    /* ★★ 数据源: **引擎的干净清单** (`TabCameos[防御页]`, 长度以
+    /* ★ 数据源: **引擎的干净清单** (`TabCameos[防御页]`, 长度以
      * `CameoCount` 为准 —— 引擎刚跑完 `CameoIsGone` 过滤)。
-     *
-     * 为什么改成以它为准: 玩家在原版侧栏看不见不该出现的超武, 说明引擎手上
-     * 已经有过滤好的结果。我们自己扫 `SuperClass::Array` 再复刻一遍
-     * `SW_ShowCameo` / `ManualFire` / 火风暴, 就是在**猜**引擎已经算好的答案 ——
-     * 猜错一次就是"游戏里没有、侧栏里有", 而且时好时坏。
-     *
-     * 所以改成"读引擎的清单 → 在**副本**上过滤 → 交给侧栏绘制", 我们自己的规则
-     * 只做减法, 永远不负责"加进来"。这样侧栏 ⊆ 引擎给的, 不可能凭空多出条目。
-     *
-     * 拿不到清单 (容器没定位上 / 校验不过) 时退回旧的全数组扫描, 行为不倒退。 */
+     * 玩家在原版侧栏看不见不该出现的超武 ⇒ 引擎手上已经有过滤好的结果; 我们自己
+     * 扫 `SuperClass::Array` 再复刻一遍 `SW_ShowCameo` / `ManualFire` / 火风暴
+     * 就是在**猜**引擎已经算好的答案, 猜错一次就是"游戏里没有、侧栏里有"。
+     * 所以"读引擎的清单 → 在**副本**上过滤 → 交给侧栏绘制", 我们自己的规则只做
+     * 减法, 永远不负责"加进来" ⇒ 侧栏 ⊆ 引擎给的, 不可能凭空多出条目。
+     * 拿不到清单 (容器没定位上 / 校验不过) 时退回全数组扫描, 行为不倒退。 */
     {
         SwsCleanStampCheck();
         SwsEngineCleanList();
@@ -1833,16 +1803,12 @@ static void SwsScan(void)
          * `duration = (rechargeTime - left) * ratio` (Ares `ClickFire`), 满充能
          * 激活时 left≈0, 所以 TimeLeft 从**满充能的 ratio 倍**开始往下走。
          *
-         * 于是照抄引擎的话, 侧栏一激活就从 `ratio` 开始显示: 爆裂屏障 50%、
-         * 心灵之火 25% —— 正是先前实测到的 49%/24%。
-         *
-         * 原版侧栏之所以是 100% 起跳, 是因为它拿维持时长当分母。所以这里
-         * 显式算 `drainTotal = total * ratio`, 而**不是**引擎那个 A。
-         * ratio 来自 Ares ExtData `SW.ChargeToDrainRatio` (double @ +0x220),
-         * 缺省 1.0 —— 与 `ClickFire` 里 `duration` 的算法逐字对应。
-         *
-         * 注意 `total` 本身仍按引擎口径取 (实例级优先), 这样"充能中"的
-         * 百分比与原版完全一致, 只有运作中换分母。 */
+         * 照抄引擎的话, 侧栏一激活就从 `ratio` 开始显示 (爆裂屏障 50%、心灵之火 25%)。
+         * 原版侧栏之所以 100% 起跳, 是因为它拿维持时长当分母 ⇒ 这里显式算
+         * `drainTotal = total * ratio`, 而**不是**引擎那个 A。ratio 来自 Ares ExtData
+         * `SW.ChargeToDrainRatio` (double @ +0x220), 缺省 1.0 —— 与 `ClickFire` 里
+         * `duration` 的算法逐字对应。`total` 本身仍按引擎口径取 (实例级优先), 这样
+         * "充能中"的百分比与原版完全一致, 只有运作中换分母。 */
         s_Items[n].drainTotal = 0;
         if (tc->drain && total > 0)
         {
@@ -2121,10 +2087,9 @@ static int SwsStripCameoCount(int tab)
  *   "读它 → 过滤 → 删它" 构成自我蚕食 —— 现场日志 `clean list n=0` +
  *   `notseen=25` + `tc=0/0/0/0`, 侧栏一格不画, 而且引擎侧栏也跟着空掉,
  *   容器再也长不回来 (引擎补货也走这个容器)。
- *
- *   ⇒ 做法: **第一次读到时就存一份快照**, 之后一直用那份快照当数据源。
- *     快照只增不减 (条目出现就并进来), 去重随便删容器, 都不影响侧栏。
- *     这才真正做到"拷贝一份, 在副本上过滤" —— 用户要的就是这个结构。
+ *   ⇒ **第一次读到时就存一份快照**, 之后一直用那份快照当数据源。快照只增不减
+ *   (条目出现就并进来), 去重随便删容器都不影响侧栏 —— 这才真正做到"拷贝一份,
+ *   在副本上过滤"。
  * ===================================================================== */
 /* 把引擎容器当前的内容并进快照 (只增不减)。
  * 返回快照里的条目数; -1 = 容器不可用 (本轮不开闸门)。 */
@@ -2249,11 +2214,10 @@ static int SwsDVecOk(const unsigned char* v, const unsigned char* lo,
  * 定位跟着 Ares 的代码走: 不扫数据段、不会误命中别的容器、ASLR 后依然对。
  * 找不到 / 两条对不上 / 容器不自洽一律 fail-closed。
  *
- * 只在确实在跑一局时才找 (本家指针有效 + 帧号 > 60), 上面两个前置条件已保证
- * 时机。
+ * 只在确实在跑一局时才找 (本家指针有效 + 帧号 > 60), 上面两个前置条件已保证时机。
  *
- * > ⚠ **不要用 `Unsorted::ScenarioInit` (0xA8E7AC) 做"在跑一局"判断**: 名字像是
- * > "场景初始化中", 实际是个计数器且实战中长期为 0, 两种判法都让定位器从未跑过。 */
+ * ⚠ **不要用 `Unsorted::ScenarioInit` (0xA8E7AC) 做"在跑一局"判断**: 名字像是
+ * "场景初始化中", 实际是个计数器且实战中长期为 0。 */
 #define ARES_SKIPCHECK "SidebarClass_AddCameo_SkipSizeCheck"
 #define ARES_SCAN_SPAN 0x60u
 static unsigned char* SwsAresFindTabCameos(void)
@@ -2375,7 +2339,7 @@ static void SwsDefenseRepair(void)
     cnt = *(int*)(s_TabCam + (unsigned)TAB_DEFENSE * DVEC_SIZE + DVEC_OFF_COUNT);
     /* Ares 维护两份计数: TabCameos[i].Count (我们只改这份) 与
      * StripClass::CameoCount (页签布局按它算)。两份都要跟上, 否则页签按旧
-     * 计数画、点到已删掉的位置; 偏移对不上时宁可跳过, 不写坏别人的内存。 */
+     * 计数画、点到空位; 偏移对不上时宁可跳过, 不写坏别人的内存。 */
     if (SwsStripCameoCount(TAB_DEFENSE) >= 0)
         *(int*)(strip + OFF_STRIP_CAMCOUNT) = cnt;
     if (cnt > 0)
@@ -2439,14 +2403,12 @@ static void SwsDefenseRepair(void)
  *   (3) 侧栏收起 (F4) —— 侧栏什么都不画, 目标态却仍是"隐藏重复" (见
  *       SwsDedupSync), 于是 F4 一下整页超武消失。
  * 三道门一起补上: 类型门 ∧ 实例门 ∧ 快照门 (最近一次扫描的条目表里真的有它)。
- * 三道门一起补上: 类型门 ∧ 实例门 ∧ 快照门 (最近一次扫描的条目表里真的有它)。
  */
 
 
 /* 本家"活的"超武 (IsPresent==1) 下标位图。**一趟建好, 供搬出逐条 O(1) 查** ——
- * 早期版本写成 SwsHasLiveSuper(swIdx) 每条 cameo 走一遍全表, 而
- * `SuperClass::Array` 在满编剧本里有 4480 条、防御页 cameo 也有几十条 ⇒
- * 单次去重复查就是十几万次循环。位图按 swIdx 取位, 大小固定。
+ * 每条 cameo 各扫一遍全表的话, `SuperClass::Array` 满编剧本有 4480 条、防御页
+ * cameo 也有几十条, 单次去重复查就是十几万次循环。位图按 swIdx 取位, 大小固定。
  *
  * 判据与 SwsDedupRestore 逐字相同 —— 两个方向必须对称, 否则就在"camo 在页里 /
  * Super 不在"的窗口里删出丢失。返回建的个数, -1 = 容器不可用。 */
@@ -2518,23 +2480,17 @@ static int SwsSidebarHasIcon(int swIdx)
 
 /* 从防御页删掉所有"侧栏上确实也有"的超武 cameo。返回删掉几条, -1 = 不可用。
  *
- * ⚠⚠ 与 `SwsEngineCleanList` 的**致命顺序依赖**:
- *   引擎的干净清单就是**这个容器本身**, 而本函数会把它缩短。于是
- *     "读清单 → 过滤 → 绘制 → 删容器" 这个闭环一旦成立, 下一轮读到的清单
- *     就只剩"上次没删掉的" —— 逐轮自我蚕食, 最后侧栏变空。
+ * ⚠⚠ 与 `SwsEngineCleanList` 的**致命顺序依赖**: 引擎的干净清单就是**这个容器
+ *   本身**, 而本函数会把它缩短。"读清单 → 过滤 → 绘制 → 删容器" 这个闭环一旦
+ *   成立, 下一轮读到的清单就只剩"上次没删掉的" —— 逐轮自我蚕食, 最后侧栏变空。
+ *   (只删不读 ⇒ `ShowCameo=false` 的漏进来; 只读不删 ⇒ 同一超武两边同时出现。)
  *
- *   两个方向都踩过:
- *     - 只删不读: 侧栏照旧全量, 但 `ShowCameo=false` 的又会漏进来 (老 bug);
- *     - 只读不删: 过滤对了, 但同一个超武在引擎侧栏和自定义侧栏**同时**出现。
- *
- *   ⇒ 正确做法: **读一份快照当数据源, 再对容器做去重**。快照必须在删除**之前**
- *     取, 且删除只针对"本轮确实画出来了"的条目 —— 画出来的条件里已经包含
- *     "在快照里", 所以删除是快照的子集, 不会把还没画的条目误删。
- *
- *   `SwsScan` 每轮都重建快照 (见 s_CleanBits), `SwsDedupSync` 在其后跑,
- *   于是每轮都是"先按引擎的完整清单决定画什么, 再把画了的搬走"。
- *   引擎下一帧会通过 `HouseClass_UpdateSuperWeaponsUnavailable` / AddCameo
- *   把该给的补回来 —— 这本来就是它每帧在做的事, 我们只是搭个便车。 */
+ *   ⇒ **读一份快照当数据源, 再对容器做去重**。快照必须在删除**之前**取, 且
+ *   删除只针对"本轮确实画出来了"的条目 —— 画出来的条件里已经包含"在快照里",
+ *   所以删除是快照的子集, 不会把还没画的条目误删。
+ *   `SwsScan` 每轮重建快照 (见 s_CleanBits), `SwsDedupSync` 在其后跑 ⇒ 每轮都是
+ *   "先按引擎的完整清单决定画什么, 再把画了的搬走"。引擎下一帧会通过
+ *   `HouseClass_UpdateSuperWeaponsUnavailable` / AddCameo 把该给的补回来。 */
 static int SwsDedupRemove(void)
 {
     unsigned char* vec, *items;
@@ -2706,21 +2662,12 @@ static int SwsDedupSync(void)
  *   ② 防御页默认不是激活页签;
  *   ③ 地图内嵌 ini 新增的超武 (SP_CryospearSpecial / WarheadSpecial1 …) 压根
  *      不在 rulesmo.ini 里 ⇒ `SidebarPCX=` 读不到 ⇒ 自己载 PCX 这条路也空。
- * ⇒ 结果是"格子空着"。用户点一次"过滤/显示"按钮之所以能救回来, 就是按钮那条路
- *   顺手调了一次 `RepaintSidebar(1)`, 引擎于是把防御页重画, 抓取钩抓到像素。
- *   这里把那次重画自己做掉, 每轮扫描最多催一次, 催满 32 次停手。
- *
- * 纯 UI 重绘请求 (`SwsDedupRestore` / `SwsDefenseRepair` 早就在调它), 不碰模拟。
- * 副作用只有一次多余的侧栏重画, 而侧栏本来每帧都在重画。
- *
- * ⚠⚠ 实测修正: **光调 `RepaintSidebar(1)` 抓不到**。用户在 emigdal
- *   地图上手动点"过滤/显示"按钮能一次救回两个图标, 而按钮那条路除了
- *   `RepaintSidebar` 之外**还走了 `AddCameo`**; 只抄 `RepaintSidebar` 的
- *   `SwsNudgePaint` 连催 32 次一个也没抓到 (日志: `SwsNudgePaint` 跑满, 无
- *   `sws: cap`)。差别就在 `AddCameo` —— 它会把 super 挂到防御页的 cameo 槽上,
- *   而抓取钩 (`0x6A9958`) 只在**槽被画**时才有机会拷像素。所以这里改成
- *   "AddCameo(所有本家超武) + RepaintSidebar", 即复用 `SwsDedupRestore` 那条
- *   已被用户操作实证有效的路径。
+ * ⇒ 结果是"格子空着"。用户在地图上手动点"过滤/显示"按钮能一次救回两个图标,
+ *   那条路 = `AddCameo` + `RepaintSidebar`。⚠ **光调 `RepaintSidebar(1)` 抓不到**
+ *   (连催 32 次一个也没抓到, 日志无 `sws: cap`): 差别就在 `AddCameo` —— 它会把
+ *   super 挂到防御页的 cameo 槽上, 而抓取钩 (`0x6A9958`) 只在**槽被画**时才有
+ *   机会拷像素。这里复用 `SwsDedupRestore` 那条已被用户操作实证有效的路径,
+ *   每轮扫描最多催一次, 催满停手。纯 UI 重绘请求, 不碰模拟。
  *
  * 为什么这样安全 (联机铁律):
  *   - `AddCameo` 是 UI 层操作, 不写任何模拟状态, 引擎自己就在用它建防御页;
@@ -3079,10 +3026,10 @@ void SWS_Poll(void)
  * 用的就是**屏上这一帧**的布局 (s_Items[].x/y 由缓存重建时发布), 所以命中与
  * 画面永远一致; 重建一改布局, 下一帧就会重画。
  *
- * 命中不能拿整块栏区矩形来判。栏区底框是按每列的 maxRows 画满的, 某列条目少的
- * 时候下半截是空的, 再加上栏区内部的左右留白 —— 这些地方**根本没有图标**, 却会
- * 把玩家的点击整片吞掉 ("侧栏盖住的地图那块点不动, 框单位/打靶都用不了")。
- * 所以只在真正画了图标的地方挡, 空地一律还给引擎。 */
+* 命中不能拿整块栏区矩形来判。栏区底框按每列的 maxRows 画满, 某列条目少时下半截
+     * 是空的, 再加栏区内部的左右留白 —— 这些地方**根本没有图标**, 却会把玩家的点击
+     * 整片吞掉 ("侧栏盖住的地图那块点不动, 框单位/打靶都用不了")。所以只在真正画了
+     * 图标的地方挡, 空地一律还给引擎。 */
 static int SwsHitItem(int mx, int my)
 {
     int k, o;
@@ -3318,11 +3265,8 @@ static void SwsCFillR(int x, int y, int rw, int rh, unsigned char r,
  *
  * 没有兜底: 校验不过就不画这个图标 (条目仍在, 边框/百分比照旧), 且只记一行
  * 日志。**不要**再引回 PCX::BlitToSurface 作兜底: 它只能 blit 进已锁的合成面,
- * 而重建期刻意不持锁面, 为它中途 unlock/relock 再重入半段布局代价太大; 而且它
- * 100% 不透明、不认 Alpha, 留着只会让半透明在个别条目上失效。
- * 而重建期刻意不持锁面 —— 为了它中途 unlock/relock 再重入半段布局, 代价
- * 远大于它兜的那点风险; 而且它 100% 不透明、不认 Alpha, 留着只会让半透明
- * 在个别条目上失效。 */
+ * 而重建期刻意不持锁面 —— 为它中途 unlock/relock 再重入半段布局, 代价远大于它
+ * 兜的那点风险; 而且它 100% 不透明、不认 Alpha, 留着只会让半透明在个别条目上失效。 */
 static void SwsCPSrc(int x, int y, int dw, int dh,
                     const unsigned short* src, int pw, int ph, int opaque)
 {
@@ -4188,12 +4132,10 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
                      * 不可信: Ares 激活它走 `ClickFire` → `Launch()`, **不清
                      * IsReady** (它本来就是从 Ready 点过来的), 停用/耗尽后也没人
                      * 补清 —— 引擎里唯一把 IsReady 置 1 的地方是计时器归零那条路
-                     * (Ares `0x10035587`), 置 0 只在发射路径。
-                     * 实测日志 (运作中的爆裂屏障):
-                     *     sws: drain BlasticadeSpecial state=2 ready=1 tot=3600 ...
-                     * `ready=1` 而 `left` 在减 —— 所以老门控 `!ready` 会把这些超武
-                     * **充能时的上升百分比整个挡掉**, 之前只看得到下降的那条
-                     * (靠 `|| drainState==2` 兜底)。
+                     * (Ares `0x10035587`), 置 0 只在发射路径。实测日志
+                     * (`sws: drain BlasticadeSpecial state=2 ready=1 tot=3600`) 是
+                     * `ready=1` 而 `left` 在减, 所以老门控 `!ready` 会把这些超武
+                     * **充能时的上升百分比整个挡掉**。
                      *
                      * `remain > 0` 是"计时器在跑"的直接证据, 三种状态都成立:
                      *   充能中 → remain>0 → 上升百分比
@@ -4207,12 +4149,9 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
                      *
                      * 引擎 `SuperClass::GetCameoChargeStage` 的 ChargeDrain 分支
                      * (gamemd 0x6CBF02 起) 算的是 `remaining / GetRechargeTime()`,
-                     * 分母用的是**满充能时间**, 所以原版内部那个"充能条"在激活
-                     * 瞬间是停在 `ratio` 处 (爆裂屏障 50%、心灵之火 25%)。
-                     * 但**侧栏百分比不是那个充能条** —— 原版侧栏拿维持时长当
-                     * 分母, 所以是 100% 起跳往下走。实测: 我们先前 49%/24%,
-                     * 原版 100%, 差的就是这个分母。
-                     *
+                     * 分母是**满充能时间**, 所以原版内部那个"充能条"在激活瞬间停在
+                     * `ratio` 处 (爆裂屏障 50%、心灵之火 25%)。但**侧栏百分比不是那个
+                     * 充能条** —— 原版侧栏拿维持时长当分母, 100% 起跳往下走。
                      * 不跟原版一致的话, 激活后百分比会从 ratio 跳起, 与原版相反。 */
                     if (it->drainState == 2)
                     {

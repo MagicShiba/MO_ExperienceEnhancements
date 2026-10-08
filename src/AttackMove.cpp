@@ -1,11 +1,11 @@
 /* AttackMove.cpp - custom attack-move hotkey.
  *
- * Vanilla Ctrl+Shift+LMB is Action::AttackMoveNav=62 / AttackMoveTar=63
- * (cursor AttackOutOfRange2) driving Mission::AttackMove=29 as a FootClass
- * overlay (MegaMission + MegaDestination(cell) / MegaTarget(object)).
- * This module re-issues the same sim order as a standard MegaMission event
- * (Mission=29) so any hotkey can trigger it: single key (X2/A) fires at the
- * hover cell, combo with LMB (e.g. A+LMB) fires on the LMB edge.
+ * Vanilla Ctrl+Shift+LMB = Action::AttackMoveNav=62 / AttackMoveTar=63 (cursor
+ * AttackOutOfRange2) driving Mission::AttackMove=29 as a FootClass overlay
+ * (MegaMission + MegaDestination(cell) / MegaTarget(object)). This module
+ * re-issues the same sim order as a standard MegaMission event (Mission=29) so
+ * any hotkey can trigger it: single key (X2/A) fires at the hover cell, combo
+ * with LMB (e.g. A+LMB) fires on the LMB edge.
  *
  * Net-safe: read-only queries + OutList enqueue, no sim memory writes.
  * Direct order uses IsPlanningEvent=0; holding Z queues (plan=1), same as
