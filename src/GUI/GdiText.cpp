@@ -203,16 +203,6 @@ int GtMouseGameXY(int* x, int* y)
     return 1;
 }
 
-void GtEnsureLog(void)
-{
-    if (g_Log) return;
-    BuildPaths();
-    g_Log = CreateFileA(g_LogPath, FILE_APPEND_DATA,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (g_Log == INVALID_HANDLE_VALUE) g_Log = NULL;
-}
-
 void LogLine(const char* body)
 {
     char buf[LOG_LINE_MAX];

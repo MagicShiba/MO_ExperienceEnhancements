@@ -88,6 +88,51 @@ static void MOE_LogHost(void)
     LogLine(buf);
 }
 
+/* 日志打开 + 启动轮转 ([Log] MaxKB, 默认 500, <=0 不限)。
+ * 幂等, 每进程只执行一次。超限先截断 (占着也能清), 不行再删, 都不行就续写。 */
+#define MOE_LOG_MAXKB_DEF 500
+#define MOE_LOG_MAXKB_MAX 1048576u
+
+void GtEnsureLog(void)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    int maxKB, rotated = 0;
+    unsigned limit;
+    if (g_Log) return;
+    BuildPaths();
+    maxKB = GetPrivateProfileIntA("Log", "MaxKB", MOE_LOG_MAXKB_DEF, g_IniPath);
+    if (maxKB <= 0) limit = 0;
+    else
+    {
+        if ((unsigned)maxKB > MOE_LOG_MAXKB_MAX) maxKB = (int)MOE_LOG_MAXKB_MAX;
+        limit = (unsigned)maxKB * 1024u;
+    }
+    if (limit > 0 &&
+        GetFileAttributesExA(g_LogPath, GetFileExInfoStandard, &fa) &&
+        !(fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+        (fa.nFileSizeHigh > 0 || fa.nFileSizeLow > limit))
+    {
+        HANDLE h = CreateFileA(g_LogPath, GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                               TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); rotated = 1; }
+        else if (DeleteFileA(g_LogPath)) rotated = 1;
+    }
+    g_Log = CreateFileA(g_LogPath, FILE_APPEND_DATA,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (g_Log == INVALID_HANDLE_VALUE) g_Log = NULL;
+    if (rotated && g_Log)
+    {
+        char rb[64], n1[16];
+        unsigned q = AppendCStr(rb, 0, "log: cleared (exceeded ", sizeof(rb));
+        UtoA((unsigned)maxKB, n1);
+        q = AppendCStr(rb, q, n1, sizeof(rb));
+        AppendCStr(rb, q, "KB)", sizeof(rb));
+        LogLine(rb);
+    }
+}
+
 /* 崩溃定位: 各入口写阶段 id, 崩溃处理打阶段名 + 栈快照 (见 .h)。 */
 volatile unsigned g_MoePhase = MP_NONE;
 

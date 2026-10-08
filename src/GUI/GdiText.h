@@ -25,7 +25,7 @@ extern HANDLE g_Log;
 extern char g_IniPath[MAX_PATH_LEN];
 extern char g_LogPath[MAX_PATH_LEN];
 void BuildPaths(void);
-void GtEnsureLog(void);   /* 幂等: 建路径+打开日志, 失败则 g_Log=NULL */
+void GtEnsureLog(void);   /* 定义在 MOExperience.cpp; 幂等: 建路径+打开日志, 失败则 g_Log=NULL */
 void LogLine(const char* body);
 /* ---------------- 鼠标游戏坐标 (WWMouse+窗口映射, 供 PatrolCircle 等输入模块用), 返回 1=有效 */
 int GtMouseGameXY(int* x, int* y);

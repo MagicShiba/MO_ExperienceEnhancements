@@ -1047,8 +1047,16 @@ static void SwsFillType(SwsTypeCache* tc, void* type, const char* id)
             }
             tc->name[k] = 0;
         }
-        /* 缺 SidebarPCX 的记一行, 便于查图标 (还可能靠引擎抓取兜底)。 */
-        if (!tc->pcxFile) LogS("sws: nopcx ", id);
+        /* 缺 SidebarPCX 的记一行, 便于查图标 (还可能靠引擎抓取兜底)。
+         * 与 hide cameo 一样只记前 16 条, 换图/多自定义超武时不刷屏。 */
+        {
+            static int s_NoPcx = 0;
+            if (!tc->pcxFile && s_NoPcx < 16)
+            {
+                LogS("sws: nopcx ", id);
+                s_NoPcx++;
+            }
+        }
     }
     /* "点击即生效" = 一次点击完成, 无需再点地图选格。与 Phobos 的
      * `SWButtonClass::LaunchSuper` 对齐:
@@ -1121,7 +1129,7 @@ static int SwsSidebarShows(int swIdx)
     if (tc->prio < 0) SwsFillType(tc, type, id);
     if (tc->swIdx < 0) return 0;
     /* drain (UseChargeDrain) 不参与过滤, 只决定 instant (见 SwsFillType)。 */
-return (tc->hide || !tc->show || !tc->manual) ? 0 : 1;
+    return (tc->hide || !tc->show || !tc->manual) ? 0 : 1;
 }
 
 /* ================= 从引擎手里拿超武 cameo 图标 =================
@@ -1173,9 +1181,6 @@ static void*  s_PswSlot = NULL;     /* 壳写的 SuperWeaponTypeClass* */
 static unsigned s_CameoPcx = 0;     /* Ares 的 BSurface* CameoPCX 的地址 */
 static void*  s_CapBuf = NULL;      /* 可执行内存 (壳) */
 static int    s_HookDone = 0;
-
-/* Ares 映像范围 (定义在下面防御页那一段, 这里先声明) */
-static int SwsAresImage(unsigned char** ppLo, unsigned char** ppHi);
 
 /* 逐超武的图标缓存: 按**类型指针**索引 (类型对象终身静态)。
  * 只缓存 60x48 的 16 位色, 抓到一次终身有效。60*48*2 = 5760B/条, 320 条 = 1.8MB。 */
@@ -1385,8 +1390,7 @@ static void SwsCacheEpoch(void)
  * 出来"。现场分不出, 所以任何早退都留一条日志 (同 tag 只记一次, 状态变了再记)。 */
 static int s_ScanZeroTag = 0;   /* 上次记下的 tag (字符串比较太贵, 用索引) */
 static const char* const kScanTag[] = {
-    "cur", "supitems", "houserr", "houseitems",
-    "stability", "nohouse", "n0", "ncap"
+    "cur", "supitems", "houserr", "houseitems"
 };
 #define SCAN_TAG_N ((int)(sizeof(kScanTag) / sizeof(kScanTag[0])))
 
@@ -1459,7 +1463,8 @@ static void SwsScan(void)
     /* ini / 类型数组换代就把所有 ini 派生缓存清掉 (见 SwsCacheEpoch)。 */
     SwsCacheEpoch();
     /* 逐项被拒计数: 只在扫空时一次性打出 ("哪道显示门吃掉了全部条目"),
-     * 不参与逻辑。 */
+     * 不参与逻辑。其中 rNotClean 只是"不在防御页快照里"的计数
+     * (2026-10-08 起不再过滤, `notseen=` 仅供核对)。 */
     int rOwner = 0, rPresent = 0, rType = 0, rFlag = 0, rId = 0,
         rCache = 0, rIdx = 0, rHidden = 0, rShow = 0, rNotClean = 0;
     s_ItemN = 0;
@@ -1468,11 +1473,11 @@ static void SwsScan(void)
     if (!cur || !IsPlausiblePtr(cur)) { SwsScanZero(0, 0, 0); return; }
     count = 0;
     items = SwsVecItems(ADDR_SUPER_ARR, &count);
-    if (!items) { SwsScanZero(2, count, 0); SwsDumpVec(ADDR_SUPER_ARR, count); return; }
-    if (!IsPlausiblePtr((void*)ADDR_HOUSE_ARR)) { SwsScanZero(3, 0, 0); return; }
+    if (!items) { SwsScanZero(1, count, 0); SwsDumpVec(ADDR_SUPER_ARR, count); return; }
+    if (!IsPlausiblePtr((void*)ADDR_HOUSE_ARR)) { SwsScanZero(2, 0, 0); return; }
     hCount = 0;
     hItems = SwsVecItems(ADDR_HOUSE_ARR, &hCount);
-    if (!hItems) { SwsScanZero(4, hCount, 0); SwsDumpVec(ADDR_HOUSE_ARR, hCount); return; }
+    if (!hItems) { SwsScanZero(3, hCount, 0); SwsDumpVec(ADDR_HOUSE_ARR, hCount); return; }
     /* 空数组是合法的"还没有" (刚开局/刚换剧本), 不是错误 —— 交 0 条即可。 */
     /* 数组换了 (开局/重开) 的那一轮只缓存、本轮不扫, 下一轮才真扫。 */
     if (!s_StableInit || items != (void**)s_PrevSupItems ||
@@ -1709,10 +1714,26 @@ s_Items[n].remain = remain;
         }
     }
     /* 一条都没扫出 = 侧栏整块不画且去重停手。把各道显示门吃掉的条数一起打出,
-     * 一眼看出是哪道全吃掉了。 */
+     * 一眼看出是哪道全吃掉了。正常态 (开局没超武/收起) 本来就是 0, 每轮都打
+     * 等于 4 次/秒刷屏: 同签名只记一次, 计数变了再记。 */
     if (n <= 0)
     {
         char buf[128], t1[16], t2[16];
+        unsigned sig;
+        static unsigned s_LastN0 = 0xFFFFFFFFu;
+        sig = (unsigned)count * 31u + (unsigned)rOwner;
+        sig = sig * 31u + (unsigned)rPresent;
+        sig = sig * 31u + (unsigned)rType;
+        sig = sig * 31u + (unsigned)rFlag;
+        sig = sig * 31u + (unsigned)rId;
+        sig = sig * 31u + (unsigned)rCache;
+        sig = sig * 31u + (unsigned)rIdx;
+        sig = sig * 31u + (unsigned)rHidden;
+        sig = sig * 31u + (unsigned)rShow;
+        sig = sig * 31u + (unsigned)rNotClean;
+        sig = sig * 31u + (unsigned)hCount;
+        if (sig == s_LastN0) return;
+        s_LastN0 = sig;
         unsigned q = AppendCStr(buf, 0, "sws: scan0 n0 tot=", sizeof(buf));
         UtoA((unsigned)count, t1);
         q = AppendCStr(buf, q, t1, sizeof(buf));
@@ -1886,8 +1907,8 @@ static void SwsCleanStampCheck(void)
 {
     void** it = SwsVecItems(ADDR_SWTYPE_ARR, NULL);
     static void* s_Last = NULL;
-    static int s_Init = 0;
-    if (!s_Init) { s_Init = 1; s_Last = it; return; }
+    static int s_StampInit = 0;
+    if (!s_StampInit) { s_StampInit = 1; s_Last = it; return; }
     if (it == s_Last) return;
     s_Last = it;
     if (s_CleanN > 0)
@@ -2448,7 +2469,7 @@ extern "C" __declspec(dllexport) int __cdecl SWS_OverBar(int mx, int my)
 void SWS_Poll(void)
 {
     static int s_LastItemN = -1;
-    int tog, lb, rb;
+    int tog;
     /* ---- 帧门: 挂在 0x4F42F0, 但它不是每帧一次 (上百个静态调用点, 散在
      * AI/对象/渲染/消息代码, 多处在逐对象循环内, 每渲染帧被调上百次)。
      * 用引擎帧号变化做门 ("与上次相同则跳过")。 */
@@ -2512,8 +2533,8 @@ void SWS_Poll(void)
         LogLine(v >= 0 ? "sws: armed" : "sws: cancel");
     }
     {
-        lb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
-        rb = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 1 : 0;
+        int lb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
+        int rb = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 1 : 0;
         /* 上膛统一在松开边沿做 (见 s_PendSel)。 */
         if (s_SelDown && !lb)
         {
@@ -2658,8 +2679,8 @@ void SWS_Poll(void)
         }
         else if (s_CleanMode)
         {
-            /* 两次扫描之间容器会被去重缩短: 被改过就立刻重建快照 (读两 int 比一下,
-             * 每帧做无妨), 否则下一轮拿"被自己删过"的清单当数据源, 逐轮蚕食。 */
+            /* 防御页容器变了 (引擎新加 cameo / 去重搬过) 就提前重扫一轮,
+             * 新到手的超武不等 15 帧节流。只读两 int, 每帧做无妨。 */
             static int s_LastSeenCnt = -1, s_LastSeenCam = -1;
             int nowCnt = *(int*)(s_TabCam + (unsigned)TAB_DEFENSE * DVEC_SIZE +
                                  DVEC_OFF_COUNT);
