@@ -2080,11 +2080,11 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
             yOff = g_VT.VShift + (cred ? g_VT.CreditDY : 0);
             r = VecRender(t, wc, adv, h, (inTip ? tx : x), y, eff,
                           px, yOff);
-            /* VecRender 失败时记一行 (字/坐标/失败点 why), 上限 40。 */
+            /* VecRender 失败时记一行 (字/坐标/失败点 why), 上限 8。 */
             if (r == VC_FAIL)
             {
                 static int nF = 0;
-                if (nF < 40)
+                if (nF < 8)
                 {
                     char fb1[16], ff[112];
                     unsigned fz = 0;

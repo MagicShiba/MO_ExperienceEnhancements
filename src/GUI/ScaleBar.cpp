@@ -1392,34 +1392,40 @@ void SB_PaintVoid(void)
         Sb_PaintVoidOn(s_CurM);
 }
 
-/* 物理鼠标点 -> 视口点 (v = (p - A.xy) * R / A)。缩小档窗口内点也折
- * (落到 R 外再由 SB_PtInView 拒), 否则底栏点击变地图下令。 */
-void SB_MapPoint(Point2D* p, unsigned ret)
+/* 物理鼠标点 -> 视口点 (v = (p - A.xy) * R / A)。连续且钳到 R 内:
+ * 框选拖出视口贴边停住、不盖栏 (1x 同形); 在不在视口内由返回值说,
+ * 出界改由 SB_PtInRawView 用物理坐标判 (强制值会进引擎框选/算格, 野指针崩)。 */
+int SB_MapPoint(Point2D* p)
 {
     RectangleStruct a, r;
     int vx, vy;
-    if (!s_Enable || !p) return;
-    if (!IsPlausiblePtr(p)) return;   /* 入参取错的话 p 会是野指针, 绝不能写 */
-    if (!SB_Zoomed()) return;
-    if (ret >= 0x00653700u && ret < 0x00653800u) return;   /* 雷达: 雷达面内坐标 */
+    int inA;
+    if (!s_Enable || !p) return 1;
+    if (!IsPlausiblePtr(p)) return 1;   /* 入参取错的话 p 会是野指针, 绝不能写 */
+    if (!SB_Zoomed()) return 1;
     FM_GetViewRects(&a, &r);
-    if (a.Width < 32 || r.Width < 16 || r.Height < 16) return;
-    if (p->X < a.X || p->Y < a.Y ||
-        p->X >= a.X + a.Width || p->Y >= a.Y + a.Height)
+    if (a.Width < 32 || r.Width < 16 || r.Height < 16) return 1;
+    inA = !(p->X < a.X || p->Y < a.Y ||
+            p->X >= a.X + a.Width || p->Y >= a.Y + a.Height);
+    if (!inA)
     {
-        /* A 之外: 窗口内点折到 R 外 (窗口外点原样, 原点一致无差别)。*/
+        /* A 之外: 同公式外推再钳住, 不跳变 (窗口外点原样)。
+         * 放大缩小同一规则 (放大档以前这里直接透传物理值, 与 R 映射值
+         * 在边界上断崖, 框选跨边即跳变)。出界改由 SB_PtInRawView 判。 */
         int ww = GtGameW(), wh = GtGameH();
-        if (!SB_Out() || ww <= 0 || wh <= 0) return;
-        if (p->X < 0 || p->Y < 0 || p->X >= ww || p->Y >= wh) return;
+        if (ww <= 0 || wh <= 0) return 1;
+        if (p->X < 0 || p->Y < 0 || p->X >= ww || p->Y >= wh) return 1;
         vx = (int)((long)(p->X - a.X) * (long)r.Width / (long)a.Width);
         vy = (int)((long)(p->Y - a.Y) * (long)r.Height / (long)a.Height);
-        if (vx <= r.Width) vx = r.Width + 1;   /* 保证真的出界 */
-        if (vy <= r.Height) vy = r.Height + 1;
+        if (vx < 0) vx = 0;
+        if (vy < 0) vy = 0;
+        if (vx > r.Width) vx = r.Width;
+        if (vy > r.Height) vy = r.Height;
         if (vx > 0x7FFF) vx = 0x7FFF;
         if (vy > 0x7FFF) vy = 0x7FFF;
         p->X = vx;
         p->Y = vy;
-        return;
+        return 0;
     }
     vx = (int)((long)(p->X - a.X) * (long)r.Width / (long)a.Width);
     vy = (int)((long)(p->Y - a.Y) * (long)r.Height / (long)a.Height);
@@ -1429,9 +1435,10 @@ void SB_MapPoint(Point2D* p, unsigned ret)
     if (vy > r.Height) vy = r.Height;
     p->X = vx;
     p->Y = vy;
+    return 1;
 }
 
-/* 视口点是否落在 R 里 (缩小档底栏带须明确拒掉)。1x/放大恒 1。 */
+/* 视口点是否落在 R 里 (窗口外残留值兜底; 栏带改由 SB_PtInRawView 判)。1x/放大恒 1。 */
 int SB_PtInView(int vx, int vy)
 {
     RectangleStruct a, r;
@@ -1441,6 +1448,18 @@ int SB_PtInView(int vx, int vy)
     if (r.Width < 16 || r.Height < 16) return 1;
     if (vx < 0 || vy < 0) return 0;
     if (vx > r.Width || vy > r.Height) return 0;
+    return 1;
+}
+
+/* 物理点是否落在视口 A 里。映射值现已全钳制 (框选不断崖), 出界只能看物理:
+ * 总闸与各直接调引擎查询处先过它, 栏带点击一律拒掉。 */
+int SB_PtInRawView(int x, int y)
+{
+    RectangleStruct a;
+    FM_GetViewRects(&a, 0);
+    if (a.Width < 32 || a.Height < 16) return 0;
+    if (x < a.X || y < a.Y) return 0;
+    if (x >= a.X + a.Width || y >= a.Y + a.Height) return 0;
     return 1;
 }
 

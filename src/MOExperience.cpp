@@ -485,13 +485,12 @@ __attribute__((naked)) void MOExperience_EdgeFixEntry(void)
 }
 
 /* ProcessClickCoords (所有地图点击的总闸, 只判 X<0/Y<0、无上界): 缩小档下
- * 视口外的点入口明确拒掉 (SB_PtInView), 否则底栏点击变地图下令。只 SB_Out 动手。
+ * 视口外的点入口明确拒掉 (映射值 SB_PtInView + 物理坐标 SB_PtInRawView,
+ * 任一出界即拒), 否则底栏点击变地图下令。只 SB_Out 动手。
  * 拒掉时自己 ret 0x18。首 7B, 跳板跳回 0x692307。
  *
- * ⚠️ 例外: 侧栏顶部那一块的物理点在缩小档下会被 SB_MapPoint 折到 R 之外 (那是
- * "底栏点击变地图下令"的正确解法), 于是也一起被这道门拒掉 —— 而后面那道小地图
- * 点击门 (0x692406) 要靠这个"出界"的点识别小地图点击。所以判据只能是**物理**鼠标
- * 位置 (点击点恒由它折算而来, 反算回去是唯一无歧义口径), 见 FM_ShouldDeferClick。*/
+ * ⚠️ 例外: 侧栏顶部那一块走小地图点击门 (0x692406), 判据只能是**物理**鼠标
+ * 位置 (映射值已钳进 R, 看不出界; 见 FM_ShouldDeferClick)。 */
 void* g_ClickCoordsTramp = NULL;
 
 static int ClickCoordsReject(void* pt)
@@ -502,6 +501,13 @@ static int ClickCoordsReject(void* pt)
     /* 侧栏顶部那一块交给后面的点击门吞, 别在这里拒掉 (放行而没人接手 = 点成对
      * 地图某点的下令, 比点不动更糟, 所以判据里含"门武装好了没有")。*/
     if (SB_Zoomed() && FM_ShouldDeferClick()) return 0;
+    /* 映射值已全钳制 (框选不断崖), 出界只能看物理: 栏带点击物理必在 A 外。
+     * Gt 失败则沿用旧路 (映射判), 不多事。 */
+    if (SB_Zoomed())
+    {
+        int rx = 0, ry = 0;
+        if (GtMouseGameXY(&rx, &ry) && !SB_PtInRawView(rx, ry)) return 1;
+    }
     /* 真拒掉才打一条 (2 秒一条): 确认底栏点击走到了这条总闸。 */
     if (--s_tick <= 0)
     {
@@ -822,7 +828,7 @@ static void MOE_MousePos(void* out)
     my = *(int*)((char*)m + WWMOUSE_OFF_Y);
     s_MouseVp.X = mx;
     s_MouseVp.Y = my;
-    if (SB_Zoomed()) SB_MapPoint(&s_MouseVp, 0);
+    if (SB_Zoomed()) SB_MapPoint(&s_MouseVp);
     /* 出参没人读也顺手填上 (调用者栈上临时量, 同口径防脏值)。 */
     if (out && IsPlausiblePtr(out))
     {
@@ -939,14 +945,11 @@ static void MOE_WndFixLParam(unsigned slot)
     {
         pt.X = x;
         pt.Y = y;
-        SB_MapPoint(&pt, 0);
+        SB_MapPoint(&pt);
         x = pt.X;
         y = pt.Y;
     }
-    if (x < -32768) x = -32768;   /* 引擎按 16 位符号扩展读, 别溢出 */
-    if (x >  32767) x =  32767;
-    if (y < -32768) y = -32768;
-    if (y >  32767) y =  32767;
+    /* lParam 按 (y<<16)|x 打包, masking 收尾 (值域早被映射钳住, 不会 wrap)。 */
     out = ((unsigned)(y & 0xFFFF) << 16) | (unsigned)(x & 0xFFFF);
     s_WndLp = out;
 }

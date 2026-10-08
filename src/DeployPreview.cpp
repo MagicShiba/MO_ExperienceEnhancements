@@ -256,7 +256,7 @@ static int DP_MouseCellZ(int* mcx, int* mcy, int* lz)
     crd.X = crd.Y = crd.Z = 0;
     if (!GtMouseGameXY(&mx, &my)) return 0;
     pt.X = mx; pt.Y = my;
-    SB_MapPoint(&pt, 0);          /* 物理点 -> 视口点 (放大档必须, scale=1 恒等) */
+    if (!SB_MapPoint(&pt)) return 0;   /* 栏带不进引擎查询 (无上界) */
     if (!FN_CLICKCOORDS((void*)ADDR_DISPLAY, &pt, &center, &crd, &tgtObj, &b5, &b6))
         return 0;
     *mcx = (int)center.X; *mcy = (int)center.Y;

@@ -61,7 +61,8 @@ extern void* g_EdgeFixTramp;
 /* 通用拉伸 blit 0x6BA580 入口钩 (naked): 缩放档下面指针野了就跳过 (防崩)。 */
 void MOExperience_BlitGuardEntry(void);
 extern void* g_BlitGuardTramp;
-/* ProcessClickCoords 入口钩: 缩小档把视口外的点明确拒掉 (SB_PtInView)。 */
+/* ProcessClickCoords 入口钩: 缩小档把视口外的点明确拒掉 (映射值看 SB_PtInView,
+ * 物理坐标看 SB_PtInRawView, 任一出界即拒)。 */
 void MOExperience_ClickCoordsEntry(void);
 extern void* g_ClickCoordsTramp;
 /* Clamp_Center 入口钩: 视口比地图大时钉地图正中 (SB_ClampFix)。 */

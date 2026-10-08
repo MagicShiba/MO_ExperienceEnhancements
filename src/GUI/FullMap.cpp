@@ -189,9 +189,8 @@ static int Fm_ModeDisarm(void)
 }
 /* 小地图点击门 (自己跳视口 + 吞穿透)。态0 让位给引擎 widget 分派, 态2 没有面板
  * 可点, 只有态1 开这道门。**但缩放档例外**: 缩放时 ViewBounds=R, 小地图那块在
- * 引擎眼里已经"不在视口里" (缩小档连 ProcessClickCoords 的入口都会被 ScaleBar
- * 的 SB_PtInView 拒掉), 原生 RadarClass::Action 那条 gadget 链也不可靠 ⇒ 缩放档
- * 一律自己接, 不看模式。1x 且非缩小档时逐位沿用原版 (Fm_ModeGate 为 0)。 */
+ * 引擎眼里已经"不在视口里", 原生 RadarClass::Action 那条 gadget 链也不可靠
+ * ⇒ 缩放档一律自己接, 不看模式。1x 且非缩小档时逐位沿用原版 (Fm_ModeGate 为 0)。 */
 static int Fm_ModeGate(void)
 {
     if (Fm_ModeBare()) return 0;
@@ -277,8 +276,7 @@ static int Fm_ColumnX(int bare);                   /* 定义在下面 §侧栏�
 /* 屏幕物理坐标是否落在侧栏"顶部那一块"(资金条 + 小地图 + 顶部两个按钮)。
  * 缩放档下这一块在引擎眼里不在视口里 (ViewBounds=R), 所以 ScaleBar 的
  * ProcessClickCoords 拒点门要拿它**放行**: 那一小块是我们画的 UI, 点击由
- * FM_RadarClickGate 吞掉, 当成"点在视口外"拒掉就等于小地图点不动 (物理点被
- * 折到 R 之外, 入口那道 SB_PtInView 先拒)。
+ * FM_RadarClickGate 吞掉。判据用物理坐标 (映射值已钳进 R, 看不出界)。
  * 列起点用 `Fm_ColumnX(0)` 现算, 不读 SidebarBounds.X (那个全局缩小档下会被
  * 引擎按 R 重算, 瞬时值不可信)。*/
 static int FM_PtInKeepRegion(int px, int py)

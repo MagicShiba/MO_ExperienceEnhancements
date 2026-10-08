@@ -977,8 +977,6 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
 {
     int drew = 0, rc, showCamp = 0;
     int liveCamp = 0, hoverCamp = 0;
-    int dbgMX = -1, dbgMY = -1;
-    static int s_lastShow = -1;
     BoxSpec camp, hint;
 
     if (!g_Cfg.Enable) return 0;
@@ -1049,7 +1047,6 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
         int mx = -1, my = -1;
         if (GtMouseGameXY(&mx, &my))
         {
-            dbgMX = mx; dbgMY = my;
             /* 并集防抖: 命中上帧框区, 或落在触发条上, 都算悬停。
              * g_CampValid 是上帧残留, 若二选一, 鼠标停在"触发条内/旧框区外"
              * 会隔帧翻转 show/hide。 */
@@ -1121,50 +1118,6 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
         }
         /* 本帧 DrawBox 会重设新鲜度 (画出才置 1), 先清零 */
         g_CampValid = 0;
-        if (showCamp != s_lastShow)
-        {
-            char sb[160], t1[16], t2[16], t3[16], t4[16], t5[16], t6[16], t7[16];
-            unsigned q = 0;
-            s_lastShow = showCamp;
-            q = AppendCStr(sb, q, showCamp ? "camp: show live=" : "camp: hide live=", sizeof(sb));
-            UtoA((unsigned)liveCamp, t1); q = AppendCStr(sb, q, t1, sizeof(sb));
-            q = AppendCStr(sb, q, " hover=", sizeof(sb));
-            UtoA((unsigned)hoverCamp, t2); q = AppendCStr(sb, q, t2, sizeof(sb));
-            q = AppendCStr(sb, q, " mouse=", sizeof(sb));
-            UtoA((unsigned)(dbgMX < 0 ? 0 : dbgMX), t3); q = AppendCStr(sb, q, t3, sizeof(sb));
-            q = AppendCh(sb, q, ',', sizeof(sb));
-            UtoA((unsigned)(dbgMY < 0 ? 0 : dbgMY), t4); q = AppendCStr(sb, q, t4, sizeof(sb));
-            q = AppendCStr(sb, q, " campN=", sizeof(sb));
-            UtoA((unsigned)g_CampRing.count, t5); q = AppendCStr(sb, q, t5, sizeof(sb));
-            q = AppendCStr(sb, q, " hintN=", sizeof(sb));
-            UtoA((unsigned)g_HintRing.count, t6); q = AppendCStr(sb, q, t6, sizeof(sb));
-            if (showCamp)
-            {
-                /* 最新战役记录还剩多久: 按键附带的瞬态系统消息通常只有几百 tick,
-                 * 剧情感知消息一般是永生(-1)或长超时, 不开 LogMessages 也能归因 */
-                q = AppendCStr(sb, q, " newExp=", sizeof(sb));
-                if (g_CampRing.count > 0)
-                {
-                    ChatMsg* nm = MsgAt(&g_CampRing, g_CampRing.count - 1);
-                    int expIn = nm->expire ? (int)(nm->expire - GtClockNow()) : -1;
-                    if (expIn < 0)
-                    {
-                        q = AppendCh(sb, q, '-', sizeof(sb));
-                        UtoA((unsigned)(-expIn), t7);
-                    }
-                    else UtoA((unsigned)expIn, t7);
-                    q = AppendCStr(sb, q, t7, sizeof(sb));
-                }
-                else q = AppendCStr(sb, q, "none", sizeof(sb));
-            }
-            else
-            {
-                q = AppendCStr(sb, q, " hist=", sizeof(sb));
-                UtoA((unsigned)HasCampHistory(), t7);
-                q = AppendCStr(sb, q, t7, sizeof(sb));
-            }
-            LogLine(sb);
-        }
     }
 
     /* 战役框: sp=0 (ignoreTimeout 在可见性处按悬停设置);

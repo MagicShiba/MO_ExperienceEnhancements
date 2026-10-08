@@ -72,15 +72,21 @@ int SB_CompositeMagnify(void);
  * 不标脏就会拿放大结果当下一次的源。见实现处说明。*/
 void SB_MarkViewDirty(void);
 
-/* 物理鼠标点反变换成视口空间点 (v = (p - A.xy) * R / A)。A 外点原样放行。 */
-void SB_MapPoint(Point2D* p, unsigned ret);
+/* 物理鼠标点反变换成视口空间点 (v = (p - A.xy) * R / A)。连续且钳到 R 内,
+ * 框选拖出视口贴边停住 (1x 同形)。返回 1 = 可按原逻辑继续用 p;
+ * 返回 0 = p 在视口外 (已钳住, 别拿去查格/下令)。 */
+int SB_MapPoint(Point2D* p);
 
 /* 视图坐标 (引擎 CoordsToClient 的输出 = 渲染面坐标) → 屏幕坐标。
  * scale=1 时恒等; 供本项目那些按引擎投影画图元的层用。 */
 int SB_ViewToScreen(int vx, int vy, int* sx, int* sy);
 
-/* 视口点是否落在 R 里 (缩小档 R 比窗口大, 引擎边界拒不掉底栏带)。1x/放大恒 1。*/
+/* 视口点是否落在 R 里 (窗口外残留值兜底; 栏带改由 SB_PtInRawView 判)。1x/放大恒 1。*/
 int SB_PtInView(int vx, int vy);
+
+/* 物理点是否落在视口 A 里 (总闸与各直接调引擎查询处用它拒掉栏带点击,
+ * 与映射值无关; 映射值现已全钳制, 出界只能看物理)。 */
+int SB_PtInRawView(int x, int y);
 
 /* 视口比地图大: 居中钳位。原版 min>max 时 TacticalPos 每帧来回跳 ⇒ 抖动。
  * 退化轴直接钉地图正中, 边界读引擎全局自己算。返回值语义与原版一致。 */
