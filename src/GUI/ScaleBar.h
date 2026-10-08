@@ -18,7 +18,8 @@ int SB_Level(void);
  * ViewBounds 是 A 而不是 R (见实现处的推导)。须在 Fm_ApplyViewWidth 之前调。*/
 void SB_ResetZoom1x(void);
 
-/* 当前档的视口缩放: R = A * SB_Scale()。0.25 = 4 倍放大, 1 = 原样, 2 = 2 倍视野。 */
+/* 当前档的视口缩放: R = A * SB_Scale()。0.25 = 4 倍放大, 1 = 原样, 2 = 2 倍视野。
+ * R 超 [ScaleBar] LimitFallback 时钳到限制上 (长边=限制值, 见 SB_GetViewRect)。 */
 double SB_Scale(void);
 
 /* 1 = 放大档 (视口比视图区小)。 */

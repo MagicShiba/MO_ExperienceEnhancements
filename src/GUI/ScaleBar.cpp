@@ -53,10 +53,34 @@ static int s_Y = 4;                     /* 下边距 (控件底边到窗口底�
 static int s_Len = 360;
 static int s_FontPx = 12;
 static int s_VoidRgb = 0x202028;        /* 图外底色 (深灰), 0xRRGGBB 一个键 */
+static int s_LimitFallback = 8192;      /* R 长边上限像素 (0=无限制, <3820 按 3820) */
 
-/* R 的硬上限 = ZBuffer/ABuffer 建得出的尺寸 (SB_ResizeBufs 的守卫)。大面走 ddraw
- * 能建得更大, 两者不一致时 R 会大过裁剪器 ⇒ 野读崩, 所以取 R 处必须跟这条线对齐。*/
-#define SB_BUF_MAX 8192
+/* R 长边限制 ([ScaleBar] LimitFallback, 缺省 8192): 自设安全线, 不是引擎硬上限
+ * (实测缓冲能建出更大)。三处取 R 的位置必须用同一条线, 否则 R 与裁剪器尺寸
+ * 错配 ⇒ Render 拿 R 坐标寻址小尺寸缓冲野读崩。0 = 不预检, 走真实分配见分晓。*/
+#define SB_LIMIT_DEF 8192
+#define SB_LIMIT_MIN 3820
+
+/* 长边超限? (0=不限) */
+static int Sb_OverLimit(int w, int h)
+{
+    if (s_LimitFallback == 0) return 0;
+    return (w > s_LimitFallback || h > s_LimitFallback);
+}
+
+/* 超限钳到限制上: 长边=LimitFallback。只钳缩小档 (s>1); 1x/放大档 R<=A 原样走。*/
+static double Sb_ClampScale(double s, int aw, int ah)
+{
+    int longA;
+    if (s <= 1.0 || s_LimitFallback == 0) return s;
+    longA = aw > ah ? aw : ah;
+    if (longA < 1) return s;
+    {
+        double cap = (double)s_LimitFallback / (double)longA;
+        if (s > cap) return cap;
+    }
+    return s;
+}
 
 /* ---------------- 档位表 ----------------
  * 9 档, 从最放大排到最小。标尺上的数字是"相对 1x 的倍率" 1/scale (见 notes §3)。
@@ -181,6 +205,8 @@ void SB_EnsureInit(void)
     }
     s_Level = GetPrivateProfileIntA(SB_SECTION, "Level", s_LevOne, g_IniPath);
     if (s_Level < 0 || s_Level >= s_NLev) s_Level = s_LevOne;
+    s_LimitFallback = GetPrivateProfileIntA(SB_SECTION, "LimitFallback", SB_LIMIT_DEF, g_IniPath);
+    if (s_LimitFallback != 0 && s_LimitFallback < SB_LIMIT_MIN) s_LimitFallback = SB_LIMIT_MIN;
     Sb_SyncZoomed();
     if (!s_Enable) return;
     p = 0;
@@ -203,6 +229,8 @@ void SB_EnsureInit(void)
     UtoA((unsigned)((s_VoidRgb >> 8) & 0xFF), b2); p = AppendCStr(buf, p, b2, sizeof(buf));
     p = AppendCh(buf, p, ',', sizeof(buf));
     UtoA((unsigned)(s_VoidRgb & 0xFF), b3); p = AppendCStr(buf, p, b3, sizeof(buf));
+    p = AppendCStr(buf, p, " limit=", sizeof(buf));
+    UtoA((unsigned)s_LimitFallback, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     LogLine(buf);
 }
 
@@ -233,8 +261,9 @@ static void Sb_InitLabels(void)
  * 一个屏幕像素摊 scale 个图上像素。要两轴都装下整张图, scale 得取宽高约束里更松的
  * 那一轴 = max(图宽/A.W, 图高/A.H); 另一边留余量, 余量露出的就是图外深灰。
  * ⚠️ 必须是 max: 取 min 时 R 装不下整图, 右/下侧被裁, 看着反而像放大了。
- * 建不出 R (超 SB_BUF_MAX 或低于 SB_EnsureBig 的 320x240 下限) 判为不支持,
- * 由调用方退回最高那一档。*/
+ * R 超长边限制 (LimitFallback) 时钳到限制上 (能装多少装多少); 低于 SB_EnsureBig
+ * 的 320x240 下限 / 地图尺寸读不到才判为不支持, 由调用方退回最高那一档。
+ * MAX 档 R 最大, 性能开销也最大。*/
 static double s_MaxScale = 0.0;
 static int s_MaxOk = 0;
 static int Sb_MapPx(int* l, int* t, int* w, int* h);   /* 定义在文件后部 */
@@ -256,7 +285,15 @@ static double Sb_CalcMaxScale(void)
     rw = (int)((double)a.Width * sc + 0.5);
     rh = (int)((double)a.Height * sc + 0.5);
     if (rw < 320 || rh < 240) return 0.0;
-    if (rw > 8192 || rh > 8192) return 0.0;
+    if (Sb_OverLimit(rw, rh))
+    {
+        /* 超限不判废, 钳到限制上 (长边=LimitFallback), 能装多少装多少。 */
+        sc = Sb_ClampScale(sc, a.Width, a.Height);
+        if (sc <= 0.02) return 0.0;
+        rw = (int)((double)a.Width * sc + 0.5);
+        rh = (int)((double)a.Height * sc + 0.5);
+        if (rw < 320 || rh < 240) return 0.0;
+    }
     return sc;
 }
 
@@ -314,15 +351,16 @@ int SB_GetViewRect(RectangleStruct* out, double scale)
     if (!s_Enable || !out) return 0;
     FM_GetViewRects(&a, 0);
     if (a.Width < 32 || a.Height < 32) return 0;
+    /* R 超长边限制 ⇒ 钳到限制上 (长边=LimitFallback), 不退回 1x。
+     * 三处取 R 须同线, 否则 ViewBounds 留着大 R、缓冲却退回 A 尺寸 ⇒ Render 拿 R
+     * 坐标寻址小缓冲, 野读崩。F11 换模式改 A.Width 时最容易撞上。
+     * LimitFallback=0 时不钳制, 走真实分配见分晓。*/
+    s = Sb_ClampScale(s, a.Width, a.Height);
     w = (int)((double)a.Width * s + 0.5);
     h = (int)((double)a.Height * s + 0.5);
     if (w < 32) w = 32;
     if (h < 32) h = 32;
-    /* R 超 SB_BUF_MAX ⇒ 这档不可用, 当场退回 A (=1x)。必须在这里挡: 大面是 ddraw
-     * 建的, 8548x4666 它建得出, 而两块裁剪缓冲建不出 ⇒ prepare 只能把缓冲退回 A,
-     * ViewBounds 却还留着那个 R ⇒ Render 拿 R 坐标寻址 A 尺寸的缓冲, 野读崩。
-     * F11 换模式改 A.Width 时最容易撞上 (MAX 档 R = A.Width*scale)。*/
-    if (w > SB_BUF_MAX || h > SB_BUF_MAX) return 0;
+    if (Sb_OverLimit(w, h)) return 0;   /* 兜底: A 本身超限 (1x/放大档) 时保持 A */
     if (s > 1.0 && !SB_EnsureBig(w, h)) return 0;   /* 大面缺失: 退回 A */
     out->X = 0;
     out->Y = 0;
@@ -957,7 +995,8 @@ static int SB_ResizeBufs(int bw, int bh)
     void *nz, *na, *oz, *oa;
     char b1[16], b2[16], buf[96];
     unsigned p = 0;
-    if (bw < 64 || bh < 64 || bw > SB_BUF_MAX || bh > SB_BUF_MAX) return 0;
+    if (bw < 64 || bh < 64) return 0;
+    if (Sb_OverLimit(bw, bh)) return 0;
     t.X = 0; t.Y = 0; t.Width = bw; t.Height = bh;
     nz = Sb_BuildBuf(0, &t);
     na = Sb_BuildBuf(1, &t);
@@ -1523,7 +1562,8 @@ static void Sb_SetLevel(int lv, const char* why)
     unsigned p = 0;
     if (!s_Enable) return;
     if (lv < 0 || lv >= s_NLev || lv == s_Level) return;
-    /* MAX 建不出来 (R 超上限 / 地图尺寸读不到) ⇒ 退到最高那一档, 不静默变 1x。*/
+    /* MAX 算不出 (地图尺寸读不到 / 过小) ⇒ 退到最高那一档, 不静默变 1x。
+     * R 超限走钳制 (Sb_ClampScale), 不走这条。*/
     if (lv == SB_LEV_MAX)
     {
         Sb_DropMax();

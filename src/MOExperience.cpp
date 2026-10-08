@@ -18,6 +18,7 @@
 #include "AttackMove.h"
 #include "MindSelect.h"
 #include "MsgText.h"
+#include "OrderThrottle.h"
 #include "PatrolCircle.h"
 #include "PowerDisplay.h"
 #include "RepairAll.h"
@@ -231,6 +232,7 @@ static void PowerDrawBoth(void)
     SmartArea_Poll();
     DeployPreview_Poll();
     MindSelect_Poll();
+    OrderThrottle_Poll();
     SWS_Poll();
     RepairAll_Poll();
     if (!g_InitDone) MOE_EnsureInit();
