@@ -29,6 +29,7 @@
 #include "TreeChop.h"
 #include "WeaponRange.h"
 #include "ScaleBar.h"
+#include "PauseView.h"
 #include "MOExperience.h"
 
 /* ---------------- 地址 ---------------- */
@@ -176,7 +177,8 @@ void MOE_EnsureInit(void)
     SWPanel_EnsureInit();
     PowerDisplay_EnsureInit();
     FM_EnsureInit();
-    SB_EnsureInit();   /* 缩放刻度条: 读 [ScaleBar] (档位/几何); Enable=0 时全部空转 */
+    SB_EnsureInit();   /* 底栏: 读 [BottomBar] (缩放档位/几何); ScaleEnable=0 时缩放空转 */
+    PV_EnsureInit();   /* 底栏: 读 [BottomBar] (暂停按钮 PauseEnable/PauseHotkey) */
 }
 
 /* ---------------- 渲染回退原因统计 ----------------
@@ -242,6 +244,9 @@ static void PowerDrawBoth(void)
     /* 缩放刻度条: 探整图 / 建档位表 / 摆条 / 点选滚轮换档。必须在 FM_Poll 之后
      * —— 落位要用 FM_Poll 刚刷新出来的视口矩形。 */
     SB_Poll();
+    /* 单机暂停/步进: F5 边沿 + 底栏两按钮点击 (暂停中经迷你循环的 Mark 钩
+     * 照样跑到这里)。 */
+    PV_Poll();
     /* CCToolTip 选面/量宽用的矩形影子 = 满视图区 A (见 ScaleBar.cpp)。*/
     SB_PublishAView();
     /* 鼠标源头折算 (缩放): 注入可能早于 WWMouse 构造, 没装上就在这里每循环重试。*/
@@ -1134,6 +1139,8 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     /* 刻度条: 画在视图区之外的底部工具栏带子上 (A 之外 ⇒ 引擎的 blit 不会把它
      * 缩放, 也跟着一起上屏)。 */
     if (SB_DrawToComposite()) drew = 1;
+    /* 暂停/步进两按钮 (刻度条左侧, 启用后按过一次 F5 才画)。 */
+    if (PV_DrawToComposite()) drew = 1;
 
     if (!drew) { StatTick(tick, 1); return 0; }
     StatTick(tick, 0);    if (s_firstDraw)
@@ -1271,6 +1278,8 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         UtoA((unsigned)r->ExceptionCode, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " addr=", sizeof(buf));
         UtoA((unsigned)(size_t)r->ExceptionAddress, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " tid=", sizeof(buf));
+        UtoA((unsigned)GetCurrentThreadId(), b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, (r->NumberParameters >= 2) ? " (read)" : " (write)", sizeof(buf));
         p = AppendCStr(buf, p, " fault=", sizeof(buf));
         UtoA(r->NumberParameters ? (unsigned)(size_t)r->ExceptionInformation[0] : 0u, b1);

@@ -9,7 +9,7 @@
 #include "ScaleBar.h"
 #include "MOExperience.h"
 
-#define SB_SECTION "ScaleBar"
+#define SB_SECTION "BottomBar"
 
 /* ---------------- 地址 (反汇编实证) ---------------- */
 #define ADDR_SURF_COMPOSITE  0x0088731Cu
@@ -55,7 +55,7 @@ static int s_FontPx = 12;
 static int s_VoidRgb = 0x202028;        /* 图外底色 (深灰), 0xRRGGBB 一个键 */
 static int s_LimitFallback = 8192;      /* R 长边上限像素 (0=无限制, <3820 按 3820) */
 
-/* R 长边限制 ([ScaleBar] LimitFallback, 缺省 8192): 自设安全线, 不是引擎硬上限
+/* R 长边限制 ([BottomBar] LimitFallback, 缺省 8192): 自设安全线, 不是引擎硬上限
  * (实测缓冲能建出更大)。三处取 R 的位置必须用同一条线, 否则 R 与裁剪器尺寸
  * 错配 ⇒ Render 拿 R 坐标寻址小尺寸缓冲野读崩。0 = 不预检, 走真实分配见分晓。*/
 #define SB_LIMIT_DEF 8192
@@ -183,7 +183,7 @@ void SB_EnsureInit(void)
     s_Init = 1;
     GtEnsureLog();
     if (!g_Log) return;
-    s_Enable = GetPrivateProfileIntA(SB_SECTION, "Enable", 0, g_IniPath) ? 1 : 0;
+    s_Enable = GetPrivateProfileIntA(SB_SECTION, "ScaleEnable", 0, g_IniPath) ? 1 : 0;
     s_X = GetPrivateProfileIntA(SB_SECTION, "X", 32, g_IniPath);
     if (s_X < 0 || s_X > 4096) s_X = 32;
     s_Y = GetPrivateProfileIntA(SB_SECTION, "Y", 4, g_IniPath);
@@ -1487,6 +1487,7 @@ void SB_MapDeltaToScreen(int* dx, int* dy)
 static int s_TextH;     /* 档位文字带高 (按 s_FontPx 估) */
 static int s_WidgetH;   /* 文字带 + 缝 + 滑条带 */
 static int s_HoverLev = -1;   /* 鼠标悬着的档位, -1 = 不在条上 (SB_Poll 每帧填) */
+static int s_Placed = 0;     /* Sb_Place 跑过一遍 (暂停按钮锚点用) */
 
 static int Sb_Gx0(void) { return s_BarX + 14; }
 static int Sb_Gx1(void) { return s_BarX + s_BarW - 14; }
@@ -1554,6 +1555,7 @@ static void Sb_Place(void)
         UtoA((unsigned)gh, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
         LogLine(buf);
     }
+    s_Placed = 1;
 }
 
 static void Sb_SetLevel(int lv, const char* why)
@@ -1778,4 +1780,16 @@ int SB_DrawToComposite(void)
     if (Sb_IsBigSurf(surf)) return 0;
     if (Sb_PaintSurface(surf)) { s_Drew = 1; return 1; }
     return 0;
+}
+
+/* 刻度条矩形 (暂停按钮锚在它左侧用)。 */
+int SB_BarGeom(int* x, int* y, int* w, int* h)
+{
+    if (!s_Enable || !s_Placed) return 0;
+    if (s_BarW < 32 || s_WidgetH < 16) return 0;
+    if (x) *x = s_BarX;
+    if (y) *y = s_BarY;
+    if (w) *w = s_BarW;
+    if (h) *h = s_WidgetH;
+    return 1;
 }

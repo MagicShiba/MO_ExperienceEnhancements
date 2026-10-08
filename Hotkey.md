@@ -1,7 +1,8 @@
 # 快捷键写法 (Hotkey)
 
 适用: `MOExperience.ini` 里 `[PatrolCircle]`、`[SmartOrder]`、`[TreeChop]`、
-`[FuzzyAttack]`、`[AttackMove]`、`[MindSelect]` 的 `Hotkey` 项。
+`[FuzzyAttack]`、`[AttackMove]`、`[MindSelect]` 的 `Hotkey` 项与
+`[BottomBar]` 的 `PauseHotkey` 项。
 
 ## 规则
 
@@ -70,3 +71,4 @@
 | 范围智能 `[SmartArea]` | `Shift+Middle`（主键须是 `Middle`，可改单键如 `X1`） | 点按/划线扫块(轨迹各节点)挑目标, 按住时绿色细线连到分到的目标(松手即消), 按各自光标下对象令(不移动); 光标无令时按规则表: 非本家载具/飞机/步兵(非建筑)强攻、工程师对建筑占领(多楼轮转均分, 不管 SquadSize)、步兵对自家载具进入、本家其余跳过、非工程师步兵对建筑待命; 松开即执行; 待命等脏键全松后重判（配置的修饰/附加键，或物理 Shift——单 X1 时按住 Shift 点照样待命，松 Shift 即判）; 含 Ctrl 时归模糊，Z 不禁 |
 | 心控收敛 `[MindSelect]` | `Shift+P` | 结尾只剩心控单位 |
 | 超武侧栏 `[SWSidebar]` | `F4` (`ToggleKey`) | 显示/隐藏右侧超武侧栏(隐藏不占空间) |
+| 单机暂停 `[BottomBar]` | `F5` (`PauseHotkey`) | 暂停/恢复(仅遭遇战/战役, 联机不响应; `PauseEnable=0` 则整个不启用); 底栏左键: 暂停/恢复与单步一帧各一钮(启用后按过一次 F5 才显示, 之后常显) |

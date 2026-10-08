@@ -4,7 +4,7 @@
  */
 #pragma once
 
-/* 读 [ScaleBar] 节 (幂等)。 */
+/* 读 [BottomBar] 节 (幂等)。 */
 void SB_EnsureInit(void);
 
 /* 每循环 (prepare 钩) 调: 摆刻度条矩形 + 处理点击换档 + 准备缩小档大面。 */
@@ -19,7 +19,7 @@ int SB_Level(void);
 void SB_ResetZoom1x(void);
 
 /* 当前档的视口缩放: R = A * SB_Scale()。0.25 = 4 倍放大, 1 = 原样, 2 = 2 倍视野。
- * R 超 [ScaleBar] LimitFallback 时钳到限制上 (长边=限制值, 见 SB_GetViewRect)。 */
+ * R 超 [BottomBar] LimitFallback 时钳到限制上 (长边=限制值, 见 SB_GetViewRect)。 */
 double SB_Scale(void);
 
 /* 1 = 放大档 (视口比视图区小)。 */
@@ -106,3 +106,7 @@ void SB_MapDeltaToScreen(int* dx, int* dy);
 
 /* 刻度条: 兜底画进 Composite (SW_DrawToComposite 由每帧绘制钩调)。 */
 int SB_DrawToComposite(void);
+
+/* 刻度条矩形 (暂停按钮锚在它左侧用)。返回 0 = 刻度条没开/没摆好。
+ * x/y = 控件左上 (文字带顶), w = 条宽, h = 控件总高。 */
+int SB_BarGeom(int* x, int* y, int* w, int* h);
