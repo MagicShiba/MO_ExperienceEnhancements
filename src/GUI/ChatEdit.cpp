@@ -19,8 +19,8 @@
  *     底板只包画出内容, 字体跟战役框 (MsgText_CampStyle)。
  *   粘贴 CF_UNICODETEXT, 复制/剪切写剪贴板; 组字串自画黄色+下划线。
  *   输入法: 组合窗 (CFS_FORCE_POSITION) + 候选窗每帧指到输入框下面
- *     (x=光标, y=盒底, surface→客户区换算); 系统组合窗由主窗子类化隐藏
- *     (WM_IME_SETCONTEXT 清位 + 吃掉 STARTCOMPOSITION), 候选条仍由系统画。
+ *     (x=插入点即已输入文本右侧, y=盒底, surface→客户区换算); 系统组合窗由主窗
+ *     子类化隐藏 (WM_IME_SETCONTEXT 清位 + 吃掉 STARTCOMPOSITION), 候选条仍由系统画。
  *   代价: 打字时方向键镜头可能动一下 (不再吞键)。
  * 构建见 build-fast.bat (32 位 mingw, 无 CRT, -limm32)。
  */
@@ -477,9 +477,9 @@ static void CE_PollIME(void)
 
 /* ---------------- IME 组合/候选窗 ----------------
  * 游戏从不设 IME 窗位置, 默认堆在 (0,0)。激活期间每帧把组合窗 + 候选窗指到
- * 输入框下面 (x=光标, y=盒底, surface→客户区换算); 系统组合窗由主窗子类化
- * 隐藏 (WM_IME_SETCONTEXT 清位 + 吃掉 STARTCOMPOSITION), 自画黄色组字串。
- * 全本地 Win32, 联机安全。 */
+ * 输入框下面 (x=插入点即已输入文本右侧, y=盒底, surface→客户区换算);
+ * 系统组合窗由主窗子类化隐藏 (WM_IME_SETCONTEXT 清位 + 吃掉 STARTCOMPOSITION),
+ * 自画黄色组字串。全本地 Win32, 联机安全。 */
 
 #define CE_GAME_HWND_ADDR 0x00B73550u
 
@@ -561,8 +561,8 @@ static void CE_PositionIME(int sx, int sy, int surfW, int surfH)
     himc = ImmGetContext(h);
     if (!himc) return;
     {
-        /* 组合窗 + 候选窗同指输入框下面 (x=光标, y=盒底, 客户区坐标):
-         * 有输入法按组合窗相对定位候选窗, 两者必须同位置;
+        /* 组合窗 + 候选窗同指输入框下面 (x=插入点即已输入文本右侧, y=盒底,
+         * 客户区坐标): 有输入法按组合窗相对定位候选窗, 两者必须同位置;
          * 组合窗用 CFS_FORCE_POSITION (精确定位, IME 不得调整)。每帧设一次。 */
         COMPOSITIONFORM cfc;
         CANDIDATEFORM cdc;
@@ -779,7 +779,7 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     int xs[CE_BUF_N + 1];
     int i, tx, ty, bw, bh;
     int startIdx, endIdx, visLen, dx, curX, lo, hi;
-    int compX, compWsum, compFit, th, boxY;
+    int compX, imeX, compWsum, compFit, th, boxY;
     void* label;
     if (!surf || !IsPlausiblePtr(surf)) return 0;
     (void)bitLineH;
@@ -921,8 +921,10 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
             BlitCoverage(locked, surfPitch, surfW, surfH, dx, ty, w + 2, th,
                          255, 255, 255, 100);
     }
-    /* 组字串 (黄色+下划线, 光标跟组字光标; 宽钳到盒内) */
+    /* 组字串 (黄色+下划线, 光标跟组字光标; 宽钳到盒内).
+     * 候选框锚点另算 (imeX = 插入点, 见下), 不跟组字串走。 */
     compX = dx + (xs[ce_Cur] - xs[startIdx]);
+    imeX = compX;
     if (ce_CompLen > 0 && compFit > 0)
     {
         int w = RenderLine(ce_Comp, compFit);
@@ -957,12 +959,14 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     /* 光标 (有选中则隐藏, 530ms 闪烁; 钳到盒内) */
     if (compX < tx) compX = tx;
     if (compX > tx + bw - 2) compX = tx + bw - 2;
+    if (imeX < tx) imeX = tx;
+    if (imeX > tx + bw - 2) imeX = tx + bw - 2;
     if (lo < 0 && ((GetTickCount() - ce_BlinkT) / 530u) % 2u == 0u)
         CE_FillRect(surf, compX, ty, 2, th, 255, 255, 255, 100);
 
     unlockFn(surf, NULL);
-    /* 输入法跟随 (surface 已解锁): 候选框指到输入框下面, 每帧设一次。 */
-    CE_PositionIME(compX, boxY + bh, surfW, surfH);
+    /* 候选框锚在插入点 (已输入文本右侧), 不跟组字串内容走, 每帧设一次。 */
+    CE_PositionIME(imeX, boxY + bh, surfW, surfH);
     return 1;
 }
 
