@@ -1,6 +1,6 @@
-/* PauseView.h - 单机暂停 + 单步帧进 (F5 + 按过一次后常显的两按钮)。
+/* PauseView.h - 单机暂停 + 单步帧进 (热键 + 按钮)。
  * MainLoop 入口门 (0x55D360), 暂停跑迷你循环后跳 0x55DEDB 出本轮。
- * 只读 + 渲染面写入, 仅单机生效。PauseEnable=0 则整个不启用。
+ * 只读 + 渲染面写入, 仅单机生效。PauseEnable 只定按钮初始显示。
  */
 #pragma once
 

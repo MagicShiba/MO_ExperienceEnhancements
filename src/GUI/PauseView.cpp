@@ -1,8 +1,9 @@
-/* PauseView.cpp - 单机暂停 + 单步帧进 (F5 + 按过一次后常显的两按钮)。
+/* PauseView.cpp - 单机暂停 + 单步帧进 (热键 + 按钮)。
  * MainLoop 入口 (0x55D360) 挂门: 暂停跑迷你循环后跳 0x55DEDB 出本轮,
  * 步进帧放行一轮原循环。迷你循环: CallBack → 守卫 → Mark(2) → 输入 →
  * Keyboard → Render → Tactical::Update → Sleep(1)。做法见 Phobos FrameByFrame。
- * [BottomBar] PauseEnable=0 整个不启用; =1 启用, 按钮按过一次 F5 后常显。
+ * 热键单机恒有效; [BottomBar] PauseEnable 只定按钮初始显示
+ * (0=用过一次才显示, 1=常显)。
  * 联机或未开局恒放行。只读 + 渲染面写入。
  */
 
@@ -38,7 +39,7 @@
 
 /* ---------------- 配置 ---------------- */
 static int s_Init = 0;
-static int s_BtnEnable = 0;      /* [BottomBar] PauseEnable (默认 0 = 不启用) */
+static int s_BtnShowInit = 0;    /* [BottomBar] PauseEnable: 按钮初始显示, 默认隐藏 */
 static OU_Hotkey s_Hk;          /* [BottomBar] PauseHotkey (默认 F5) */
 static int s_HkOk = 0;
 
@@ -66,11 +67,11 @@ void PV_EnsureInit(void)
     s_HkOk = 1;
     if (g_Log)
     {
-        s_BtnEnable = GetPrivateProfileIntA(PV_SECTION, "PauseEnable", 0, g_IniPath) ? 1 : 0;
+        s_BtnShowInit = GetPrivateProfileIntA(PV_SECTION, "PauseEnable", 0, g_IniPath) ? 1 : 0;
         OU_ReadHotkey(PV_SECTION, "PauseHotkey", &s_Hk);
         p = 0;
         p = AppendCStr(buf, p, "pv: btn=", sizeof(buf));
-        p += UtoA((unsigned)s_BtnEnable, buf + p);
+        p += UtoA((unsigned)s_BtnShowInit, buf + p);
         p = AppendCStr(buf, p, " hk=", sizeof(buf));
         UtoA((unsigned)s_Hk.vk, buf + p);
         LogLine(buf);
@@ -90,7 +91,6 @@ static int PV_IsMP(void)
 static int PV_CanRun(void)
 {
     if (!s_Init) return 0;
-    if (!s_BtnEnable) return 0;   /* PauseEnable=0: 功能整个不启用 */
     if (PV_IsMP()) return 0;
     if (!*(volatile unsigned char*)(size_t)ADDR_SCEN_STARTED) return 0;
     return 1;
@@ -180,7 +180,7 @@ static int PV_InRect(int mx, int my, int x, int y)
 
 static int PV_ShowButtons(void)
 {
-    return s_AutoShow ? 1 : 0;   /* 默认不显示; 按过一次 F5 暂停后长久显示 */
+    return (s_BtnShowInit || s_AutoShow) ? 1 : 0;
 }
 
 /* 点击 + 悬停 (左键上升沿才动作, 按下点在别处划进来的不算)。 */
