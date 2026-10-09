@@ -100,9 +100,13 @@ Print 0x434B90 / Simple 0x4A5EB0 / GetDim 0x433CF0。
 
 ## 右侧提示与超武区分
 
-调用链：`Simple_` → `Simple_+0x142` 调 `Print` → 逐字 `Blit`；建筑提示另经 `DrawText 0x479041` 小矩形；超武名出自 `0x4A6345`。
+调用链：`Simple_` → `Simple_+0x142` 调 `Print` → 逐字 `Blit`；建筑提示另经 `DrawText 0x479041` 小矩形。
 
-门全按路径/发起者：`Simple_` 只收 `0x4A6345`；`Print` 只收冒号计时器；`Blit` 只认 DrawText 路径并豁免提示子树；`VecRender` 做坐标归一与空裁剪回退。
+门全按路径/发起者：`Simple_` 收 `0x4A6345`（Fancy 内部调 Simple_ 的返回点，所有 Fancy 文本都经此，名单另靠横向带+形状过滤）；`Print` 只收冒号计时器；`Blit` 只认 DrawText 路径并豁免提示子树；`VecRender` 做坐标归一与空裁剪回退。
+
+Ares FPS 计数器（`"FPS: N Avg: F"`，0x4F4583 定死 x=0、y=底-32，Render 尾最后画）含冒号但永不收表（`VecSWIsFps` 前缀排除；超武计时器从不以 `FPS:` 开头）。它到 `Simple_` 有两条路（Fancy 内转返回点 0x4A6345 / 新版 YRpp 直调返回点在 Ares.dll 内），收串只认内容不认调用者。
+
+FPS 钉住（任何档位 1x、位置固定）：`Simple_` 入口收串并跳过原绘制 → Render 尾新钩（0x4F4589，Ares 之后 5B）以固定 16px（GDI 9 号槽）重画到固定位（x=0，底上 32，与 Ares 同锚点）。Ares 的黑底盒走度量（0x4A59E0 经 GetDim），计数器串宽度报 0 直接消失。只画窗口面，大面跳过；`Render=0` 或钉住钩没装上时不收，看原版。
 
 ## 电力提示盒
 

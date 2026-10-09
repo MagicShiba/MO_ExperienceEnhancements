@@ -528,6 +528,13 @@ static int VecSWHasEq(const wchar_t* s)
     }
     return 0;
 }
+/* Ares FPS 计数器前缀: 钉住收串与消盒共用判据 (超武计时器永不用此前缀)。 */
+static int VecSWIsFps(const wchar_t* s)
+{
+    if (!s || !IsPlausiblePtr((void*)s)) return 0;
+    return (s[0] == L'F' && s[1] == L'P' && s[2] == L'S' && s[3] == L':') ? 1 : 0;
+}
+
 /* 前 16 字含冒号即计时器。 */
 static int VecSWColon(const wchar_t* s)
 {
@@ -818,6 +825,15 @@ typedef struct {
 static StkCE g_StkC[STICKY_N];
 static int g_StkRR = 0;
 
+/* FPS 钉住: Simple_ 收到的计数器串, Render 尾固定位 1x 重画 (见 VecFpsPinEntry)。 */
+#define FPS_PX 16
+#define FPS_SLOT 9
+#define FPS_MAXCH 63
+static wchar_t s_FpsBuf[FPS_MAXCH + 1];
+static int s_FpsN = 0;
+static int s_FpsHave = 0;
+void* g_FpsPinTramp = NULL;
+
 /* 全串宽度查表, 找不到返回 0。 */
 static int VecDimLookup(const wchar_t* s, int len)
 {
@@ -1019,7 +1035,39 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
     int a1, int a2, int a3, int a4, int a5, int a6, int a7)
 {
     if (!g_OrigSimple) return 0;
-    /* 名单行只出自 0x004A6345。 */
+    /* Ares FPS 计数器钉住: 收串并跳过原绘制, Render 尾固定位 1x 重画。
+     * 只按内容认 ("FPS:" 前缀超武计时器永不用), 不认调用者:
+     * Ares 经 Fancy 走 Simple_ (返回点 0x4A6345) 或直调 Simple_
+     * (新版 YRpp static DrawText → Simple_, 返回点在 Ares.dll 内), 两种都收。
+     * 与超武面板开关无关; Render 关或钉住钩没装上则不收 (看原版)。 */
+    if (g_VT.Render && g_FpsPinTramp)
+    {
+        const wchar_t* fs = (const wchar_t*)(size_t)edxIn;
+        if (VecSWIsFps(fs) && IsPlausiblePtr((void*)a1))
+        {
+            int* b = (int*)a1;
+            if (VecIsCanvas((void*)a1, b[1], b[2]) &&
+                IsPlausiblePtr((void*)a2) && IsPlausiblePtr((void*)a3))
+            {
+                int* p2 = (int*)a2;
+                int* p3 = (int*)a3;
+                int i, n = 0;
+                while (n < FPS_MAXCH && fs[n]) n++;
+                for (i = 0; i < n; i++) s_FpsBuf[i] = fs[i];
+                s_FpsBuf[n] = 0;
+                s_FpsN = n;
+                s_FpsHave = (n > 0) ? 1 : 0;
+                if (IsPlausiblePtr((void*)ecxIn))
+                {
+                    ((int*)ecxIn)[0] = p2[0] + p3[0];
+                    ((int*)ecxIn)[1] = p2[1] + p3[1];
+                }
+                return ecxIn;
+            }
+        }
+    }
+    /* 0x4A6345 是 Fancy 内部调 Simple_ 的返回点 (反汇编实证),
+     * 所有 Fancy 文本都经此, 不只侧栏名单; 名单另靠横向带+形状过滤。 */
     if (g_SWPanelOn && g_SWCompW &&
         (unsigned)__builtin_return_address(0) == 0x004A6345u &&
         IsPlausiblePtr((void*)a1))
@@ -1147,6 +1195,8 @@ int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
     {
         r = g_OrigGetDim(t, e, s, &ow, &oh, maxW);
     }
+    /* Ares FPS 计数器: 宽度报 0 → 黑底盒消失 (高照原版; 字由 Simple_ 拦下钉住重画)。 */
+    if (VecSWIsFps(s)) { if (r) { *w = 0; if (h) *h = oh; } g_GDDepth--; return r; }
     if (!r || (maxW > 0 && ow >= maxW)) goto fwd;
     px = VecPickPx(t);
     if (px < 8 || px > 40 || !GdiEnsure(px, g_VT.Bold, VecGdiSlot(px), g_VTFace))
@@ -2247,6 +2297,62 @@ void VecText_EnsureInit(void)
     LogLine(buf);
 }
 
+/* ---------------- FPS 钉住绘制 (Render 尾, Ares 之后) ----------------
+ * 本帧 Simple_ 收到的计数器串, 以固定字号画到固定位 (x=0, 底上 32,
+ * 与 Ares 同锚点), 任何档位都是 1x。只画窗口面, 大面跳过。 */
+static void VecFpsPinDraw(void)
+{
+    void* comp;
+    int cw, chh, pitch, w, y, adv;
+    unsigned char* locked;
+    RectangleStruct rc;
+    ColorStruct black;
+    if (!s_FpsHave || !g_VT.Render) { s_FpsHave = 0; return; }
+    s_FpsHave = 0;
+    if (s_FpsN <= 0) return;
+    if (!GdiEnsure(FPS_PX, 0, FPS_SLOT, g_VTFace)) return;
+    comp = *(void**)ADDR_SURF_COMPOSITE;
+    if (!comp || !IsPlausiblePtr(comp) || SB_IsBigSurface(comp)) return;
+    cw = GtSurfGet(comp, GtVT_GET_WIDTH);
+    chh = GtSurfGet(comp, GtVT_GET_HEIGHT);
+    pitch = GtSurfGet(comp, GtVT_GET_PITCH);
+    if (cw < 64 || chh < 64 || pitch < cw * 2) return;
+    Calibrate();
+    w = RenderLine(s_FpsBuf, s_FpsN);
+    if (w <= 0) return;
+    adv = g_G->adv;
+    y = chh - adv - 32;
+    if (y < 0) y = 0;
+    rc.X = 0; rc.Y = y; rc.Width = w + 2; rc.Height = adv;
+    black.R = 0; black.G = 0; black.B = 0;
+    GtFillRectTrans(comp, &rc, &black, 100);
+    locked = GtLock(comp);
+    if (!locked) return;
+    BlitCoverage(locked, pitch, cw, chh, 0, y, w + 2, adv,
+                 255, 255, 255, 100);
+    GtUnlock(comp);
+}
+
+static void FpsPinC(void)
+{
+    VecFpsPinDraw();
+}
+
+static void* g_CallFpsPin = (void*)FpsPinC;
+__attribute__((naked)) void VecFpsPinEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "pushfl\n\t"
+        "call *%0\n\t"
+        "popfl\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallFpsPin), "m" (g_FpsPinTramp)
+        : "memory", "cc");
+}
+
 void VecText_Install(void)
 {
     VecText_EnsureInit();
@@ -2298,6 +2404,16 @@ void VecText_Install(void)
         else { LogLine("vtext: getdim hook OFF"); g_OrigGetDim = NULL; }
     }
     else { LogLine("vtext: getdim bytes mismatch"); LogBytes((unsigned char*)ADDR_GETDIM); }
+    /* FPS 钉住钩 (0x4F4589, Render 尾 Ares 之后): 计数器固定位 1x。没装上就看原版。 */
+    {
+        static const unsigned char kWantFpsPin[5] = { 0xA1, 0x1C, 0x73, 0x88, 0x00 };
+        if (BytesSame((unsigned char*)0x4F4589u, kWantFpsPin, 5))
+        {
+            g_FpsPinTramp = BuildTrampAt(0x4F4589u, 5, 0x4F458Eu);
+            if (!g_FpsPinTramp || !PatchAt(0x4F4589u, (void*)(size_t)VecFpsPinEntry, 5))
+                g_FpsPinTramp = NULL;
+        }
+    }
     }
     else LogLine("vtext: text hooks OFF (Enable=0)");
     /* 以下共用钩与 Enable 无关。 */

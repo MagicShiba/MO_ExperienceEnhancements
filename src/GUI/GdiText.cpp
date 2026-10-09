@@ -751,7 +751,7 @@ typedef struct {
     unsigned char cov[ROWC_W * ROWC_H];
 } RowCE;
 static RowCE g_RowC[ROWC_N];
-static int g_RowGen[GDI_SLOTS] = { 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+static int g_RowGen[GDI_SLOTS] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
 static int g_RowRR = 0;
 
 static void GdiFreeSlot(GdiSlot* s)

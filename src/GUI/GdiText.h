@@ -180,8 +180,8 @@ void GtUnpack16(unsigned short px, unsigned char* r, unsigned char* g,
 #define ABC_MEMO_N 1024
 
 /* 槽: 0=战役框 1=提示框 2=全局文本主字号 3=超武面板/底电 4=聊天输入
- * 5=超武充能% 6=超武悬停名 7=缩放刻度 8=全局文本顶栏字号。一槽一字号。 */
-#define GDI_SLOTS 9
+ * 5=超武充能% 6=超武悬停名 7=缩放刻度 8=全局文本顶栏字号 9=FPS钉住。一槽一字号。 */
+#define GDI_SLOTS 10
 
 typedef struct {
     HDC dc;
