@@ -17,9 +17,9 @@
 #define ADDR_DSURF_CTOR      0x004BA5A0u   /* DSurface::DSurface(this,w,h,f1,f2) */
 #define ADDR_OP_NEW          0x007C8E17u   /* 引擎的 operator new (cdecl, 1 参) */
 #define ADDR_OP_DELETE       0x007C8B3Du   /* 引擎的 operator delete (cdecl, 1 参) */
-/* ZBuffer/ABuffer 的构造/析构 (尺寸 = 0x30 字节, 布局 +0x28=宽 +0x2C=高)。
- * 只借这两个函数单独重建缓冲, 不走 Set_View_Dimensions 正门 (它末尾调 InitGUI
- * 按 R 重排侧栏/消息区, R > 窗口即越界)。 */
+/* ZBuffer/ABuffer 的构造/析构 (对象 0x30 字节，+0x28=宽 +0x2C=高)。
+ * 只借这两个函数单独重建缓冲，不走 Set_View_Dimensions 正门
+ * (它末尾调 InitGUI，会按 R 重排侧栏/消息区)。 */
 #define ADDR_ZBUF_CTOR       0x007BC970u
 #define ADDR_ZBUF_DTOR       0x007BCAE0u
 #define ADDR_ABUF_CTOR       0x00410CE0u
@@ -34,12 +34,11 @@
 #define ADDR_CUR_SURF_SB     0x00887314u   /* 引擎"当前绘制面" (Render 入口 = Composite) */
 #define ADDR_VIEWBOUNDS      0x00886FA0u   /* ViewBounds (缩放档 = R) */
 #define ADDR_SIDEBAR_W       0x007F5BF8u   /* 侧栏列宽 (168) */
+/* chrome 脏缓存: [0xB0CD44] 为 0 ⇒ 引擎下帧重画整个 chrome。 */
+#define SB_CHROME_DIRTY_N 0xB0CD44u
 
-/* TacticalClass::RegisterDirtyArea (0x6D2790): 把一块矩形推进"脏区表"
- * ([0xB0CE7C] 起每条 20 字节, [0xB0CE88] 条数, [0xB0CE8C] 容量 10)。表里
- * 重复的会被去掉、被新矩形包住的合并成更大的矩形; 渲染器把每条与 ViewBounds
- * 求交后重绘。引擎只在"外部事件弄坏了像素"时调它 (建筑起拆、动画换帧…),
- * **滚动不走这条路** —— 滚动是 Draw 里的整幅位移拷贝 + 只画新空出来那条。*/
+/* TacticalClass::RegisterDirtyArea (0x6D2790)：矩形推进脏区表
+ * ([0xB0CE7C] 起每条 20 字节)。滚动不走这条路 (整幅位移拷贝 + 只画新空条)。 */
 typedef void (__fastcall *FnRegDirtyArea)(void*, RectangleStruct, int);
 
 #define SB_LABLEN  10
@@ -55,9 +54,8 @@ static int s_FontPx = 12;
 static int s_VoidRgb = 0x202028;        /* 图外底色 (深灰), 0xRRGGBB 一个键 */
 static int s_LimitFallback = 8192;      /* R 长边上限像素 (0=无限制, <3820 按 3820) */
 
-/* R 长边限制 ([BottomBar] LimitFallback, 缺省 8192): 自设安全线, 不是引擎硬上限
- * (实测缓冲能建出更大)。三处取 R 的位置必须用同一条线, 否则 R 与裁剪器尺寸
- * 错配 ⇒ Render 拿 R 坐标寻址小尺寸缓冲野读崩。0 = 不预检, 走真实分配见分晓。*/
+/* R 长边限制 ([BottomBar] LimitFallback，缺省 8192)：自设安全线。
+ * 取 R 的三处须同线，否则 R 与裁剪器错配。0 = 不预检。 */
 #define SB_LIMIT_DEF 8192
 #define SB_LIMIT_MIN 3820
 
@@ -83,8 +81,8 @@ static double Sb_ClampScale(double s, int aw, int ah)
 }
 
 /* ---------------- 档位表 ----------------
- * 9 档, 从最放大排到最小。标尺上的数字是"相对 1x 的倍率" 1/scale (见 notes §3)。
- * scale>1 那几档视野比窗口大, 走 R 大的离屏面 (缩小档); 建不出来时自动退回 A。*/
+ * 9 档，从最放大排到最小。标尺数字是相对 1x 的倍率 1/scale。
+ * scale>1 的档视野比窗口大，走 R 大的离屏面；建不出时退回 A。 */
 #define SB_MAXLEV 9
 #define SB_LEV_MAX (SB_MAXLEV - 1)     /* 最右那档: 整张地图塞进视图区 */
 /* MAX 那档的 scale 由 Sb_CalcMaxScale() 现算, 表里留 0。*/
@@ -94,7 +92,7 @@ static const double* s_LevScale = s_LevAll;
 static int    s_NLev = SB_MAXLEV;
 static void Sb_SyncZoomed(void);
 static char s_LevLabel[SB_MAXLEV][SB_LABLEN];
-/* s_LevAll 里 scale==1.0 那档的下标。SB_EnsureInit 里按表填实 (不写死)。*/
+/* s_LevAll 里 scale==1.0 那档的下标。 */
 static int s_LevOne = 4;
 static double Sb_CalcMaxScale(void);   /* MAX 档的倍率, 定义在"档位查询"段 */
 
@@ -108,17 +106,14 @@ static int s_Drew = 0;
 static int s_LadderOk = 0;
 
 /* ---------------- 缩小档的离屏大面 (scale>1) ----------------
- * 引擎只会 1:1 逐格画进传给 Render 的面; scale>1 时 R 比窗口大, 所以自建两张
- * R 大小的 DSurface (Composite/地图面), 只在 GScreenClass::Render 期间临时换进
- * 全局 0x88731C/0x8872FC (TacticalClass::Render 内部会把这两个互换, 尺寸必须相同),
- * 渲染完立刻还原, 再把大面的 R 区域降采样铺回真 Composite 的 A。 */
+ * 引擎只会 1:1 画进传给 Render 的面；scale>1 时自建两张 R 大的 DSurface，
+ * 只在 Render 期间临时换进全局，完事还原再降采样铺回。 */
 static void* s_BigComp = 0;             /* 两张 R 大的离屏面 (引擎双缓冲互换) */
 static void* s_BigMap = 0;
 static void* s_CurC = 0;                /* 下次 Render 入口要装的 (Composite 槽) */
 static void* s_CurM = 0;                /* 下次 Render 入口要装的 (地图槽) */
 static void* s_LastFinal = 0;           /* 本帧渲染完的最终画面所在面 (降采样源) */
-/* 大面物理尺寸只增不减 (新 R 塞得下就复用): 按 R 精确重建会在切侧栏模式时每帧
- * 建面, 新面是黑的 ⇒ 整屏闪黑。引擎只读写 (0,0,R) 区域, 多出的边角没人碰。 */
+/* 大面物理尺寸只增不减 (新 R 塞得下就复用)：精确重建会在切侧栏时闪黑。 */
 static int   s_BigW = 0, s_BigH = 0;     /* 逻辑 R */
 static int   s_BigCapW = 0, s_BigCapH = 0; /* 实际分配尺寸 */
 static int   s_SurfActive = 0;
@@ -130,26 +125,21 @@ static int   s_SwapSeen = 0;            /* 本帧 Render 入口真的换过大�
 static int   s_Suspended = 0;
 /* ZBuffer/ABuffer 当前尺寸 (按 R 重建过一次就记下) */
 static int   s_BufW = 0, s_BufH = 0;
-/* 新面催引擎重画 (帧号门控, 连续几帧推整块脏区) */
+/* 新面催引擎重画 (帧号门控)。 */
 static int   s_RedrawFrames = 0;
 static int   s_RedrawFrameNo = -1;
-/* 一次性洗大面: 修好 s_WinComp 那一刻之前的帧可能已经把窗口坐标的东西烙进大面,
- * 引擎增量渲染不会再覆盖它们 ⇒ 必须自己抹一次黑并强制整块重画。*/
+/* 一次性洗大面：修好窗口面之前烙进的旧像素，增量渲染盖不掉。 */
 static int   s_PurgeFrames = 0;
 static int   s_PurgeWarned = 0;
 /* 渲染期临时换出的原全局 (只在 SB_RenderSwapIn/Out 之间有效) */
 static void* s_RenderOldComp = 0;
 static void* s_RenderOldMap = 0;
 static int   s_RenderSwapped = 0;
-/* 记住"真正的窗口面"。上一帧若换出去没换回来 (泄漏), SwapIn 会看到
- * [0x88731C] 已经是我们的面 —— 那时用它当还原目标, 否则泄漏会一直传染,
- * 后面所有按窗口坐标的绘制 (刻度条/UI 层) 全落进大面 ⇒ 降采样后残影。*/
+/* 记住真正的窗口面 (泄漏自愈用)。 */
 static void* s_WinComp = 0;
 static void* s_WinMap = 0;
 static int   s_LeakWarned = 0;
-/* 窗口面的逻辑尺寸 (SB_CanvasH 用)。缩小档下 [0x88731C] 绝大多数时间是 R 大的
- * 大面, 所以"这块面是不是主画布"不能问当前全局, 只能靠记住的窗口面尺寸。
- * 每帧由消息帧钩的 SB_NoteWindowSurface 喂 (见那里), SB_EnsureBig 里另有一份。*/
+/* 窗口面的逻辑尺寸。每帧由 SB_NoteWindowSurface 喂。 */
 static int   s_WinW = 0, s_WinH = 0;
 
 static unsigned Sb_Fmt1(char* p, double v)
@@ -256,17 +246,13 @@ static void Sb_InitLabels(void)
     }
 }
 
-/* ---------------- MAX 档: 整张地图塞进视图区 ----------------
- * 地图画进 R (尺寸 A*scale) 再按 scale 降采样铺回 A, 所以 scale>1 = 视野变大:
- * 一个屏幕像素摊 scale 个图上像素。要两轴都装下整张图, scale 得取宽高约束里更松的
- * 那一轴 = max(图宽/A.W, 图高/A.H); 另一边留余量, 余量露出的就是图外深灰。
- * ⚠️ 必须是 max: 取 min 时 R 装不下整图, 右/下侧被裁, 看着反而像放大了。
- * R 超长边限制 (LimitFallback) 时钳到限制上 (能装多少装多少); 低于 SB_EnsureBig
- * 的 320x240 下限 / 地图尺寸读不到才判为不支持, 由调用方退回最高那一档。
- * MAX 档 R 最大, 性能开销也最大。*/
+/* ---------------- MAX 档：整张地图塞进视图区 ----------------
+ * scale = max(图宽/A.W, 图高/A.H)，取更松的那轴两轴才都装得下。
+ * 超限钳到 LimitFallback；过小或地图读不到才判不支持。 */
 static double s_MaxScale = 0.0;
 static int s_MaxOk = 0;
 static int Sb_MapPx(int* l, int* t, int* w, int* h);   /* 定义在文件后部 */
+static int Sb_ViewPx(int* ox, int* oy, int* w, int* h);/* 定义在文件后部 */
 static void Sb_DropMax(void) { s_MaxOk = 0; s_MaxScale = 0.0; }
 
 static double Sb_CalcMaxScale(void)
@@ -278,16 +264,16 @@ static double Sb_CalcMaxScale(void)
     FM_GetViewRects(&a, 0);
     if (a.Width < 64 || a.Height < 64) return 0.0;
     if (mw < 16 || mh < 16) return 0.0;
-    sx = (double)mw / (double)a.Width;   /* 每横/纵一个视口像素要摊多少图上像素 */
+    sx = (double)mw / (double)a.Width;
     sy = (double)mh / (double)a.Height;
-    sc = sx > sy ? sx : sy;              /* 取更松的那轴 ⇒ 两轴都装得下 = 全图可见 */
+    sc = sx > sy ? sx : sy;
     if (sc <= 0.02 || sc > 64.0) return 0.0;
     rw = (int)((double)a.Width * sc + 0.5);
     rh = (int)((double)a.Height * sc + 0.5);
     if (rw < 320 || rh < 240) return 0.0;
     if (Sb_OverLimit(rw, rh))
     {
-        /* 超限不判废, 钳到限制上 (长边=LimitFallback), 能装多少装多少。 */
+        /* 超限钳到限制上，能装多少装多少。 */
         sc = Sb_ClampScale(sc, a.Width, a.Height);
         if (sc <= 0.02) return 0.0;
         rw = (int)((double)a.Width * sc + 0.5);
@@ -297,7 +283,7 @@ static double Sb_CalcMaxScale(void)
     return sc;
 }
 
-/* 不查缓存的原始倍率 (SB_Scale 会调它, 别再回头调 SB_Scale)。*/
+/* 不查缓存的原始倍率。 */
 static double Sb_ScaleRaw(void)
 {
     if (s_Level != SB_LEV_MAX) return s_LevScale[s_Level];
@@ -306,8 +292,7 @@ static double Sb_ScaleRaw(void)
 }
 
 /* ---------------- 档位查询 ----------------
- * SB_Zoomed 走缓存 (每 blit/每文本都问, 省 double 比较)。s_Enable/s_Level/
- * s_Level 的写入点负责同步 (EnsureInit + Sb_SetLevel, 只增不减的读多写少)。 */
+ * SB_Zoomed 走缓存 (省每 blit/每文本的 double 比较)。 */
 static int s_ZoomedCache = 0;
 static void Sb_SyncZoomed(void)
 {
@@ -319,8 +304,7 @@ int SB_In(void)       { return (s_Enable && Sb_ScaleRaw() < 1.0) ? 1 : 0; }
 int SB_Out(void)      { return (s_Enable && Sb_ScaleRaw() > 1.0) ? 1 : 0; }
 int SB_Zoomed(void)   { return s_ZoomedCache; }
 
-/* CCToolTip 的"选面/量宽"矩形必须是 A: 引擎把 ViewBounds 地址写死在指令里,
- * 缩放时 ViewBounds 已是 R, 须另给一份 A 影子。1x 时 A == R, 与原版一致。 */
+/* CCToolTip 选面/量宽用的矩形影子 = 满视图区 A。1x 时 A == R。 */
 static unsigned g_AView[4] = { 0u, 0u, 1752u, 1048u };
 
 const unsigned* SB_AViewBlock(void) { return g_AView; }
@@ -329,20 +313,20 @@ void SB_PublishAView(void)
 {
     RectangleStruct a;
     FM_GetViewRects(&a, 0);
-    if (a.Width < 16 || a.Height < 16) return;   /* 还没布局好: 保留上一份 */
+    if (a.Width < 16 || a.Height < 16) return;
     g_AView[0] = (unsigned)a.X;
     g_AView[1] = (unsigned)a.Y;
     g_AView[2] = (unsigned)a.Width;
     g_AView[3] = (unsigned)a.Height;
 }
 
-/* 缩小档大面 (定义在文件后部)。返回 1 = 可用; 0 = 建不出来, 调用方必须退回 A。*/
+/* 缩小档大面 (定义在文件后部)。返回 1 = 可用。 */
 static int SB_EnsureBig(int w, int h);
 static void SB_SurfaceDestroy(void);
 static void Sb_SetLevel(int lv, const char* why);
 
-/* 视口矩形 = 视图区 * scale。ViewBounds 恒为 (0,0,w,h), X/Y 非 0 则查格错位。
- * 缩小档须先建好大面 (否则按 R 往窗口面画即越界), 建不出返回 0 退回 A。 */
+/* 视口矩形 = 视图区 * scale。ViewBounds 恒为 (0,0,w,h)。
+ * 缩小档须先建好大面，建不出返回 0 退回 A。 */
 int SB_GetViewRect(RectangleStruct* out, double scale)
 {
     RectangleStruct a;
@@ -351,17 +335,14 @@ int SB_GetViewRect(RectangleStruct* out, double scale)
     if (!s_Enable || !out) return 0;
     FM_GetViewRects(&a, 0);
     if (a.Width < 32 || a.Height < 32) return 0;
-    /* R 超长边限制 ⇒ 钳到限制上 (长边=LimitFallback), 不退回 1x。
-     * 三处取 R 须同线, 否则 ViewBounds 留着大 R、缓冲却退回 A 尺寸 ⇒ Render 拿 R
-     * 坐标寻址小缓冲, 野读崩。F11 换模式改 A.Width 时最容易撞上。
-     * LimitFallback=0 时不钳制, 走真实分配见分晓。*/
+    /* R 超限钳到限制上。三处取 R 须同线。0 = 不钳制。 */
     s = Sb_ClampScale(s, a.Width, a.Height);
     w = (int)((double)a.Width * s + 0.5);
     h = (int)((double)a.Height * s + 0.5);
     if (w < 32) w = 32;
     if (h < 32) h = 32;
-    if (Sb_OverLimit(w, h)) return 0;   /* 兜底: A 本身超限 (1x/放大档) 时保持 A */
-    if (s > 1.0 && !SB_EnsureBig(w, h)) return 0;   /* 大面缺失: 退回 A */
+    if (Sb_OverLimit(w, h)) return 0;
+    if (s > 1.0 && !SB_EnsureBig(w, h)) return 0;
     out->X = 0;
     out->Y = 0;
     out->Width = w;
@@ -369,8 +350,37 @@ int SB_GetViewRect(RectangleStruct* out, double scale)
     return 1;
 }
 
-/* 最近邻定点重采样 (目标第 i 像素取源 (i*step)>>16)。目的矩形须按目标面
- * 尺寸再夹一次, 否则启动/改分辨率瞬间整片写出界。 */
+/* ---------------- 16bpp 像素行的快拷 ----------------
+ * 本工程无 CRT (memcpy 是逐字节循环)，每帧数 MB 的搬运走它太贵。
+ * 这里按 32 位字搬，输出与 memcpy 逐位相同。 */
+typedef unsigned int SbWord __attribute__((may_alias, aligned(1)));
+
+static void Sb_CopyPx(unsigned short* d, const unsigned short* s, int n)
+{
+    unsigned char* dp = (unsigned char*)d;
+    const unsigned char* sp = (const unsigned char*)s;
+    SbWord a, b, c, e;
+    while (n > 0 && (((unsigned long)dp) & 3u) != 0u)
+    { *(unsigned short*)dp = *(const unsigned short*)sp; dp += 2; sp += 2; n--; }
+    while (n >= 8)
+    {
+        a = *(const SbWord*)sp;       b = *(const SbWord*)(sp + 4);
+        c = *(const SbWord*)(sp + 8); e = *(const SbWord*)(sp + 12);
+        *(SbWord*)dp = a;             *(SbWord*)(dp + 4) = b;
+        *(SbWord*)(dp + 8) = c;       *(SbWord*)(dp + 12) = e;
+        dp += 16; sp += 16; n -= 8;
+    }
+    while (n >= 4)
+    {
+        a = *(const SbWord*)sp; b = *(const SbWord*)(sp + 4);
+        *(SbWord*)dp = a; *(SbWord*)(dp + 4) = b;
+        dp += 8; sp += 8; n -= 4;
+    }
+    while (n-- > 0)
+    { *(unsigned short*)dp = *(const unsigned short*)sp; dp += 2; sp += 2; }
+}
+
+/* 最近邻定点重采样。目的矩形须按目标面尺寸再夹一次。 */
 static unsigned Sb_Step(int srcW, int dstW)
 {
     if (dstW <= 0) return 0;
@@ -379,15 +389,51 @@ static unsigned Sb_Step(int srcW, int dstW)
 static int Sb_MinI(int a, int b) { return a < b ? a : b; }
 static int Sb_MaxI(int a, int b) { return a > b ? a : b; }
 
-static long Sb_Resample(unsigned char* sb, int sp, int sw, int sh,
+/* 目标/源矩形按所在面尺寸裁剪 (改分辨率瞬间可能越界)。 */
+static void Sb_ClipA(RectangleStruct* a, int W, int H)
+{
+    if (a->X < 0) { a->Width += a->X; a->X = 0; }
+    if (a->Y < 0) { a->Height += a->Y; a->Y = 0; }
+    if (a->X + a->Width > W) a->Width = W - a->X;
+    if (a->Y + a->Height > H) a->Height = H - a->Y;
+}
+static void Sb_ClipR(RectangleStruct* r, int W, int H)
+{
+    if (r->X < 0) r->X = 0;
+    if (r->Y < 0) r->Y = 0;
+    if (r->X + r->Width > W) r->Width = W - r->X;
+    if (r->Y + r->Height > H) r->Height = H - r->Y;
+}
+
+/* 目标列到源列的映射表 (够大就复用)。开不出返回 0，调用方退回逐列计算。 */
+#define SB_COLMAP_MAX 16384
+static int* s_Col = 0;
+static int s_ColN = 0;
+
+static int* Sb_ColMap(int n)
+{
+    void* p;
+    if (n <= 0 || n > SB_COLMAP_MAX) return 0;
+    if (n <= s_ColN) return s_Col;
+    if (s_Col) VirtualFree(s_Col, 0, MEM_RELEASE);
+    s_Col = 0;
+    s_ColN = 0;
+    p = VirtualAlloc(0, (size_t)n * sizeof(int), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!p) return 0;
+    s_Col = (int*)p;
+    s_ColN = n;
+    return s_Col;
+}
+
+static long Sb_Resample(unsigned char* sb, int sp,
                         unsigned char* db, int dp, int iw, int ih,
                         int sx, int sy, int rw, int rh,
                         int dx, int dy, int dw, int dh,
                         int cx0, int cy0, int cx1, int cy1)
 {
-    unsigned xstep, ystep;
-    int x, y, x0, y0, x1, y1, xstepI, ystepI;
-    (void)sw; (void)sh;
+    unsigned xstep, ystep, acc;
+    int y, x0, y0, x1, y1, w, i;
+    int* cm;
     if (iw <= 0 || ih <= 0) return 0;
     if (dx < 0) { dw += dx; dx = 0; }
     if (dy < 0) { dh += dy; dy = 0; }
@@ -401,19 +447,51 @@ static long Sb_Resample(unsigned char* sb, int sp, int sw, int sh,
     if (x1 <= x0 || y1 <= y0) return 0;
     xstep = Sb_Step(rw, dw);
     ystep = Sb_Step(rh, dh);
-    xstepI = (int)xstep; ystepI = (int)ystep;
+    w = x1 - x0;
+    /* 精确 2:1 下采样 (0.5x 档)：步幅恒为 2，直读即可，不要乘法与映射表。
+     * 与通用路逐位相同 (xstep 恰为 2<<16)，见 test/scalebar_resample_test.c。 */
+    if (rw == dw * 2 && rh == dh * 2)
+    {
+        int x;
+        for (y = y0; y < y1; y++)
+        {
+            unsigned short* drow = (unsigned short*)(db + (size_t)(dy + y) * dp);
+            const unsigned short* srow = (const unsigned short*)
+                (sb + (size_t)(sy + y * 2) * sp);
+            for (x = x0; x < x1; x++)
+                drow[dx + x] = srow[sx + x * 2];
+        }
+        return (long)w * (long)(y1 - y0);
+    }
+    /* 列映射每帧算一次，内层只剩两次访存。表按目标绝对列建 (起点 x0)。 */
+    cm = Sb_ColMap(w);
+    if (cm)
+    {
+        acc = (unsigned)x0 * xstep;
+        for (i = 0; i < w; i++) { cm[i] = (int)(acc >> 16); acc += xstep; }
+    }
     for (y = y0; y < y1; y++)
     {
         unsigned short* drow = (unsigned short*)(db + (size_t)(dy + y) * dp);
         const unsigned short* srow = (const unsigned short*)
-            (sb + (size_t)(sy + (int)((unsigned)(y * ystepI) >> 16)) * sp);
-        for (x = x0; x < x1; x++)
-            drow[dx + x] = srow[sx + (int)((unsigned)(x * xstepI) >> 16)];
+            (sb + (size_t)(sy + (int)(((unsigned)y * ystep) >> 16)) * sp);
+        if (cm)
+        {
+            unsigned short* p2 = drow + dx + x0;
+            const unsigned short* s2 = srow + sx;
+            for (i = 0; i < w; i++) p2[i] = s2[cm[i]];
+        }
+        else
+        {
+            int x;
+            for (x = x0; x < x1; x++)
+                drow[dx + x] = srow[sx + (int)(((unsigned)x * xstep) >> 16)];
+        }
     }
-    return (long)(x1 - x0) * (long)(y1 - y0);
+    return (long)w * (long)(y1 - y0);
 }
 
-/* 某个关口没通过时的原因码 (只在真出问题时打一条, 正常帧零开销) */
+/* 某关口没通过时的原因码 (限频打一条)。 */
 static int Sb_Skip(int why)
 {
     char buf[64];
@@ -427,9 +505,8 @@ static int Sb_Skip(int why)
     return 0;
 }
 
-/* ---------------- 放大档: 把放大结果写进 Composite 的视图区 ----------------
- * 写 Composite (上屏 blit 的源) 而不是 Primary: 写 Primary 会被后面几次 blit
- * 覆盖。源与目标在同一张面, 先把 R 拷出来再原地放大, 否则采样读到刚写的像素。 */
+/* ---------------- 放大档：把放大结果写进 Composite 的视图区 ----------------
+ * 写 Composite (上屏 blit 的源)。源与目标在同一张面，先拷出再原地放大。 */
 static void* s_Scratch = 0;
 static int s_ScratchBytes = 0;
 
@@ -443,20 +520,72 @@ static unsigned char* Sb_Scratch(int need)
     return (unsigned char*)s_Scratch;
 }
 
-/* 放大档: 每帧把视口 R 整块注册成脏区。
- * 放大是就地做的 (R ⊆ A), 于是视口里每帧都留着放大过的像素, 而引擎光栅是增量
- * 的 (没标脏的格子不重画, 滚动只靠位移拷贝 + 画新空出来那条) ⇒ 没标脏的格子拿
- * 放大像素当源, 新露出来的格子显示别处内容的残影。整块标脏后放大源永远是本帧
- * 引擎的干净输出。代价 = 最多一次 1x 的整幅重画量。
- * 纯渲染脏区, 不碰 TacticalPos 与任何模拟状态, 联机安全。*/
-void SB_MarkViewDirty(void)
+/* ---------------- 帧入口：把干净 R 还给引擎 (放大档) ----------------
+ * 放大是就地做的 (R ⊆ A)，呈现后 R 里留着放大像素；引擎光栅是增量的，
+ * 视口移动时先整幅位移拷贝 (源就是 R) 再补新空条，不还原就会搬出残影。
+ * 还原用呈现前拷在 s_Scratch 里的那份干净 R。静止时引擎不读 R，
+ * 只还原即可；移动的帧另整块标脏 (见 SB_ViewPreRender)。
+ * 只认 pitch 与 R 的几何，不认面指针 (引擎双缓冲会轮换)。
+ * 纯渲染面写入，联机安全。 */
+/* 挂起的干净 R 快照 (SB_CompositeMagnify 存，下一帧入口还原)。 */
+static struct { int armed, pitch, x, y, w, h, rowB, frame, warned; }
+    s_Rst = { 0, 0, 0, 0, 0, 0, 0, -1, 0 };
+
+/* 取消挂起 (离开放大档 / 换档时)。 */
+static void Sb_DropRestore(void)
+{
+    s_Rst.armed = 0;
+    s_Rst.rowB = 0;
+}
+
+/* 把挂起的干净 R 拷回 Composite 的 R 位置。返回 1 = 还原过。
+ * 门不过就静默跳过 (下一帧自愈)。 */
+static int Sb_RestoreView(void)
+{
+    void* comp;
+    unsigned char *cb, *kb;
+    RectangleStruct* vb;
+    RectangleStruct r;
+    int cp, cw, ch, y;
+    s_Rst.armed = 0;
+    if (!s_Scratch || s_Rst.rowB <= 0) return 0;
+    comp = *(void**)ADDR_SURF_COMPOSITE;
+    if (!comp || !IsPlausiblePtr(comp)) return 0;
+    cp = GtSurfGet(comp, GtVT_GET_PITCH);
+    cw = GtSurfGet(comp, GtVT_GET_WIDTH);
+    ch = GtSurfGet(comp, GtVT_GET_HEIGHT);
+    if (cp != s_Rst.pitch || cp <= 0 || cp < cw * 2) return 0;
+    vb = (RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
+    if (!vb) return 0;
+    r = *vb;
+    /* R 须与快照一致 (换档/读档/改分辨率会改它)。 */
+    if (r.X != s_Rst.x || r.Y != s_Rst.y || r.Width != s_Rst.w || r.Height != s_Rst.h)
+        return 0;
+    if (r.Width < 16 || r.Height < 16 || r.X < 0 || r.Y < 0) return 0;
+    if (r.X + r.Width > cw || r.Y + r.Height > ch) return 0;
+    if (r.Width * 2 != s_Rst.rowB) return 0;
+    cb = GtLock(comp);
+    if (!cb)
+    {
+        if (!s_Rst.warned)
+        { s_Rst.warned = 1; LogLine("sbar: WARN view restore lock failed"); }
+        return 0;
+    }
+    kb = (unsigned char*)s_Scratch;
+    for (y = 0; y < r.Height; y++)
+        Sb_CopyPx((unsigned short*)(cb + (size_t)(r.Y + y) * cp + (size_t)r.X * 2),
+                  (const unsigned short*)(kb + (size_t)y * s_Rst.rowB), r.Width);
+    GtUnlock(comp);
+    return 1;
+}
+
+/* 整块标脏 (移动那一帧用)。 */
+static void Sb_MarkViewDirty(void)
 {
     RectangleStruct* vb = (RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
     void* tac = *(void**)(size_t)ADDR_TACTICAL_SB;
     FnRegDirtyArea fn;
     RectangleStruct r;
-    if (!s_Enable) return;
-    if (!SB_In()) return;                 /* 缩小档的 R 比窗口大, 走另一套面 */
     if (!tac || !IsPlausiblePtr(tac)) return;
     if (!vb) return;
     if (vb->Width < 64 || vb->Width > 8192) return;
@@ -469,28 +598,96 @@ void SB_MarkViewDirty(void)
     fn(tac, r, 1);
 }
 
-/* 整数倍放大的快路: 2x / 4x 两档 R 与 A 恰好是 1:n 关系, 而通用路径每个**目标**
- * 像素都要做一次乘移采样 —— 4x 下那是 A 的整幅 (1752x1048 ≈ 180 万像素/帧)、
- * 单这一项就占几毫秒。n 倍放大只需把源行横向铺 n 次、再把铺好的行纵向重复
- * n 次: 写入量降到约 1/n。起点偏移只影响目的位置, 不影响映射 (通用路径里
- * 目标 (0,0) 本来就映射到源 (0,0)), 所以 a.X/a.Y 无须为 0。 */
+/* 换档后连催几帧整块重画，盖住新露出的那圈。 */
+static int s_ViewDirtyN = 0;
+static int s_ViewDirtyFrame = -1;
+
+/* 上次呈现时的视口原点，判引擎这一趟会不会跑位移拷贝。 */
+static int s_LastOX = 0, s_LastOY = 0;
+static int s_MoveSeen = 0;
+
+/* 换档时调: R 尺寸变了，快照作废并连催几帧整块重画。 */
+static void Sb_LevelChanged(void)
+{
+    Sb_DropRestore();
+    s_ViewDirtyN = 4;
+    s_ViewDirtyFrame = -1;
+    s_Rst.warned = 0;
+    s_MoveSeen = 0;
+}
+
+/* 记下刚呈现完的视口原点。 */
+static void Sb_NoteOrigin(void)
+{
+    int ox = 0, oy = 0, vw = 0, vh = 0;
+    if (!Sb_ViewPx(&ox, &oy, &vw, &vh)) return;
+    s_LastOX = ox;
+    s_LastOY = oy;
+    s_MoveSeen = 1;
+}
+
+/* 视口原点变了就会跑位移拷贝。读不到按会处理。 */
+static int Sb_ViewMoved(void)
+{
+    int ox = 0, oy = 0, vw = 0, vh = 0;
+    if (!s_MoveSeen) return 1;
+    if (!Sb_ViewPx(&ox, &oy, &vw, &vh)) return 1;
+    return (ox != s_LastOX || oy != s_LastOY) ? 1 : 0;
+}
+
+void SB_ViewPreRender(void)
+{
+    int had, ok = 0, moved;
+    if (!s_Enable) return;
+    /* 缩小档走大面那套；1x 不用还原。 */
+    if (!SB_In()) { Sb_DropRestore(); s_ViewDirtyN = 0; s_MoveSeen = 0; return; }
+
+    /* 还原先行 (动不动都做)：位移拷贝真要读 R 时这是最后一道保险。 */
+    had = s_Rst.armed;
+    if (had) ok = Sb_RestoreView();
+
+    moved = Sb_ViewMoved();
+    if (ok && !moved && s_ViewDirtyN <= 0) return;
+
+    if (had && !ok && s_ViewDirtyN <= 0)
+    {
+        /* 还原被几何门挡掉 = 快照已过期，连催几帧标脏盖住。 */
+        s_ViewDirtyN = 4;
+        s_ViewDirtyFrame = -1;
+        if (!s_Rst.warned)
+        { s_Rst.warned = 1; LogLine("sbar: view restore stale -> dirty fallback"); }
+    }
+    if (s_ViewDirtyN > 0)
+    {
+        int fr = *(int*)(size_t)ADDR_FRAME_SB;
+        if (fr != s_ViewDirtyFrame) { s_ViewDirtyFrame = fr; s_ViewDirtyN--; }
+    }
+    /* 移动 (或换档后几帧) 才整块标脏。 */
+    Sb_MarkViewDirty();
+}
+
+/* 整数倍放大的快路: n 倍放大只需把源行横向铺 n 次、再把铺好的行纵向重复
+ * n 次，写入量约 1/n。横向按字对写。只在 n 是 2 的幂时调用 (见调用处)。 */
 static void Sb_ResampleNx(const unsigned char* sb, int sp, int sw, int sh,
                           unsigned char* db, int dp, int n, int ax, int ay)
 {
-    int y, x, i, rowBytes = sw * n * 2;
-    for (y = 0; y < sh; y++)
+    int y, x, k, rowPx = sw * n;
+    unsigned char* d0 = db + (size_t)ay * dp + (size_t)ax * 2;
+    int pairs = n >> 1;
+    for (y = 0; y < sh; y++, d0 += (size_t)n * dp)
     {
         const unsigned short* srow =
             (const unsigned short*)(sb + (size_t)y * sp);
-        unsigned char* d0 = db + (size_t)(ay + y * n) * dp + (size_t)ax * 2;
         unsigned short* d = (unsigned short*)d0;
         for (x = 0; x < sw; x++)
         {
-            unsigned short v = srow[x];
-            for (i = 0; i < n; i++) *d++ = v;
+            SbWord w = (SbWord)((unsigned)srow[x] * 0x00010001u);
+            for (k = 0; k < pairs; k++) *(SbWord*)(d + 2 * k) = w;
+            d += n;
         }
-        for (i = 1; i < n; i++)
-            memcpy(d0 + (size_t)i * dp, d0, (size_t)rowBytes);
+        for (k = 1; k < n; k++)
+            Sb_CopyPx((unsigned short*)(d0 + (size_t)k * dp),
+                      (const unsigned short*)d0, rowPx);
     }
 }
 
@@ -499,30 +696,26 @@ int SB_CompositeMagnify(void)
     RectangleStruct a, r;
     void* comp;
     unsigned char *cb, *sb;
-    int cp, cw, ch, need, y;
+    int cp, cw, ch, need, y, fr;
     if (!s_Enable) return 0;
     if (!SB_In()) return 0;
+    /* 同帧第二遍 (兜底消息帧钩) 去重，否则把放大像素当干净 R 存下。 */
+    fr = *(int*)(size_t)ADDR_FRAME_SB;
+    if (s_Rst.frame == fr) return 1;
     MOE_SetPhase(MP_COMPMAG);
     FM_GetViewRects(&a, &r);
     if (a.Width < 32 || r.Width < 16 || r.Height < 16) return Sb_Skip(1);
-    comp = *(void**)(size_t)ADDR_SURF_COMPOSITE;
+    comp = *(void**)ADDR_SURF_COMPOSITE;
     if (!comp || !IsPlausiblePtr(comp)) return Sb_Skip(2);
     cp = GtSurfGet(comp, GtVT_GET_PITCH);
     cw = GtSurfGet(comp, GtVT_GET_WIDTH);
     ch = GtSurfGet(comp, GtVT_GET_HEIGHT);
     if (cp <= 0 || cw < 8 || ch < 8) return Sb_Skip(3);
-    /* 下面所有读写都按 16bpp (unsigned short) 算。pitch 不够 2*width 说明这不是
-     * 16bpp 的面, 继续走就会每行越过行尾、最后几行直接冲出缓冲。*/
+    /* 下面按 16bpp 算：pitch 不够 2*宽就跳过，否则越过行尾。 */
     if (cp < cw * 2) return Sb_Skip(7);
-    if (a.X < 0) { a.Width += a.X; a.X = 0; }
-    if (a.Y < 0) { a.Height += a.Y; a.Y = 0; }
-    if (a.X + a.Width > cw) a.Width = cw - a.X;
-    if (a.Y + a.Height > ch) a.Height = ch - a.Y;
+    Sb_ClipA(&a, cw, ch);
     if (a.Width < 16 || a.Height < 16) return Sb_Skip(1);
-    if (r.X < 0) r.X = 0;
-    if (r.Y < 0) r.Y = 0;
-    if (r.X + r.Width > cw) r.Width = cw - r.X;
-    if (r.Y + r.Height > ch) r.Height = ch - r.Y;
+    Sb_ClipR(&r, cw, ch);
     if (r.Width < 16 || r.Height < 16) return Sb_Skip(1);
     need = r.Width * 2;
     sb = Sb_Scratch(need * r.Height);
@@ -530,14 +723,13 @@ int SB_CompositeMagnify(void)
     cb = GtLock(comp);
     if (!cb) return Sb_Skip(4);
     for (y = 0; y < r.Height; y++)
-        memcpy(sb + (size_t)y * need,
-               cb + (size_t)(r.Y + y) * cp + (size_t)r.X * 2, (size_t)need);
+        Sb_CopyPx((unsigned short*)(sb + (size_t)y * need),
+                  (const unsigned short*)(cb + (size_t)(r.Y + y) * cp
+                                             + (size_t)r.X * 2), r.Width);
     {
         int n = 0;
         if (a.Width % r.Width == 0) n = a.Width / r.Width;
-        /* 只在 n 是 2 的幂时走快路: 通用路径的 16.16 步长 (rw<<16)/dw 只有在
-         * n 整除 65536 时才精确等于 1/n (n=3 会在部分行差一格, 与通用路
-         * 输出不一致)。2x / 4x 两档正好落在这里。*/
+        /* 只在 n 是 2 的幂时走快路 (通用路 16.16 步长在 n=3 时差一格)。 */
         if (n >= 2 && n <= 8 && (n & (n - 1)) == 0
             && a.Height == r.Height * n
             && a.X >= 0 && a.Y >= 0 && a.X + a.Width <= cw && a.Y + a.Height <= ch)
@@ -546,20 +738,28 @@ int SB_CompositeMagnify(void)
         }
         else
         {
-            Sb_Resample(sb, need, r.Width, r.Height, cb, cp, cw, ch,
+            Sb_Resample(sb, need, cb, cp, cw, ch,
                         0, 0, r.Width, r.Height,
                         a.X, a.Y, a.Width, a.Height,
                         a.X, a.Y, a.X + a.Width, a.Y + a.Height);
         }
     }
-    /* 呈现之前不要往 R 写任何 1:1 内容: R ⊆ A, 刚放进去的 A 就是本帧要呈现的图,
-     * 写回去会在左上角(A 的原点侧)露出一块没放大的方块。要让 R 每帧干净靠
-     * SB_MarkViewDirty 催引擎重画, 不在这里补救。*/
+    /* 呈现前不往 R 写 1:1 内容：R ⊆ A，写回去会在左上角露出一块没放大的方块。
+     * 快照由下一帧入口的 SB_ViewPreRender 拷回 R。 */
     GtUnlock(comp);
+    s_Rst.armed = 1;
+    s_Rst.pitch = cp;
+    s_Rst.x = r.X;
+    s_Rst.y = r.Y;
+    s_Rst.w = r.Width;
+    s_Rst.h = r.Height;
+    s_Rst.rowB = need;
+    s_Rst.frame = *(int*)(size_t)ADDR_FRAME_SB;
+    Sb_NoteOrigin();
     return 1;
 }
 
-/* 缩小档自建 R 大面: 只在 Render 期间换进 [0x88731C]/[0x8872FC], 完事还原+降采样。*/
+/* 缩小档自建 R 大面：只在 Render 期间换进全局，完事还原 + 降采样。 */
 typedef void* (__cdecl    *SbAllocFn)(unsigned);
 typedef void* (__thiscall *SbDSurfCtorFn)(void*, int, int, int, int);
 typedef void  (__thiscall *SbDSurfDtorFn)(void*, int);
@@ -569,10 +769,10 @@ static void* Sb_NewSurf(int w, int h)
     SbAllocFn al = (SbAllocFn)(size_t)ADDR_OP_NEW;
     void* o;
     if (!al || w < 8 || h < 8) return 0;
-    o = al(0x24);                       /* DSurface 对象大小 (CreateAll 实测) */
+    o = al(0x24);
     if (!o || !IsPlausiblePtr(o)) return 0;
     ((SbDSurfCtorFn)(size_t)ADDR_DSURF_CTOR)(o, w, h, 1, 1);
-    /* 建面失败时虚表可能仍可读但尺寸不对, 用它当判据; 失败就销毁别用。*/
+    /* 建面失败 (尺寸对不上) 就销毁别用。 */
     if (GtSurfGet(o, GtVT_GET_WIDTH) != w || GtSurfGet(o, GtVT_GET_HEIGHT) != h)
     {
         void** vt = *(void***)o;
@@ -589,12 +789,12 @@ static void Sb_FreeSurf(void* s)
     if (!s || !IsPlausiblePtr(s)) return;
     vt = *(void***)s;
     if (!vt || !IsPlausiblePtr(vt) || !IsPlausiblePtr(vt[0])) return;
-    ((SbDSurfDtorFn)vt[0])(s, 1);       /* vtable[0](this, 1) = 引擎释放面对象 */
+    ((SbDSurfDtorFn)vt[0])(s, 1);
 }
 
-/* 新面填图外底色 (深灰, 黑看着像渲染坏了)。面缓冲内容未定义, 先铺底再画地图。 */
+/* 新面填图外底色 (深灰)，面缓冲内容未定义，先铺底再画地图。 */
 static unsigned short s_VoidPx = 0;
-static int s_VoidPxOk = 0;   /* s_VoidR/G/B 只初始化一次, 校准后像素值恒定 */
+static int s_VoidPxOk = 0;
 static unsigned short Sb_VoidPixel(void)
 {
     unsigned r, g, b, px;
@@ -609,29 +809,26 @@ static unsigned short Sb_VoidPixel(void)
     return (unsigned short)px;
 }
 
+static void Sb_FillOpaque(unsigned char* base, int pitch, int W, int H,
+                          int x0, int y0, int w, int h, unsigned short px);
+
 static void Sb_ClearSurf(void* s)
 {
     unsigned char* b;
-    int pitch, w, h, x, y;
-    unsigned short px;
+    int pitch, w, h;
     if (!s || !IsPlausiblePtr(s)) return;
     pitch = GtSurfGet(s, GtVT_GET_PITCH);
     w = GtSurfGet(s, GtVT_GET_WIDTH);
     h = GtSurfGet(s, GtVT_GET_HEIGHT);
     if (pitch <= 0 || w < 8 || h < 8) return;
     if (pitch < w * 2) return;          /* 不是 16bpp 的面: 逐行会越过行尾 */
-    px = Sb_VoidPixel();
     b = GtLock(s);
     if (!b) return;
-    for (y = 0; y < h; y++)
-    {
-        unsigned short* row = (unsigned short*)(b + (size_t)y * pitch);
-        for (x = 0; x < w; x++) row[x] = px;
-    }
+    Sb_FillOpaque(b, pitch, w, h, 0, 0, w, h, Sb_VoidPixel());
     GtUnlock(s);
 }
 
-/* 是不是我们自己造的大面 (换面/绘制前的把关用)。*/
+/* 是不是自建的大面 (换面/绘制前的把关用)。 */
 static int Sb_IsBigSurf(void* s)
 {
     if (!s || !IsPlausiblePtr(s)) return 0;
@@ -639,8 +836,7 @@ static int Sb_IsBigSurf(void* s)
             s == s_CurC || s == s_CurM || s == s_LastFinal);
 }
 
-/* 载入门: 进度屏载入中 ([0xA9FAB0] 相位非 0, 或 loader 直接调 Render 的窗口
- * [0xA9FA94] 置位), 地图与对象表是半成品, 缩小档一切重活按 1x 退回。 */
+/* 载入门：进度屏载入中地图半成品，缩小档按 1x 退回。 */
 #define ADDR_LOAD_PHASE   0x00A9FAB0u
 #define ADDR_LOAD_RENDER  0x00A9FA94u
 
@@ -657,15 +853,14 @@ static int SB_Loading(void)
     }
     return on;
 }
-/* Render 是否在栈上 (SwapIn 置 1, SwapOut/AfterMap 清 0)。栈上有 Render 时
- * PrepareSurface 推迟到帧间, 否则把引擎正在画的面换掉。 */
+/* Render 是否在栈上 (SwapIn 置 1，SwapOut/AfterMap 清 0)。 */
 static int s_InRender = 0;
 static int s_RefWarned = 0;
 
 void SB_RenderSwapIn(void)
 {
     void* c;
-    /* 载入中一切重活退回 1x (地图与对象表是半成品)。门判据见 SB_Loading。*/
+    /* 载入中一切重活退回 1x。 */
     if (SB_Loading()) return;
     s_InRender = 1;
     if (!SB_Out() || !s_SurfActive) return;
@@ -673,8 +868,7 @@ void SB_RenderSwapIn(void)
     c = *(void**)ADDR_SURF_COMPOSITE;
     s_RenderOldComp = c;
     s_RenderOldMap  = *(void**)ADDR_SURF_MAP;
-    /* 入口已是大面 = 上一帧没还原: 拿它当还原目标会把泄漏传下去 (UI 全落进大面),
-     * 改用记住的窗口面。 */
+    /* 入口已是大面 = 上一帧没还原，改用记住的窗口面。 */
     if (Sb_IsBigSurf(c))
     {
         if (!s_LeakWarned)
@@ -693,16 +887,15 @@ void SB_RenderSwapIn(void)
     s_RenderSwapped = 1;
     s_SwapSeen = 1;
     s_Suspended = 0;
-    if (s_RenderOldComp == s_CurC) return;      /* 已经装好 (泄漏自愈后重复) */
+    if (s_RenderOldComp == s_CurC) return;      /* 已经装好 */
     *(void**)ADDR_SURF_COMPOSITE = s_CurC;
     *(void**)ADDR_SURF_MAP       = s_CurM;
 }
 
-/* 让出 (换回窗口面): Render 里按窗口坐标画的两串 (光标擦除 / chrome 底栏)
- * 不能烙进 R, 0x4F44CB / 0x4F4505 再装回大面。 */
+/* 让出 (换回窗口面)：Render 里按窗口坐标画的两串不能烙进 R。 */
 void SB_RenderSuspend(int forCursor)
 {
-    (void)forCursor;   /* 恒传 0 (光标那条改走 Suspend(0) 即可自洽, 见 §22)。 */
+    (void)forCursor;
     if (!s_RenderSwapped || s_Suspended) return;
     if (!s_RenderOldComp || !IsPlausiblePtr(s_RenderOldComp)) return;
     *(void**)ADDR_SURF_COMPOSITE = s_RenderOldComp;
@@ -711,7 +904,7 @@ void SB_RenderSuspend(int forCursor)
     s_Suspended = 1;
 }
 
-/* 装回大面。[0x887314] ("当前绘制面") 须一起装, 否则引擎拿错面走虚表崩。 */
+/* 装回大面。[0x887314] 须一起装，否则引擎拿错面走虚表崩。 */
 void SB_RenderResume(void)
 {
     if (!s_Suspended) return;
@@ -727,20 +920,18 @@ void SB_RenderSwapOut(void)
     s_InRender = 0;
     if (!s_RenderSwapped) return;
     s_RenderSwapped = 0;
-    /* 跟住引擎双缓冲轮换 (0x6D4063 会永久互换两槽): 记下本帧分配, 下帧原样装回。
-     * 让出期间没跑三趟, 不能记。 */
+    /* 跟住引擎双缓冲轮换：记下本帧分配，下帧原样装回。让出期间没跑三趟就不能记。 */
     if (!s_Suspended)
     {
         s_CurC = *(void**)ADDR_SURF_COMPOSITE;
         s_CurM = *(void**)ADDR_SURF_MAP;
         s_LastFinal = s_CurC;
     }
-    else s_SwapSeen = 0;                 /* 本帧没画 ⇒ 也不能拿上一帧的画面降采样 */
+    else s_SwapSeen = 0;                 /* 本帧没画就不能拿上一帧的画面降采样 */
     s_Suspended = 0;
     g_PreCurWin = 0;
     g_PreCurSurf = 0;
-    /* [0x887314] 是 UI 阶段唯一认的面, 不能留成大面。还原目标仍是大面时用
-     * s_WinComp/s_WinMap 兜底。 */
+    /* [0x887314] 是 UI 阶段唯一认的面，不能留成大面。 */
     if (Sb_IsBigSurf(s_RenderOldComp) && s_WinComp && IsPlausiblePtr(s_WinComp))
         s_RenderOldComp = s_WinComp;
     if (Sb_IsBigSurf(s_RenderOldMap) && s_WinMap && IsPlausiblePtr(s_WinMap))
@@ -750,8 +941,7 @@ void SB_RenderSwapOut(void)
         s_LeakWarned = 1;
         LogLine("sbar: WARN window composite unknown, chrome may ghost");
     }
-    /* 无条件还原窗口面。[0x887314] 须一起还原: 引擎 UI (侧栏/cameo) 往它画,
-     * 不还原就把 UI 烙进大面。 */
+    /* 无条件还原窗口面 (引擎 UI 往它画，不还原就把 UI 烙进大面)。 */
     *(void**)ADDR_SURF_COMPOSITE = s_RenderOldComp;
     *(void**)ADDR_SURF_MAP = s_RenderOldMap;
     *(void**)ADDR_CUR_SURF_SB = s_RenderOldComp;
@@ -760,8 +950,8 @@ void SB_RenderSwapOut(void)
 /* "在场"探针 0x6D9B50: 不接管 (见 ScaleBar.h)。 */
 
 
-/* 迷雾 (0x6D7840) 越界写护栏: ViewBounds=R 而 [0x887314] 若是窗口面, 写入越界。
- * 临时换 s_CurC 挡 (引擎自己还原)。1x 空操作。 */
+/* 迷雾越界写护栏：ViewBounds=R 而 [0x887314] 是窗口面时写入越界，
+ * 临时换 s_CurC 挡。1x 空操作。 */
 static int s_ShroudWarn = 0;
 static int s_ShroudHit = 0;
 
@@ -773,8 +963,8 @@ void SB_ShroudGuard(void)
     if (!s_CurC || !IsPlausiblePtr(s_CurC)) return;
     cur = *(void**)ADDR_CUR_SURF_SB;
     if (cur == s_CurC) return;
-    if (Sb_IsBigSurf(cur)) return;       /* 我们那两张之一: 尺寸一样, 别动 */
-    /* 不发虚表调用: [0x887314] 存疑时拿它派发等于踩雷, 只做纯指针比较。 */
+    if (Sb_IsBigSurf(cur)) return;
+    /* 不发虚表调用，只做纯指针比较。 */
     s_ShroudHit++;
     *(void**)ADDR_CUR_SURF_SB = s_CurC;
 }
@@ -790,13 +980,9 @@ void SB_ShroudReport(void)
     LogLine(buf);
 }
 
-/* 崩溃处理 (MOE_CrashFilter) 调: 追记四个大面指针 + 存活标志。只读指针整数,
- * 不解引用不调虚表, 崩溃时安全。用来判定崩溃现场的面是不是我们的 (泄漏/野面)。 */
+/* 崩溃处理调：追记大面指针 + 存活标志。只读指针，不解引用，崩溃时安全。 */
 
-/* 三趟地图画完立刻调: 还原窗口面 + 降采样。须早于引擎 UI, 否则 UI 烙进大面。
- * chrome 脏缓存 ([0xB0CD44]) 降采样后清零, 下帧必重画底栏带。 */
-#define SB_CHROME_DIRTY_N 0xB0CD44u   /* chrome 脏缓存计数 ("哪些面画过底栏") */
-
+/* 三趟地图画完立刻调：还原窗口面 + 铺图外 + 降采样。须早于引擎 UI。 */
 void SB_RenderAfterMap(void)
 {
     /* Render 照原版跑, 但 s_InRender 必须清 (Render 后半仍在栈上)。*/
@@ -805,10 +991,13 @@ void SB_RenderAfterMap(void)
     SB_ShroudReport();
     /* 载入中不降采样 (三趟跑在 loader 自己的面上)。让出中由 Demagnify 内部跳过。*/
     if (SB_Out() && s_SurfActive && !SB_Loading())
+    {
+        SB_PaintVoid();
         SB_CompositeDemagnify();
+    }
 }
 
-/* 边缘卷屏: 入口点换回物理鼠标 (死区不跟缩放)。1x 恒等。 */
+/* 边缘卷屏：入口点换回物理鼠标。1x 恒等。 */
 #define SB_WWMOUSE_OFF_X  0x1C
 #define SB_WWMOUSE_OFF_Y  0x20
 void SB_EdgeScrollPointFix(Point2D* pt)
@@ -837,7 +1026,7 @@ static void SB_SurfaceDestroy(void)
             || d == s_BigComp || d == s_BigMap)
             LogLine("sbar: WARN free big surf still referenced by engine");
     }
-    /* 推迟一代释放: 引擎 Draw 里可能还缓存着这对面指针, 当场释放即 UAF。 */
+    /* 推迟一代释放：引擎 Draw 里可能还缓存着这对面指针。 */
     if (s_RetComp) Sb_FreeSurf(s_RetComp);
     if (s_RetMap) Sb_FreeSurf(s_RetMap);
     s_RetComp = s_BigComp; s_RetMap = s_BigMap;
@@ -866,19 +1055,19 @@ void SB_AppendCrashSurfs(char* buf, unsigned* p, unsigned cap)
     *p = q;
 }
 
-/* 建/复用 R 大的离屏大面。返回 1 = 可用; 0 = 失败 (置 s_SurfFail, 调用方退回 A)。*/
+/* 建/复用 R 大的离屏大面。返回 1 = 可用；0 = 失败，调用方退回 A。 */
 static int SB_EnsureBig(int w, int h)
 {
     if (s_SurfFail) return 0;
     if (w < 320 || h < 240) return 0;
-    /* 引擎不会画进大面时不能做缩小档 (只会按 R 往窗口面画 ⇒ 越界)。 */
+    /* 引擎不会画进大面时不能做缩小档。 */
     if (!g_RenderTramp)
     {
         if (!s_SurfWarned) { s_SurfWarned = 1;
             LogLine("sbar: zoom-out off (render hook missing)"); }
         return 0;
     }
-    /* 引擎每帧互换两槽, 窗口面须在"没装过大面"时抓 (见 s_WinComp), 否则全错位。 */
+    /* 引擎每帧互换两槽，窗口面须在没装过大面时抓。 */
     {
         void* wc = *(void**)ADDR_SURF_COMPOSITE;
         void* wm = *(void**)ADDR_SURF_MAP;
@@ -886,22 +1075,21 @@ static int SB_EnsureBig(int w, int h)
         {
             if (s_WinComp != wc)
             {
-                if (!s_WinComp) s_PurgeFrames = 8;   /* 首次抓到 ⇒ 之前可能烙过印记 */
+                if (!s_WinComp) s_PurgeFrames = 8;
                 s_WinComp = wc;
                 s_WinMap = wm;
             }
-            /* 主画布判据 (SB_CanvasH) 只认记住的窗口面尺寸。*/
             s_WinW = GtSurfGet(s_WinComp, GtVT_GET_WIDTH);
             s_WinH = GtSurfGet(s_WinComp, GtVT_GET_HEIGHT);
         }
     }
-    /* 尺寸只增不减 (见 s_BigCapW): 精确重建切侧栏时每帧建面闪黑。 */
+    /* 尺寸只增不减。 */
     if (s_SurfActive && w <= s_BigCapW && h <= s_BigCapH)
     {
         if (s_BigW != w || s_BigH != h)
         {
             s_BigW = w; s_BigH = h;
-            s_RedrawFrames = 4;            /* R 变了: 催引擎把新露出的那圈重画 */
+            s_RedrawFrames = 4;
         }
         return 1;
     }
@@ -914,7 +1102,7 @@ static int SB_EnsureBig(int w, int h)
             LogLine("sbar: zoom-out surface FAILED -> off"); }
         return 0;
     }
-    /* 必须两张面 (跟住引擎双缓冲轮换, 见 SwapOut): 第二张建不出就全退。 */
+    /* 须两张面 (跟住引擎双缓冲轮换)：第二张建不出就全退。 */
     s_BigMap = Sb_NewSurf(w, h);
     if (!s_BigMap)
     {
@@ -930,8 +1118,8 @@ static int SB_EnsureBig(int w, int h)
     s_BigW = w; s_BigH = h;
     s_BigCapW = w; s_BigCapH = h;
     s_SurfActive = 1;
-    s_RedrawFrames = 4;                 /* 新面全空: 逼引擎把整块重画几帧 */
-    /* 新面缓冲是未定义内容, 先清零 (黑 = 引擎图外底色), 否则图外/半格处显示堆残留。 */
+    s_RedrawFrames = 4;
+    /* 新面缓冲内容未定义，先铺底。 */
     Sb_ClearSurf(s_BigComp);
     Sb_ClearSurf(s_BigMap);
     {
@@ -946,7 +1134,7 @@ static int SB_EnsureBig(int w, int h)
     return 1;
 }
 
-/* ZBuffer/ABuffer 按 R 重建 (不走正门, 见文件头)。先建新再放旧, Render 不留空。 */
+/* ZBuffer/ABuffer 按 R 重建。先建新再放旧，Render 不留空。 */
 typedef void  (__cdecl    *SbFreeFn)(void*);
 typedef void  (__thiscall *SbBufCtorFn)(void*, RectangleStruct);
 typedef void  (__thiscall *SbBufDtorFn)(void*);
@@ -961,8 +1149,8 @@ static void* Sb_BuildBuf(int isA, const RectangleStruct* r)
     if (!p || !IsPlausiblePtr(p)) return 0;
     ct = isA ? (SbBufCtorFn)(size_t)ADDR_ABUF_CTOR
              : (SbBufCtorFn)(size_t)ADDR_ZBUF_CTOR;
-    ct(p, *r);                          /* 按值传 (ret 0x10), 不能传指针 */
-    /* 与 Set_View_Dimensions 第 3 步一致 (ctor 内部其实也写了同一个字段)。*/
+    ct(p, *r);                          /* 矩形按值传，不能传指针 */
+    /* 与 Set_View_Dimensions 第 3 步一致。 */
     if (!isA) *(unsigned*)((unsigned char*)p + 0x24) = 0x8000u;
     return p;
 }
@@ -974,7 +1162,7 @@ static void Sb_DropBuf(int isA, void* p)
     ((SbFreeFn)(size_t)ADDR_OP_DELETE)(p);
 }
 
-/* 缓冲真实尺寸直接读对象 (引擎也会重建它们, 自己记的尺寸会脱节)。 */
+/* 缓冲真实尺寸直接读对象。 */
 static int SB_BufDims(int* w, int* h)
 {
     unsigned char* z = *(unsigned char**)ADDR_ZBUF_SB;
@@ -1022,7 +1210,7 @@ static int SB_ResizeBufs(int bw, int bh)
     return 1;
 }
 
-/* 缓冲是否已经是 (w,h): 引擎也会重建它们, 以对象里的真实值为准。 */
+/* 缓冲是否已经是 (w,h)：以对象里的真实值为准。 */
 static int SB_BufIs(int w, int h)
 {
     int ww = 0, hh = 0;
@@ -1031,15 +1219,13 @@ static int SB_BufIs(int w, int h)
     return (ww == w && hh == h);
 }
 
-/* ZBuffer/ABuffer 尺寸 + 新面催重画。每循环在 FM_Poll 之后调 (SB_Poll)。*/
+/* ZBuffer/ABuffer 尺寸 + 新面催重画。每循环在 FM_Poll 之后调。 */
 void SB_PrepareSurface(void)
 {
     RectangleStruct a, r;
     if (!s_Enable) return;
-    /* 载入中地图半重建, 别碰面和缓冲, 等门开。*/
     if (SB_Loading()) return;
-    /* Render 在栈上时整个推迟 (见 s_InRender): 此时自愈会把后两趟赶进窗口面,
-     * 重建会换掉引擎正在画的面/缓冲。打一行日志, 只一次。*/
+    /* Render 在栈上时整个推迟。 */
     if (s_InRender)
     {
         if (!s_RefWarned)
@@ -1050,18 +1236,15 @@ void SB_PrepareSurface(void)
         return;
     }
     MOE_SetPhase(MP_ZBUF);
-    /* 上一帧泄漏自愈: 全局还指着大面时在这里还原 (Render 栈外, 安全)。 */
+    /* 上一帧泄漏自愈。 */
     if (s_RenderSwapped) { MOE_SetPhase(MP_SURFSWAP); SB_RenderSwapOut(); }
     FM_GetViewRects(&a, &r);
     if (!SB_Out())
     {
         if (s_SurfActive) SB_SurfaceDestroy();
         s_RedrawFrames = 0;
-        s_SurfFail = 0;                 /* 离开缩小档: 下次可重试建面 */
-        /* 离开缩小档要把 ZBuffer/ABuffer 缩回 A。判据用 SB_BufIs (读对象里的
-         * 真实尺寸) 而不是 s_BufW: 引擎自己也会重建这两块, 那时 s_BufW 还是 0 而
-         * 对象已经是别的尺寸了, 于是长期"视口 A / 裁剪器另一个尺寸" ⇒ 鼠标落在
-         * 侧栏列上时被当成还在地图里去查格 (notes/隐藏侧栏.md §4.8)。*/
+        s_SurfFail = 0;
+        /* 离开缩小档把缓冲缩回 A。以对象真实尺寸为准 (见 SB_BufIs)。 */
         if (a.Width >= 64 && a.Height >= 64 && !SB_BufIs(a.Width, a.Height))
             SB_ResizeBufs(a.Width, a.Height);
         return;
@@ -1070,11 +1253,11 @@ void SB_PrepareSurface(void)
     {
         if (!SB_EnsureBig(r.Width, r.Height)) return;   /* 建不出: 保持 A */
     }
-    /* 缩小档缓冲须按 R: Render 用 R 坐标寻址, 停在 A 尺寸即野读写。 */
+    /* 缩小档缓冲须按 R。 */
     if (!SB_BufIs(r.Width, r.Height))
     {
         SB_ResizeBufs(r.Width, r.Height);
-        /* 两块缓冲建不出来 = 内存不够。宁可退回 1x (R=A) 也不能让 Render 崩。*/
+        /* 建不出就退回 1x，不能让 Render 野读写。 */
         if (!SB_BufIs(r.Width, r.Height))
         {
             if (!SB_ResizeBufs(a.Width, a.Height))
@@ -1083,16 +1266,13 @@ void SB_PrepareSurface(void)
             SB_SurfaceDestroy();
             if (!s_SurfWarned) { s_SurfWarned = 1;
                 LogLine("sbar: zbuf alloc FAILED -> zoom-out off"); }
-            /* ⚠️ 光退面 + 退缓冲不够: ViewBounds 里还留着那个建不出来的 R, 而裁剪器
-             * 已经退回 A 尺寸 ⇒ 同帧 Render 拿 R 坐标寻址 A 缓冲 = 野读崩。必须当帧
-             * 把档位打回 1x 并重算视口 (R=A)。SB_GetViewRect 里有 s_SurfFail 兜底,
-             * 但那是**下一趟** Fm_ApplyViewWidth, 本帧 Render 已经在栈上了。*/
+            /* 必须当帧把档位打回 1x 并重算视口，否则本帧 Render 野读。 */
             Sb_SetLevel(s_LevOne, "bufalloc-fail");
             FM_SyncViewNow();
             return;
         }
     }
-    /* "洗大面": 烙进的旧印记增量渲染盖不掉, 催整块 R 重画几帧。 */
+    /* 洗大面：催整块 R 重画几帧。 */
     if (s_PurgeFrames > 0)
     {
         s_PurgeFrames--;
@@ -1103,7 +1283,7 @@ void SB_PrepareSurface(void)
             LogLine("sbar: purge big surfaces (force full redraw)");
         }
     }
-    /* 新面催重画几帧 (换视口宽度本身不标脏)。 */
+    /* 新面催重画几帧。 */
     if (s_RedrawFrames > 0)
     {
         int fr = *(int*)(size_t)ADDR_FRAME_SB;
@@ -1124,13 +1304,13 @@ void SB_PrepareSurface(void)
 int SB_CompositeDemagnify(void)
 {
     RectangleStruct a, r;
-    void* src = s_LastFinal;         /* 本帧渲染完的最终画面 (SB_RenderSwapOut 记录) */
+    void* src = s_LastFinal;
     void* dst;
     unsigned char *sb, *db;
     int sp, sw, sh, dp, dww, dhh;
     if (!s_Enable) return 0;
     if (!SB_Out() || !s_SurfActive || !src) return 0;
-    /* 本帧 Render 入口没换过大面 = 引擎没往大面画, 降采样会铺一片空白, 跳过。*/
+    /* 本帧入口没换过大面 = 引擎没往大面画，跳过。 */
     if (!s_SwapSeen) return 0;
     s_SwapSeen = 0;
     MOE_SetPhase(MP_COMPMAG);
@@ -1142,9 +1322,9 @@ int SB_CompositeDemagnify(void)
     sh = GtSurfGet(src, GtVT_GET_HEIGHT);
     if (sp <= 0 || sw < 8 || sh < 8) return Sb_Skip(3);
     if (sp < sw * 2) return Sb_Skip(7);
-    dst = *(void**)ADDR_SURF_COMPOSITE;      /* 已被 SB_RenderSwapOut 还原成窗口面 */
+    dst = *(void**)ADDR_SURF_COMPOSITE;
     if (!dst || !IsPlausiblePtr(dst) || dst == src) return Sb_Skip(2);
-    /* 目标仍是大面 = 还原漏了: 跳过并自愈 (否则大面→大面越采越糊)。 */
+    /* 目标仍是大面 = 还原漏了，跳过并自愈。 */
     if (Sb_IsBigSurf(dst))
     {
         if (!s_LeakWarned)
@@ -1159,32 +1339,27 @@ int SB_CompositeDemagnify(void)
     dhh = GtSurfGet(dst, GtVT_GET_HEIGHT);
     if (dp <= 0 || dww < 8 || dhh < 8) return Sb_Skip(3);
     if (dp < dww * 2) return Sb_Skip(7);
-    if (a.X < 0) { a.Width += a.X; a.X = 0; }
-    if (a.Y < 0) { a.Height += a.Y; a.Y = 0; }
-    if (a.X + a.Width > dww) a.Width = dww - a.X;
-    if (a.Y + a.Height > dhh) a.Height = dhh - a.Y;
+    Sb_ClipA(&a, dww, dhh);
     if (a.Width < 16 || a.Height < 16) return Sb_Skip(1);
-    if (r.X < 0) r.X = 0;
-    if (r.Y < 0) r.Y = 0;
-    if (r.X + r.Width > sw) r.Width = sw - r.X;
-    if (r.Y + r.Height > sh) r.Height = sh - r.Y;
+    Sb_ClipR(&r, sw, sh);
     if (r.Width < 16 || r.Height < 16) return Sb_Skip(1);
     sb = GtLock(src);
     if (!sb) return Sb_Skip(4);
     db = GtLock(dst);
     if (!db) { GtUnlock(src); return Sb_Skip(4); }
-    Sb_Resample(sb, sp, sw, sh, db, dp, dww, dhh,
+    Sb_Resample(sb, sp, db, dp, dww, dhh,
                 r.X, r.Y, r.Width, r.Height,
                 a.X, a.Y, a.Width, a.Height,
                 a.X, a.Y, a.X + a.Width, a.Y + a.Height);
     GtUnlock(dst);
     GtUnlock(src);
-    /* 作废 chrome 脏缓存: 我们每帧覆写 Composite, 不清底栏带不重画出重影。 */
+    /* 每帧作废 chrome 脏缓存：缩小档下底栏带有其它按帧刷新的来源，
+     * 只靠刻度条按需刷会留拖影（原因待查），先恢复每帧清。 */
     *(unsigned*)(size_t)SB_CHROME_DIRTY_N = 0;
     return 1;
 }
 
-/* 主画布判定 (窗口面 + 自建大面, 缩小档三趟期间渲染面就是大面)。 */
+/* 主画布判定 (窗口面 + 自建大面)。 */
 int SB_IsBigSurface(void* s)
 {
     if (!s || !IsPlausiblePtr(s)) return 0;
@@ -1193,7 +1368,7 @@ int SB_IsBigSurface(void* s)
     return 0;
 }
 
-/* 每帧由消息帧钩喂窗口 Composite 尺寸 (缩小档没开过也得有值)。 */
+/* 每帧由消息帧钩喂窗口 Composite 尺寸。 */
 void SB_NoteWindowSurface(void* surf, int w, int h)
 {
     if (!surf || !IsPlausiblePtr(surf)) return;
@@ -1206,7 +1381,7 @@ void SB_NoteWindowSurface(void* surf, int w, int h)
     }
 }
 
-/* 只有 pitch 的场合用这个认主画布。认不出返回 0, 调用方退回原版光栅。 */
+/* 只有 pitch 的场合用这个认主画布。认不出返回 0。 */
 int SB_CanvasH(int w)
 {
     int ww = s_WinW, hh = s_WinH;
@@ -1218,7 +1393,7 @@ int SB_CanvasH(int w)
     return 0;
 }
 
-/* 地图矩形/视口原点: 直接读引擎全局 (换算照抄 Clamp_Center)。结论见 notes。 */
+/* 地图矩形/视口原点：直接读引擎全局。 */
 static int Sb_MapPx(int* l, int* t, int* w, int* h)
 {
     int bx, gx, gy, cw, ch;
@@ -1252,8 +1427,7 @@ static int Sb_ViewPx(int* ox, int* oy, int* w, int* h)
                           && *oy > -1000000 && *oy < 1000000);
 }
 
-/* 视口比地图大时居中钳位 (原版 min>max 来回跳 ⇒ 抖动)。退化轴钉地图正中。
- * 与原版逐条对齐 (Y 夹完继续夹 X, 不短路), 结论见 notes。 */
+/* 视口比地图大时居中钳位。退化轴钉地图正中。 */
 int SB_ClampFix(Point2D* c)
 {
     static int s_tick = 0;
@@ -1269,16 +1443,15 @@ int SB_ClampFix(Point2D* c)
     vw = *(volatile int*)(size_t)0xB0CE30u;     /* ViewBounds.Width  */
     vh = *(volatile int*)(size_t)0xB0CE34u;     /* ViewBounds.Height */
     if (vw <= 16 || vh <= 16) return 0;
-    /* 退化 ⇔ 地图比视口小。等价于 min > max, 但写成了不含舍入的形式。*/
+    /* 退化 = 地图比视口小。 */
     degX = (mw < vw);
     degY = (mh < vh);
-    /* 与原版同一份推导 (见 Sb_MapPx 注释), 保证与边界处连续。*/
     cx = ml + mw / 2;
     cy = mt + mh / 2;
     mnX = vw / 2 + ml;      mxX = mnX + mw - vw;
     mnY = vh / 2 + mt;      mxY = mnY + mh - vh;
     midX = cx;              midY = cy;
-    /* 退化状态翻转时打一条 (2 秒一条): 确认 "视口 > 地图" 真的被认出来了。*/
+    /* 退化状态翻转时打一条。 */
     {
         int deg = degX || degY;
         if (deg != s_wasDeg || --s_tick <= 0)
@@ -1300,24 +1473,25 @@ int SB_ClampFix(Point2D* c)
             LogLine(buf);
         }
     }
-    /* ---- Y: 与 0x6D86B3..0x6D86C7 一致, 夹完**继续**去夹 X ---- */
+    /* Y 夹完继续夹 X (与原版同序)。 */
     if (degY) { if (c->Y != midY) { c->Y = midY; bl = 1; } }
     else if (c->Y < mnY) { c->Y = mnY; bl = 1; }
     else if (c->Y > mxY) { c->Y = mxY; bl = 1; }
-    /* ---- X: 与 0x6D86D2..0x6D86F2 一致, 夹了直接返回 1 ---- */
+    /* ---- X ---- */
     if (degX) { if (c->X != midX) { c->X = midX; bl = 1; } }
     else if (c->X < mnX) { c->X = mnX; return 1; }
     else if (c->X > mxX) { c->X = mxX; return 1; }
     return bl;
 }
 
-/* 视口比地图大时, 图外那一圈要不要钉住视口中心 (见 SB_ClampFix)。*/
+/* 视口比地图大时，图外那一圈要不要钉住视口中心。 */
 int SB_ClampNeeded(void)
 {
     return s_Enable ? 1 : 0;
 }
 
-/* 图外底色每帧重铺 (增量拷贝的旧像素没人覆盖 ⇒ 残影)。只铺两张大面。 */
+/* 图外底色每帧重铺 (增量拷贝的旧像素没人覆盖)。
+ * 首行逐像素写、其余按行拷。 */
 static void Sb_FillOpaque(unsigned char* base, int pitch, int W, int H,
                           int x0, int y0, int w, int h, unsigned short px)
 {
@@ -1328,14 +1502,13 @@ static void Sb_FillOpaque(unsigned char* base, int pitch, int W, int H,
     if (x0 + w > W) w = W - x0;
     if (y0 + h > H) h = H - y0;
     if (w <= 0 || h <= 0) return;
-    for (yy = 0; yy < h; yy++)
-    {
-        row = (unsigned short*)(base + (size_t)(y0 + yy) * pitch);
-        for (xx = 0; xx < w; xx++) row[x0 + xx] = px;
-    }
+    row = (unsigned short*)(base + (size_t)y0 * pitch) + x0;
+    for (xx = 0; xx < w; xx++) row[xx] = px;
+    for (yy = 1; yy < h; yy++)
+        Sb_CopyPx((unsigned short*)(base + (size_t)(y0 + yy) * pitch) + x0, row, w);
 }
 
-/* 在指定的大面上铺图外底色 (只用于我们自己的 R 大面, 不碰窗口面, 见 SB_PaintVoid)。*/
+/* 在指定的大面上铺图外底色。 */
 static void Sb_PaintVoidOn(void* surf)
 {
     int ml, mt, mw, mh;
@@ -1360,7 +1533,7 @@ static void Sb_PaintVoidOn(void* surf)
     sw = GtSurfGet(surf, GtVT_GET_WIDTH);
     sh = GtSurfGet(surf, GtVT_GET_HEIGHT);
     if (pitch <= 0 || sw < 8 || sh < 8 || pitch < sw * 2) return;
-    /* 面与几何对不上就不铺 (如下帧对上自然会铺), 错铺会盖掉地图位。 */
+    /* 面与几何对不上就不铺。 */
     if (sw != vw || sh != vh)
     {
         static int s_warned = 0;
@@ -1370,7 +1543,7 @@ static void Sb_PaintVoidOn(void* surf)
     px = Sb_VoidPixel();
     base = GtLock(surf);
     if (!base) return;
-    /* 直接铺大面坐标: 左右两条通高; 上下只铺中间段 (边角左右已铺, 同值不重写)。 */
+    /* 直接铺大面坐标：左右两条通高，上下只铺中间段。 */
     Sb_FillOpaque(base, pitch, sw, sh, 0, 0, bx0, vh, px);
     Sb_FillOpaque(base, pitch, sw, sh, bx1, 0, vw - bx1, vh, px);
     Sb_FillOpaque(base, pitch, sw, sh, bx0, 0, bx1 - bx0, by0, px);
@@ -1378,23 +1551,19 @@ static void Sb_PaintVoidOn(void* surf)
     GtUnlock(surf);
 }
 
-/* chrome 前后铺图外底色。只铺两张大面 (降采样会带过去)。 */
+/* 图外底色：三趟地图后、降采样前铺一次本帧最终面。
+ * 第三趟只画地图不碰图外，所以一次就够；另一张面轮到它显示的那帧自会铺。 */
 void SB_PaintVoid(void)
 {
     if (!s_Enable) return;
-    if (!SB_Zoomed()) return;
-    if (!s_RenderSwapped) return;      /* 没接管渲染面就别乱画 */
-    /* 只认我们自己的两张大面, 不认全局读出来的指针 (换挡中间态可能指向未知面)。*/
-    if (!s_CurC || !IsPlausiblePtr(s_CurC)) return;
+    if (!SB_Out() || !s_SurfActive) return;
+    if (!s_SwapSeen) return;      /* 本帧没往大面画就不用铺 */
+    if (!s_LastFinal || !IsPlausiblePtr(s_LastFinal)) return;
     MOE_SetPhase(MP_PAINTVOID);
-    Sb_PaintVoidOn(s_CurC);
-    if (s_CurM && s_CurM != s_CurC && IsPlausiblePtr(s_CurM))
-        Sb_PaintVoidOn(s_CurM);
+    Sb_PaintVoidOn(s_LastFinal);
 }
 
-/* 物理鼠标点 -> 视口点 (v = (p - A.xy) * R / A)。连续且钳到 R 内:
- * 框选拖出视口贴边停住、不盖栏 (1x 同形); 在不在视口内由返回值说,
- * 出界改由 SB_PtInRawView 用物理坐标判 (强制值会进引擎框选/算格, 野指针崩)。 */
+/* 物理鼠标点 -> 视口点。连续且钳到 R 内。出界由 SB_PtInRawView 判。 */
 int SB_MapPoint(Point2D* p)
 {
     RectangleStruct a, r;
@@ -1409,9 +1578,7 @@ int SB_MapPoint(Point2D* p)
             p->X >= a.X + a.Width || p->Y >= a.Y + a.Height);
     if (!inA)
     {
-        /* A 之外: 同公式外推再钳住, 不跳变 (窗口外点原样)。
-         * 放大缩小同一规则 (放大档以前这里直接透传物理值, 与 R 映射值
-         * 在边界上断崖, 框选跨边即跳变)。出界改由 SB_PtInRawView 判。 */
+        /* A 之外：同公式外推再钳住。出界由 SB_PtInRawView 判。 */
         int ww = GtGameW(), wh = GtGameH();
         if (ww <= 0 || wh <= 0) return 1;
         if (p->X < 0 || p->Y < 0 || p->X >= ww || p->Y >= wh) return 1;
@@ -1438,7 +1605,7 @@ int SB_MapPoint(Point2D* p)
     return 1;
 }
 
-/* 视口点是否落在 R 里 (窗口外残留值兜底; 栏带改由 SB_PtInRawView 判)。1x/放大恒 1。 */
+/* 视口点是否落在 R 里。1x/放大恒 1。 */
 int SB_PtInView(int vx, int vy)
 {
     RectangleStruct a, r;
@@ -1451,8 +1618,7 @@ int SB_PtInView(int vx, int vy)
     return 1;
 }
 
-/* 物理点是否落在视口 A 里。映射值现已全钳制 (框选不断崖), 出界只能看物理:
- * 总闸与各直接调引擎查询处先过它, 栏带点击一律拒掉。 */
+/* 物理点是否落在视口 A 里。 */
 int SB_PtInRawView(int x, int y)
 {
     RectangleStruct a;
@@ -1487,22 +1653,29 @@ void SB_MapDeltaToScreen(int* dx, int* dy)
 }
 
 /* ---------------- 刻度条几何 ----------------
- * 控件 = 上面一条档位文字带 + 一道缝 + 下面的滑条带, 三段高度固定不重叠:
- *   文字带 (FontPx+2) | 缝 2px | 滑条带 12px
- * 滑条带里那条**贯穿的横线贴控件底部** (3px), 刻度与旋钮坐在它上面 —— 横线挪到底
- * 之后滑条带从 21 压到 12, 整控件 (FontPx=12 时) 28px, 比底部工具栏带 (32px) 还矮。 */
+ * 控件 = 文字带 (FontPx+2) + 缝 1px + 滑条带 12px + 底留白 2px。
+ * 滑条带内 (相对 rowY)：刻度线 2..8，黄色滑块 1..9，贯穿横条 9..11。 */
 #define SB_BAND_H    32    /* 底部工具栏带高 (与 FullMap.cpp 的 winH-32 同一条) */
 #define SB_SLIDER_H  12    /* 滑条带总高 */
 #define SB_LINE_H    3     /* 贯穿横线高, 贴控件底 */
-#define SB_TEXT_GAP  2
-#define SB_TICK_H    (SB_SLIDER_H - SB_LINE_H)   /* 刻度/旋钮/+- 那截 */
+#define SB_TEXT_GAP  1     /* 文字带与滑条带之间的缝 */
+#define SB_TICK_H    7     /* 刻度/± 那截 (比滑条带少 2px: 刻度线压低 2) */
 #define SB_BOT_PAD   2     /* 横线底下再留 2px: 任何笔画都不许贴控件最后一行 */
 
-/* + 和 - 画在刻度带里 (不骑在横线上): 骑横线的话竖笔画只剩 2px 露在横条上方,
- * 整个字看着就是个三角, 而且紧贴控件最后一行。带里居中才画得出竖笔上下对称。 */
+/* 黄色滑块：高度不跟刻度线走，下移压住横线首行。 */
+#define SB_KNOB_H    9
+#define SB_KNOB_DY   1
+
+/* 刻度线下移量 (坐在横线正上方)。 */
+#define SB_TICK_DY   2
+
+/* 贯穿横条左端外扩量 (右端不动)。 */
+#define SB_LINE_X0   (-2)
+
+/* + / - 画在刻度带里居中 (不骑横线)。 */
 #define SB_SIGN_C    (SB_TICK_H / 2)   /* 带内中心那一行 */
 #define SB_SIGN_BAR  3                 /* 横笔高 */
-#define SB_SIGN_STEM 7                 /* 竖笔高 (横条上下各露 2px) */
+#define SB_SIGN_STEM SB_TICK_H         /* 竖笔高 (与刻度带同高, 占满) */
 static int s_TextH;     /* 档位文字带高 (按 s_FontPx 估) */
 static int s_WidgetH;   /* 文字带 + 缝 + 滑条带 */
 static int s_HoverLev = -1;   /* 鼠标悬着的档位, -1 = 不在条上 (SB_Poll 每帧填) */
@@ -1541,20 +1714,16 @@ static void Sb_Place(void)
     s_BarH = SB_SLIDER_H;
     s_WidgetH = s_TextH + SB_TEXT_GAP + s_BarH + SB_BOT_PAD;
     s_BarW = s_Len;
-    /* 右侧基准恒为"侧栏列左缘" = 窗口宽 - 168: 与侧栏显隐 (F11 三态) 无关,
-     * 也不跟视口宽度走 —— 条子只跟着窗口摆。条右端再往左让 s_X 像素。*/
+    /* 右侧基准恒为侧栏列左缘，与 F11 显隐无关。 */
     s_BarX = gw - sbw - s_X - s_BarW;
     if (s_BarX < 0) s_BarX = 0;
     if (s_BarX + s_BarW > gw) s_BarW = gw - s_BarX;
-    /* 默认盖底部工具栏带 (缩放取样碰不到它, 工具栏与条都保持 1:1)。
-     * s_Y 是**下边距** (控件底边到窗口底边), 不是控件上边的绝对 y。记成绝对 y 的
-     * 话填个 4 就把控件扔到屏幕顶上 (y=4..32), 落在地图视口 A 里面, 看着像整条
-     * 消失。Y=-1 自动 = 贴带顶 (gh-32); 控件 28px 时它等价于下边距 4。*/
+    /* 默认盖底部工具栏带。s_Y 是下边距 (控件底边到窗口底边)，Y=-1 贴带顶。 */
     if (s_Y >= 0) s_BarY = gh - s_Y - s_WidgetH;
     else s_BarY = gh - SB_BAND_H;
     if (s_BarY + s_WidgetH > gh) s_BarY = gh - s_WidgetH;
     if (s_BarY < 0) s_BarY = 0;
-    /* 几何变了才打一条 (Sb_Place 每帧都跑)。 */
+    /* 几何变了才打一条。 */
     if (s_BarX != s_LastX || s_BarY != s_LastY || s_BarW != s_LastW)
     {
         char g1[16], buf[128];
@@ -1583,8 +1752,7 @@ static void Sb_SetLevel(int lv, const char* why)
     unsigned p = 0;
     if (!s_Enable) return;
     if (lv < 0 || lv >= s_NLev || lv == s_Level) return;
-    /* MAX 算不出 (地图尺寸读不到 / 过小) ⇒ 退到最高那一档, 不静默变 1x。
-     * R 超限走钳制 (Sb_ClampScale), 不走这条。*/
+    /* MAX 算不出 ⇒ 退到最高那一档，不静默变 1x。R 超限走钳制，不走这条。 */
     if (lv == SB_LEV_MAX)
     {
         Sb_DropMax();
@@ -1598,6 +1766,8 @@ static void Sb_SetLevel(int lv, const char* why)
     if (lv != s_Level) Sb_DropMax();
     s_Level = lv;
     Sb_SyncZoomed();
+    /* R 随档变，快照作废并连催几帧重画。 */
+    Sb_LevelChanged();
     p = AppendCStr(buf, p, "sbar: level=", sizeof(buf));
     UtoA((unsigned)s_Level, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " scale=", sizeof(buf));
@@ -1606,8 +1776,7 @@ static void Sb_SetLevel(int lv, const char* why)
     p = AppendCStr(buf, p, why, sizeof(buf));
     p = AppendCStr(buf, p, " drew=", sizeof(buf));
     UtoA((unsigned)s_Drew, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    /* zbuf = 从引擎对象读出的裁剪器真实尺寸, zref = 我们自己记的。
-     * 缩小档两者都该等于 R, 其余档等于 A。*/
+    /* zbuf = 引擎对象里的真实尺寸，zref = 我们记的。 */
     {
         int zw = 0, zh = 0;
         char b2[16], b3[16];
@@ -1625,17 +1794,14 @@ static void Sb_SetLevel(int lv, const char* why)
 }
 
 /* 引擎重建了渲染面 (读档 / 改分辨率) ⇒ 缩放退回 1x。
- * 换面会压 `s_ForceRedraw`, 逼侧栏走全量重画, 那条路调 `ComputeLayout` 并按
- * **当时的 ViewBounds** 重推 cameo 锚点。这几帧 ViewBounds 是 R ⇒ 锚点被写成
- * `R.Width + 22`, 拷贝落点越出 168 宽的侧栏条带。1x 时 R == A, 这条链与原版
- * 逐位相同。细节见 notes/隐藏侧栏.md §4.3b。
- * 按"读档不保留缩放"处理: 不记忆读档前挡位。*/
+ * 换面会触发侧栏全量重画，那条路按 ViewBounds 重推锚点，
+ * 须让 ViewBounds 先回到 A。须在 Fm_ApplyViewWidth 之前调。 */
 void SB_ResetZoom1x(void)
 {
     char b1[16], buf[128];
     unsigned p = 0;
     if (!s_Enable) return;
-    if (s_Level == s_LevOne) return;      /* 已是 1x: 什么都不用做 */
+    if (s_Level == s_LevOne) return;
     p = AppendCStr(buf, p, "sbar: level=", sizeof(buf));
     UtoA((unsigned)s_Level, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " -> ", sizeof(buf));
@@ -1645,6 +1811,7 @@ void SB_ResetZoom1x(void)
     LogLine(buf);
     s_Level = s_LevOne;
     Sb_SyncZoomed();
+    Sb_LevelChanged();
 }
 
 /* 每循环: 摆矩形 + 点击换档。 */
@@ -1653,13 +1820,11 @@ void SB_Poll(void)
     int mx, my, down, lv0;
     if (!s_Enable) return;
     Sb_InitLabels();
-    /* 缩小档的离屏大面 + ZBuffer/ABuffer 尺寸必须在本帧 Render 之前准备好。 */
+    /* 大面 + 缓冲须在本帧 Render 之前准备好。 */
     SB_PrepareSurface();
     Sb_Place();
     if (!GtMouseGameXY(&mx, &my)) { s_LbDown = 0; s_HoverLev = -1; return; }
     lv0 = s_Level;
-    /* 悬停档位 (给绘制用: 只有它和 4x/1x/0.5x 会画字)。窗口尺寸或地图变了之后
-     * MAX 可能不再支持, 在这里退到最高那一档 (lv0 之前取, 退档也能触发视口同步)。*/
     s_HoverLev = Sb_OverBar(mx, my) ? Sb_LevelAt(mx) : -1;
     if (s_Level == SB_LEV_MAX)
     {
@@ -1674,9 +1839,7 @@ void SB_Poll(void)
         s_LbDown = 1;
     }
     else if (!down) s_LbDown = 0;
-    /* 改档当帧就要把视口和裁剪器都跟上: FM_SyncViewNow 同步视口 (幂等), 再跑一趟
-     * prepare 补裁剪器尺寸 —— 缩小档引擎拿 **R 坐标**寻址 ZBuffer/ABuffer, 停在旧
-     * 档尺寸就是野读写。prepare 幂等 (SB_BufIs 对得上零开销)。*/
+    /* 改档当帧把视口和裁剪器跟上 (prepare 幂等)。 */
     if (s_Level != lv0)
     {
         FM_SyncViewNow();
@@ -1703,7 +1866,11 @@ static void Sb_Fill(unsigned char* base, int pitch, int W, int H,
     }
 }
 
-/* 条的全部像素 (无底板/边框, 全 alpha=255 直写)。ox/oy = 原点偏移。 */
+/* 刻度条只画不擦：换档/悬停切档后旧像素会留在底栏带上。
+ * 放大档须在切换时刻刷一次 chrome 脏缓存，让引擎重画底栏带盖掉旧像素。 */
+static long s_BarSig = -1;
+
+/* 条的全部像素 (无底板/边框)。ox/oy = 原点偏移。 */
 static void Sb_Paint(unsigned char* base, int pitch, int W, int H, int ox, int oy)
 {
     int bx = s_BarX + ox, by = s_BarY + oy;   /* by = 控件顶 = 文字带顶 */
@@ -1713,27 +1880,37 @@ static void Sb_Paint(unsigned char* base, int pitch, int W, int H, int ox, int o
     int ga = Sb_Gx0(), gb = Sb_Gx1(), gn = s_NLev > 1 ? s_NLev - 1 : 1;
     wchar_t buf[10];
     int gx0 = Sb_Gx0() + ox, gx1 = Sb_Gx1() + ox;
+    long sig;
+
+    sig = s_Level * 2 + (s_HoverLev + 1);
+    if (sig != s_BarSig)
+    {
+        s_BarSig = sig;
+        *(unsigned*)(size_t)SB_CHROME_DIRTY_N = 0;
+    }
+
     /* 刻度 + 旋钮坐在横线上方 */
     for (i = 0; i < s_NLev; i++)
     {
         dx = Sb_DetentX(i, ga, gb, gn) + ox;
-        Sb_Fill(base, pitch, W, H, dx - 1, rowY, 2, SB_TICK_H, 198, 206, 216, 255);
+        Sb_Fill(base, pitch, W, H, dx - 1, rowY + SB_TICK_DY, 2, SB_TICK_H,
+                198, 206, 216, 255);
     }
-    /* 贯穿横线 (贴控件底, 底下还有 SB_BOT_PAD 留白) */
-    Sb_Fill(base, pitch, W, H, gx0, lineY, gx1 - gx0 + 1, SB_LINE_H, 88, 92, 100, 255);
-    /* 左"+" 右"-": 在刻度带里居中, 竖笔上下对称露出 2px */
+    /* 贯穿横条 */
+    Sb_Fill(base, pitch, W, H, gx0 + SB_LINE_X0, lineY,
+            gx1 - gx0 - SB_LINE_X0 + 1, SB_LINE_H, 88, 92, 100, 255);
+    /* 左 + 右 - */
     dx = bx + 6;
     Sb_Fill(base, pitch, W, H, dx - 4, rowY + SB_SIGN_C - 1, 9, SB_SIGN_BAR, 232, 236, 242, 255);
     Sb_Fill(base, pitch, W, H, dx - 1, rowY + SB_SIGN_C - SB_SIGN_STEM / 2, 3, SB_SIGN_STEM,
             232, 236, 242, 255);
     dx = bx + s_BarW - 7;
     Sb_Fill(base, pitch, W, H, dx - 4, rowY + SB_SIGN_C - 1, 9, SB_SIGN_BAR, 232, 236, 242, 255);
-    /* 当前档的黄色指示条: 与刻度同高 (SB_TICK_H), 比刻度宽, 一眼认得出 */
+    /* 当前档的黄色滑块 */
     dx = Sb_DetentX(s_Level, ga, gb, gn) + ox;
-    Sb_Fill(base, pitch, W, H, dx - 4, rowY, 8, SB_TICK_H, 12, 13, 16, 255);
-    Sb_Fill(base, pitch, W, H, dx - 3, rowY, 6, SB_TICK_H, 250, 214, 80, 255);
-    /* 档位文字: 只在文字带里 (by .. by+s_TextH-1), 不碰滑条。
-     * 常显的只有 4x / 1x / 0.5x 三档; 其余 (含 max) 只有鼠标悬在其上时才画。*/
+    Sb_Fill(base, pitch, W, H, dx - 4, rowY + SB_KNOB_DY, 8, SB_KNOB_H, 12, 13, 16, 255);
+    Sb_Fill(base, pitch, W, H, dx - 3, rowY + SB_KNOB_DY, 6, SB_KNOB_H, 250, 214, 80, 255);
+    /* 档位文字：只在文字带里。常显 4x / 1x / 0.5x，其余悬停才画。 */
     if (!GdiEnsure(s_FontPx, VecText_Bold(), 7, VecText_FontFace())) return;
     th = g_G->adv;
     if (th > s_TextH - 1) th = s_TextH - 1;
@@ -1747,12 +1924,13 @@ static void Sb_Paint(unsigned char* base, int pitch, int W, int H, int ox, int o
         if (!n) continue;
         tw = RenderLine(buf, n);
         if (tw <= 0) continue;
+        /* 不透明覆盖：幂等，每帧照画不叠亮。 */
         BlitCoverage(base, pitch, W, H, Sb_DetentX(i, ga, gb, gn) + ox - tw / 2, by,
-                     tw + 2, th, 242, 246, 252, 100);
+                     tw + 2, th, 242, 246, 252, 255);
     }
 }
 
-/* 锁面 + 调 Sb_Paint 的共用壳。bpp 槽返回的是**字节**数 (16 位色=2)。*/
+/* 锁面 + 调 Sb_Paint 的共用壳。bpp 是字节数 (16 位色 = 2)。 */
 static int Sb_PaintSurface(void* surf)
 {
     unsigned char* base;
@@ -1795,7 +1973,7 @@ static int Sb_PaintSurface(void* surf)
 int SB_DrawToComposite(void)
 {
     void* surf = *(void**)ADDR_SURF_COMPOSITE;
-    /* 条画窗口面: 画进大面会跟降采样落到画面中部。 */
+    /* 条画窗口面：画进大面会跟降采样落到画面中部。 */
     if (Sb_IsBigSurf(surf)) return 0;
     if (Sb_PaintSurface(surf)) { s_Drew = 1; return 1; }
     return 0;

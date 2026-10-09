@@ -343,7 +343,7 @@ void* g_RenderTramp = NULL;
 static void RenderEntrySwap(void)
 {
     /* 必须在引擎动 R 之前 (SwapIn 那一步会把 [0x88731C] 换成大面)。*/
-    SB_MarkViewDirty();
+    SB_ViewPreRender();
     SB_RenderSwapIn();
 }
 static void* g_CallRender = (void*)RenderEntrySwap;
@@ -410,7 +410,6 @@ void* g_ChromePostTramp = NULL;
 static void ChromePreC(void)
 {
     SB_RenderSuspend(0);
-    SB_PaintVoid();   /* 图外铺窗口面 (此刻地图是窗口坐标, 残影源头在这张面上)。 */
 }
 static void* g_CallChromePre = (void*)ChromePreC;
 __attribute__((naked)) void MOExperience_ChromePreEntry(void)
@@ -428,7 +427,6 @@ __attribute__((naked)) void MOExperience_ChromePreEntry(void)
 static void ChromePostC(void)
 {
     SB_RenderResume();
-    SB_PaintVoid();   /* 图外铺大面 (第三趟前清掉这张面上的残影源头)。 */
 }
 static void* g_CallChromePost = (void*)ChromePostC;
 __attribute__((naked)) void MOExperience_ChromePostEntry(void)
@@ -1124,10 +1122,10 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     GtRefreshWinSize(tick);
 
     /* 缩放呈现 (UI 链之前): 改 Composite (它是上屏 blit 的源, 改 Primary 只闪一瞬)。
-     * 缩小档的还原+降采样在 AfterMap (0x4F451B) 做, 这样引擎 UI 不会落进大面;
+     * 缩小档的还原+铺图外+降采样在 AfterMap (0x4F451B) 做, 这样引擎 UI 不会落进大面;
      * 该钩没装上时才回退到这里跑。 */
     if (SB_In()) SB_CompositeMagnify();
-    else if (SB_Out() && !g_AfterMapTramp) SB_CompositeDemagnify();
+    else if (SB_Out() && !g_AfterMapTramp) { SB_PaintVoid(); SB_CompositeDemagnify(); }
 
     drew = MOE_DrawUILayers(surf, surfW, surfH, surfPitch, &bitLineH, &screenW);
 
