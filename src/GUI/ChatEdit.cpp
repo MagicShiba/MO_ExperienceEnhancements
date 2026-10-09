@@ -11,6 +11,8 @@
  *     导航键 (箭头/Home/End/Delete) 到不了 Input, 每帧 GetAsyncKeyState 轮询
  *     (边缘立刻一步, 按住 400ms 后 33ms 连发), 只在游戏主窗当前台时动手,
  *     组字中放行给 IME。不装全局键盘钩 (会卡住后台程序取键)。
+ *   历史: 回车/提交时记行 (Esc 取消不记, 相邻重复不记, 32 行, 纯输入框本地);
+ *     开框时上下键翻 (Up 更旧/Down 更新, 到底恢复翻前行), 改字即离翻。
  *   文本全程镜像进原生 EditBuffer, 提交/取消走原生 Input, 发包与手打一致,
  *     不碰模拟/网络函数 (单机+联机同路)。
  *   显示: 原生编辑行由 ChatEdit_HideNative 隐藏 (0x5D49B4, 3B, 永不返回 0,
@@ -106,6 +108,17 @@ static int ce_CompLen = 0;
 static int ce_CompCur = 0;
 static int ce_CompH = 0;      /* IME 组合行高缓存 (>0=已测到, 开框清零) */
 
+/* 输入历史: 发过的行 (回车/提交时记, Esc 取消不记, 相邻重复不记)。
+ * ce_HistIdx<0=不在翻, 否则 0=最新。起翻先 stash 当前行, Down 到底恢复它。 */
+#define CE_HIST_N 32
+static wchar_t ce_Hist[CE_HIST_N][CE_BUF_N];
+static int ce_HistLen[CE_HIST_N];
+static int ce_HistCount = 0;
+static int ce_HistIdx = -1;
+static wchar_t ce_HistStash[CE_BUF_N];
+static int ce_HistStashLen = 0;
+static int ce_Esc = 0;   /* 本次开框按过 Esc (取消语义, 关框不记历史) */
+
 static unsigned ce_CmdTick = 0; /* Ctrl 组合键上次处理时刻 (Input 钩/轮询握手) */
 static unsigned ce_NavTick = 0; /* 退格/Delete 上次处理时刻 (Input 钩/轮询握手) */
 /* WM_CHAR 摘除钩 (定义在后, 开框时懒安装): 行缓冲游标快照 + 安装前置声明 */
@@ -117,6 +130,7 @@ typedef struct { int vk; int prev; unsigned nextRep; } CENavKey;
 static CENavKey ce_NavKeys[] = {
     { VK_LEFT, 0, 0 }, { VK_RIGHT, 0, 0 },
     { VK_HOME, 0, 0 }, { VK_END, 0, 0 }, { VK_DELETE, 0, 0 },
+    { VK_UP, 0, 0 }, { VK_DOWN, 0, 0 },   /* 上下翻输入历史 */
     { VK_BACK, 0, 0 },   /* 退格: 对话框上游直改原生时 Input 钩收不到, 轮询后备 */
 };
 static int ce_CtrlPrev[4] = { 0, 0, 0, 0 };   /* C/X/V/A 边沿 */
@@ -264,6 +278,7 @@ static int CE_BudgetOk(int newLen, int fieldW)
 static void CE_DeleteRange(int lo, int hi)
 {
     int i;
+    ce_HistIdx = -1;   /* 改字即离翻历史 */
     if (lo < 0 || hi <= lo) return;
     if (hi > ce_Len) hi = ce_Len;
     for (i = hi; i <= ce_Len; i++) ce_Buf[i - (hi - lo)] = ce_Buf[i];
@@ -276,6 +291,7 @@ static void CE_InsertOne(wchar_t c, int fieldW)
 {
     int lo, hi, i;
     int keep;
+    ce_HistIdx = -1;   /* 改字即离翻历史 */
     CE_SelRange(&lo, &hi);
     if (lo >= 0) CE_DeleteRange(lo, hi);
     if (ce_Len >= CE_BUF_N - 1) return;
@@ -438,6 +454,80 @@ static void CE_DoPaste(int fieldW)
     }
     CE_Mirror();
     CE_BlinkReset();
+}
+
+/* ---------------- 输入历史 (上下键翻, 只挂输入框, 与联机无关) ----------------
+ * 记: 回车分支记 + 关框补记 (单机对话框提交不走 Input, Esc 取消不记)。
+ * 两处双记由"相邻重复不记"合并。翻: Up=更旧, Down=更新, 到底恢复翻前行。
+ * 改字 (Insert/Delete) 即离翻; 光标键移动不离翻, Up 从当前位继续。 */
+
+static void CE_HistPush(void)
+{
+    int i, k;
+    if (ce_Len <= 0 || ce_Len >= CE_BUF_N) return;
+    if (ce_HistCount > 0 && ce_HistLen[0] == ce_Len)
+    {
+        for (k = 0; k < ce_Len; k++)
+            if (ce_Hist[0][k] != ce_Buf[k]) break;
+        if (k >= ce_Len) return;   /* 相邻重复不记 (兼并回车+关框双记) */
+    }
+    if (ce_HistCount < CE_HIST_N) ce_HistCount++;
+    for (i = ce_HistCount - 1; i > 0; i--)
+    {
+        int l = ce_HistLen[i - 1];
+        ce_HistLen[i] = l;
+        for (k = 0; k <= l; k++) ce_Hist[i][k] = ce_Hist[i - 1][k];
+    }
+    ce_HistLen[0] = ce_Len;
+    for (k = 0; k <= ce_Len; k++) ce_Hist[0][k] = ce_Buf[k];
+}
+
+static void CE_HistApply(int idx)
+{
+    int k;
+    for (k = 0; k <= ce_HistLen[idx]; k++) ce_Buf[k] = ce_Hist[idx][k];
+    ce_Len = ce_HistLen[idx];
+    ce_Cur = ce_Len;
+    ce_Anchor = -1;
+    ce_ViewX = 0;   /* Render 按光标重滚 */
+    CE_Mirror();
+    CE_BlinkReset();
+}
+
+static void CE_HistMove(int dir)
+{
+    int k;
+    if (dir < 0)   /* Up: 更旧 */
+    {
+        if (ce_HistCount <= 0) return;
+        if (ce_HistIdx < 0)
+        {
+            int n = (ce_Len < CE_BUF_N) ? ce_Len : CE_BUF_N - 1;
+            for (k = 0; k < n; k++) ce_HistStash[k] = ce_Buf[k];
+            ce_HistStash[n] = 0;
+            ce_HistStashLen = n;
+            ce_HistIdx = 0;
+        }
+        else if (ce_HistIdx < ce_HistCount - 1) ce_HistIdx++;
+        else return;   /* 已到最旧 */
+        CE_HistApply(ce_HistIdx);
+    }
+    else   /* Down: 更新, 到底恢复翻前行 */
+    {
+        if (ce_HistIdx < 0) return;
+        if (ce_HistIdx > 0) { ce_HistIdx--; CE_HistApply(ce_HistIdx); }
+        else
+        {
+            for (k = 0; k <= ce_HistStashLen; k++) ce_Buf[k] = ce_HistStash[k];
+            ce_Len = ce_HistStashLen;
+            ce_Cur = ce_Len;
+            ce_Anchor = -1;
+            ce_ViewX = 0;
+            ce_HistIdx = -1;
+            CE_Mirror();
+            CE_BlinkReset();
+        }
+    }
 }
 
 /* ---------------- 组字轮询 (Imm, 无钩) ---------------- */
@@ -645,6 +735,8 @@ static void CE_ApplyNav(int vk)
     int ctrl = CE_KeyDown(VK_CONTROL);
     if (vk == VK_DELETE) { CE_DoDelete(); CE_Mirror(); }
     else if (vk == VK_BACK) { CE_DoBackspace(); CE_Mirror(); }
+    else if (vk == VK_UP) CE_HistMove(-1);
+    else if (vk == VK_DOWN) CE_HistMove(1);
     else CE_NavMove(vk, shift, ctrl);
     ce_NavTick = GetTickCount();
 }
@@ -727,7 +819,7 @@ static void CE_Activate(void)
     wchar_t* nb = (wchar_t*)(CE_MSGLIST + CE_OFF_EDITBUF);
     int n = 0;
     unsigned k;
-    ce_CompLen = 0; ce_CompCur = 0; ce_CompH = 0;
+    ce_CompLen = 0; ce_CompCur = 0; ce_CompH = 0; ce_HistIdx = -1; ce_Esc = 0;
     /* 同步原生缓冲: 只认领, 不显示。AddEdit 预填的发送模板原样未动则发送时剥离,
      * 自己和原生缓冲都归零 (镜像覆盖模板)。 */
     if (IsPlausiblePtr(nb))
@@ -765,6 +857,8 @@ static void CE_Activate(void)
 
 static void CE_Deactivate(void)
 {
+    if (ce_Len > 0 && !ce_Esc) CE_HistPush();   /* 关框补记 (单机对话框提交不走 Input; 回车已记过, 相邻去重合并) */
+    ce_Esc = 0;
     ce_Active = 0;
     ce_Anchor = -1;
     ce_CompLen = 0;
@@ -1201,10 +1295,11 @@ int __fastcall ChatEdit_InputHook(void* t, void* edxUnused,
         CE_StripPrefix();
         /* 发送指纹存档 (单机回声跟玩家色用, 见上) */
         if (ce_Len > 0) CE_NoteSent();
+        CE_HistPush();   /* 记历史 (空行不记, 见内判) */
         return ce_OrigInput(t, edxUnused, keySlot, key);
     }
     if (ukey == 0x1Bu)
-        return ce_OrigInput(t, edxUnused, keySlot, key);   /* Esc 原生关闭 */
+    { ce_Esc = 1; return ce_OrigInput(t, edxUnused, keySlot, key); }   /* Esc 原生关闭, 不记历史 */
     if (ukey == 0x08u)
     {
         /* 退格: 轮询优先, 这里只做后备 (150ms 握手防双删) */
