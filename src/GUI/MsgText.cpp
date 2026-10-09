@@ -838,12 +838,11 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
             if (g_Cfg.Shadow && g_Cfg.ShadowOpacity > 0 &&
                 (boardOp > 0 || B->shadowNoBoard))
             {
-                int ox, oy;
-                for (oy = 0; oy < g_Cfg.ShadowSize; oy++)
-                    for (ox = 0; ox < g_Cfg.ShadowSize; ox++)
-                        BlitCoverage(locked, surfPitch, surfW, surfH,
-                                     x + g_Cfg.ShadowDX + ox, ly + g_Cfg.ShadowDY + oy,
-                                     w + 2, adv, 0, 0, 0, (unsigned)(g_Cfg.ShadowOpacity * B->fade / 100));
+                /* 单遍并集阴影 (见 GdiText.h 的 BlitCoverageShadow) */
+                BlitCoverageShadow(locked, surfPitch, surfW, surfH,
+                                   x, ly, w + 2, adv,
+                                   g_Cfg.ShadowSize, g_Cfg.ShadowDX, g_Cfg.ShadowDY,
+                                   (unsigned)(g_Cfg.ShadowOpacity * B->fade / 100));
             }
             BlitCoverage(locked, surfPitch, surfW, surfH, x, ly, w + 2, adv, fg.R, fg.G, fg.B, (unsigned)B->fade);
             drawn++;

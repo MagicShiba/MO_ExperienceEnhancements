@@ -205,19 +205,15 @@ static void CE_SelRange(int* lo, int* hi)
     *hi = (ce_Anchor < ce_Cur) ? ce_Cur : ce_Anchor;
 }
 
-/* GDI 自然宽度 (与 RenderLine 同口径: ABC 全宽, 无 DigitTrack)。
- * 调用前须 GdiEnsure 成功 (g_G->dc 有效)。 */
+/* GDI 自然宽度 (ABC 全宽, 无 DigitTrack)。须先 GdiEnsure 成功。 */
 static int CE_TextWidth(const wchar_t* s, int n)
 {
     int tot = 0, i;
     if (!g_G || !g_G->dc || !s || n <= 0) return 0;
     for (i = 0; i < n; i++)
     {
-        ABC abc;
-        int ga;
-        if (!GetCharABCWidthsW(g_G->dc, s[i], s[i], &abc)) return -1;
-        ga = abc.abcA + abc.abcB + abc.abcC;
-        if (ga < 0) ga = 0;
+        int ga = GtCharAdv(s[i]);
+        if (ga < 0) return -1;
         tot += ga;
     }
     return tot;
@@ -532,6 +528,20 @@ static void CE_HistMove(int dir)
 
 /* ---------------- 组字轮询 (Imm, 无钩) ---------------- */
 
+/* 本帧 IME 上下文: PollIME 取得, PositionIME 复用, 帧末释放。 */
+static HIMC ce_FrameImc = NULL;
+static HWND  ce_FrameImcWnd = NULL;
+
+static void CE_ReleaseFrameImc(void)
+{
+    if (ce_FrameImc)
+    {
+        ImmReleaseContext(ce_FrameImcWnd, ce_FrameImc);
+        ce_FrameImc = NULL;
+        ce_FrameImcWnd = NULL;
+    }
+}
+
 static void CE_PollIME(void)
 {
     HWND fg;
@@ -539,12 +549,15 @@ static void CE_PollIME(void)
     LONG r;
     ce_CompLen = 0;
     ce_CompCur = 0;
+    CE_ReleaseFrameImc();
     fg = GetForegroundWindow();
     if (fg && fg == ce_FgWnd)
     {
         himc = ImmGetContext(fg);
         if (himc)
         {
+            ce_FrameImc = himc;
+            ce_FrameImcWnd = fg;
             r = ImmGetCompositionStringW(himc, GCS_COMPSTR, ce_Comp,
                                         (DWORD)(CE_BUF_N - 1) * 2);
             if (r > 0)
@@ -559,19 +572,12 @@ static void CE_PollIME(void)
                 if (cur > n) cur = n;
                 ce_CompCur = (int)cur;
             }
-            ImmReleaseContext(fg, himc);
         }
     }
 }
 
 /* ---------------- IME 组合/候选窗 ----------------
- * 游戏从不设 IME 窗位置, 默认堆在 (0,0)。激活期间每帧定位:
- *   组合窗 CFS_FORCE_POSITION 指到"盒底上一行" (隐藏了看不见, 只给 IME 做堆叠锚点);
- *   候选窗 CFS_EXCLUDE, 排除区=整块底板, 上沿贴住盒底。
- * 组字开始前 EXCLUDE 直接生效 (贴底); 组字后 IME 按"组合窗下再空出一行"自己重排
- * 候选 (覆盖 EXCLUDE), 组合窗抬过一行后正好落回盒底, 两段行为落同一点, 不上下跳。
- * 系统组合窗由主窗子类化隐藏 (WM_IME_SETCONTEXT 清位 + 吃掉 STARTCOMPOSITION),
- * 自画黄色组字串。全本地 Win32, 联机安全。 */
+ * 组合窗隐藏, 指盒底上一行做堆叠锚点; 候选窗指盒底。系统组合窗由主窗子类化隐藏。 */
 
 #define CE_GAME_HWND_ADDR 0x00B73550u
 
@@ -586,11 +592,7 @@ static HWND CE_GameHwnd(void)
     return NULL;
 }
 
-/* ---------------- 系统组合窗隐藏 (主窗子类化, 装一次不摘) ----------------
- * 自画组字串, 系统的不画: 截 WM_IME_SETCONTEXT 清 ISC_SHOWUICOMPOSITIONWINDOW,
- * 吃掉 WM_IME_STARTCOMPOSITION (return 0, 不转交)。候选窗 (NOTIFY) 与输入
- * (COMPOSITION/CHAR) 原样转交。只动引擎主窗, 有别人的子类链让路不踩。
- * 游戏内除聊天无其他 IME 入口 (存档对话框是独立顶层窗), 不摘。 */
+/* 系统组合窗隐藏 (主窗子类化): 自画组字串, 候选与输入原样转交。 */
 
 static WNDPROC ce_OrigWndProc = NULL;
 
@@ -601,8 +603,7 @@ static LRESULT WINAPI CE_WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
         l &= (LPARAM)(~(DWORD)ISC_SHOWUICOMPOSITIONWINDOW);
     if (m == WM_IME_STARTCOMPOSITION)
     {
-        /* 自画组字串: 吃掉"打开系统组合窗"通知, 不转交。
-         * 候选窗 (NOTIFY) 与输入 (COMPOSITION/CHAR) 原样转交, 不受影响。 */
+        /* 自画组字串, 不开系统组合窗。 */
         (void)w; (void)l;
         return 0;
     }
@@ -629,8 +630,7 @@ static void CE_SubclassEnsure(HWND h)
     else SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)want);
 }
 
-/* IME 组合行高 (客户区像素): 读 IME 组合字体实测行高, 失败回退自家字高换算。
- * 组合窗隐藏了但 IME 照"窗下空一行"堆候选, 行高必须准, 否则候选贴不齐盒底。 */
+/* IME 组合行高: 读 IME 组合字体实测, 失败回退换算, 均缓存。 */
 static int CE_CompLineH(HIMC himc, int lineH, int ch, int surfH)
 {
     LOGFONTW lf;
@@ -638,7 +638,10 @@ static int CE_CompLineH(HIMC himc, int lineH, int ch, int surfH)
     HFONT hf, ho;
     TEXTMETRICW tm;
     int h = 0, got = 0;
-    if (ce_CompH > 0) return ce_CompH;   /* 一局内 IME 字体不变, 测到就不再建 GDI 字体 */
+    /* 回退值也缓存 (常态无组字, 否则每帧重建 GDI 字体)。变量名须避开 Windows 宏。 */
+    static int s_clh = -1, s_cch = -1, s_csh = -1, s_cval = 0;
+    if (ce_CompH > 0) return ce_CompH;
+    if (s_clh == lineH && s_cch == ch && s_csh == surfH) return s_cval;
     if (himc && ImmGetCompositionFontW(himc, &lf))
     {
         hdc = GetDC(NULL);
@@ -660,24 +663,25 @@ static int CE_CompLineH(HIMC himc, int lineH, int ch, int surfH)
         h = lineH * ch / surfH;
     if (h < 8) h = 8;
     if (h > 128) h = 128;
-    if (got) ce_CompH = h;   /* 只缓存实测值, 回退值不缓存 (下次重测) */
+    if (got) ce_CompH = h;
+    else { s_clh = lineH; s_cch = ch; s_csh = surfH; s_cval = h; }
     return h;
 }
 
-/* IME 定位: 组合窗 (隐藏) 指盒底上一行做堆叠锚点, 候选窗 CANDIDATEPOS 指盒底。
- * 组字前候选听 CANDIDATEPOS (贴底); 组字后 IME 按"组合窗下空一行"重排, 抬过一行
- * 正好落回盒底。行高读 IME 组合字体实测。 */
+/* IME 定位: 组合窗指盒底上一行, 候选窗指盒底。 */
 static void CE_PositionIME(int imeX, int boxY, int bh,
                            int lineH, int surfW, int surfH)
 {
+    /* 位置不变则跳过: IMM 调用贵, 光标/盒大多时间不动。 */
+    static int s_cx = -1, s_cy = -1, s_cyc = -1;
     HWND h = CE_GameHwnd();
     RECT rc;
     COMPOSITIONFORM cfc = { 0 };
     CANDIDATEFORM cdc = { 0 };
     HIMC himc;
-    int cw, ch, cx, cy;
+    int own;
+    int cw, ch, cx, cy, cyc;
     if (!h || !IsWindow(h)) return;
-    CE_SubclassEnsure(h);
     if (GetForegroundWindow() != h) return;
     if (!GetClientRect(h, &rc)) return;
     cw = rc.right - rc.left;
@@ -687,18 +691,34 @@ static void CE_PositionIME(int imeX, int boxY, int bh,
     cy = (boxY + bh) * ch / surfH;
     if (cx > cw - 40) cx = cw - 40;
     if (cy > ch - 40) cy = ch - 40;
-    himc = ImmGetContext(h);
-    if (!himc) return;
+    /* 复用本帧已取的上下文; 候选窗位置依赖真行高, 不用回退值。 */
+    himc = (ce_FrameImc && ce_FrameImcWnd == h) ? ce_FrameImc : NULL;
+    own = 0;
+    if (!himc)
+    {
+        CE_ReleaseFrameImc();
+        himc = ImmGetContext(h);
+        own = 1;
+        if (!himc) return;
+    }
+    cyc = cy - CE_CompLineH(himc, lineH, ch, surfH);
+    if (cyc < 0) cyc = 0;
+    if (cx == s_cx && cy == s_cy && cyc == s_cyc)
+    {
+        if (own) ImmReleaseContext(h, himc);
+        return;
+    }
+    s_cx = cx; s_cy = cy; s_cyc = cyc;
+    CE_SubclassEnsure(h);
     cfc.dwStyle = CFS_FORCE_POSITION;
     cfc.ptCurrentPos.x = cx;
-    cfc.ptCurrentPos.y = cy - CE_CompLineH(himc, lineH, ch, surfH);
-    if (cfc.ptCurrentPos.y < 0) cfc.ptCurrentPos.y = 0;
+    cfc.ptCurrentPos.y = cyc;
     ImmSetCompositionWindow(himc, &cfc);
     cdc.dwStyle = CFS_CANDIDATEPOS;
     cdc.ptCurrentPos.x = cx;
     cdc.ptCurrentPos.y = cy;
     ImmSetCandidateWindow(himc, &cdc);
-    ImmReleaseContext(h, himc);
+    if (own) ImmReleaseContext(h, himc);
 }
 
 /* ---------------- 导航/命令轮询 (箭头等到不了 Input, 在此处理) ---------------- */
@@ -937,17 +957,12 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
         }
     }
     if (!GdiEnsure(lineH, ce_Bold, CE_GDI_SLOT, ce_Face)) return 0;
-    /* 逐字 x 偏移 (与 RenderLine 同口径) */
+    /* 逐字 x 偏移 (与 RenderLine 同口径)。 */
     xs[0] = 0;
     for (i = 0; i < ce_Len; i++)
     {
-        ABC abc;
-        int ga = lineH;
-        if (g_G && g_G->dc && GetCharABCWidthsW(g_G->dc, ce_Buf[i], ce_Buf[i], &abc))
-        {
-            ga = abc.abcA + abc.abcB + abc.abcC;
-            if (ga < 0) ga = 0;
-        }
+        int ga = GtCharAdv(ce_Buf[i]);
+        if (ga < 0) ga = lineH;
         xs[i + 1] = xs[i] + ga;
     }
     /* 滚动保证光标可见 */
@@ -1055,14 +1070,8 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
             if (showW > maxW) showW = maxW;
             for (k = 0; k < ce_CompCur && k < compFit; k++)
             {
-                ABC abc;
-                int ga = lineH;
-                if (g_G && g_G->dc &&
-                    GetCharABCWidthsW(g_G->dc, ce_Comp[k], ce_Comp[k], &abc))
-                {
-                    ga = abc.abcA + abc.abcB + abc.abcC;
-                    if (ga < 0) ga = 0;
-                }
+                int ga = GtCharAdv(ce_Comp[k]);
+                if (ga < 0) ga = lineH;
                 acc += ga;
             }
             if (showW > 0)
@@ -1516,5 +1525,6 @@ int ChatEdit_Frame(void* surf, int bitLineH, int screenW,
     /* 绘制放 MessageDrawHook 尾部 (战役框/提示框/超武面板之后), 输入框压最上层。
      * 原生行已隐藏, 无需再盖。 */
     CE_Render(surf, bitLineH, surfW, surfH, surfPitch);
+    CE_ReleaseFrameImc();   /* 本帧没人用上的 IME 上下文 (上面几条提前 return 的路) */
     return 1;   /* 激活中 */
 }

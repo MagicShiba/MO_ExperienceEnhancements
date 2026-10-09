@@ -635,6 +635,26 @@ unsigned GtClockNow(void)
 int g_RBits = 5, g_GBits = 6, g_BBits = 5;  /* 默认 565 */
 int g_Calibrated = 0;
 
+/* 位深展开表, 混合查表用。Calibrate 后清零重建。 */
+unsigned char g_ExpR[32], g_ExpG[64], g_ExpB[32];
+int g_ExpReady = 0;
+
+void GtBuildExpand(void)
+{
+    int i, rN = (1 << g_RBits) - 1, gN = (1 << g_GBits) - 1, bN = (1 << g_BBits) - 1;
+    if (rN < 1) rN = 31;
+    if (gN < 1) gN = 63;
+    if (bN < 1) bN = 31;
+    for (i = 0; i < 32; i++) g_ExpR[i] = (unsigned char)((i * 255 + rN / 2) / rN);
+    for (i = 0; i < 32; i++) g_ExpB[i] = (unsigned char)((i * 255 + bN / 2) / bN);
+    for (i = 0; i < 64; i++)
+    {
+        unsigned v = (unsigned)((i * 255 + gN / 2) / gN);
+        g_ExpG[i] = (unsigned char)(v > 255u ? 255u : v);
+    }
+    g_ExpReady = 1;
+}
+
 void Calibrate(void)
 {
     void* tmp;
@@ -668,6 +688,7 @@ void Calibrate(void)
     if ((raw & 0xF800u) == 0xF800u)      { g_RBits = 5; g_GBits = 6; g_BBits = 5; }
     else if ((raw & 0x7C00u) == 0x7C00u) { g_RBits = 5; g_GBits = 5; g_BBits = 5; }
     /* 否则保持默认 565 */
+    g_ExpReady = 0;
 
     p = 0;
     p = AppendCStr(buf, p, "cal: raw=", sizeof(buf));
@@ -686,48 +707,24 @@ void Calibrate(void)
     g_Calibrated = 1;
 }
 
-/* 16 位混合: dst = fg*a + dst*(1-a), a=0..255 */
-unsigned short Blend16(unsigned short dst, unsigned fr, unsigned fg, unsigned fb, unsigned a)
-{
-    unsigned dr, dg, db, or_, og, ob;
-    unsigned rShift, gShift;
-    if (a == 0) return dst;
-    if (g_GBits == 6) { rShift = 11; gShift = 5; }
-    else              { rShift = 10; gShift = 5; }
-    dr = (dst >> rShift) & 0x1Fu;
-    dg = (dst >> gShift) & (g_GBits == 6 ? 0x3Fu : 0x1Fu);
-    db = dst & 0x1Fu;
-    or_ = (fr * a + (dr * ((1u << g_RBits) - 1) / 255u) * (255u - a) + 127u) / 255u;
-    og = (fg * a + (dg * ((1u << g_GBits) - 1) / 255u) * (255u - a) + 127u) / 255u;
-    ob = (fb * a + (db * ((1u << g_BBits) - 1) / 255u) * (255u - a) + 127u) / 255u;
-    /* fr/fg/fb 是 8 位输入, 先压到目标位深再混入会丢精度;
-     * 这里把 dst 侧归一到 8 位再混, 最后压回, 精度更高 */
-    {
-        unsigned dr8 = (dr * 255u + ((1u << g_RBits) - 1) / 2) / ((1u << g_RBits) - 1);
-        unsigned dg8 = (dg * 255u + ((1u << g_GBits) - 1) / 2) / ((1u << g_GBits) - 1);
-        unsigned db8 = (db * 255u + ((1u << g_BBits) - 1) / 2) / ((1u << g_BBits) - 1);
-        or_ = (fr * a + dr8 * (255u - a) + 127u) / 255u;
-        og = (fg * a + dg8 * (255u - a) + 127u) / 255u;
-        ob = (fb * a + db8 * (255u - a) + 127u) / 255u;
-        or_ = (or_ * ((1u << g_RBits) - 1) + 127u) / 255u;
-        og = (og * ((1u << g_GBits) - 1) + 127u) / 255u;
-        ob = (ob * ((1u << g_BBits) - 1) + 127u) / 255u;
-    }
-    return (unsigned short)((or_ << rShift) | (og << gShift) | ob);
-}
+/* Blend16 见 GdiText.h 内联。 */
 
 void GtUnpack16(unsigned short px, unsigned char* r, unsigned char* g,
                 unsigned char* b)
 {
-    unsigned rShift, gShift, rv, gv, bv;
-    if (g_GBits == 6) { rShift = 11; gShift = 5; }
-    else              { rShift = 10; gShift = 5; }
-    rv = (px >> rShift) & 0x1Fu;
-    gv = (px >> gShift) & (g_GBits == 6 ? 0x3Fu : 0x1Fu);
-    bv = px & 0x1Fu;
-    *r = (unsigned char)((rv * 255u + ((1u << g_RBits) - 1) / 2) / ((1u << g_RBits) - 1));
-    *g = (unsigned char)((gv * 255u + ((1u << g_GBits) - 1) / 2) / ((1u << g_GBits) - 1));
-    *b = (unsigned char)((bv * 255u + ((1u << g_BBits) - 1) / 2) / ((1u << g_BBits) - 1));
+    if (!g_ExpReady) GtBuildExpand();
+    if (g_GBits == 6)
+    {
+        *r = g_ExpR[(px >> 11) & 0x1Fu];
+        *g = g_ExpG[(px >> 5) & 0x3Fu];
+        *b = g_ExpB[px & 0x1Fu];
+    }
+    else
+    {
+        *r = g_ExpR[(px >> 10) & 0x1Fu];
+        *g = g_ExpG[(px >> 5) & 0x1Fu];
+        *b = g_ExpB[px & 0x1Fu];
+    }
 }
 
 /* ---------------- GDI 光栅化 (七槽: 战役/提示/全局文本/超武面板/聊天输入/
@@ -736,19 +733,30 @@ void GtUnpack16(unsigned short px, unsigned char* r, unsigned char* g,
  * [VecText] 字号, 共用一个槽会让 GdiEnsure 每次都拆了重建 (CreateDIBSection
  * + CreateFontW), 反而比重新光栅还贵。 */
 
-static GdiSlot g_Slots[7] = {
-    { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
-    { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
-    { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
-    { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
-    { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
-    { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } },
-    { NULL, NULL, NULL, NULL, NULL, 0, -1, -1, 0, { 0 } }
-};
+/* 全零起步, dc==NULL 即空槽。 */
+static GdiSlot g_Slots[GDI_SLOTS];
 GdiSlot* g_G = &g_Slots[0];
+
+/* ---------------- 行光栅缓存 (RenderLine 同串复用) ----------------
+ * 命中时不调 GDI, 只写回红通道。按槽代号作废。容量须装下一帧不同串数。 */
+#define ROWC_N 64            /* 条目数 */
+#define ROWC_W 256           /* 单行像素宽上限 */
+#define ROWC_H 32            /* 单行像素高上限 (行高 = g_G->adv) */
+#define ROWC_TX 80           /* 键里存的字数 (超出的长串不入缓存) */
+typedef struct {
+    int gen;
+    const void* owner;     /* GdiSlot*: 同串不同槽不共用 */
+    int len, w, h;
+    wchar_t tx[ROWC_TX];
+    unsigned char cov[ROWC_W * ROWC_H];
+} RowCE;
+static RowCE g_RowC[ROWC_N];
+static int g_RowGen[GDI_SLOTS] = { 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+static int g_RowRR = 0;
 
 static void GdiFreeSlot(GdiSlot* s)
 {
+    int i;
     if (s->dc)
     {
         SelectObject(s->dc, s->oldBmp);
@@ -759,6 +767,9 @@ static void GdiFreeSlot(GdiSlot* s)
     s->dc = NULL; s->dib = NULL; s->oldBmp = NULL; s->font = NULL;
     s->bits = NULL; s->pitch = 0; s->px = -1; s->bold = -1; s->adv = 0;
     s->face[0] = 0;
+    /* ABC 记忆表随槽作废, 键值一起清。 */
+    for (i = 0; i < ABC_MEMO_N; i++) { s->abcM[i] = -1; s->abcK[i] = 0; }
+    if (s->sidx >= 0 && s->sidx < GDI_SLOTS) g_RowGen[s->sidx]++;
 }
 
 int GdiEnsure(int fontPx, int bold, int slot, const wchar_t* face)
@@ -772,8 +783,9 @@ int GdiEnsure(int fontPx, int bold, int slot, const wchar_t* face)
     char b1[16], b2[16], buf[256];
     unsigned p;
 
-    if (slot < 0 || slot > 6) slot = 0;
+    if (slot < 0 || slot >= GDI_SLOTS) slot = 0;
     s = &g_Slots[slot];
+    s->sidx = slot;
 
     if (s->dc && fontPx == s->px && wantBold == s->bold && FaceSame(face, s->face)) { g_G = s; return 1; }
     GdiFreeSlot(s);
@@ -843,16 +855,34 @@ int GdiEnsure(int fontPx, int bold, int slot, const wchar_t* face)
 }
 
 /* 量一段文本在 maxW 内能放几个字符 */
-/* 单字前进宽 (字体自己的度量, ABC 全宽 = A+B+C)。
- * 这才是一切正常排版的基准: 汉字满格 1em、拉丁按字形比例、空格窄、
- * 标点按字体给的自然位置。用 tmHeight 之类垂直度量当水平格宽是错的
- * (msyh 18px 的 tmHeight≈24, 横向会散)。需先 GdiEnsure。 */
+/* 单字 ABC 三段 (槽内记忆, 同字只问 GDI 一次)。 */
+int GtCharABC(wchar_t ch, int* pa, int* pb, int* pc)
+{
+    GdiSlot* s = g_G;
+    ABC abc;
+    int idx;
+    if (!s || !s->dc || !ch) return -1;
+    /* 乘性散列: CJK 连号直接取模会互撞。 */
+    idx = (int)(((((unsigned)ch) * 2654435761u) >> 16) & (ABC_MEMO_N - 1));
+    if (s->abcK[idx] != ch)
+    {
+        if (!GetCharABCWidthsW(s->dc, ch, ch, &abc)) return -1;
+        s->abcA[idx] = (short)abc.abcA;
+        s->abcB[idx] = (short)abc.abcB;
+        s->abcC[idx] = (short)abc.abcC;
+        s->abcM[idx] = (short)((abc.abcA + abc.abcB + abc.abcC) & 0x7FFF);
+        s->abcK[idx] = ch;
+    }
+    if (pa) *pa = s->abcA[idx];
+    if (pb) *pb = s->abcB[idx];
+    if (pc) *pc = s->abcC[idx];
+    return s->abcM[idx];
+}
+
+/* 单字前进宽 (ABC 全宽)。需先 GdiEnsure。 */
 int GtCharAdv(wchar_t ch)
 {
-    ABC abc;
-    if (!g_G || !g_G->dc) return 0;
-    if (!GetCharABCWidthsW(g_G->dc, ch, ch, &abc)) return 0;
-    return abc.abcA + abc.abcB + abc.abcC;
+    return GtCharABC(ch, 0, 0, 0);
 }
 
 int CharsFit(const wchar_t* text, int len, int maxW)
@@ -864,21 +894,83 @@ int CharsFit(const wchar_t* text, int len, int maxW)
     return fit;
 }
 
-static void ClearDib(void)
+/* 清 DIB 用到的矩形 (整幅 256KB, 每帧几十次, 只清所需)。 */
+static void ClearDibRect(int cols, int rows)
 {
-    int y, x;
-    unsigned char* row;
-    if (g_G) g_G->gen++;
-    for (y = 0; y < DIB_H; y++)
+    int y, i, w;
+    if (cols > DIB_W) cols = DIB_W;
+    if (rows > DIB_H) rows = DIB_H;
+    if (cols < 0) cols = 0;
+    if (rows < 0) rows = 0;
+    if (!g_G || !g_G->bits) return;
+    w = (cols * 4 + 3) >> 2;
+    for (y = 0; y < rows; y++)
     {
-        row = g_G->bits + y * g_G->pitch;
-        for (x = 0; x < DIB_W; x++) { row[x*4+0] = 0; row[x*4+1] = 0; row[x*4+2] = 0; row[x*4+3] = 0; }
+        unsigned int* p = (unsigned int*)(g_G->bits + y * g_G->pitch);
+        for (i = 0; i < w; i++) p[i] = 0;
+    }
+}
+
+/* 行缓存按返回宽+2 列存取, 与调用方读取一致。 */
+#define ROW_PAD 2
+
+/* 行缓存命中: 写回 DIB 红通道。 */
+static void RowCE_Blit(RowCE* e)
+{
+    int y, x, cw = e->w + ROW_PAD;
+    if (cw > ROWC_W) cw = ROWC_W;
+    for (y = 0; y < e->h; y++)
+    {
+        unsigned char* row = g_G->bits + y * g_G->pitch;
+        const unsigned char* cv = e->cov + y * ROWC_W;
+        for (x = 0; x < cw; x++) row[x * 4 + 2] = cv[x];
+    }
+}
+
+/* 取缓存条目; 命中填 *pe 返回 1。 */
+static int RowCE_Get(const wchar_t* text, int len, RowCE** pe)
+{
+    int i, k;
+    if (len > ROWC_TX) return 0;
+    for (i = 0; i < ROWC_N; i++)
+    {
+        RowCE* e = &g_RowC[i];
+        if (e->gen != g_RowGen[g_G->sidx] || e->owner != g_G || e->len != len)
+            continue;
+        for (k = 0; k < len; k++)
+            if (e->tx[k] != text[k]) break;
+        if (k == len) { *pe = e; return 1; }
+    }
+    return 0;
+}
+
+/* 存当前 DIB 有效区 (超宽/超高不入)。 */
+static void RowCE_Put(const wchar_t* text, int len, int w, int h)
+{
+    RowCE* e;
+    int y, x, cw;
+    cw = w + ROW_PAD;
+    if (w <= 0 || cw > ROWC_W || h <= 0 || h > ROWC_H || len > ROWC_TX) return;
+    e = &g_RowC[g_RowRR % ROWC_N];
+    g_RowRR++;
+    e->gen = g_RowGen[g_G->sidx];
+    e->owner = g_G;
+    e->len = len;
+    e->w = w;
+    e->h = h;
+    for (x = 0; x < len; x++) e->tx[x] = text[x];
+    for (y = 0; y < h; y++)
+    {
+        const unsigned char* row = g_G->bits + y * g_G->pitch;
+        unsigned char* cv = e->cov + y * ROWC_W;
+        for (x = 0; x < cw; x++) cv[x] = row[x * 4 + 2];
     }
 }
 
 int RenderLine(const wchar_t* text, int len)
 {
     SIZE sz;
+    RowCE* e;
     if (!g_G->dc || len <= 0) return 0;
     /* 精确限宽: 按实际字形 fit DIB (之前 len*24 粗估, 16px 下只画 42 字,
      * 聊天长文尾部直接被砍还留黑盒; CharsFit 同 dc 同字体, 精确无浪费) */
@@ -888,52 +980,169 @@ int RenderLine(const wchar_t* text, int len)
         if (fit < len) len = fit;
         if (len <= 0) return 0;
     }
+    if (RowCE_Get(text, len, &e))
+    {
+        RowCE_Blit(e);
+        return e->w;
+    }
     if (!GetTextExtentPoint32W(g_G->dc, text, len, &sz)) return 0;
     if (sz.cx > DIB_W - 8) sz.cx = DIB_W - 8;
-    ClearDib();
+    if (g_G->adv < 1) ClearDibRect(sz.cx + 8, DIB_H);
+    else ClearDibRect(sz.cx + 8, g_G->adv + 8);
     ExtTextOutW(g_G->dc, 0, 0, 0, NULL, text, (UINT)len, NULL);
+    RowCE_Put(text, len, sz.cx, g_G->adv);
     return sz.cx;
 }
 
-/* 单字形光栅: 清 DIB 后在 (x0,y0) 画一个 wchar, 返回 GDI 像素宽 (*outW 同)。
- * 调用方在字形四周留边距 (墨水 overhang 会超出 extent, 顶着边画会被裁)。 */
+/* 单字形光栅: 在 (x0,y0) 画一个字, 返回像素宽。先取 extent 再清。 */
 int GtRenderGlyphAt(wchar_t ch, int x0, int y0, int* outW)
 {
     SIZE sz;
     if (!g_G || !g_G->dc) return 0;
     if (x0 < 0 || y0 < 0 || x0 > DIB_W - 32) return 0;
-    ClearDib();
     if (!GetTextExtentPoint32W(g_G->dc, &ch, 1, &sz)) return 0;
+    ClearDibRect(x0 + sz.cx + 16, DIB_H);
     ExtTextOutW(g_G->dc, x0, y0, 0, NULL, &ch, 1, NULL);
     if (outW) *outW = sz.cx;
     return sz.cx;
 }
 
-/* DIB 覆盖率 blit 到已 Lock 的 16 位面 (裁剪到面内) */
+/* DIB 覆盖率 blit 到已 Lock 的 16 位面。 */
 void BlitCoverage(unsigned char* dstBase, int dstPitch, int surfW, int surfH,
                   int dx, int dy, int w, int h,
                   unsigned fr, unsigned fg, unsigned fb, unsigned alphaScale)
 {
-    int y, x;
+    int y, x, x0, x1;
+    if (!g_G || !g_G->bits || w <= 0 || h <= 0) return;
+    x0 = (dx < 0) ? -dx : 0;
+    x1 = (dx + w > surfW) ? surfW - dx : w;
+    if (x1 <= x0) return;
+    if (alphaScale > 255u) alphaScale = 255u;
+    /* 纯黑走 BlendDark, 与 Blend16(…,0,0,0,a) 相同。 */
+    if (fr == 0 && fg == 0 && fb == 0)
+    {
+        for (y = 0; y < h; y++)
+        {
+            int sy = dy + y;
+            unsigned char* dibRow;
+            unsigned short* dstRow;
+            if (sy < 0 || sy >= surfH) continue;
+            dibRow = g_G->bits + y * g_G->pitch + x0 * 4;
+            dstRow = (unsigned short*)(dstBase + sy * dstPitch) + dx + x0;
+            if (alphaScale == 100u)
+            {
+                for (x = x0; x < x1; x++)
+                {
+                    unsigned cov = dibRow[x * 4 + 2];
+                    if (!cov) continue;
+                    dstRow[x] = BlendDark(dstRow[x], cov);
+                }
+            }
+            else
+            {
+                for (x = x0; x < x1; x++)
+                {
+                    unsigned cov = dibRow[x * 4 + 2];
+                    unsigned a;
+                    if (!cov) continue;
+                    a = (cov * alphaScale + 50u) / 100u;
+                    if (a > 255u) a = 255u;
+                    dstRow[x] = BlendDark(dstRow[x], a);
+                }
+            }
+        }
+        return;
+    }
     for (y = 0; y < h; y++)
     {
         int sy = dy + y;
         unsigned char* dibRow;
         unsigned short* dstRow;
         if (sy < 0 || sy >= surfH) continue;
-        dibRow = g_G->bits + y * g_G->pitch;
-        dstRow = (unsigned short*)(dstBase + sy * dstPitch);
-        for (x = 0; x < w; x++)
+        dibRow = g_G->bits + y * g_G->pitch + x0 * 4;
+        dstRow = (unsigned short*)(dstBase + sy * dstPitch) + dx + x0;
+        if (alphaScale == 100u)
         {
-            int sx = dx + x;
-            unsigned cov;
-            unsigned a;
-            if (sx < 0 || sx >= surfW) continue;
-            cov = dibRow[x * 4 + 2];   /* 白字: R=G=B, 取 R */
-            if (!cov) continue;
-            a = (cov * alphaScale + 50u) / 100u;
-            if (a > 255u) a = 255u;
-            dstRow[sx] = Blend16(dstRow[sx], fr, fg, fb, a);
+            for (x = x0; x < x1; x++)
+            {
+                unsigned cov = dibRow[x * 4 + 2];
+                if (!cov) continue;
+                dstRow[x] = Blend16(dstRow[x], fr, fg, fb, cov);
+            }
+        }
+        else
+        {
+            for (x = x0; x < x1; x++)
+            {
+                unsigned cov = dibRow[x * 4 + 2];
+                unsigned a;
+                if (!cov) continue;
+                a = (cov * alphaScale + 50u) / 100u;
+                if (a > 255u) a = 255u;
+                dstRow[x] = Blend16(dstRow[x], fr, fg, fb, a);
+            }
+        }
+    }
+}
+
+/* 阴影单遍合成: 各遍保留系数连乘, 每像素只混一次。 */
+#define SHD_MAXK 16
+void BlitCoverageShadow(unsigned char* dstBase, int dstPitch,
+                        int surfW, int surfH,
+                        int dx, int dy, int sw, int sh,
+                        int Size, int offX, int offY,
+                        unsigned alphaScale)
+{
+    const unsigned char* srow[SHD_MAXK];
+    unsigned short* drow;
+    int scol[SHD_MAXK];
+    int X0, X1, Y, X, ox, oy, i, k;
+    if (!g_G || !g_G->bits || sw <= 0 || sh <= 0) return;
+    if (Size < 1) Size = 1;
+    if (Size > 4) Size = 4;
+    if (alphaScale > 255u) alphaScale = 255u;
+    X0 = dx + offX;
+    X1 = dx + offX + Size - 1 + sw - 1;
+    if (X1 < X0 || surfW <= 0 || surfH <= 0) return;
+    if (X1 < 0) return;
+    if (X0 < 0) X0 = 0;
+    if (X1 > surfW - 1) X1 = surfW - 1;
+    for (Y = dy + offY; Y <= dy + offY + Size - 1 + sh - 1; Y++)
+    {
+        if (Y < 0 || Y >= surfH) continue;
+        drow = (unsigned short*)(dstBase + (size_t)Y * dstPitch);
+        k = 0;
+        for (oy = 0; oy < Size && k < SHD_MAXK; oy++)
+        {
+            /* dy 为画面行坐标, 换算源行须减去。 */
+            int sy = Y - dy - offY - oy;
+            if (sy < 0 || sy >= sh) continue;
+            for (ox = 0; ox < Size && k < SHD_MAXK; ox++)
+            {
+                srow[k] = g_G->bits + (size_t)sy * g_G->pitch;
+                scol[k] = dx + offX + ox;
+                k++;
+            }
+        }
+        if (!k) continue;
+        for (X = X0; X <= X1; X++)
+        {
+            unsigned m = 255u;
+            int any = 0;
+            for (i = 0; i < k; i++)
+            {
+                int sx = X - scol[i];
+                unsigned cov, a;
+                if (sx < 0 || sx >= sw) continue;
+                cov = srow[i][sx * 4 + 2];
+                if (!cov) continue;
+                a = (cov * alphaScale + 50u) / 100u;
+                if (a > 255u) a = 255u;
+                m = (m * (255u - a) + 127u) / 255u;
+                any = 1;
+            }
+            if (!any) continue;
+            drow[X] = BlendDark(drow[X], 255u - m);
         }
     }
 }

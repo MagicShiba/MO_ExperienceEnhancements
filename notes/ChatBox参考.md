@@ -106,3 +106,14 @@
 结论：体感时间一律现实时钟（游戏 tick 是帧计数）；淡出的是内容不是透明度（无活消息时 `DrawBox` 返回 0，须锁存展开）；展开无需防抖（斜坡已保证无硬闪）。
 
 配置（`[MsgText]`，改后重启）：`Enable/FontFace/FontHeight/Bold`（输入框同套字），`ChatEdit/ChatBoxSP/ChatNameSP`，`CampBottom/CampBottomMargin`（输入框落位），`HoverMinOpacity=5`（悬停最低透明度，0=沿用渐隐）。
+
+## 性能 (开输入框掉帧)
+
+位置/状态不变不重设; 每帧建 GDI/IMM 对象先问是否与上次相同。
+
+1. `CE_CompLineH` 回退值也缓存 (键=行高/客户区高/游戏高)。
+2. `CE_PositionIME` 缓存 (cx, cy, 组合窗 y), 不变不碰 IMM。
+3. HIMC 一帧一个 (`ce_FrameImc`), 帧末释放; 候选窗行高须用真 HIMC 量。
+4. 逐字宽度走 `GtCharAdv` 记忆表, 不逐字问 GDI。
+
+缓存变量名避开 Windows 短宏 (如 `s_lh` 会展开, 编译报错无指向)。

@@ -130,18 +130,17 @@ static int SWBlitPart(unsigned char* locked, int surfPitch, int surfW,
                       int surfH, const wchar_t* s, int x, int ly, int adv,
                       unsigned char fr, unsigned char fg, unsigned char fb)
 {
-    int l = SWLen(s), w, ox, oy;
+    int l = SWLen(s), w;
     if (l <= 0) return 0;
     w = RenderLine(s, l);
     if (w <= 0) return 0;
     if (g_SW.Shadow && g_SW.ShadowOpacity > 0)
     {
-        for (oy = 0; oy < g_SW.ShadowSize; oy++)
-            for (ox = 0; ox < g_SW.ShadowSize; ox++)
-                BlitCoverage(locked, surfPitch, surfW, surfH,
-                             x + g_SW.ShadowDX + ox, ly + g_SW.ShadowDY + oy,
-                             w + 2, adv, 0, 0, 0,
-                             (unsigned)g_SW.ShadowOpacity);
+        /* 单遍并集阴影 (见 GdiText.h 的 BlitCoverageShadow) */
+        BlitCoverageShadow(locked, surfPitch, surfW, surfH,
+                           x, ly, w + 2, adv,
+                           g_SW.ShadowSize, g_SW.ShadowDX, g_SW.ShadowDY,
+                           (unsigned)g_SW.ShadowOpacity);
     }
     BlitCoverage(locked, surfPitch, surfW, surfH, x, ly,
                  w + 2, adv, fr, fg, fb, 100);
