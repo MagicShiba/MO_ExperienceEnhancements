@@ -33,6 +33,7 @@
 #include "GdiText.h"
 #include "Icon.h"
 #include "ScaleBar.h"
+#include "SideScroll.h"
 
 #define TT_SECTION "ToolTips"
 
@@ -311,6 +312,15 @@ extern "C" __declspec(dllexport) DWORD __cdecl ToolTip_Clamp(void* regs)
     esp = TT_Reg(regs, REG_OFF_ESP);
     surf = (void*)TT_Reg(regs, REG_OFF_ESI);
     if (!esp || !surf) return 0;
+    /* 侧栏滚动条避让: 每次提示绘制都记下面+盒 (面是否侧栏由 SS_Draw 判定)。
+     * cameo 提示画在侧栏面里且早于 Blit, 滚动条画在 Blit 钩里, 不记就会盖住字。
+     * 记在钳制之前 —— 侧栏面的提示走不到下面的 composite 分支。 */
+    {
+        int* qr = (int*)(esp + 0x34u);   /* X,Y,W,H, 与 pr 同地址 */
+        if (IsPlausiblePtr(qr) && qr[2] > 0 && qr[2] <= 2048 &&
+            qr[3] > 0 && qr[3] <= 2048)
+            SS_NoteTip(surf, qr[0], qr[1], qr[2], qr[3]);
+    }
     comp = *(void**)ADDR_SURF_COMPOSITE;
     if (!comp || !IsPlausiblePtr(comp) || surf != comp) return 0;
     pr = (int*)(esp + 0x34u);   /* X,Y,W,H */

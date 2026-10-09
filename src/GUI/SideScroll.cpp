@@ -246,6 +246,27 @@ static int SS_MouseOnSidebar(int mx, int my)
     return (mx >= x && mx < x + w && my >= y && my < y + h);
 }
 
+/* ---------------- 提示避让 ----------------
+ * cameo 提示盒画在侧栏面里 (CCToolTip::Draw2 侧栏分支, 早于 Blit), 本条画在
+ * BlitSidebar 钩里 (呈现前最后一步) ⇒ 天然盖住提示字。ToolTip_Clamp 每次提示
+ * 绘制都经 SS_NoteTip 记下面+盒+帧; 这里横向相交才断开, 纵向在盒上下分两段画
+ * (各外扩 1px 不蹭边框)。只认画在本面(sb)且帧差 ≤1 的记录: composite 面的提示
+ * 由引擎盖在本条之上, 无需避让; 跨帧即失效, 提示消失不留 stale 缺口。 */
+static void* s_TipSurf = NULL;
+static int s_TipX = 0, s_TipY = 0, s_TipW = 0, s_TipH = 0;
+static int s_TipFrame = -1;
+
+void SS_NoteTip(void* surf, int x, int y, int w, int h)
+{
+    int fr;
+    if (!surf || w <= 0 || h <= 0) return;
+    if (w > 2048 || h > 2048) return;
+    fr = *(volatile int*)(size_t)ADDR_FRAME;
+    s_TipSurf = surf;
+    s_TipX = x; s_TipY = y; s_TipW = w; s_TipH = h;
+    s_TipFrame = fr;
+}
+
 /* ---------------- 每循环 ---------------- */
 
 void SS_Poll(void)
@@ -354,8 +375,47 @@ int SS_Draw(void)
     c.G = (unsigned char)((s_ThumbRgb >> 8) & 0xFF);
     c.B = (unsigned char)(s_ThumbRgb & 0xFF);
     r.X = x0;
-    r.Y = g.thumbY;
     r.Width = g.sw;
+
+    /* 提示盒处断开: 横向不交或纵向不交都整段画, 只有真压住字才分两段。 */
+    {
+        int fr = *(volatile int*)(size_t)ADDR_FRAME;
+        int t0 = g.thumbY, t1 = g.thumbY + g.thumbH;
+        int cx0, cx1, cy0, cy1, s0, s1;
+        if (s_TipSurf && s_TipSurf == sb && s_TipFrame >= 0 &&
+            fr >= s_TipFrame && fr - s_TipFrame <= 1)
+        {
+            cx0 = s_TipX - 1;
+            cx1 = s_TipX + s_TipW + 1;
+            cy0 = s_TipY - 1;
+            cy1 = s_TipY + s_TipH + 1;
+            if (cx1 > x0 && cx0 < x0 + g.sw && cy1 > t0 && cy0 < t1)
+            {
+                int drew = 0;
+                s0 = t0;
+                s1 = (cy0 < t1) ? cy0 : t1;   /* 盒上段 */
+                if (s1 > s0)
+                {
+                    r.Y = s0;
+                    r.Height = s1 - s0;
+                    GtFillRectTrans(sb, &r, &c, 100);
+                    drew = 1;
+                }
+                s0 = (cy1 > t0) ? cy1 : t0;   /* 盒下段 */
+                s1 = t1;
+                if (s1 > s0)
+                {
+                    r.Y = s0;
+                    r.Height = s1 - s0;
+                    GtFillRectTrans(sb, &r, &c, 100);
+                    drew = 1;
+                }
+                return drew;
+            }
+        }
+    }
+
+    r.Y = g.thumbY;
     r.Height = g.thumbH;
     GtFillRectTrans(sb, &r, &c, 100);
     return 1;

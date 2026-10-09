@@ -10,6 +10,10 @@
 /* 每循环 (prepare 钩 0x4F42F0) 调: 帧门 + 拖动/跳转。 */
 void SS_Poll(void);
 
+/* 提示盒记录 (ToolTip_Clamp 每次提示绘制都调): 面+盒+帧。cameo 提示画在侧栏面里
+ * 且早于 Blit, 本条画在 Blit 钩里, 不记就会盖住提示字。 */
+void SS_NoteTip(void* surf, int x, int y, int w, int h);
+
 /* 侧栏面上屏前调 (BlitSidebar 0x6A70E0 钩): 画滑块。侧栏面是靠 BlitSidebar 带
  * 上屏的, 画在呈现之前 (同 notes/隐藏侧栏.md §4.5)。返回 1 = 画了。 */
 int  SS_Draw(void);
