@@ -1,8 +1,14 @@
-/* OrderThrottle.cpp - 大量单位分帧下令 (OutList 一帧 128 条, 多的静默丢)。
- * 钩 ClickedMission @ 0x6FFBE0 上游: OutList 有空位且无排队则放行, 否则入队,
- * Poll 每帧按 `Count < 128` 经跳板补发 (判据与原版 Add 同一句, 不递归)。
- * 补发前验存活, 换图/超时 600 帧丢弃。MPEnable 默认 0 (只挡未验证的 Winsock
- * 缓冲, 同步本身无影响)。详见 notes/选中与下令上限.md。 */
+/* OrderThrottle.cpp - 大量单位分帧下令。
+ *
+ * 原版 EventClass::OutList 一帧只装 128 条, 而一次下令给选区每个单位各发一条,
+ * 于是第 129 条起被静默丢弃。钩 ClickedMission @ 0x6FFBE0 上游: OutList 放得下
+ * 且无排队则放行, 否则入队; Poll 每帧经跳板补发, 判据与原版 Add 同一句。
+ * 补发前验存活, 换图/超时丢弃。
+ *
+ * MPEnable 默认 0: 分帧本身不影响同步 (见 notes/选中与下令上限.md §5), 这个开关
+ * 只挡下一层 Winsock 出站缓冲 —— 每帧命令量被顶到上限时的表现没验证过。
+ *
+ * 引擎事实与推导见 notes/选中与下令上限.md。 */
 
 #include <windows.h>
 #include "GdiText.h"
@@ -121,14 +127,11 @@ static int OT_On(void)
 {
     OT_EnsureInit();
     if (!g_OtEnable) return 0;
-    if (OT_IsMP())
+    if (OT_IsMP() && !g_OtMpEnable) return 0;
+    if (OT_IsMP() && !g_OtMpWarned)
     {
-        if (!g_OtMpEnable) return 0;
-        if (!g_OtMpWarned)
-        {
-            g_OtMpWarned = 1;
-            LogLine("othrottle: MP ON - refilling OutList to 128 every catch-up frame");
-        }
+        g_OtMpWarned = 1;
+        LogLine("othrottle: MP ON - refilling OutList to 128 every catch-up frame");
     }
     return 1;
 }
@@ -219,7 +222,9 @@ __attribute__((naked)) void OrderThrottle_Entry(void)
         : "memory", "cc");
 }
 
-/* 偷 0x6FFBE0 起 5 字节 jmp 到壳, 跳板存原 10 字节 + 跳回。目标点被占/对不上就放弃。 */
+/* 偷 0x6FFBE0 起 5 字节 jmp 到壳, 跳板存原 10 字节 + 跳回。被偷的字节是
+ * `sub esp,0x88` + 四个 push, 不含任何直接相对跳转, 跳板原样重放安全。
+ * 目标点已被别的补丁占了, 或字节对不上, 就整个放弃 (幂等, 不会反复试)。 */
 static void OT_EnsureHook(void)
 {
     unsigned char* site;
@@ -314,8 +319,8 @@ void OrderThrottle_Poll(void)
     if (!OT_On()) { OT_Flush("inactive"); return; }
     if (s_QCount <= 0) return;
 
-    /* 不发超: cnt 是 OutList 当前数的上界 (一条令恰推进 1; 原版拒收只会让 cnt
-     * 高估, 高估是安全方向), `cnt < EVT_CAP` 保证本帧不溢出。 */
+    /* 不发超: cnt 是 OutList 当前数的上界 —— 一条令恰好推进 1, 原版中途拒收只会
+     * 让 cnt 高估, 高估是安全方向 (少发而非多发)。`cnt < EVT_CAP` 保证不溢出。 */
     cnt = *(unsigned*)ADDR_OUT_COUNT;
     if (cnt >= EVT_CAP) return;
     while (s_QCount > 0 && cnt < EVT_CAP)

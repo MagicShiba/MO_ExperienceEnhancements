@@ -18,9 +18,9 @@
  *     压住战役框。底部模式贴战役框下沿, 顶部模式留原生行原位;
  *     底板只包画出内容, 字体跟战役框 (MsgText_CampStyle)。
  *   粘贴 CF_UNICODETEXT, 复制/剪切写剪贴板; 组字串自画黄色+下划线。
- *   输入法: 组合窗 (CFS_FORCE_POSITION) + 候选窗每帧指到输入框下面
- *     (x=插入点即已输入文本右侧, y=盒底, surface→客户区换算); 系统组合窗由主窗
- *     子类化隐藏 (WM_IME_SETCONTEXT 清位 + 吃掉 STARTCOMPOSITION), 候选条仍由系统画。
+ *   输入法: 组合窗 (隐藏) 指盒底上一行做堆叠锚点 + 候选窗 CANDIDATEPOS 指盒底
+ *     (surface→客户区换算); 系统组合窗由主窗子类化隐藏 (WM_IME_SETCONTEXT 清位
+ *     + 吃掉 STARTCOMPOSITION), 候选条仍由系统画。
  *   代价: 打字时方向键镜头可能动一下 (不再吞键)。
  * 构建见 build-fast.bat (32 位 mingw, 无 CRT, -limm32)。
  */
@@ -104,6 +104,7 @@ static unsigned ce_BlinkT = 0;
 static wchar_t ce_Comp[CE_BUF_N];
 static int ce_CompLen = 0;
 static int ce_CompCur = 0;
+static int ce_CompH = 0;      /* IME 组合行高缓存 (>0=已测到, 开框清零) */
 
 static unsigned ce_CmdTick = 0; /* Ctrl 组合键上次处理时刻 (Input 钩/轮询握手) */
 static unsigned ce_NavTick = 0; /* 退格/Delete 上次处理时刻 (Input 钩/轮询握手) */
@@ -449,8 +450,6 @@ static void CE_PollIME(void)
     ce_CompLen = 0;
     ce_CompCur = 0;
     fg = GetForegroundWindow();
-    himc = NULL;
-    r = -999;
     if (fg && fg == ce_FgWnd)
     {
         himc = ImmGetContext(fg);
@@ -476,8 +475,11 @@ static void CE_PollIME(void)
 }
 
 /* ---------------- IME 组合/候选窗 ----------------
- * 游戏从不设 IME 窗位置, 默认堆在 (0,0)。激活期间每帧把组合窗 + 候选窗指到
- * 输入框下面 (x=插入点即已输入文本右侧, y=盒底, surface→客户区换算);
+ * 游戏从不设 IME 窗位置, 默认堆在 (0,0)。激活期间每帧定位:
+ *   组合窗 CFS_FORCE_POSITION 指到"盒底上一行" (隐藏了看不见, 只给 IME 做堆叠锚点);
+ *   候选窗 CFS_EXCLUDE, 排除区=整块底板, 上沿贴住盒底。
+ * 组字开始前 EXCLUDE 直接生效 (贴底); 组字后 IME 按"组合窗下再空出一行"自己重排
+ * 候选 (覆盖 EXCLUDE), 组合窗抬过一行后正好落回盒底, 两段行为落同一点, 不上下跳。
  * 系统组合窗由主窗子类化隐藏 (WM_IME_SETCONTEXT 清位 + 吃掉 STARTCOMPOSITION),
  * 自画黄色组字串。全本地 Win32, 联机安全。 */
 
@@ -537,49 +539,75 @@ static void CE_SubclassEnsure(HWND h)
     else SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)want);
 }
 
-static void CE_PositionIME(int sx, int sy, int surfW, int surfH)
+/* IME 组合行高 (客户区像素): 读 IME 组合字体实测行高, 失败回退自家字高换算。
+ * 组合窗隐藏了但 IME 照"窗下空一行"堆候选, 行高必须准, 否则候选贴不齐盒底。 */
+static int CE_CompLineH(HIMC himc, int lineH, int ch, int surfH)
 {
-    HWND hg = CE_GameHwnd();
-    HWND h = hg ? hg : ce_FgWnd;
+    LOGFONTW lf;
+    HDC hdc;
+    HFONT hf, ho;
+    TEXTMETRICW tm;
+    int h = 0, got = 0;
+    if (ce_CompH > 0) return ce_CompH;   /* 一局内 IME 字体不变, 测到就不再建 GDI 字体 */
+    if (himc && ImmGetCompositionFontW(himc, &lf))
+    {
+        hdc = GetDC(NULL);
+        if (hdc)
+        {
+            hf = CreateFontIndirectW(&lf);
+            if (hf)
+            {
+                ho = (HFONT)SelectObject(hdc, hf);
+                if (GetTextMetricsW(hdc, &tm) && tm.tmHeight > 0 && tm.tmHeight < 256)
+                { h = tm.tmHeight; got = 1; }
+                SelectObject(hdc, ho);
+                DeleteObject(hf);
+            }
+            ReleaseDC(NULL, hdc);
+        }
+    }
+    if (!got && lineH > 0 && ch > 0 && surfH > 0)
+        h = lineH * ch / surfH;
+    if (h < 8) h = 8;
+    if (h > 128) h = 128;
+    if (got) ce_CompH = h;   /* 只缓存实测值, 回退值不缓存 (下次重测) */
+    return h;
+}
+
+/* IME 定位: 组合窗 (隐藏) 指盒底上一行做堆叠锚点, 候选窗 CANDIDATEPOS 指盒底。
+ * 组字前候选听 CANDIDATEPOS (贴底); 组字后 IME 按"组合窗下空一行"重排, 抬过一行
+ * 正好落回盒底。行高读 IME 组合字体实测。 */
+static void CE_PositionIME(int imeX, int boxY, int bh,
+                           int lineH, int surfW, int surfH)
+{
+    HWND h = CE_GameHwnd();
     RECT rc;
-    int cw, ch, cx, cy;
+    COMPOSITIONFORM cfc = { 0 };
+    CANDIDATEFORM cdc = { 0 };
     HIMC himc;
+    int cw, ch, cx, cy;
     if (!h || !IsWindow(h)) return;
-    if (hg) CE_SubclassEnsure(hg);   /* 总闸只装引擎主窗, 与前台无关 */
+    CE_SubclassEnsure(h);
     if (GetForegroundWindow() != h) return;
     if (!GetClientRect(h, &rc)) return;
     cw = rc.right - rc.left;
     ch = rc.bottom - rc.top;
     if (cw < 100 || ch < 100) return;
-    if (surfW <= 0 || surfH <= 0) return;
-    cx = sx * cw / surfW;
-    cy = sy * ch / surfH;
-    if (cx < 0) cx = 0;
-    if (cy < 0) cy = 0;
+    cx = imeX * cw / surfW;
+    cy = (boxY + bh) * ch / surfH;
     if (cx > cw - 40) cx = cw - 40;
     if (cy > ch - 40) cy = ch - 40;
     himc = ImmGetContext(h);
     if (!himc) return;
-    {
-        /* 组合窗 + 候选窗同指输入框下面 (x=插入点即已输入文本右侧, y=盒底,
-         * 客户区坐标): 有输入法按组合窗相对定位候选窗, 两者必须同位置;
-         * 组合窗用 CFS_FORCE_POSITION (精确定位, IME 不得调整)。每帧设一次。 */
-        COMPOSITIONFORM cfc;
-        CANDIDATEFORM cdc;
-        cfc.dwStyle = CFS_FORCE_POSITION;
-        cfc.ptCurrentPos.x = cx;
-        cfc.ptCurrentPos.y = cy;
-        cfc.rcArea.left = 0; cfc.rcArea.top = 0;
-        cfc.rcArea.right = cw; cfc.rcArea.bottom = ch;
-        ImmSetCompositionWindow(himc, &cfc);
-        cdc.dwIndex = 0;
-        cdc.dwStyle = CFS_CANDIDATEPOS;
-        cdc.ptCurrentPos.x = cx;
-        cdc.ptCurrentPos.y = cy;
-        cdc.rcArea.left = 0; cdc.rcArea.top = 0;
-        cdc.rcArea.right = cw; cdc.rcArea.bottom = ch;
-        ImmSetCandidateWindow(himc, &cdc);
-    }
+    cfc.dwStyle = CFS_FORCE_POSITION;
+    cfc.ptCurrentPos.x = cx;
+    cfc.ptCurrentPos.y = cy - CE_CompLineH(himc, lineH, ch, surfH);
+    if (cfc.ptCurrentPos.y < 0) cfc.ptCurrentPos.y = 0;
+    ImmSetCompositionWindow(himc, &cfc);
+    cdc.dwStyle = CFS_CANDIDATEPOS;
+    cdc.ptCurrentPos.x = cx;
+    cdc.ptCurrentPos.y = cy;
+    ImmSetCandidateWindow(himc, &cdc);
     ImmReleaseContext(h, himc);
 }
 
@@ -599,7 +627,6 @@ static void CE_NavMove(int vk, int shift, int ctrl)
     default: break;
     }
     if (shift && ce_Anchor == ce_Cur) ce_Anchor = -1;
-    if (ce_ViewX < 0) ce_ViewX = 0;
     CE_BlinkReset();
 }
 
@@ -675,7 +702,7 @@ static DWORD WINAPI CE_Watchdog(LPVOID unused)
     (void)unused;
     for (;;)
     {
-        if (ce_Active && ce_FgWnd && GetForegroundWindow() == ce_FgWnd)
+        if (ce_Active && CE_GameForeground())
             PostMessageA(ce_FgWnd, WM_NULL, 0, 0);
         Sleep(16);
     }
@@ -700,7 +727,7 @@ static void CE_Activate(void)
     wchar_t* nb = (wchar_t*)(CE_MSGLIST + CE_OFF_EDITBUF);
     int n = 0;
     unsigned k;
-    ce_CompLen = 0; ce_CompCur = 0;
+    ce_CompLen = 0; ce_CompCur = 0; ce_CompH = 0;
     /* 同步原生缓冲: 只认领, 不显示。AddEdit 预填的发送模板原样未动则发送时剥离,
      * 自己和原生缓冲都归零 (镜像覆盖模板)。 */
     if (IsPlausiblePtr(nb))
@@ -844,7 +871,6 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
            xs[endIdx + 1] - xs[startIdx] <= 1000) endIdx++;
     {
         int fit = CharsFit(ce_Buf + startIdx, endIdx - startIdx, DIB_W - 8);
-        if (fit < 0) fit = 0;
         if (fit < endIdx - startIdx) endIdx = startIdx + fit;
     }
     visLen = endIdx - startIdx;
@@ -854,8 +880,6 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     if (ce_CompLen > 0)
     {
         compFit = CharsFit(ce_Comp, ce_CompLen, DIB_W - 8);
-        if (compFit < 0) compFit = 0;
-        if (compFit > ce_CompLen) compFit = ce_CompLen;
         compWsum = CE_TextWidth(ce_Comp, compFit);
         if (compWsum < 0) compWsum = 0;
     }
@@ -965,8 +989,8 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
         CE_FillRect(surf, compX, ty, 2, th, 255, 255, 255, 100);
 
     unlockFn(surf, NULL);
-    /* 候选框锚在插入点 (已输入文本右侧), 不跟组字串内容走, 每帧设一次。 */
-    CE_PositionIME(imeX, boxY + bh, surfW, surfH);
+    /* 候选指盒底, 每帧设一次。 */
+    CE_PositionIME(imeX, boxY, bh, lineH, surfW, surfH);
     return 1;
 }
 
@@ -1397,6 +1421,5 @@ int ChatEdit_Frame(void* surf, int bitLineH, int screenW,
     /* 绘制放 MessageDrawHook 尾部 (战役框/提示框/超武面板之后), 输入框压最上层。
      * 原生行已隐藏, 无需再盖。 */
     CE_Render(surf, bitLineH, surfW, surfH, surfPitch);
-    (void)screenW;
     return 1;   /* 激活中 */
 }

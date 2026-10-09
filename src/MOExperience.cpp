@@ -22,6 +22,7 @@
 #include "PatrolCircle.h"
 #include "PowerDisplay.h"
 #include "RepairAll.h"
+#include "SideScroll.h"
 #include "SmartArea.h"
 #include "SmartOrder.h"
 #include "SWSBar.h"
@@ -241,6 +242,9 @@ static void PowerDrawBoth(void)
     /* 撑满视口 + 摘侧栏 gadget (隐藏原版建造栏时必须每循环都跑, 引擎每次
      * 切页/改视口都会把按钮重新挂回去)。 */
     FM_Poll();
+    /* 原版侧栏滚动条 (拖滑块定滚动位置)。必须在 FM_Poll 之后 —— 它靠
+     * FM_SidebarVisible() 判断侧栏列此刻归谁 (态1/2 那一列是地图的)。 */
+    SS_Poll();
     /* 缩放刻度条: 探整图 / 建档位表 / 摆条 / 点选滚轮换档。必须在 FM_Poll 之后
      * —— 落位要用 FM_Poll 刚刷新出来的视口矩形。 */
     SB_Poll();
@@ -284,6 +288,9 @@ static void BlitSbEntryDraw(void)
     void* tramp;
     MOE_EnsureInit();
     MOE_SetPhase(MP_BLITSIDEBAR);
+    /* 侧栏滚动条要在**呈现之前**画进侧栏面 (侧栏面靠 BlitSidebar 带上屏);
+     * 排在 PowerDisplay 之后 = 层级最上, 不被底电那行字盖住。 */
+    SS_Draw();
     PowerDisplay_DrawSb();   /* 先画字再上屏, 否则晚一帧闪烁。 */
     tramp = (void*)(size_t)FM_BlitSb();   /* 0 = 不接管, 返回引擎跳板 */
     if (tramp) g_BlitSbTramp = tramp;

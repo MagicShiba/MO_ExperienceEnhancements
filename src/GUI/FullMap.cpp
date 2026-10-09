@@ -1533,6 +1533,12 @@ static void Fm_CursorStampStrip(void* mouse, void* strip, int colX)
     if (want > 0 && want != save) vb->Width = save;
 }
 
+int FM_SidebarVisible(void)
+{
+    if (!s_Enable) return 1;
+    return Fm_ModeFull() ? 1 : 0;
+}
+
 unsigned long FM_BlitSb(void)
 {
     void* strip;

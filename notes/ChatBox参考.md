@@ -80,7 +80,7 @@
 
 ## 输入法（定案）
 
-- 组合窗 + 候选窗每帧指到输入框下面（x=光标，y=盒底，surface→客户区换算）；组合窗用 `CFS_FORCE_POSITION`（`CFS_POINT` 允许 IME 调整位置）。
+- 组合窗 `CFS_FORCE_POSITION` 指盒底上一行（隐藏了，只做堆叠锚点）+ 候选窗 `CFS_CANDIDATEPOS` 指盒底（surface→客户区换算）；组合窗用 `CFS_FORCE_POSITION`（`CFS_POINT` 允许 IME 调整位置）。组字前候选听 `CANDIDATEPOS`（贴底）；组字后 IME 按“组合窗下再空出一行”自己重排（覆盖候选窗设置），组合窗抬过一行后正好落回盒底。`CFS_EXCLUDE` 试过：组字开始后按不住，被 IME 重排覆盖，不用。组合行高读 `ImmGetCompositionFont` 实测（失败回退自家字高换算，一局内缓存）。
 - 系统组合窗由主窗子类化隐藏：截 `WM_IME_SETCONTEXT` 清 `ISC_SHOWUICOMPOSITIONWINDOW`，吃掉 `WM_IME_STARTCOMPOSITION`（不转交）；候选窗（`WM_IME_NOTIFY`）与输入（`COMPOSITION/CHAR`）原样转交。
 - 结论：压组合字高 / `CFS_HIDDEN(0x2000)` 依赖输入法配合，不可靠，不用。
 - 组字串游戏内自画（黄色+下划线），`Imm` 轮询 `GCS_COMPSTR`。

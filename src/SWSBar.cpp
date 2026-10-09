@@ -5,8 +5,9 @@
  *
  * 不建 Gadget、不碰模拟 (Ares 不动):
  *   - 数据: `SuperClass::Array` 里 `Owner==本家 && IsPresent==1` 的对象,
- *     只读+本地过滤+排序 —— 联机安全。防御页 (TabCameos) 只是 UI 镜像,
- *     不是拥有全集, 不做显示判据 (2026-10-08: 拿它当闸门会压塌显示)。
+ *     只读+本地过滤+排序 —— 联机安全。防御页 (TabCameos) 只是 UI 镜像而不是
+ *     拥有全集 (在手 78 个超武时它的 CameoCount 只有 56), 不能拿它当显示闸门:
+ *     引擎重建窗口内采样会得到极少条目, 开闸后显示数塌到 2->0 且不自愈。
  *   - 分组: 右侧 4 列 (盟/苏/厄/焚风), 空列隐藏; 归属查内建表 (由 rulesmo.ini
  *     授予建筑 Owner/Prerequisite 链离线推导), 查不到落玩家阵营。
  *   - 排序/隐藏: `[SWSidebar]` 单节, 以超武 ID 为键: 负数=隐藏, 0/缺键=
@@ -191,10 +192,9 @@ static void SwsCleanStampCheck(void);
 static int SwsStripCameoCount(int tab);
 #define TAB_DEFENSE           1      /* 0 建筑 / 1 防御 / 2 步兵 / 3 载具 */
 
-/* 引擎防御页的抽样快照 (按超武下标开位), 只增不减, 纯诊断用。
- * 2026-10-08 起不再做显示闸门: 防御页不是拥有全集 (78 在手只有 56 槽),
- * 拿它当闸门会在超武变化时把显示压塌 (76->2->0)。去重删容器前先抽样,
- * 避免"读→删"自我蚕食, 仅此而已。 */
+/* 引擎防御页的抽样快照 (按超武下标开位), 只增不减, **纯诊断用**。
+ * 不做显示闸门: 防御页不是拥有全集 (在手 78 个只有 56 槽), 拿它当闸门会在
+ * 超武变化时把显示压塌。去重删容器前先抽样, 避免"读→删"自我蚕食。 */
 static unsigned char s_CleanBits[SWS_LIVE_BYTES];
 static int s_CleanMode = 0;
 static int s_CleanN = -1;
@@ -1463,8 +1463,7 @@ static void SwsScan(void)
     /* ini / 类型数组换代就把所有 ini 派生缓存清掉 (见 SwsCacheEpoch)。 */
     SwsCacheEpoch();
     /* 逐项被拒计数: 只在扫空时一次性打出 ("哪道显示门吃掉了全部条目"),
-     * 不参与逻辑。其中 rNotClean 只是"不在防御页快照里"的计数
-     * (2026-10-08 起不再过滤, `notseen=` 仅供核对)。 */
+     * 不参与逻辑。rNotClean = 不在防御页快照里, 只供核对, 不过滤。 */
     int rOwner = 0, rPresent = 0, rType = 0, rFlag = 0, rId = 0,
         rCache = 0, rIdx = 0, rHidden = 0, rShow = 0, rNotClean = 0;
     s_ItemN = 0;
@@ -1497,8 +1496,7 @@ static void SwsScan(void)
         if (hItems[i] == cur) break;
     if (i >= hCount) return;
     /* 数据源: `SuperClass::Array` (本家 + IsPresent, 见下面循环)。
-     * 防御页快照只做诊断抽样 (条目数进日志, 供核对"引擎给了谁"):
-     * 它不是拥有全集, 不能当显示判据 (2026-10-08)。 */
+     * 防御页快照只做诊断抽样 (条目数进日志, 供核对"引擎给了谁")。 */
     {
         SwsCleanStampCheck();
         SwsEngineCleanList();
@@ -1547,14 +1545,9 @@ static void SwsScan(void)
         if (!tc) { rCache++; continue; }
         if (tc->swIdx < 0) { rIdx++; continue; }
         if (tc->prio < 0) SwsFillType(tc, type, id);
-        /* 2026-10-08: TabCameos 快照不再做显示闸门 (只记数, 见 rNotClean)。
-         * 实测它不是"拥有的全集": 78 个超武在手时防御页 CameoCount 只有 56,
-         * 超武变化/引擎重建窗口内第一次采样只拿到 2 个 (BoidBlitz/MADMine),
-         * 闸门一开显示从 76 直接塌到 2 且不再自愈 (引擎不再补加, 去重只删),
-         * 之后连那 2 个也被吃掉 (notseen=79, 其余门计数全 0)。
-         * 显示清单 = Super 对象 (Owner==本家 && IsPresent) + 类型门
-         * (!hide && manual && show), 与引擎 AddCameo 的 ShowCameo 判门同源
-         * (读同一 ExtData +0x1E5), 不需要再拿 UI 镜像交叉验证。 */
+        /* 防御页快照只记数不过滤 (见上面说明)。显示清单 = Super 对象 (Owner==本家 &&
+         * IsPresent) + 类型门 (!hide && manual && show), 与引擎 AddCameo 的
+         * ShowCameo 判门同源 (读同一 ExtData +0x1E5)。 */
         if (s_CleanMode)
         {
             int b = tc->swIdx;
@@ -1847,12 +1840,7 @@ static int SwsStripCameoCount(int tab)
 }
 
 /* =======================================================================
- * 引擎防御页抽样 —— 纯诊断 (2026-10-08 起不再是数据源)。
- *
- * 曾经把它当"权威清单"用快照做显示闸门, 实测错误: 防御页不是拥有全集
- * (78 个超武在手时 CameoCount 只有 56), 超武变化/引擎重建窗口内采样
- * 只拿到 2 个就开闸, 显示 76->2->0 且不自愈。显示清单只看 Super 对象 +
- * 类型门 (与引擎 AddCameo 的 ShowCameo 判门同源)。
+ * 引擎防御页抽样 —— 纯诊断, 不是数据源 (理由见上方 s_CleanBits 处说明)。
  *
  * 采样 = `RulesExt::TabCameos[防御页]`, 长度以 `StripClass::CameoCount`
  * (+0x54) 为准。每项 `BuildType` 步长 0x34: +0x00 ItemIndex /
