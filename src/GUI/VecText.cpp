@@ -1150,7 +1150,10 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
  * 全走这里, 一处替换处处生效。只动单行适配宽度, 高度与换行逻辑原样:
  * 先走原版取 h (与原版同口径), w 用 GDI 自然步进和
  * (与绘制笔位同口径: ABC 全宽 + 数字 DigitTrack)。
- * 控制串 (\t \n 等)、超长 (>255 字)、触 maxW (换行逻辑) 一律走原版。
+ * 控制串 (\t \n 等)、超长 (>255 字) 一律走原版。
+ * maxW<=0 = 不限宽 (0x4A59E0 经 0x433ED0 的布局/底框度量即此):
+ * 必须同样给 GDI 宽, 否则底框/摆位用原宽而落墨用 GDI 宽,
+ * 侧栏数字底框包不住字、居中文本偏位。maxW>0 触顶 (换行逻辑) 才原样。
  * 非 PUA 多行串另有 grow-only 修正 (原版换行丢行宽, 超武提示窄盒溢出),
  * 只增不减, 见下。重入守卫: 嵌套调用直接走原版 (防栈爆)。
  * 未开 Render 不接管。 */
@@ -1166,11 +1169,11 @@ int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
     if (g_GDDepth > 0 || !g_VT.Render)
         return g_OrigGetDim(t, e, s, w, h, maxW);
     if (!t || !IsPlausiblePtr(t) || !s || !IsPlausiblePtr((void*)s) ||
-        !w || !h || maxW <= 0)
+        !w)
         return g_OrigGetDim(t, e, s, w, h, maxW);
     g_GDDepth++;
     r = g_OrigGetDim(t, e, s, &ow, &oh, maxW);
-    if (!r || ow >= maxW) goto fwd;   /* 失败/触顶: 原样 */
+    if (!r || (maxW > 0 && ow >= maxW)) goto fwd;   /* 失败/触顶: 原样 */
     px = VecPickPx(t);
     if (px < 8 || px > 40 || !GdiEnsure(px, g_VT.Bold, 2, g_VTFace))
         goto fwd;
@@ -1219,7 +1222,7 @@ int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
                 }
                 if (ga < 0) ga = 0;
                 lineW += ga;
-                if (lineW >= maxW) goto fwd;   /* 单行触顶 (换行逻辑): 原样 */
+                if (maxW > 0 && lineW >= maxW) goto fwd;   /* 单行触顶 (换行逻辑): 原样 */
             }
             if (i >= 256) goto fwd;   /* 超长未见尾: 原样 */
             if (lineW > tot) tot = lineW;
@@ -1243,7 +1246,7 @@ int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
                     if (nh > oh && nh < 4096) oh = nh;
                 }
             }
-            *w = tot; *h = oh;
+            *w = tot; if (h) *h = oh;
             {
                 DimCE* e = &g_DimC[g_DimCPos % DIMCACHE_N];
                 g_DimCPos++;
@@ -1287,7 +1290,7 @@ int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
                 if (lw > mx) mx = lw;
                 if (mx > ow + 6 && mx <= maxW)
                 {
-                    *w = mx; *h = oh;
+                    *w = mx; if (h) *h = oh;
                     {
                         DimCE* e = &g_DimC[g_DimCPos % DIMCACHE_N];
                         g_DimCPos++;
@@ -1313,10 +1316,10 @@ int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
         if (wc >= 0x30 && wc <= 0x39) ga += g_VT.DigitTrack;
         if (ga < 0) ga = 0;
         tot += ga;
-        if (tot >= maxW) goto fwd;   /* 触顶 (换行逻辑): 原样 */
+        if (maxW > 0 && tot >= maxW) goto fwd;   /* 触顶 (换行逻辑): 原样 */
     }
     if (i >= 256) goto fwd;   /* 超长未见尾: 原样 */
-    *w = tot; *h = oh;
+    *w = tot; if (h) *h = oh;
     {
         DimCE* e = &g_DimC[g_DimCPos % DIMCACHE_N];
         g_DimCPos++;
@@ -1326,7 +1329,7 @@ int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
     g_GDDepth--;
     return r;
 fwd:
-    if (r) { *w = ow; *h = oh; }
+    if (r) { *w = ow; if (h) *h = oh; }
     g_GDDepth--;
     return r;
 }

@@ -11,6 +11,29 @@
 * 切换清产的原生 abandon 路 (0x6AA7BC/0x6AA884) 零触发, 不钩 (见文件末说明)。
  *   - 图标数字 (DrawStrip 的 CountTotal 取数点 0x6A9C86): 本地有排队则
  *     EAX/EBX=原版数+本地数后跳 0x6A9CC9 借用原版绘制; 无排队跑原指令。
+ *   - 就绪文本左对齐 (DrawStrip Ready/状态分支, 纯渲染补丁, 不碰模拟):
+ *     原版同一行 (y 同为 ebp+1) 有三套排版 (esi 为图标 X):
+ *     数字 (x=esi+0x3C, flag 0x242 右对齐);
+ *     有数字时的状态字 (x=esi+2, flag 0x42 左对齐, 如"等待");
+ *     无数字时的状态字/就绪 (x=esi+0x1E, flag 0x142 居中)。
+ *     flag 高字节位 0=居中/位 1=右对齐 (0x4A59E0 布局与 0x4A5EB0 绘制
+ *     同口径实证: 0x242 右/0x142 中/0x42 左)。
+ *     工厂完工且有排队时, 状态块画居中的"就绪" (IsDone→0xD53 经
+ *     0x6A9DAB/0x6A9E17) 与右侧数字同行重叠 (CJK 比原版 1bpp 字宽)。
+ *     开关开时给状态块加条件排版 (与 0x6A9EE4 处 Ready 块同判据):
+ *     本图标画过数字 ([esp+0x13]==1) 则走左分支几何 (x=esi+2,
+ *     flag 0x42), 否则走原版居中 (x=esi+0x1E, flag 0x142)。
+ *     实现为两处 JMP 桩 (开关开时一次性写入, 指令等长覆盖, 无 rel):
+ *       布局点 0x6A9DAB (8B: lea+push) → BQ_StateLay,
+ *       绘制点 0x6A9E17 (5B: push) → BQ_StateDraw;
+ *     桩内读 [esp+0x13] (布局点前有 push 1/push 2 用 +0x1B,
+ *     绘制点前两次调用已平衡用 +0x13, 逐条数 push 实证),
+ *     原字节照抄执行后跳回原生后继 (0x6A9DB3/0x6A9E1C)。
+ *     无数字的就绪/等待保持原版居中; 有数字时"就绪"居左,
+ *     右侧数字底框独占右侧不再被挡。
+ *     数字底框本身由 VecText 度量 (maxW<=0 不限宽同样给 GDI 真宽)
+ *     保证与落墨同宽、正确包裹。字节不符 (版本/Ares 差异) 则静默跳过
+ *     (fail-close 回原版)。
  *   - BuildQueue_Poll (每循环, 挂 PowerDrawBoth): 无对账无丢单, 只喂单 ——
  *     逐条目按 (house,naval,cat) 现解析工厂; 工厂不存在/非本家→留着等
  *     (卖了重建/具现后自动续上); 工厂 Object==null (无在产/待放置) 才复刻一次
@@ -126,7 +149,7 @@
 #define TO_DRAWNUM 0x006A9CC9u
 #define TO_DRAWSKIP 0x006A9D88u
 
-#define BQ_CAP 16
+#define BQ_CAP 50
 
 /* 待发事件窗守卫: Poll 挂渲染 (可快于逻辑帧), 同一工厂连续两轮都可能
  * 见到 Object==null (上轮发的 PRODUCE 还没执行), 连发两单则第二单在
@@ -369,6 +392,71 @@ static void* BQ_ModBase(void)
     return base;
 }
 
+/* 状态块条件排版桩 (纯渲染, 见文件头): [esp+0x13] 为 1 (本图标画过
+ * 数字) 走左分支, 否则走原版居中。返回地址跳回原生后继。
+ * 注意: 裸函数, 不得读写除 EAX 外的寄存器 (调用点后续要用 ECX/EBX),
+ * EFLAGS 在桩内外均无存活依赖。 */
+static DWORD g_BQBackLay = 0x006A9DB3u;
+static DWORD g_BQBackDraw = 0x006A9E1Cu;
+
+__attribute__((naked)) static void BQ_StateLay(void)
+{
+    __asm__ volatile (
+        "cmpb $1, 0x1B(%%esp)\n\t"
+        "je 1f\n\t"
+        "lea 0x1E(%%esi), %%eax\n\t"
+        "push $0x142\n\t"
+        "jmp *%0\n\t"
+        "1:\n\t"
+        "lea 0x2(%%esi), %%eax\n\t"
+        "push $0x42\n\t"
+        "jmp *%0\n\t"
+        : : "m" (g_BQBackLay));
+}
+
+__attribute__((naked)) static void BQ_StateDraw(void)
+{
+    __asm__ volatile (
+        "cmpb $1, 0x13(%%esp)\n\t"
+        "je 1f\n\t"
+        "push $0x142\n\t"
+        "jmp *%0\n\t"
+        "1:\n\t"
+        "push $0x42\n\t"
+        "jmp *%0\n\t"
+        : : "m" (g_BQBackDraw));
+}
+
+/* 写 JMP rel32 桩 (len>=5, 多余字节补 NOP)。调用方先验字节。 */
+static void BQ_WriteJmp(void* site, void* stub, unsigned len)
+{
+    unsigned char* p = (unsigned char*)site;
+    DWORD old = 0;
+    int rel = (int)((char*)stub - ((char*)site + 5));
+    if (!VirtualProtect(p, len, PAGE_EXECUTE_READWRITE, &old)) return;
+    p[0] = 0xE9;
+    *(int*)(p + 1) = rel;
+    {
+        unsigned k;
+        for (k = 5; k < len; k++) p[k] = 0x90;
+    }
+    VirtualProtect(p, len, old, &old);
+}
+
+static void BQ_ReadyLeftPatch(void)
+{
+    unsigned char* s1 = (unsigned char*)(size_t)0x6A9DAB;
+    unsigned char* s2 = (unsigned char*)(size_t)0x6A9E17;
+    /* 8D 46 1E | 68 42 01 00 00 */
+    if (s1[0] == 0x8D && s1[1] == 0x46 && s1[2] == 0x1E && s1[3] == 0x68 &&
+        s1[4] == 0x42 && s1[5] == 0x01 && s1[6] == 0x00 && s1[7] == 0x00)
+        BQ_WriteJmp(s1, (void*)BQ_StateLay, 8);
+    /* 68 42 01 00 00 */
+    if (s2[0] == 0x68 && s2[1] == 0x42 && s2[2] == 0x01 && s2[3] == 0x00 &&
+        s2[4] == 0x00)
+        BQ_WriteJmp(s2, (void*)BQ_StateDraw, 5);
+}
+
 static void BQ_EnsureInit(void)
 {
     if (g_BQInit) return;
@@ -379,6 +467,7 @@ static void BQ_EnsureInit(void)
         GetPrivateProfileIntA(BQ_SECTION, "Enable", 0, g_IniPath) ? 1 : 0;
     LogLine(g_BQEnable ? "bqueue: local building queue ON"
                        : "bqueue: local building queue OFF");
+    if (g_BQEnable) BQ_ReadyLeftPatch();
     {
         char mb[48], hx[16];
         unsigned q = 0;

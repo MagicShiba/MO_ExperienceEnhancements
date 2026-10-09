@@ -118,7 +118,7 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈，`0x6A9C86` 的 `[ESP+0x3
 自动续上）；`Object==null` 才下单；同一工厂每轮只喂一项（事件下帧才
 执行）。教训：存工厂指针+R0 存活校验，开工后日志实证整
 队列被 drop（`fire` 后连串 `drop` 到 depth=0），遂删除整个 R0/drop path。
-菜单/读档/换 CurrentPlayer 即清空（未下单=未扣费）。上限 16。
+菜单/读档/换 CurrentPlayer 即清空（未下单=未扣费）。上限 50。
 
 结论：
 
