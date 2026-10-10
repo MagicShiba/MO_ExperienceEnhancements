@@ -21,6 +21,7 @@
 #include "Observer.h"
 #include "OrderThrottle.h"
 #include "PatrolCircle.h"
+#include "PlaceScatter.h"
 #include "PowerDisplay.h"
 #include "RepairAll.h"
 #include "SideScroll.h"
@@ -239,6 +240,8 @@ static void PowerDrawBoth(void)
     OrderThrottle_Poll();
     SWS_Poll();
     RepairAll_Poll();
+    /* 侧栏放建筑时驱散地基上的自家单位 (只读+标准 Move 事件)。 */
+    PlaceScatter_Poll();
     /* 多观战修复 + 观战面板排序 (联机安全, 见 Observer.cpp)。 */
     Observer_Poll();
     if (!g_InitDone) MOE_EnsureInit();
