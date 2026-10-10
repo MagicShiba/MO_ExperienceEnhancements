@@ -5,8 +5,11 @@
  * 且无排队则放行, 否则入队; Poll 每帧经跳板补发, 判据与原版 Add 同一句。
  * 补发前验存活, 换图/超时丢弃。
  *
- * MPEnable 默认 0: 分帧本身不影响同步 (见 notes/选中与下令上限.md §5), 这个开关
- * 只挡下一层 Winsock 出站缓冲 —— 每帧命令量被顶到上限时的表现没验证过。
+ * 配置 [Features] OrderThrottle (单键三态, 缺失=1, 改后重启):
+ *   0=禁用 (完全旁路, 与原版逐位相同), 1=仅单机启用 (默认),
+ *   2=联机也启用 (LAN/Internet 照常分帧)。
+ * 2 纯粹保守: 分帧本身不影响同步 (见 notes/选中与下令上限.md §5), 挡的是
+ * 下一层 Winsock 出站缓冲 —— 每帧命令量被顶到上限时的表现没验证过。
  *
  * 引擎事实与推导见 notes/选中与下令上限.md。 */
 
@@ -15,7 +18,7 @@
 #include "OrderUtil.h"
 #include "OrderThrottle.h"
 
-#define OT_SECTION "OrderThrottle"
+#define OT_SECTION "Features"
 
 /* ---------------- 地址 ---------------- */
 
@@ -46,8 +49,7 @@
 /* ---------------- 配置 ---------------- */
 
 static int g_OtInit = 0;
-static int g_OtEnable = 1;      /* [OrderThrottle] Enable */
-static int g_OtMpEnable = 0;    /* [OrderThrottle] MPEnable (默认关!) */
+static int g_OtMode = 1;        /* [Features] OrderThrottle: 0=禁用,1=仅单机,2=联机也启用 */
 static int g_OtMpWarned = 0;
 static int g_OtFirstLog = 0;
 
@@ -113,21 +115,20 @@ static void OT_EnsureInit(void)
     g_OtInit = 1;
     BuildPaths();
     GtEnsureLog();
-    g_OtEnable = GetPrivateProfileIntA(OT_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    g_OtMpEnable = GetPrivateProfileIntA(OT_SECTION, "MPEnable", 0, g_IniPath) ? 1 : 0;
-    q = AppendCStr(buf, q, "othrottle: enable=", sizeof(buf));
-    q += UtoA((unsigned)g_OtEnable, buf + q);
-    q = AppendCStr(buf, q, " mp=", sizeof(buf));
-    q += UtoA((unsigned)g_OtMpEnable, buf + q);
+    g_OtMode = GetPrivateProfileIntA(OT_SECTION, "OrderThrottle", 1, g_IniPath);
+    if (g_OtMode < 0) g_OtMode = 0;
+    if (g_OtMode > 2) g_OtMode = 2;
+    q = AppendCStr(buf, q, "othrottle: mode=", sizeof(buf));
+    q += UtoA((unsigned)g_OtMode, buf + q);
     LogLine(buf);
 }
 
-/* 联机且 MPEnable=0 时整模块空转 (默认配置)。 */
+/* 0=禁用; 1=仅单机 (联机整模块空转, 默认配置); 2=联机也启用。 */
 static int OT_On(void)
 {
     OT_EnsureInit();
-    if (!g_OtEnable) return 0;
-    if (OT_IsMP() && !g_OtMpEnable) return 0;
+    if (g_OtMode <= 0) return 0;
+    if (OT_IsMP() && g_OtMode < 2) return 0;
     if (OT_IsMP() && !g_OtMpWarned)
     {
         g_OtMpWarned = 1;
@@ -158,8 +159,8 @@ static int __cdecl OT_Decide(void* self, int mission, void* target,
     OtOrder* e;
     unsigned cnt;
     OT_EnsureInit();
-    if (!g_OtEnable) return 0;
-    if (OT_IsMP() && !g_OtMpEnable) return 0;
+    if (g_OtMode <= 0) return 0;
+    if (OT_IsMP() && g_OtMode < 2) return 0;
     /* 有排队保序; 无排队且原版放得下 (与 Add 同一句) 则放行。 */
     if (s_QCount <= 0)
     {
@@ -311,7 +312,7 @@ void OrderThrottle_Poll(void)
     unsigned q;
 
     OT_EnsureInit();
-    if (!g_OtEnable) { OT_Flush("disabled"); return; }
+    if (g_OtMode <= 0) { OT_Flush("disabled"); return; }
     OT_EnsureHook();
     /* 换图/读档: 队列里的对象与格指针全部作废。 */
     scen = *(void**)ADDR_SCENARIO;

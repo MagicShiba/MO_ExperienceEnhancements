@@ -8,5 +8,7 @@
 *.7z
 /obj
 /test
+/tools
+
 other/计划.md
 *.bak

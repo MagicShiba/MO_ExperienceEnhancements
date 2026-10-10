@@ -28,7 +28,7 @@
 #include "FullMap.h"
 #include "SideScroll.h"
 
-#define SS_SECTION "SideScroll"
+#define SS_SECTION "Sidebar"
 
 /* ---------------- 引擎地址 ---------------- */
 #define ADDR_SB_OBJ        0x0087F7E8u  /* 侧栏对象本身 */
@@ -100,7 +100,7 @@ void SS_EnsureInit(void)
     if (g_Log)
     {
         /* GetPrivateProfileIntA 直接吃 0xRRGGBB (与 [ScaleBar] Void 同格式)。 */
-        s_Enable      = GetPrivateProfileIntA(SS_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
+        s_Enable      = GetPrivateProfileIntA(SS_SECTION, "ScrollEnable", 1, g_IniPath) ? 1 : 0;
         s_HitW        = GetPrivateProfileIntA(SS_SECTION, "HitWidth", 14, g_IniPath);
         s_ShowW       = GetPrivateProfileIntA(SS_SECTION, "ShowWidth", 6, g_IniPath);
         s_RightMargin = GetPrivateProfileIntA(SS_SECTION, "RightMargin", 3, g_IniPath);

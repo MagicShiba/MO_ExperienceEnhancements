@@ -49,28 +49,14 @@
  *     已暂停/空闲→按 shift 进 0x6AAE4A (0x2E, Shift 清全) 或 0x6AAFBD (0x10,
  *     经 jmp 0x6AB1FF 共享尾构造)。剥离在明取消分支 (0x6AB197, d=1/5/0/8) 与暗
  *     分发点 (0x6AAE44, d=6/7/8) 两处; 明暂停检查 state==1 一律原生暂停。
- *     全程不仿造事件构造 (E8 点一律不碰)。c 记原生 shift 决策位 ([esp+0x13]),
- *     与物理键不一致另记 `bq: sh`。
+  *     全程不仿造事件构造 (E8 点一律不碰)。
  *   - Shift 检测走原版键位函数 0x53EC70 (ecx=0x10, AH&0x80 为按下; 与 0x54F25B
  *     处原版 Shift 检测逐字节同用法; GetKeyState 后备)。
  * 待放置时 Object 非空故下一个先等着, 放下后自动开工 (=Phobos 文档行为)。
  * 存档/读档/换 CurrentPlayer 即清空 (未下单=未扣费, 经济一致)。
- * 开关关时钩子全跑原指令、轮询直接返回 (=原版行为)。
- *
- * 诊断 trace: bq: qd/qf (左键记入, a=heap b=want c=raw d=used),
- * bq: qn (工厂未具现仍记入, a=heap b=4 c=raw d=used),
- * bq: h0 (右键到暂停检查, a=state b=heap),
- * bq: hd (到暗暂停, a=heap b=本地数 c=0 d=0; 纯哨兵, 暂停保持原生),
- * bq: cp (右键, a=heap b=剩本地 c=原生shift位 d=1弹一/0走原生/
- * 5本地空但模拟>1拦原生/6暗取消弹一/7暗取消拦原生/8Shift清全走原生/
- * 10明暂停Shift转取消分支),
- * bq: sh (原生shift位与物理Shift不一致, a=heap b=原生位 c=物理键 d=0),
- * bq: cs (取消时模拟侧, a=heap b=模拟数 c=在产中 d=总数),
- * bq: pw (生产监视, a=Object低16 b=暂停位 c=线号 d=1换项/空/2暂停边沿),
- * bq: ev (OutList 新增事件, a=类型(0xE下单/0xF暂停/0x10单个取消/0x2E全部
- * 取消) b=house c=HeapID d=当时计数; 与路径无关, 发送瞬间必留痕),
- * bqueue: queued/fire/unqueued (记入/开工/移除, heap+depth), bqueue: base=模块基址。
- *
+  * 开关关时钩子全跑原指令、轮询直接返回 (=原版行为)。
+  * 日志只剩启动两行 (bqueue: ON + modbase); 逐事件 trace 已全删。
+  *
  * 铁律 (Syringe HandleException 实证: 跳板原样拷贝被偷字节, rel/call 不修正;
  * Phobos 全库也从不在 rel 字节上 return 0):
  *   .inj 钩子凡偷了含 rel 的字节 (E8 call / Jcc), 永远不许 return 0;
@@ -107,7 +93,7 @@
 #include <windows.h>
 #include "GdiText.h"
 
-#define BQ_SECTION "BuildQueue"
+#define BQ_SECTION "Features"
 
 /* Syringe REGISTERS 布局 (YRpp Syringe.h)。 */
 #define R_EDI 0x08
@@ -219,147 +205,6 @@ static void BQ_MarkPending(void* house, unsigned naval, unsigned cat)
     g_BQPend[free].age = 0;
 }
 
-static void BQ_Trace(const char* head, int a, int b, int c, int d);
-
-/* OutList 事件哨兵 (纯读零行为): 每轮看 OutList 写指针, 新增
- * 条目逐条记 `bq: ev` (a=类型 b=house c=HeapID d=当时计数)。
- * 布局经 YRpp EventClass.h 实证 (pack1, sizeof=111, DataBuffer@7):
- * Type@0(1B: 0xE下单/0xF暂停/0x10单个取消/0x2E全部取消), HouseIndex@2,
- * HeapID@11 (produce/suspend/abandon 通用, 余者记原始值)。
- * 用途: 与发送路径无关——无论谁 (原生分支/Ares/未知) 构造暂停/取消事件,
- * 进 OutList 的瞬间必留痕, 自带 house+heap 可归因; 我方 fire(0xE) 自带
- * `bqueue: fire` 行, 此处照记 (自校验 Type@0 解读是否正确)。
- * 环形 128 槽: 单轮推进>8 视为读档/菜单, 静默重同步 (防刷屏)。 */
-static unsigned g_BQEvNext = 0;
-static int g_BQEvInit = 0;
-
-/* 规划事件抓包 (联机同步研究用, 量极小): Type + 前 48 字节 hex。
- * 用途: 取原生巡逻建圈/关环/提交的真实事件序列
- * (Mega=0x04/Connect=0x2A/Commit=0x2B), 与我方构造逐字节对比。 */
-static void BQ_HexB(char* out, unsigned v)
-{
-    static const char* dig = "0123456789ABCDEF";
-    out[0] = dig[(v >> 4) & 15u];
-    out[1] = dig[v & 15u];
-    out[2] = 0;
-}
-
-static void BQ_EvHex(const unsigned char* e)
-{
-    char buf[128], hb[4];
-    unsigned q = 0, i;
-    q = AppendCStr(buf, q, "pev: t=", sizeof(buf));
-    BQ_HexB(hb, (unsigned)e[0]);
-    q = AppendCStr(buf, q, hb, sizeof(buf));
-    for (i = 1; i < 48; i++)
-    {
-        BQ_HexB(hb, (unsigned)e[i]);
-        q = AppendCStr(buf, q, (i & 3) == 1 ? " " : "", sizeof(buf));
-        q = AppendCStr(buf, q, hb, sizeof(buf));
-        if (q + 4 >= sizeof(buf)) break;
-    }
-    (void)q;
-    LogLine(buf);
-}
-
-static void BQ_EvWatch(void)
-{
-    unsigned next = *(unsigned*)ADDR_OUT_NEXT;
-    unsigned cur;
-    unsigned adv;
-    int guard;
-    if (!g_BQEvInit)
-    {
-        g_BQEvNext = next;
-        g_BQEvInit = 1;
-        return;
-    }
-    adv = (next - g_BQEvNext) & 0x7Fu;
-    if (!adv) return;
-    if (adv > 8u) /* 大跳变: 读档/菜单/爆流, 静默重同步 */
-    {
-        g_BQEvNext = next;
-        return;
-    }
-    cur = g_BQEvNext;
-    guard = 0;
-    while (cur != next && guard < 8)
-    {
-        const unsigned char* e =
-            (const unsigned char*)(ADDR_OUT_BUF + cur * EVT_SIZE);
-        int heap = *(int*)(e + 11);
-        BQ_Trace("bq: ev", (int)e[0], (int)e[2], heap,
-                 (int)*(unsigned*)ADDR_OUT_COUNT);
-        if (e[0] == 0x04 || e[0] == 0x2A || e[0] == 0x2B)
-            BQ_EvHex(e); /* 规划事件额外 hex (原生序列研究) */
-        cur = (cur + 1u) & 0x7Fu;
-        guard++;
-    }
-    g_BQEvNext = next;
-}
-
-/* 生产监视器 (纯诊断零行为): 每轮记各 (house,naval,cat) 线的工厂 Object 指针
- * 与 +0x70 暂停位, 变化才记一行 `bq: pw`。用于把在产变化归因: cp 后 1~2 帧内
- * Object 变空/换新=点击杀的, 无 cp 关联=自然推进或别路。+0x38 进度字每帧都变,
- * 故只看 Object 存亡与 +0x70 边沿。 */
-#define BQ_WATCH_SLOTS 8
-typedef struct
-{
-    void* house;
-    unsigned naval;
-    unsigned buildcat;
-    void* obj;
-    unsigned susp;
-    int live;
-} BQWatch;
-
-static BQWatch g_BQWatch[BQ_WATCH_SLOTS];
-
-static void BQ_WatchClear(void)
-{
-    int s;
-    for (s = 0; s < BQ_WATCH_SLOTS; s++)
-        g_BQWatch[s].live = 0;
-}
-
-static void BQ_Watch(void* house, unsigned naval, unsigned cat,
-                     void* factory)
-{
-    int s;
-    int free = -1;
-    void* obj;
-    unsigned susp;
-    if (!house || !factory) return;
-    obj = *(void**)((char*)factory + OFF_FAC_OBJECT);
-    susp = *(unsigned char*)((char*)factory + 0x70u) ? 1u : 0u;
-    for (s = 0; s < BQ_WATCH_SLOTS; s++)
-    {
-        if (g_BQWatch[s].live && g_BQWatch[s].house == house &&
-            g_BQWatch[s].naval == naval && g_BQWatch[s].buildcat == cat)
-        {
-            int kind = 0;
-            if (g_BQWatch[s].obj != obj) kind = 1;
-            else if (g_BQWatch[s].susp != susp) kind = 2;
-            if (kind)
-            {
-                BQ_Trace("bq: pw", (int)((size_t)obj & 0xFFFFu),
-                         (int)susp, (int)(naval * 16u + cat), kind);
-                g_BQWatch[s].obj = obj;
-                g_BQWatch[s].susp = susp;
-            }
-            return;
-        }
-        if (!g_BQWatch[s].live && free < 0) free = s;
-    }
-    if (free < 0) return;
-    g_BQWatch[free].house = house;
-    g_BQWatch[free].naval = naval;
-    g_BQWatch[free].buildcat = cat;
-    g_BQWatch[free].obj = obj;
-    g_BQWatch[free].susp = susp;
-    g_BQWatch[free].live = 1;
-}
-
 /* 条目不存工厂指针: 每轮按 (house,naval,cat) 现解析槽位, 无 stale。
  * buildcat 取自点击帧原生栈 [esp+0x24] (与原生 GPF 入参同值)。 */
 typedef struct
@@ -464,7 +309,7 @@ static void BQ_EnsureInit(void)
     BuildPaths();
     GtEnsureLog();
     g_BQEnable =
-        GetPrivateProfileIntA(BQ_SECTION, "Enable", 0, g_IniPath) ? 1 : 0;
+        GetPrivateProfileIntA(BQ_SECTION, "BuildQueue", 0, g_IniPath) ? 1 : 0;
     LogLine(g_BQEnable ? "bqueue: local building queue ON"
                        : "bqueue: local building queue OFF");
     if (g_BQEnable) BQ_ReadyLeftPatch();
@@ -529,28 +374,6 @@ static int BQ_ShiftDown(void)
     return g_BQShiftHist != 0u ? 1 : 0;
 }
 
-static void BQ_Trace(const char* head, int a, int b, int c, int d)
-{
-    char buf[96], b1[16], b2[16], b3[16], b4[16];
-    unsigned q = 0;
-    q = AppendCStr(buf, q, head, sizeof(buf));
-    HtoA((unsigned)a, b1);
-    q = AppendCStr(buf, q, " a=", sizeof(buf));
-    q = AppendCStr(buf, q, b1, sizeof(buf));
-    HtoA((unsigned)b, b2);
-    q = AppendCStr(buf, q, " b=", sizeof(buf));
-    q = AppendCStr(buf, q, b2, sizeof(buf));
-    HtoA((unsigned)c, b3);
-    q = AppendCStr(buf, q, " c=", sizeof(buf));
-    q = AppendCStr(buf, q, b3, sizeof(buf));
-    HtoA((unsigned)d, b4);
-    q = AppendCStr(buf, q, " d=", sizeof(buf));
-    q = AppendCStr(buf, q, b4, sizeof(buf));
-    (void)q;
-    LogLine(buf);
-}
-
-static void BQ_Log2(const char* head, int heap, int depth);
 static void BQ_RemoveAt(int idx);
 static int BQ_ClearType(void* house, int heap);
 static int BQ_SimCount(void* house, void* type);
@@ -590,13 +413,10 @@ static int BQ_PopLast(void* house, int heap)
 static void BQ_RemoveAt(int idx)
 {
     int k;
-    int heap;
     if (idx < 0 || idx >= g_BQCount) return;
-    heap = BQ_HeapOf(g_BQList[idx].type);
     for (k = idx; k + 1 < g_BQCount; k++)
         g_BQList[k] = g_BQList[k + 1];
     g_BQCount--;
-    BQ_Log2("bqueue: unqueued", heap, g_BQCount);
 }
 
 /* 按 (house,naval,cat) 取主工厂 (与原版点击路径同调用; 槽位即权威,
@@ -605,22 +425,6 @@ static void* BQ_Resolve(void* house, unsigned naval, unsigned cat)
 {
     if (!house) return 0;
     return FN_GETPRIMARYFACTORY(house, ABS_BUILDINGTYPE, naval, cat);
-}
-
-static void BQ_Log2(const char* head, int heap, int depth)
-{
-    char buf[64], b1[16], b2[16];
-    unsigned q;
-    q = 0;
-    q = AppendCStr(buf, q, head, sizeof(buf));
-    HtoA((unsigned)heap, b1);
-    q = AppendCStr(buf, q, " heap=", sizeof(buf));
-    q = AppendCStr(buf, q, b1, sizeof(buf));
-    HtoA((unsigned)depth, b2);
-    q = AppendCStr(buf, q, " depth=", sizeof(buf));
-    q = AppendCStr(buf, q, b2, sizeof(buf));
-    (void)q;
-    LogLine(buf);
 }
 
 /* 复刻一次点击下单 (PRODUCE 事件手工进 OutList, 见文件头)。
@@ -668,7 +472,6 @@ static int BQ_FireProduce(void* house, void* type)
 
     *(unsigned*)ADDR_OUT_NEXT = (next + 1u) & 0x7Fu;
     *(unsigned*)ADDR_OUT_COUNT = count + 1u;
-    BQ_Log2("bqueue: fire", heap, g_BQCount);
     return 1;
 }
 
@@ -685,30 +488,18 @@ void BuildQueue_Poll(void)
     BQ_EnsureInit();
     g_BQShiftHist = (g_BQShiftHist << 1) | (BQ_ShiftRaw() ? 1u : 0u);
     if (!g_BQEnable) return;
-    BQ_EvWatch(); /* 事件哨兵: 队列空也看 (drain 窗口正是关键) */
     cur = *(void**)ADDR_CURPLAYER;
     if (!cur || (g_BQHouse && cur != g_BQHouse))
     {
         g_BQCount = 0; /* 菜单/读档/换人: 丢队列 (未下单=未扣费) */
         g_BQHouse = cur;
         BQ_PendClear();
-        BQ_WatchClear();
         return;
     }
     if (!g_BQHouse) g_BQHouse = cur;
     BQ_PendAge();
-    /* 生产监视 (drain 后也看: 沿 pend 键逐线采样, 变化才记行)。 */
-    for (i = 0; i < BQ_PEND_SLOTS; i++)
-    {
-        if (g_BQPend[i].house && g_BQPend[i].house == cur)
-            BQ_Watch(cur, g_BQPend[i].naval, g_BQPend[i].buildcat,
-                     BQ_Resolve(cur, g_BQPend[i].naval,
-                                g_BQPend[i].buildcat));
-    }
     if (g_BQCount <= 0) return;
     /* 无对账无丢单: 条目不存工厂指针, 无 stale 可对;
-     * 跨型号消失只可能来自 pop/clear (heap 键, 有 cp trace) 或换 house
-     * 清空, 均有日志可查。
      * 确认制: 发单只 mark flying 不移除, 下轮见模拟认领
      * (CountTotal>0) 才移除; 执行拒收 (忙+建筑直接返 3) 则条目留着、
      * 数字留着, pend 窗后重发。发而不删, 永不哑单丢数 (认领前图标短暂
@@ -719,20 +510,16 @@ void BuildQueue_Poll(void)
         BQEntry* e = &g_BQList[i];
         void* factory;
         int k;
-        int heap;
         if (e->house != cur) continue;
         factory = BQ_Resolve(cur, e->naval, e->buildcat);
-        BQ_Watch(cur, e->naval, e->buildcat, factory);
         if (!factory) continue; /* 工厂不存在: 留着等具现/重建, 不丢单 */
         if (e->flying)
         {
             if (BQ_SimCount(cur, e->type) > 0)
             {
-                heap = BQ_HeapOf(e->type);
                 for (k = i; k + 1 < g_BQCount; k++)
                     g_BQList[k] = g_BQList[k + 1];
                 g_BQCount--;
-                BQ_Log2("bqueue: onboard", heap, g_BQCount);
                 i--;
             }
             else if (BQ_Pending(cur, e->naval, e->buildcat))
@@ -775,8 +562,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_QueueClick(void* regs)
     house = *(void**)ADDR_CURPLAYER;
     if (!house) return 0;
     want = BQ_ShiftDown() ? 5 : 1;
-    BQ_Trace("bq: qd", BQ_HeapOf(pType), want, BQ_ShiftRaw(),
-             BQ_ShiftDown());
     free = BQ_CAP - g_BQCount;
     if (free <= 0) return 0; /* 满: 走原版拒绝 */
     if (want > free) want = free;
@@ -794,7 +579,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_QueueClick(void* regs)
             残留 flying=1 会在模拟有同型时被误认领移除 */
         g_BQCount++;
     }
-    BQ_Log2("bqueue: queued", BQ_HeapOf(pType), g_BQCount);
     return TO_CLICK_EXIT;
 }
 
@@ -805,7 +589,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_FreeShift(void* regs)
 {
     unsigned abs;
     void* pType;
-    void* factory;
     void* house;
     int want;
     int free;
@@ -816,19 +599,12 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_FreeShift(void* regs)
 
     abs = BQ_Reg(regs, R_EBP);
     pType = (void*)BQ_Reg(regs, R_EDI);
-    factory = (void*)BQ_Reg(regs, R_ESI);
     if (abs != ABS_BUILDINGTYPE || !pType) return 0;
     if (BQ_WhatAmI(pType) != (int)ABS_BUILDINGTYPE) return 0;
-    if (!BQ_ShiftDown())
-    {
-        BQ_Trace("bq: qf", BQ_HeapOf(pType), 0, BQ_ShiftRaw(), 0);
-        return 0;
-    }
+    if (!BQ_ShiftDown()) return 0;
     house = *(void**)ADDR_CURPLAYER;
     if (!house) return 0;
-    if (!factory) /* ESI 可空 (首次下单工厂未具现): 记 trace, 照记不误 */
-        BQ_Trace("bq: qn", BQ_HeapOf(pType), 4, BQ_ShiftRaw(),
-                 BQ_ShiftDown());
+    /* ESI=工厂可空 (首次下单工厂未具现): 照记不误 */
     want = 4;
     free = BQ_CAP - g_BQCount;
     if (free <= 0) return 0;
@@ -846,25 +622,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_FreeShift(void* regs)
         g_BQList[g_BQCount].flying = 0; /* 槽位复用必须清, 同上 */
         g_BQCount++;
     }
-    BQ_Trace("bq: qf", BQ_HeapOf(pType), want, BQ_ShiftRaw(), 1);
-    BQ_Log2("bqueue: queued", BQ_HeapOf(pType), g_BQCount);
     return 0;
-}
-
-/* 原生 shift 决策位 ([esp+0x13], 分发处由 [esp+0xB8]&1 置位, 原生
- * 0x6AAE3E/0x6AB1D9 凭它选 0x10 还是 0x2E) 与物理 Shift 键对照。
- * 两者不一致记一行 `bq: sh` (a=heap b=原生位 c=物理键 d=0), 用于定位
- * "按住 shift 却只减一" (原生位没置上)。 */
-static void BQ_ShiftCheck(void* regs, int heap)
-{
-    unsigned esp;
-    int bit;
-    int raw;
-    esp = BQ_Reg(regs, R_ESP);
-    bit = (*(unsigned char*)(esp + 0x13u)) ? 1 : 0;
-    raw = BQ_ShiftRaw() ? 1 : 0;
-    if (bit != raw)
-        BQ_Trace("bq: sh", heap, bit, raw, 0);
 }
 
 /* 0x6AB0C1 (6): 右键 state 检查 (jne 0x6AB18D, rel, 永远跳转)。
@@ -885,15 +643,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_PausePeel(void* regs)
     BQ_EnsureInit();
     stateAddr = BQ_Reg(regs, R_EAX);
     state = stateAddr ? *(unsigned*)stateAddr : 0u;
-    {
-        unsigned ab = BQ_Reg(regs, R_EBP);
-        void* pt = (void*)BQ_Reg(regs, R_EDI);
-        int hh = 0;
-        if (ab == ABS_BUILDINGTYPE && pt &&
-            BQ_WhatAmI(pt) == (int)ABS_BUILDINGTYPE)
-            hh = BQ_HeapOf(pt);
-        BQ_Trace("bq: h0", (int)state, hh, 0, 0);
-    }
     if (state != 1u) return TO_CANCEL_BRANCH;
     if (!g_BQEnable) return TO_PAUSE_NATIVE;
     abs = BQ_Reg(regs, R_EBP);
@@ -907,11 +656,9 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_PausePeel(void* regs)
     {
         unsigned esp = BQ_Reg(regs, R_ESP);
         int bit = (*(unsigned char*)(esp + 0x13u)) ? 1 : 0;
-        BQ_ShiftCheck(regs, heap);
         if (bit && BQ_LocalCount(house, heap) > 0)
         {
             BQ_ClearType(house, heap);
-            BQ_Trace("bq: cp", heap, 0, 1, 10);
             return TO_CANCEL_BRANCH;
         }
     }
@@ -953,11 +700,9 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_CancelPeel(void* regs)
          * 字节下 0x2E 清模拟; 空闲态右键才到这里)。c 记原生决策位。 */
         unsigned esp = BQ_Reg(regs, R_ESP);
         int bit = (*(unsigned char*)(esp + 0x13u)) ? 1 : 0;
-        BQ_ShiftCheck(regs, heap);
         if (bit)
         {
             BQ_ClearType(house, heap);
-            BQ_Trace("bq: cp", heap, 0, 1, 8);
             return 0;
         }
     }
@@ -969,22 +714,13 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_CancelPeel(void* regs)
          * AbandonAll), 在产进度作废。故总数>1 时直接退 (在产继续), 总数<=1
          * (仅剩在产单个或全空) 才走原生。 */
         int sim = BQ_SimCount(house, pType);
-        void* fac = BQ_Resolve(house,
-            *(unsigned char*)((char*)pType + OFF_TT_NAVAL) ? 1u : 0u,
-            *(unsigned*)(BQ_Reg(regs, R_ESP) + 0x24u));
-        int busy = (fac &&
-            *(void**)((char*)fac + OFF_FAC_OBJECT)) ? 1 : 0;
-        BQ_Trace("bq: cs", heap, sim, busy, sim);
         if (sim > 1)
         {
-            BQ_Trace("bq: cp", heap, 0, 0, 5);
             return TO_CANCEL_EXIT;
         }
-        BQ_Trace("bq: cp", heap, 0, 0, 0);
         return 0;
     }
     left = BQ_PopLast(house, heap);
-    BQ_Trace("bq: cp", heap, left, 0, 1);
     return TO_CANCEL_EXIT;
 }
 
@@ -1000,27 +736,16 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_CancelPeel(void* regs)
 
 /* 0x6AAFE1 (5): 暗暂停入口 (mov eax,[0x8871e0], 无 rel)。
  * regs: EDI=图标类型 (存疑时 WhatAmI 守卫), EBP=abs。
- * 纯哨兵: 记 `bq: hd` 后永远跑原指令 (暂停保持原生)。 */
+ * 纯哨兵: 永远跑原指令 (暂停保持原生)。 */
 extern "C" __declspec(dllexport) DWORD __cdecl BQ_DarkPauseSeen(void* regs)
 {
-    void* pType;
-    void* house;
-    int heap;
-
+    (void)regs;
     BQ_EnsureInit();
     if (!g_BQEnable) return 0;
-    pType = (void*)BQ_Reg(regs, R_EDI);
-    heap = (pType && BQ_WhatAmI(pType) == (int)ABS_BUILDINGTYPE) ?
-        BQ_HeapOf(pType) : -1;
-    house = *(void**)ADDR_CURPLAYER;
-    BQ_Trace("bq: hd", heap,
-             (int)(heap >= 0 && house ? BQ_LocalCount(house, heap) : 0),
-             0, 0);
     return 0;
 }
 
-/* 清空本家本型全部本地 (shift+右键清全部用, 逐条移除以便 unqueued
- * 有 trace 可查)。返回清空前数量。 */
+/* 清空本家本型全部本地 (shift+右键清全部用)。返回清空前数量。 */
 static int BQ_ClearType(void* house, int heap)
 {
     int i;
@@ -1038,8 +763,7 @@ static int BQ_ClearType(void* house, int heap)
     return n;
 }
 
-/* 暗路剥离: 本地有本型→弹尾 (d=6) 跳原生出口;
- * 本地空→模拟>1 拦下 (d=7); 否则走原生 (d=0)。Shift 方向由分发点处理。 */
+/* 暗路剥离: 本地有本型→弹尾跳原生出口; 本地空→模拟>1 拦下; 否则走原生。Shift 方向由分发点处理。 */
 static DWORD BQ_DarkPeel(void* regs)
 {
     unsigned abs;
@@ -1060,17 +784,13 @@ static DWORD BQ_DarkPeel(void* regs)
     if (left <= 0)
     {
         int sim = BQ_SimCount(house, pType);
-        BQ_Trace("bq: cs", heap, sim, 0, sim);
         if (sim > 1)
         {
-            BQ_Trace("bq: cp", heap, 0, 0, 7);
             return TO_CANCEL_EXIT;
         }
-        BQ_Trace("bq: cp", heap, 0, 0, 0);
         return 0;
     }
     left = BQ_PopLast(house, heap);
-    BQ_Trace("bq: cp", heap, left, 0, 6);
     return TO_CANCEL_EXIT;
 }
 
@@ -1113,7 +833,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_DarkDispatchPeel(
          * 未暂停的到不了这里 (上游进了暗暂停块先暂停), 天然两步防误删:
          * 松开 shift 点=减一, 按住 shift 点=清零。 */
         BQ_ClearType(house, heap);
-        BQ_Trace("bq: cp", heap, 0, 1, 8);
         return TO_DARK_ALL_NATIVE;
     }
     {

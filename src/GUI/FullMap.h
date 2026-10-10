@@ -5,7 +5,7 @@
 
 #include "GdiText.h"
 
-/* 读 [FullMap] 节 (幂等)。 */
+/* 读 [Sidebar] 节 (幂等)。 */
 void FM_EnsureInit(void);
 
 /* 装字节补丁 + CreateAll 两个调用点重定向: 让**渲染面永远全宽** (态0 要把视口
@@ -13,7 +13,7 @@ void FM_EnsureInit(void);
 void FM_Install(void);
 
 /* 每循环 (prepare 钩 0x4F42F0) 调: 采 F11 三态切换、撑视口、纠正侧栏列、摘
- * 侧栏 gadget。三态 (ini [FullMap] ToggleVk, 默认 F11):
+ * 侧栏 gadget。三态 (ini [Sidebar] ToggleKey, 默认 F11, 写法见 Hotkey.md):
  *   0 完全显示  视口收回 clientW-168, 整条侧栏面上屏, gadget 可用, 点击让位引擎
  *   1 只显示小地图和顶部两个按钮 (视口全宽)
  *   2 全屏      侧栏一点不显示, 整窗都是地图, 点击全给地图

@@ -59,7 +59,6 @@ typedef struct {
     int BriefWidth; /* 简报盒宽 (0=沿用引擎 453) */
     int BriefAdv;   /* 格宽基准: 0=字号+字距, 1=字体前进宽+字距 */
     int Bold;
-    int VShift;     /* 字形垂直偏移 (正=下移) */
     int LogDetail;  /* 1=逐字日志 */
     int Perf;       /* 1=每 2s 记性能账 */
     int Render;
@@ -464,7 +463,8 @@ static void VecBriefProbeW(wchar_t wch, int oa, int cw, int full)
     LogLine(buf);
 }
 
-/* 简报 DrawText 普查: 每个 (调用者,x,y,w,h) 只记一条。 */
+/* 简报 DrawText 普查: 每个 (调用者,x,y,w,h) 只记一条。
+ * 纯诊断 (LogDetail=1 才记, 默认不记): 普查定案后即噪音, 16 槽一满未命中全漏记。 */
 static void VecBriefProbe(unsigned caller, int x, int y, int w, int h,
                              int txt, const char* tag)
 {
@@ -474,6 +474,7 @@ static void VecBriefProbe(unsigned caller, int x, int y, int w, int h,
     unsigned q;
     int i, len = 0;
     const wchar_t* p = 0;
+    if (!g_LogDetail) return;
     for (i = 0; i < seenN; i++)
         if (seen[i][0] == caller && seen[i][1] == (unsigned)x &&
             seen[i][2] == (unsigned)y && seen[i][3] == (unsigned)w &&
@@ -1774,7 +1775,7 @@ static int VecMenuStep(MVEnt* me, int fallback)
 
 /* 菜单字形绘制: 成功返回新笔位, 失败 -1。 */
 static int VecMenuRender(void* t, wchar_t wch, int adv, int h, int x, int y,
-                         int colorW, int px, int yOff)
+                         int colorW, int px)
 {
     unsigned short* buf;
     int pitchW, Tp, B, dx, dy;
@@ -1804,7 +1805,6 @@ static int VecMenuRender(void* t, wchar_t wch, int adv, int h, int x, int y,
             if (dy > hi) dy = hi;
         }
     }
-    dy += yOff;
     for (y = 0; y < e->outh; y++)
     {
         int sy = dy + y;
@@ -1832,7 +1832,7 @@ static int VecMenuRender(void* t, wchar_t wch, int adv, int h, int x, int y,
 int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y, int color)
 {
     wchar_t wc = (wchar_t)((unsigned)wch & 0xFFFFu);
-    int eff, adv, h = 0, r, px, yOff;
+    int eff, adv, h = 0, r, px;
     (void)edxUnused;
     if (!g_OrigBlit) return 0;   /* 不该发生, 守一下不断原版链 */
     /* TAB 走原版特殊公式, 缺字/度量失败也走原版 (保留 0x5555 兜底行为) */
@@ -2006,9 +2006,8 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
         {
             MVEnt* me;
             int step;
-            yOff = g_VT.VShift;
             r = VecMenuRender(t, wc, g_MenuAdv[g_MenuIdx], h, g_MenuPenX,
-                              y, eff, px, yOff);
+                              y, eff, px);
             if (r >= 0)
             {
                 me = VecMenuGlyph(t, wc, g_MenuAdv[g_MenuIdx], h, px);
@@ -2021,8 +2020,7 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
         }
         if (px >= 0)
         {
-            yOff = g_VT.VShift;
-            r = VecMenuRender(t, wc, adv, h, x, y, eff, px, yOff);
+            r = VecMenuRender(t, wc, adv, h, x, y, eff, px);
             if (r >= 0) return r;
         }
         return g_OrigBlit(t, NULL, wch, x, y, color);
@@ -2053,9 +2051,8 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                 adv = (adv * g_VT.FontPx + g_FontOrigH / 2) / g_FontOrigH;
                 if (adv < 1) adv = 1;
             }
-            yOff = g_VT.VShift + (cred ? g_VT.CreditDY : 0);
             r = VecRender(t, wc, adv, h, (inTip ? tx : x), y, eff,
-                          px, yOff);
+                          px, (cred ? g_VT.CreditDY : 0));
             /* VecRender 失败时记一行 (字/坐标/失败点 why), 上限 8。 */
             if (r == VC_FAIL)
             {
@@ -2236,8 +2233,7 @@ void VecText_EnsureInit(void)
     g_VT.BriefMark = GetPrivateProfileIntA(VT_SECTION, "BriefMark", 1, g_IniPath);
     g_VT.BriefWidth = GetPrivateProfileIntA(VT_SECTION, "BriefWidth", 620, g_IniPath);
     g_VT.BriefAdv = GetPrivateProfileIntA(VT_SECTION, "BriefAdv", 1, g_IniPath);
-    g_VT.VShift = GetPrivateProfileIntA(VT_SECTION, "VShift", 0, g_IniPath);
-    g_VT.LogDetail = GetPrivateProfileIntA(VT_SECTION, "LogDetail", 0, g_IniPath);
+    g_VT.LogDetail = GetPrivateProfileIntA("Log", "LogDetail", 0, g_IniPath);
     g_VT.Perf = GetPrivateProfileIntA(VT_SECTION, "Perf", 0, g_IniPath);
     g_VT.Render = GetPrivateProfileIntA(VT_SECTION, "Render", 0, g_IniPath);
     g_VT.Enable = g_VT.Enable ? 1 : 0;
@@ -2261,8 +2257,6 @@ void VecText_EnsureInit(void)
     g_VT.BriefAdv = g_VT.BriefAdv ? 1 : 0;
     if (g_VT.BriefLine < 0) g_VT.BriefLine = 0;
     if (g_VT.BriefLine > 300) g_VT.BriefLine = 300;
-    if (g_VT.VShift < -8) g_VT.VShift = -8;
-    if (g_VT.VShift > 8) g_VT.VShift = 8;
     g_VT.LogDetail = g_VT.LogDetail ? 1 : 0;
     g_VT.Perf = g_VT.Perf ? 1 : 0;
     g_PfOn = g_VT.Perf;

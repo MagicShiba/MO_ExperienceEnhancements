@@ -20,11 +20,12 @@
 
 #include <windows.h>
 #include "GdiText.h"
+#include "OrderUtil.h"
 #include "FullMap.h"
 #include "ScaleBar.h"
 #include "MOExperience.h"
 
-#define FM_SECTION "FullMap"
+#define FM_SECTION "Sidebar"
 
 /* ---------------- 地址 (反汇编实证) ---------------- */
 
@@ -123,7 +124,7 @@ typedef int (__thiscall *FnFillRect)(void* self, RectangleStruct* rect, unsigned
 
 static int s_Init = 0;
 static int s_Mode = FM_MODE_FULL;
-static int s_ToggleVk = 0x7A;   /* VK_F11 */
+static OU_Hotkey s_ToggleHk;   /* [Sidebar] ToggleKey (默认 F11) */
 static int s_Enable = 0;
 static int s_ExtraH = 5;
 /* 左键"本次按下已处理"标记 —— 只由点击门维护 (读 GetAsyncKeyState, 松开时清) */
@@ -147,12 +148,12 @@ void FM_EnsureInit(void)
     s_Init = 1;
     GtEnsureLog();
     if (!g_Log) return;
-    s_Enable = GetPrivateProfileIntA(FM_SECTION, "Enable", 0, g_IniPath) ? 1 : 0;
+    s_Enable = GetPrivateProfileIntA(FM_SECTION, "HideEnable", 0, g_IniPath) ? 1 : 0;
     s_ExtraH = GetPrivateProfileIntA(FM_SECTION, "ExtraH", 5, g_IniPath);
     if (s_ExtraH < 0) s_ExtraH = 0;
     if (s_ExtraH > 64) s_ExtraH = 64;
-    s_ToggleVk = GetPrivateProfileIntA(FM_SECTION, "ToggleVk", 0x7A, g_IniPath);
-    if (s_ToggleVk <= 0 || s_ToggleVk > 255) s_ToggleVk = 0x7A;
+    OU_ParseHotkey("F11", &s_ToggleHk);
+    OU_ReadHotkey(FM_SECTION, "ToggleKey", &s_ToggleHk);
     s_Mode = GetPrivateProfileIntA(FM_SECTION, "Mode", FM_MODE_FULL, g_IniPath);
     if (s_Mode < FM_MODE_FULL || s_Mode > FM_MODE_BARE) s_Mode = FM_MODE_FULL;
     if (!s_Enable) return;
@@ -161,8 +162,6 @@ void FM_EnsureInit(void)
     UtoA((unsigned)s_Enable, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " mode=", sizeof(buf));
     UtoA((unsigned)s_Mode, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " vk=", sizeof(buf));
-    UtoA((unsigned)s_ToggleVk, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     LogLine(buf);
 }
 
@@ -1135,13 +1134,13 @@ static void Fm_ApplyViewWidth(void)
                 UtoA((unsigned)oldW, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
                 q = AppendCh(buf, q, 'x', sizeof(buf));
                 UtoA((unsigned)oldH, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
-                q = AppendCStr(buf, q, " -> ", sizeof(buf));
+                q = AppendCStr(buf, q, "->", sizeof(buf));
                 UtoA((unsigned)w, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
                 q = AppendCh(buf, q, 'x', sizeof(buf));
                 UtoA((unsigned)h, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
                 q = AppendCh(buf, q, '@', sizeof(buf));
                 UtoA((unsigned)x, b3); q = AppendCStr(buf, q, b3, sizeof(buf));
-                q = AppendCStr(buf, q, " (dirty redraw queued)", sizeof(buf));
+                q = AppendCStr(buf, q, " redraw", sizeof(buf));
                 LogLine(buf);
             }
         }
@@ -1222,12 +1221,12 @@ static void Fm_PollToggle(void)
     char buf[96];
     unsigned p = 0;
     int fr, down;
-    if (!s_Enable || !s_ToggleVk) return;
+    if (!s_Enable || s_ToggleHk.disabled) return;
     fr = *(int*)(size_t)ADDR_FRAME_COUNT;
     if (fr == s_TogLastFrame) return;
     s_TogLastFrame = fr;
     if (!GtGameFocused()) { s_TogKeyDown = 0; return; }
-    down = (GetAsyncKeyState(s_ToggleVk) & 0x8000) ? 1 : 0;
+    down = OU_HotkeyDown(&s_ToggleHk) ? 1 : 0;
     if (down && !s_TogKeyDown)
     {
         s_Mode = (s_Mode + 1) % 3;
@@ -1355,9 +1354,13 @@ void FM_Poll(void)
         UtoA((unsigned)vb->Y, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         q = AppendCStr(buf, q, " col=", sizeof(buf));
         UtoA((unsigned)sb->X, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        q = AppendCStr(buf, q, " colCalc=", sizeof(buf));
-        colXcalc = Fm_ColumnX(0);   /* 诊断分支内现算 (平时每 poll 省一次)。 */
-        UtoA((unsigned)colXcalc, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        colXcalc = Fm_ColumnX(0);   /* 诊断分支内现算 (平时每 poll 省一次)。
+                                     * 与 col 一致不记, 不一致才追 colCalc=。 */
+        if (colXcalc != sb->X)
+        {
+            q = AppendCStr(buf, q, " colCalc=", sizeof(buf));
+            UtoA((unsigned)colXcalc, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+        }
         q = AppendCStr(buf, q, " wide=", sizeof(buf));
         UtoA((unsigned)Fm_ViewWide(), b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         q = AppendCStr(buf, q, " keep=", sizeof(buf));
@@ -1396,10 +1399,13 @@ void FM_Poll(void)
             UtoA((unsigned)cwid, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
             q = AppendCh(buf, q, 'x', sizeof(buf));
             UtoA((unsigned)chgt, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
-            q = AppendCStr(buf, q, " map=", sizeof(buf));
-            UtoA((unsigned)mwid, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCh(buf, q, 'x', sizeof(buf));
-            UtoA((unsigned)mhgt, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+            if (mwid != cwid || mhgt != chgt)   /* map 与 comp 一致不记 */
+            {
+                q = AppendCStr(buf, q, " map=", sizeof(buf));
+                UtoA((unsigned)mwid, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+                q = AppendCh(buf, q, 'x', sizeof(buf));
+                UtoA((unsigned)mhgt, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+            }
             q = AppendCStr(buf, q, " strip=", sizeof(buf));
             UtoA((unsigned)swid, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
             q = AppendCh(buf, q, 'x', sizeof(buf));
@@ -1412,8 +1418,11 @@ void FM_Poll(void)
             UtoA((unsigned)cb2->Width, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
             q = AppendCh(buf, q, '@', sizeof(buf));
             UtoA((unsigned)cb2->X, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
-            q = AppendCStr(buf, q, " vpatch=", sizeof(buf));
-            UtoA((unsigned)s_ViewPatched, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+            if (s_ViewPatched)   /* 0 是常态, 不记; 非 0 才追 */
+            {
+                q = AppendCStr(buf, q, " vpatch=", sizeof(buf));
+                UtoA((unsigned)s_ViewPatched, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+            }
             LogLine(buf);
         }
     }

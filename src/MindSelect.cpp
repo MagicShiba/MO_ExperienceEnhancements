@@ -37,7 +37,7 @@
 #include "GdiText.h"
 #include "OrderUtil.h"
 
-#define MS_SECTION "MindSelect"
+#define MS_SECTION "Features"
 
 /* ---------------- 私有地址 (共享部分见 OrderUtil.h) ---------------- */
 
@@ -71,7 +71,7 @@ typedef int __attribute__((thiscall)) (*Fn_Select)(void* self);
 
 static int g_MsInit = 0;
 static int g_MsEnable = 1;
-static OU_Hotkey g_MsHk;      /* Hotkey=Shift+P */
+static OU_Hotkey g_MsHk;      /* [Features] MindSelect (默认 Shift+P) */
 static int g_MsPrevCombo = 0;
 
 static void MS_EnsureInit(void)
@@ -79,10 +79,8 @@ static void MS_EnsureInit(void)
     if (g_MsInit) return;
     g_MsInit = 1;
     BuildPaths();
-    g_MsEnable = GetPrivateProfileIntA(MS_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    OU_ParseHotkey("Shift+P", &g_MsHk);           /* 默认 (必成功) */
-    OU_ReadHotkey(MS_SECTION, "Hotkey", &g_MsHk); /* 有则覆盖, 坏串留默认 */
-    if (g_MsHk.disabled) g_MsEnable = 0;
+    /* 单行: 缺键=Shift+P 启用; 0=禁用; 其它按 Hotkey 串 (坏串留默认, None=禁用) */
+    g_MsEnable = OU_ReadHotkeySingle(MS_SECTION, "MindSelect", "Shift+P", &g_MsHk);
 }
 
 /* ---------------- 判定 + 单步 ---------------- */

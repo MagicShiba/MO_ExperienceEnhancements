@@ -80,15 +80,15 @@ Print 0x434B90 / Simple 0x4A5EB0 / GetDim 0x433CF0。
 
 ## 配置（[VecText]，改后重启）
 
-- Enable=1，FontFace=文件名原样匹配（先游戏目录后系统目录），FontPx=0（自动），Bold=0，VShift=0。
-- CreditPx/CreditDY（顶栏）；BriefOwn/BriefLine/BriefTrack/BriefWidth/BriefAdv/BriefMark（简报）；LogDetail/Render；电力四键见下。
+- Enable=1，FontFace=文件名原样匹配（先游戏目录后系统目录），FontPx=0（自动），Bold=0。
+- CreditPx/CreditDY（顶栏）；BriefOwn/BriefLine/BriefTrack/BriefWidth/BriefAdv/BriefMark（简报）；Render；电力四键见下。详细日志开关 LogDetail 在 `[Log]` 节。
 
 ## 已排除（勿重查）
 
 - DrawText 改 t+0x1C 无效：t 是画布，字体是 a1。
 - IsPlausiblePtr 要求 4 字节对齐，字节级探测先对齐。
 - 正文无体外循环，都经 DrawText。
-- 已删键勿加回：`LogAdv`、`FixLineH`、`BriefBox`/`BriefClip`。
+- 已删键勿加回：`LogAdv`、`FixLineH`、`BriefBox`/`BriefClip`、`VShift`。
 
 ## 返回值哨兵
 
@@ -96,7 +96,7 @@ Print 0x434B90 / Simple 0x4A5EB0 / GetDim 0x433CF0。
 
 ## 日志
 
-`vtext:` 钩子成败、`brief: dt/own draw/w/skip why=`、`perf:`、`gdi:` (LogDetail=1)。探针定案即删。
+`vtext:` 钩子成败、`brief: own draw/w/skip why=`、`perf:`、`gdi:` (LogDetail=1)。`brief: dt` 普查默认不记 (LogDetail=1 才记)。探针定案即删。
 
 ## 右侧提示与超武区分
 

@@ -130,3 +130,7 @@ int OU_HotkeyDown(const OU_Hotkey* hk);
 void OU_ReadString(const char* section, const char* key, const char* def,
                    char* buf, int buflen);
 int OU_ReadHotkey(const char* section, const char* key, OU_Hotkey* io);
+/* 单行开关+热键 (缺键/空串/坏串=默认值启用; "0"=禁用; 其它按 Hotkey 串解析,
+ * None 类=禁用)。先按 def 解析出默认值, 再读键覆盖。回 1=启用, 0=禁用。 */
+int OU_ReadHotkeySingle(const char* section, const char* key,
+                        const char* def, OU_Hotkey* io);

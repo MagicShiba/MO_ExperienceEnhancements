@@ -16,7 +16,7 @@
 #include "GdiText.h"
 #include "OrderUtil.h"
 
-#define AM_SECTION "AttackMove"
+#define AM_SECTION "Features"
 #define MISSION_ATTACKMOVE 29   /* Mission::AttackMove (YRpp GeneralDefinitions.h) */
 
 typedef void* __attribute__((thiscall)) (*Fn_TargetFromCell)(void* tgt, const CellStruct* cell);
@@ -45,10 +45,8 @@ static void AM_EnsureInit(void)
     g_AmInit = 1;
     BuildPaths();
     GtEnsureLog();
-    g_AmEnable = GetPrivateProfileIntA(AM_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    OU_ParseHotkey("X2", &g_AmHk);
-    OU_ReadHotkey(AM_SECTION, "Hotkey", &g_AmHk);
-    if (g_AmHk.disabled) g_AmEnable = 0;
+    /* 单行: 缺键=X2 启用; 0=禁用; 其它按 Hotkey 串 (坏串留默认, None=禁用) */
+    g_AmEnable = OU_ReadHotkeySingle(AM_SECTION, "AttackMove", "X2", &g_AmHk);
     LogLine("attackmove: ON (custom, default X2, mission=29)");
     if (!g_AmEnable) LogLine("attackmove: OFF");
 }

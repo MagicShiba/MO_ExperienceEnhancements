@@ -25,7 +25,7 @@
 #include <windows.h>
 #include "GdiText.h"
 
-#define TS_SECTION "TypeSelect"
+#define TS_SECTION "Features"
 
 /* Syringe REGISTERS 布局 (YRpp Syringe.h, MsgText.cpp 的
  * OFF_REG_ESP=0x14 / OFF_REG_ECX=0x20 可互证, EAX 紧跟 ECX 之后)。 */
@@ -43,7 +43,7 @@ static void TypeSelect_EnsureInit(void)
     g_TSInit = 1;
     BuildPaths();
     GtEnsureLog();
-    g_TSEnable = GetPrivateProfileIntA(TS_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
+    g_TSEnable = GetPrivateProfileIntA(TS_SECTION, "TypeSelect", 1, g_IniPath) ? 1 : 0;
     LogLine(g_TSEnable ? "tselect: building type-select ON"
                        : "tselect: building type-select OFF");
 }

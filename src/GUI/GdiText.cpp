@@ -400,23 +400,52 @@ static void LogFace(const char* tag, const char* what, const char* v)
     LogLine(logb);
 }
 
-static void LogFaceW(const char* tag, const wchar_t* face)
+/* face 转 ASCII (非 ASCII 记 '?'), 回 1=全 ASCII。 */
+static int FaceToAscii(const wchar_t* face, char* out, int cap)
 {
-    char tmp[FONT_FACE_MAX];
-    int i = 0;
-    while (face[i] && i < FONT_FACE_MAX - 1)
+    int i = 0, ascii = 1;
+    while (face[i] && i < cap - 1)
     {
         wchar_t wc = face[i];
-        tmp[i] = (wc >= 32 && wc < 127) ? (char)wc : '?';
+        if (wc >= 32 && wc < 127) out[i] = (char)wc;
+        else { out[i] = '?'; ascii = 0; }
         i++;
     }
-    tmp[i] = 0;
-    LogFace(tag, " use=", tmp);
-    /* 非 ASCII 名在 use= 里全是 '?', 另记前 8 个字的 U+ 值备查 */
+    out[i] = 0;
+    return ascii;
+}
+
+/* 字体解析只记一行: font: <tag> file=<f> found=<where> [use=<Face>] [tail]。
+ * 非 ASCII 名 use= 里是 '?', 才追记一行 useHex= 前 8 字备查 (ASCII 名不记)。 */
+static void LogFaceOne(const char* tag, const char* file, const char* found,
+                       const wchar_t* face, const char* tail)
+{
+    char logb[256], tmp[FONT_FACE_MAX];
+    unsigned q = 0;
+    int ascii = 1, k;
+    q = AppendCStr(logb, q, "font: ", sizeof(logb));
+    q = AppendCStr(logb, q, tag, sizeof(logb));
+    q = AppendCStr(logb, q, " file=", sizeof(logb));
+    q = AppendCStr(logb, q, file, sizeof(logb));
+    q = AppendCStr(logb, q, " found=", sizeof(logb));
+    q = AppendCStr(logb, q, found, sizeof(logb));
+    if (face)
+    {
+        ascii = FaceToAscii(face, tmp, sizeof(tmp));
+        q = AppendCStr(logb, q, " use=", sizeof(logb));
+        q = AppendCStr(logb, q, tmp, sizeof(logb));
+    }
+    if (tail)
+    {
+        q = AppendCStr(logb, q, " ", sizeof(logb));
+        q = AppendCStr(logb, q, tail, sizeof(logb));
+    }
+    LogLine(logb);
+    if (face && !ascii)
     {
         char hx[64];
-        unsigned q = 0;
-        int k = 0;
+        q = 0;
+        k = 0;
         while (face[k] && k < 8 && q + 6 < sizeof(hx))
         {
             unsigned w = (unsigned)face[k] & 0xFFFFu;
@@ -445,8 +474,7 @@ static void ResolveFontFaceRaw(const char* cfg, const char* tag, wchar_t* out,
     if (!tmp[0]) { CopyFace(out, fallback); return; }
     if (!FindFontFile(tmp, path, sizeof(path), &where))
     {
-        LogFace(tag, " file=", tmp);
-        LogFace(tag, " found=none fallback", "");
+        LogFaceOne(tag, tmp, "none", NULL, "fallback");
         CopyFace(out, fallback);
         return;
     }
@@ -454,13 +482,10 @@ static void ResolveFontFaceRaw(const char* cfg, const char* tag, wchar_t* out,
     if (ParseFamilyName(path, out))
     {
         AddFontResourceExA(path, FR_PRIVATE, 0);
-        LogFace(tag, " file=", tmp);
-        LogFace(tag, " found=", where);
-        LogFaceW(tag, out);
+        LogFaceOne(tag, tmp, where, out, NULL);
         return;
     }
-    LogFace(tag, " file=", tmp);
-    LogFace(tag, " parse failed fallback", "");
+    LogFaceOne(tag, tmp, where, NULL, "parse-failed fallback");
     CopyFace(out, fallback);
 }
 
@@ -510,8 +535,9 @@ void ResolveFontFace(const char* cfg, const char* tag, wchar_t* out,
         if (FaceSame(cands[i], out)) continue;
         if (FaceHasCJK(cands[i]))
         {
-            LogFace(tag, " cjkHeal=", "");
-            LogFaceW(tag, cands[i]);
+            char cn[FONT_FACE_MAX];
+            FaceToAscii(cands[i], cn, sizeof(cn));   /* 候选全 ASCII, 单行 */
+            LogFace(tag, " cjkHeal=", cn);
             CopyFace(out, cands[i]);
             return;
         }

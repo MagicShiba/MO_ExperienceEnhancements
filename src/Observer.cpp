@@ -8,7 +8,7 @@
 #include "GdiText.h"
 #include "Observer.h"
 
-#define OB_SECTION "Observer"
+#define OB_SECTION "Features"
 
 /* ---------------- 引擎地址 ---------------- */
 
@@ -43,7 +43,7 @@ static void OB_EnsureInit(void)
     if (g_ObInit) return;
     g_ObInit = 1;
     BuildPaths();
-    g_ObEnable = GetPrivateProfileIntA(OB_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
+    g_ObEnable = GetPrivateProfileIntA(OB_SECTION, "Observer", 1, g_IniPath) ? 1 : 0;
 }
 
 /* ---------------- 房属性判据 ---------------- */

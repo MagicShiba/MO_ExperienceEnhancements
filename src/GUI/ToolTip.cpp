@@ -23,8 +23,8 @@
  * 钩子经 dist/MOExperience.dll.inj 由 Syringe 挂载:
  *   0x6A93D9 = ToolTip_Extend, 5 (mov eax,0xB07BC4)
  * 开关关/类型非法/求值失败一律返回 0 跑原指令 (=原版行为)。
- * 配置 [ToolTips] (缺失=默认值, 改后重启):
- *   Enable=1 (1=追加第三行, 0=原版两行)
+ * 配置 [Features] ToolTips (缺失=默认值, 改后重启):
+ *   ToolTips=1 (1=追加第三行, 0=原版两行)
  *
  * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
  */
@@ -35,7 +35,7 @@
 #include "ScaleBar.h"
 #include "SideScroll.h"
 
-#define TT_SECTION "ToolTips"
+#define TT_SECTION "Features"
 
 #define REG_OFF_ESI 0x0C
 #define REG_OFF_EAX 0x24
@@ -110,7 +110,7 @@ static void ToolTip_EnsureInit(void)
     g_TTInit = 1;
     BuildPaths();
     GtEnsureLog();
-    g_TTEnable = GetPrivateProfileIntA(TT_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
+    g_TTEnable = GetPrivateProfileIntA(TT_SECTION, "ToolTips", 1, g_IniPath) ? 1 : 0;
     LogLine(g_TTEnable ? "tooltip: power+time ON" : "tooltip: power+time OFF");
 }
 

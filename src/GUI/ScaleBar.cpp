@@ -1429,10 +1429,18 @@ static int Sb_ViewPx(int* ox, int* oy, int* w, int* h)
                           && *oy > -1000000 && *oy < 1000000);
 }
 
+/* 有符号整数字段 (钳位界可能是负数, 按无符号会打出 42 亿)。值域坐标量级, 无 INT_MIN 顾虑。 */
+static unsigned SB_AppendInt(char* buf, unsigned q, unsigned cap, int v)
+{
+    char b1[16];
+    if (v < 0) { q = AppendCh(buf, q, '-', cap); v = -v; }
+    UtoA((unsigned)v, b1);
+    return AppendCStr(buf, q, b1, cap);
+}
+
 /* 视口比地图大时居中钳位。退化轴钉地图正中。 */
 int SB_ClampFix(Point2D* c)
 {
-    static int s_tick = 0;
     static int s_wasDeg = 2;
     int bl = 0;
     int ml, mt, mw, mh;
@@ -1453,25 +1461,24 @@ int SB_ClampFix(Point2D* c)
     mnX = vw / 2 + ml;      mxX = mnX + mw - vw;
     mnY = vh / 2 + mt;      mxY = mnY + mh - vh;
     midX = cx;              midY = cy;
-    /* 退化状态翻转时打一条。 */
+    /* 退化状态翻转时打一条 (周期心跳已删: 值不变时全是重复行)。 */
     {
         int deg = degX || degY;
-        if (deg != s_wasDeg || --s_tick <= 0)
+        if (deg != s_wasDeg)
         {
-            char b1[16], b2[16], buf[224];
+            char buf[224];
             unsigned q = 0;
             s_wasDeg = deg;
-            s_tick = 240;
             q = AppendCStr(buf, q, deg ? "sbar: view > map, center-pinned  x "
                                        : "sbar: view <= map, normal clamp  x ",
                             sizeof(buf));
-            UtoA((unsigned)mnX, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+            q = SB_AppendInt(buf, q, sizeof(buf), mnX);
             q = AppendCh(buf, q, ',', sizeof(buf));
-            UtoA((unsigned)mxX, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+            q = SB_AppendInt(buf, q, sizeof(buf), mxX);
             q = AppendCStr(buf, q, "  y ", sizeof(buf));
-            UtoA((unsigned)mnY, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+            q = SB_AppendInt(buf, q, sizeof(buf), mnY);
             q = AppendCh(buf, q, ',', sizeof(buf));
-            UtoA((unsigned)mxY, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+            q = SB_AppendInt(buf, q, sizeof(buf), mxY);
             LogLine(buf);
         }
     }
@@ -1733,11 +1740,11 @@ static void Sb_Place(void)
         s_LastX = s_BarX; s_LastY = s_BarY; s_LastW = s_BarW;
         q = AppendCStr(buf, q, "sbar: geom x=", sizeof(buf));
         UtoA((unsigned)s_BarX, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
-        AppendCh(buf, q, 'y', sizeof(buf));
+        q = AppendCStr(buf, q, " y=", sizeof(buf));
         UtoA((unsigned)s_BarY, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
-        AppendCh(buf, q, 'w', sizeof(buf));
+        q = AppendCStr(buf, q, " w=", sizeof(buf));
         UtoA((unsigned)s_BarW, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
-        AppendCh(buf, q, 'h', sizeof(buf));
+        q = AppendCStr(buf, q, " h=", sizeof(buf));
         UtoA((unsigned)s_WidgetH, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
         q = AppendCStr(buf, q, " win=", sizeof(buf));
         UtoA((unsigned)gw, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
@@ -1778,19 +1785,22 @@ static void Sb_SetLevel(int lv, const char* why)
     p = AppendCStr(buf, p, why, sizeof(buf));
     p = AppendCStr(buf, p, " drew=", sizeof(buf));
     UtoA((unsigned)s_Drew, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    /* zbuf = 引擎对象里的真实尺寸，zref = 我们记的。 */
+    /* zbuf = 引擎对象里的真实尺寸, zref = 我们记的; 一致只打 zbuf, 不一致才追 zref。 */
     {
         int zw = 0, zh = 0;
         char b2[16], b3[16];
         if (!SB_BufDims(&zw, &zh)) { zw = zh = -1; }
         p = AppendCStr(buf, p, " zbuf=", sizeof(buf));
-        UtoA((unsigned)zw, b2); p = AppendCStr(buf, p, b2, sizeof(buf));
+        p = SB_AppendInt(buf, p, sizeof(buf), zw);
         p = AppendCh(buf, p, 'x', sizeof(buf));
-        UtoA((unsigned)zh, b3); p = AppendCStr(buf, p, b3, sizeof(buf));
-        p = AppendCStr(buf, p, " zref=", sizeof(buf));
-        UtoA((unsigned)s_BufW, b2); p = AppendCStr(buf, p, b2, sizeof(buf));
-        p = AppendCh(buf, p, 'x', sizeof(buf));
-        UtoA((unsigned)s_BufH, b3); p = AppendCStr(buf, p, b3, sizeof(buf));
+        p = SB_AppendInt(buf, p, sizeof(buf), zh);
+        if (zw != s_BufW || zh != s_BufH)
+        {
+            p = AppendCStr(buf, p, " zref=", sizeof(buf));
+            UtoA((unsigned)s_BufW, b2); p = AppendCStr(buf, p, b2, sizeof(buf));
+            p = AppendCh(buf, p, 'x', sizeof(buf));
+            UtoA((unsigned)s_BufH, b3); p = AppendCStr(buf, p, b3, sizeof(buf));
+        }
     }
     LogLine(buf);
 }

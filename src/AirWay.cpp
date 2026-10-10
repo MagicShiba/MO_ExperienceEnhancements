@@ -17,7 +17,7 @@
 #include "GdiText.h"
 #include "AirWay.h"
 
-#define AW_SECTION "AirWay"
+#define AW_SECTION "Features"
 #define AW_VTABLE_SLOT ((void**)0x007E2908u)
 
 static int g_AirWayEnable = 0;
@@ -38,7 +38,7 @@ void AirWay_Install(void)
     BuildPaths();
     GtEnsureLog();
     g_AirWayEnable =
-        GetPrivateProfileIntA(AW_SECTION, "Enable", 0, g_IniPath) ? 1 : 0;
+        GetPrivateProfileIntA(AW_SECTION, "AirWay", 0, g_IniPath) ? 1 : 0;
     if (!g_AirWayEnable)
     {
         LogLine("airway: aircraft waypoints OFF");

@@ -21,7 +21,7 @@
 Ares 同流钩子（查 `Ares.dll.inj` 实证，同函数内）：`0x6AB0B0` LoadCameo2
 及一串 FixOffset（`0x6AB49D/4E8/577/620/741/802/825/920/92F` 等）；
 `0x6AB0B0` 在 H0 上游，可能直跳暂停块/取消分支绕过 H0，故暂停块入口
-另埋剥离钩（H0P），两条路都堵（`pa` 常驻 trace 看实际路由）。其余无 rel（return 0 安全），
+另埋剥离钩（H0P），两条路都堵。其余无 rel（return 0 安全），
 跳转只跳前向原生目标。
 右键规则（用户定稿，Shift 在此忽略）：
 总数 N>1 时每次右键只减数不动在产（`0x6AB0C1` 处 state==1 且本地有本型
@@ -72,13 +72,9 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈，`0x6A9C86` 的 `[ESP+0x3
   左键记数用“当前或近期按下”（防单帧竞态/提前松开），右键清空只认当前。
 - 建筑页/防御页天然分开：条目按 house+heap 匹配（heap=ArrayIndex 类型唯一，
   同型必同 BuildCat/同工厂），清空只清本家本型。
-- 诊断 trace（`MOExperience.log`，点击级）：`bq: qd/qf/qn`（左键记入），
-  `bq: h0`（右键到暂停检查，a=state b=heap），`bq: h1`（到切换门，
-  a=flag b=ebxHeap），`bq: cp`（右键，a=heap b=剩本地 c=shift
-  d=1弹一/2清空/3暂停剥离/0走原生），`bq: sw`（压住切换清产），
-  `bqueue: queued/fire/unqueued`（记入/开工/移除），
-  `bqueue: modbase=`（对照崩溃 EIP 归因模块）。
-  `h0/h1/cp-d0` 常驻：每次点击必留一行，无刷屏。
+- 日志只剩启动两行（`bqueue: local building queue ON` + `bqueue: modbase=`）；
+  逐事件 trace（`bq: qd/qf/qn/h0/hd/cp/sh/cs/pw/ev`、`bqueue: queued/fire/unqueued/onboard`、
+  `pev:` 抓包）已全删，模块定案不再需要。
 - 绘制空工厂钩：`0x6A9C6C`（6 字节 test+mov，无 rel）。
   绘制按 buildcat=0 取槽工厂，建筑页没下过单则槽空，原生直接跳过计数，
   防御页连带没数字。工厂空但本地有本型→EAX/EBX=本地数跳绘制块；
@@ -88,7 +84,7 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈，`0x6A9C86` 的 `[ESP+0x3
   在执行侧被拒（`0x4FA520` 首部 busy+building 直接返 3），静默丢单；
   故发单后同线 45 轮内不再发（执行后 Object 非空本来就会停）。
 - 确认制：发单只 mark flying 不移除，见模拟认领
-  （`CountTotal>0`，`bqueue: onboard`）才移除；执行拒收则条目留着数字
+  （`CountTotal>0`）才移除；执行拒收则条目留着数字
   留着，pend 窗后重发。发而不删，永不哑单丢数。
 - `0x6A9C86`（5 字节，`mov ebx,eax + cmp ebx,1`，CountTotal 取数点）→ 本地
   有排队或原生数为 0 时改用全厂求和（`sim+n`，`sim` 为本家各工厂

@@ -397,3 +397,25 @@ int OU_ReadHotkey(const char* section, const char* key, OU_Hotkey* io)
     *io = tmp;
     return 1;
 }
+
+/* 单行开关+热键 (缺键/空串/坏串=默认值启用; "0"=禁用; 其它按 Hotkey 串解析,
+ * None 类=禁用)。先按 def 解析出默认值, 再读键覆盖。回 1=启用, 0=禁用。 */
+int OU_ReadHotkeySingle(const char* section, const char* key,
+                        const char* def, OU_Hotkey* io)
+{
+    char buf[64];
+    OU_Hotkey tmp;
+    if (!section || !key || !io) return 0;
+    OU_ParseHotkey(def ? def : "", io);         /* 默认 (常量串, 必成功) */
+    OU_ReadString(section, key, "", buf, sizeof(buf));
+    if (!buf[0]) return io->disabled ? 0 : 1;   /* 缺键/空串: 留默认 */
+    if (buf[0] == '0' && buf[1] == 0)           /* "0"=禁用 */
+    {
+        io->disabled = 1;
+        return 0;
+    }
+    if (!OU_ParseHotkey(buf, &tmp))             /* 坏串: 留默认 */
+        return io->disabled ? 0 : 1;
+    *io = tmp;
+    return tmp.disabled ? 0 : 1;
+}

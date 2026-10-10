@@ -77,19 +77,25 @@ static int MOE_HostIsGame(void)
     return 1;
 }
 
-/* host 一行 (start 之前打, 双进程各留一行, 下次直接按 pid 区分)。 */
+/* host 一行 (start 之前打, 双进程各留一行, 下次直接按 pid 区分):
+ * moe: host Syringe.exe pid=2668 not gamemd, skipped
+ * moe: host gamemd.exe pid=12976 (只记文件名, 路径太长不记)。 */
 static void MOE_LogHost(void)
 {
     char pb[260], buf[512], b1[16];
-    unsigned p = 0;
+    unsigned p = 0, i;
     DWORD n = GetModuleFileNameA(NULL, pb, (DWORD)sizeof(pb));
     if (n == 0 || n >= (DWORD)sizeof(pb)) pb[0] = 0;
     else pb[n] = 0;
+    i = n;
+    while (i > 0 && pb[i - 1] != '\\' && pb[i - 1] != '/' && pb[i - 1] != ':') i--;
     p = AppendCStr(buf, p, "moe: host ", sizeof(buf));
-    p = AppendCStr(buf, p, pb, sizeof(buf));
+    p = AppendCStr(buf, p, pb + i, sizeof(buf));
     p = AppendCStr(buf, p, " pid=", sizeof(buf));
     UtoA((unsigned)GetCurrentProcessId(), b1);
     p = AppendCStr(buf, p, b1, sizeof(buf));
+    if (!MOE_HostIsGame())
+        p = AppendCStr(buf, p, " not gamemd, skipped", sizeof(buf));
     LogLine(buf);
 }
 
@@ -166,8 +172,8 @@ void MOE_EnsureInit(void)
     g_InitDone = 1;
     GtEnsureLog();
     if (!g_Log) return;
-    if (!MOE_HostIsGame()) return;   /* 非游戏宿主: DllMain 已留 host 行, 这里不再初始化各模块 */
-    LogLine("==================================================");
+    if (!MOE_HostIsGame()) return;   /* 非游戏宿主: MOE_LogHost 已留带 skipped 的行, 这里不再初始化各模块 */
+    LogLine("=====");
     p = AppendCStr(buf, 0, "MOExperience ", sizeof(buf));
     p = AppendCStr(buf, p, MOE_VERSION, sizeof(buf));
     p = AppendCStr(buf, p, " start pid=", sizeof(buf));
@@ -1395,11 +1401,7 @@ extern "C" __declspec(dllexport) BOOL __stdcall DllMain(HINSTANCE h, DWORD reaso
         DisableThreadLibraryCalls(h);
         GtEnsureLog();
         MOE_LogHost();
-        if (!MOE_HostIsGame())
-        {
-            LogLine("moe: host not gamemd, hooks skipped");
-            return TRUE;
-        }
+        if (!MOE_HostIsGame()) return TRUE;
         AddVectoredExceptionHandler(1, Moe_CrashFilter);
         MOE_EnsureInit();
         VecText_Install();

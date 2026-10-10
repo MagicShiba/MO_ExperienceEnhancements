@@ -19,7 +19,7 @@
 #include "ScaleBar.h"
 #include "WeaponRange.h"
 
-#define WR_SECTION "WeaponRange"
+#define WR_SECTION "Features"
 
 /* ---------------- 私有地址 (共享部分见 OrderUtil.h) ---------------- */
 
@@ -58,7 +58,7 @@ static void WR_EnsureInit(void)
     g_WrInit = 1;
     BuildPaths();
     GtEnsureLog();
-    g_WrEnable = GetPrivateProfileIntA(WR_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
+    g_WrEnable = GetPrivateProfileIntA(WR_SECTION, "WeaponRange", 1, g_IniPath) ? 1 : 0;
     LogLine(g_WrEnable ? "wrange: ON (ctrl+single)" : "wrange: OFF");
 }
 
