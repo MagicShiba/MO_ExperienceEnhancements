@@ -1159,7 +1159,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     /* 刻度条: 画在视图区之外的底部工具栏带子上 (A 之外 ⇒ 引擎的 blit 不会把它
      * 缩放, 也跟着一起上屏)。 */
     if (SB_DrawToComposite()) drew = 1;
-    /* 暂停/步进两按钮 (刻度条左侧, 启用后按过一次 F5 才画)。 */
+    /* 暂停/步进/格网三按钮 (刻度条左侧, 启用后按过一次 F5 才画; 格网另带灰线)。 */
     if (PV_DrawToComposite()) drew = 1;
 
     if (!drew) { StatTick(tick, 1); return 0; }

@@ -10,5 +10,7 @@ void PV_EnsureInit(void);
 /* 每循环调: F5 边沿 + 两按钮点击。 */
 void PV_Poll(void);
 
-/* 底栏两按钮画进 Composite (刻度条左侧 II/▶小方块)。返回 1 = 画过。 */
+/* 底栏三按钮画进 Composite (刻度条左侧 #/II/▶小方块, # 与暂停按钮同显同隐)。
+ * 格网实现见 GridView.h (本文件只调 GV_ 接口), 格网开且缓存有效时压底画灰色格网。
+ * 返回 1 = 画过。 */
 int PV_DrawToComposite(void);

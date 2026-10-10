@@ -4,14 +4,20 @@
  * Keyboard → Render → Tactical::Update → Sleep(1)。做法见 Phobos FrameByFrame。
  * 热键单机恒有效; [BottomBar] PauseEnable 只定按钮初始显示
  * (0=用过一次才显示, 1=常显)。
- * 联机或未开局恒放行。只读 + 渲染面写入。
+ * 格网按钮 (暂停键左侧第三块, # 图标): 与暂停按钮同显同隐 (用过一次 F5 才出现),
+ * 默认关闭, 点按才画灰色格网。使用率低故不配热键 (G 是原版警戒键, 会冲突)。
+ * 格网实现见 GridView.cpp (本文件只调 GV_ 接口)。
+ * 绘制只落在视图区 A 内 (侧栏/底栏不画)。只读 + 渲染面写入,
+ * 联机或未开局恒放行。
  */
 
 #include <windows.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "ScaleBar.h"
+#include "FullMap.h"
 #include "PauseView.h"
+#include "GridView.h"
 
 #define PV_SECTION "BottomBar"
 
@@ -49,7 +55,7 @@ static int s_Step = 0;          /* 待放行帧数 (步进按钮只置 1) */
 static int s_AutoShow = 0;      /* 用过一次暂停后本局显示按钮 (默认不绘制) */
 static int s_HkPrev = 0;        /* F5 边沿采样 */
 static int s_LbPrev = 0;        /* 左键边沿采样 */
-static int s_Hov1 = 0, s_Hov2 = 0;
+static int s_HovG = 0, s_Hov1 = 0, s_Hov2 = 0;  /* 悬停: 格网/暂停/步进 */
 static void* s_LastScen = NULL;
 static int s_LastFrame = -1;   /* 上次 Poll 见到的帧号 (倒退=新开/读档) */
 
@@ -69,11 +75,16 @@ void PV_EnsureInit(void)
     {
         s_BtnShowInit = GetPrivateProfileIntA(PV_SECTION, "PauseEnable", 0, g_IniPath) ? 1 : 0;
         OU_ReadHotkey(PV_SECTION, "PauseHotkey", &s_Hk);
+        GV_EnsureInit();
         p = 0;
         p = AppendCStr(buf, p, "pv: btn=", sizeof(buf));
         p += UtoA((unsigned)s_BtnShowInit, buf + p);
         p = AppendCStr(buf, p, " hk=", sizeof(buf));
-        UtoA((unsigned)s_Hk.vk, buf + p);
+        p += UtoA((unsigned)s_Hk.vk, buf + p);
+        p = AppendCStr(buf, p, " cull=", sizeof(buf));
+        UtoA((unsigned)GV_CullBack(), buf + p);
+        p = AppendCStr(buf, p, " blk=", sizeof(buf));
+        UtoA((unsigned)GV_ShowBlocked(), buf + p);
         LogLine(buf);
     }
 }
@@ -137,26 +148,26 @@ static int PV_HotkeyEdge(void)
     return edge;
 }
 
-/* ---------------- 按钮几何 (刻度条左侧两小方块) ---------------- */
+/* ---------------- 按钮几何 (刻度条左侧三小方块: 格网/暂停/步进) ---------------- */
 
 #define PV_BS 22      /* 方块边长 */
 #define PV_GAPB 6     /* 两块之间 */
 #define PV_GAPBAR 10  /* 与刻度条之间 */
 
-static int PV_Geom(int* x1, int* y1, int* x2, int* y2)
+/* x0/y0=格网键 (最左), x1/y1=暂停键, x2/y2=步进键。 */
+static int PV_Geom(int* x0, int* y0, int* x1, int* y1, int* x2, int* y2)
 {
     int bx, by, bw, bh;
     int gw = GtGameW(), gh = GtGameH();
     int sbw;
     int right;
+    int gy;
     if (gw < 200 || gh < 200) return 0;
     if (SB_BarGeom(&bx, &by, &bw, &bh))
     {
         right = bx - PV_GAPBAR;
         *x2 = right - PV_BS;
-        *y2 = by + bh - PV_BS - 2;
-        *x1 = *x2 - PV_GAPB - PV_BS;
-        *y1 = *y2;
+        gy = by + bh - PV_BS - 2;
     }
     else
     {
@@ -165,11 +176,14 @@ static int PV_Geom(int* x1, int* y1, int* x2, int* y2)
         if (sbw < 64 || sbw > 512) sbw = 168;
         right = gw - sbw - 32;
         *x2 = right - PV_BS;
-        *y2 = gh - 4 - PV_BS;
-        *x1 = *x2 - PV_GAPB - PV_BS;
-        *y1 = *y2;
+        gy = gh - 4 - PV_BS;
     }
-    if (*x1 < 0 || *y1 < 0 || *x2 + PV_BS > gw || *y2 + PV_BS > gh) return 0;
+    *y2 = gy;
+    *x1 = *x2 - PV_GAPB - PV_BS;
+    *y1 = gy;
+    *x0 = *x1 - PV_GAPB - PV_BS;
+    *y0 = gy;
+    if (*x0 < 0 || gy < 0 || *x2 + PV_BS > gw || gy + PV_BS > gh) return 0;
     return 1;
 }
 
@@ -183,21 +197,28 @@ static int PV_ShowButtons(void)
     return (s_BtnShowInit || s_AutoShow) ? 1 : 0;
 }
 
+/* 格网缓存/绘制已移入 GridView.cpp, 本文件只调 GV_ 接口 (见 GridView.h)。 */
+
 /* 点击 + 悬停 (左键上升沿才动作, 按下点在别处划进来的不算)。 */
 static void PV_CheckButtons(void)
 {
     int mx, my, down, edge;
-    int x1, y1, x2, y2;
-    if (!PV_ShowButtons()) { s_LbPrev = 0; s_Hov1 = s_Hov2 = 0; return; }
+    int x0, y0, x1, y1, x2, y2;
+    if (!PV_ShowButtons()) { s_LbPrev = 0; s_HovG = s_Hov1 = s_Hov2 = 0; return; }
     if (!GtMouseGameXY(&mx, &my)) { s_LbPrev = 0; return; }
-    if (!PV_Geom(&x1, &y1, &x2, &y2)) { s_LbPrev = 0; return; }
+    if (!PV_Geom(&x0, &y0, &x1, &y1, &x2, &y2)) { s_LbPrev = 0; return; }
+    s_HovG = PV_InRect(mx, my, x0, y0);
     s_Hov1 = PV_InRect(mx, my, x1, y1);
     s_Hov2 = PV_InRect(mx, my, x2, y2);
     down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
     edge = (down && !s_LbPrev) ? 1 : 0;
     s_LbPrev = down;
     if (!edge) return;
-    if (s_Hov1) PV_Toggle("btn");
+    if (s_HovG)
+    {
+        LogLine(GV_Toggle() ? "pv: grid ON" : "pv: grid OFF");
+    }
+    else if (s_Hov1) PV_Toggle("btn");
     else if (s_Hov2) PV_StepOnce();
 }
 
@@ -215,6 +236,7 @@ void PV_Poll(void)
         s_Paused = 0;
         s_Step = 0;
         s_LastFrame = frame;
+        GV_Drop();   /* 新开/读档: 格网缓存作废 */
         LogLine("pv: frame rewound -> resumed");
     }
     s_LastFrame = frame;
@@ -222,6 +244,7 @@ void PV_Poll(void)
     if (scen != s_LastScen)
     {
         s_LastScen = scen;
+        GV_Drop();   /* 换图 key 里也有场景, 这里先行作废 */
         if (s_Paused || s_Step)
         {
             s_Paused = 0;
@@ -232,6 +255,7 @@ void PV_Poll(void)
     /* Poll 在正常循环 (prepare 钩) 与迷你循环 (Mark 钩) 里都跑。 */
     if (PV_HotkeyEdge()) PV_Toggle("F5");
     PV_CheckButtons();
+    GV_PollStable();   /* 格网: 移动帧隐藏, 停稳下一帧重建 */
 }
 
 /* ---------------- 主循环入口门 + 迷你循环 ---------------- */
@@ -335,11 +359,14 @@ static void PV_Triangle(unsigned char* base, int pitch, int W, int H,
 static void PV_PaintBtn(unsigned char* base, int pitch, int W, int H,
                        int x, int y, int kind)
 {
-    /* kind 0=暂停/恢复键, 1=步进键。暂停中暂停键描黄边。 */
+    /* kind 0=暂停/恢复键, 1=步进键, 2=格网键(#)。暂停中暂停键描黄边,
+     * 格网开时格网键描黄边。 */
     int paused = s_Paused ? 1 : 0;
     unsigned char er = 140, eg = 146, eb = 156;
     if (kind == 0 && paused) { er = 250; eg = 214; eb = 80; }
-    if ((kind == 0 && s_Hov1) || (kind == 1 && s_Hov2))
+    if (kind == 2 && GV_IsOn()) { er = 250; eg = 214; eb = 80; }
+    if ((kind == 0 && s_Hov1) || (kind == 1 && s_Hov2) ||
+        (kind == 2 && s_HovG))
     {
         er = 232; eg = 236; eb = 242;
     }
@@ -358,19 +385,29 @@ static void PV_PaintBtn(unsigned char* base, int pitch, int W, int H,
             PV_Fill(base, pitch, W, H, x + 12, y + 5, 3, PV_BS - 10, 232, 236, 242, 255);
         }
     }
-    else
+    else if (kind == 1)
     {
         PV_Triangle(base, pitch, W, H, x + 5, y + 5, PV_BS - 10, 7, 232, 236, 242);
         PV_Fill(base, pitch, W, H, x + 13, y + 5, 3, PV_BS - 10, 232, 236, 242, 255);
     }
+    else
+    {
+        /* # 形: 2 竖 + 2 横, 灰色。 */
+        PV_Fill(base, pitch, W, H, x + 7, y + 5, 2, PV_BS - 10, 170, 170, 170, 255);
+        PV_Fill(base, pitch, W, H, x + 13, y + 5, 2, PV_BS - 10, 170, 170, 170, 255);
+        PV_Fill(base, pitch, W, H, x + 5, y + 7, PV_BS - 10, 2, 170, 170, 170, 255);
+        PV_Fill(base, pitch, W, H, x + 5, y + 13, PV_BS - 10, 2, 170, 170, 170, 255);
+    }
 }
+
+/* 格网绘制见 GridView.cpp (GV_DrawTo, 压底画)。 */
 
 int PV_DrawToComposite(void)
 {
     void* surf;
     unsigned char* base;
     int pitch, w, h, bpp;
-    int x1, y1, x2, y2;
+    int x0, y0, x1, y1, x2, y2;
     PV_EnsureInit();
     if (!PV_ShowButtons()) return 0;
     if (PV_IsMP()) return 0;
@@ -382,9 +419,28 @@ int PV_DrawToComposite(void)
     h = GtSurfGet(surf, GtVT_GET_HEIGHT);
     bpp = GtSurfGet(surf, GtVT_GET_BPP);
     if (bpp != 2 || pitch < w * 2 || w <= 0 || h <= 0) return 0;
-    if (!PV_Geom(&x1, &y1, &x2, &y2)) return 0;
+    if (!PV_Geom(&x0, &y0, &x1, &y1, &x2, &y2)) return 0;
     base = GtLock(surf);
     if (!base) return 0;
+    /* 格网压底。关着时跳过 (免每帧算裁剪区); 裁剪区 = 满视图区 A
+     * (侧栏列/底栏带子都在 A 外, 不落笔)。 */
+    if (GV_IsOn())
+    {
+        RectangleStruct a;
+        int cx0 = 0, cy0 = 0, cx1 = 0, cy1 = 0, clip = 0;
+        FM_GetViewRects(&a, 0);
+        if (a.Width >= 32 && a.Height >= 32 && a.X >= 0 && a.Y >= 0 &&
+            a.X < w && a.Y < h)
+        {
+            cx0 = a.X; cy0 = a.Y;
+            cx1 = a.X + a.Width; cy1 = a.Y + a.Height;
+            if (cx1 > w) cx1 = w;
+            if (cy1 > h) cy1 = h;
+            if (cx1 > cx0 && cy1 > cy0) clip = 1;
+        }
+        GV_DrawTo(base, pitch, w, h, cx0, cy0, cx1, cy1, clip);
+    }
+    PV_PaintBtn(base, pitch, w, h, x0, y0, 2);
     PV_PaintBtn(base, pitch, w, h, x1, y1, 0);
     PV_PaintBtn(base, pitch, w, h, x2, y2, 1);
     GtUnlock(surf);
