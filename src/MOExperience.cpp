@@ -18,6 +18,7 @@
 #include "AttackMove.h"
 #include "MindSelect.h"
 #include "MsgText.h"
+#include "Observer.h"
 #include "OrderThrottle.h"
 #include "PatrolCircle.h"
 #include "PowerDisplay.h"
@@ -238,6 +239,8 @@ static void PowerDrawBoth(void)
     OrderThrottle_Poll();
     SWS_Poll();
     RepairAll_Poll();
+    /* 多观战修复 + 观战面板排序 (联机安全, 见 Observer.cpp)。 */
+    Observer_Poll();
     if (!g_InitDone) MOE_EnsureInit();
     /* 撑满视口 + 摘侧栏 gadget (隐藏原版建造栏时必须每循环都跑, 引擎每次
      * 切页/改视口都会把按钮重新挂回去)。 */
