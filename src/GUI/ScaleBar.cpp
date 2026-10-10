@@ -699,9 +699,11 @@ int SB_CompositeMagnify(void)
     int cp, cw, ch, need, y, fr;
     if (!s_Enable) return 0;
     if (!SB_In()) return 0;
-    /* 同帧第二遍 (兜底消息帧钩) 去重，否则把放大像素当干净 R 存下。 */
+    /* 同帧第二遍 (兜底消息帧钩) 去重，否则把放大像素当干净 R 存下。
+     * 暂停时帧号冻结 (迷你循环反复 Render 同一帧)：还原已把 armed 清零，
+     * 此时必须重放，不按帧号去重。 */
     fr = *(int*)(size_t)ADDR_FRAME_SB;
-    if (s_Rst.frame == fr) return 1;
+    if (s_Rst.frame == fr && s_Rst.armed) return 1;
     MOE_SetPhase(MP_COMPMAG);
     FM_GetViewRects(&a, &r);
     if (a.Width < 32 || r.Width < 16 || r.Height < 16) return Sb_Skip(1);
