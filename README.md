@@ -1,7 +1,9 @@
 # 心灵终结体验优化拓展
-该项目旨在提高《心灵终结》的游戏体验，修复游戏bug。  
+[本项目](https://github.com/MagicShiba/MO_ExperienceEnhancements)旨在提高《[心灵终结](http://mentalomega.com/)》的游戏体验，修复游戏bug。  
 在为游戏添加更多新的功能、减少操作复杂性的同时，坚持做到不影响联机功能。  
-支持版本：3.3.6
+不涉及任何游戏内ini修改。  
+支持版本：3.3.6 ，理论上也兼容使用相同 ares 的mod。
+![alt text](docs/imgs/MO_logo_header.png)
 
 ## 当前项目做了什么?
 这里是简要说明，[查看更详细的功能演示和说明](docs/功能展示-UI篇.md)  
@@ -83,7 +85,7 @@ x编队信息，比如飞机弹药状态
 x最近信息跳转  
 x实现回放功能和添加内部列表  
 
-## 赞助tokens
+## 赞助 tokens
 ### -> [赛博乞讨](docs/赛博乞讨.md)
 ![alt text](docs/img_sbqt/h-凝视1.png)
 
