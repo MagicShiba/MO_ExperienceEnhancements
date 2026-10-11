@@ -12,6 +12,8 @@
  * 护航不转回攻击; 移动散开跳过建筑中心格。
  * 散开: 点按螺旋配额 (步兵 3/格, 飞机/车辆 1/格);
  * 划线按轨迹弧长重采样, 空军/地面分组, 弧形怎么画就怎么排。
+ * 预览: 按住时绿线 (单位中心→预估落点/目标中心, 含高度, 限 128 线,
+ * 换格/节点变或 400ms 刷一次), 与松手分配同规则 (终判松手重算一次)。
  * 下令: 标准 0x04 MegaMission (IsPlanningEvent=0, 与手点同形),
  * 目标显式, OutList 满 drip 跨帧续发; 发前验活, house 变化清空。
  * 落点无效则半径 5 环搜, 找不到丢弃该单位。
@@ -202,6 +204,8 @@ static void* SO_TypeOf(void* u, int w)
 typedef struct { void* unit; int id; int w; int fly; } SOUnit;
 
 static SOUnit g_SoUnits[SO_CAP];
+/* 空军/地面下标表 (预览与松手共用, 单线程轮询内串行使用)。 */
+static int s_SoAir[SO_CAP], s_SoGnd[SO_CAP];
 static int g_SoCount = 0;
 static int g_SoIdxOk = 0;
 static int g_SoArmed = 0;
@@ -216,6 +220,13 @@ static int g_SoPrevTrig = 0;
 static int g_SoNx[SO_NODE_CAP], g_SoNy[SO_NODE_CAP];
 static int g_SoNPx[SO_NODE_CAP], g_SoNPy[SO_NODE_CAP];
 static int g_SoNodeCount = 0;
+
+/* 绿线预览缓冲 (端点 leptons 世界坐标, 见 OrderUtil.h OU_PrevLine)。
+ * 分配走 SO_Queue/SO_SmartPoint 同一入口 (s_SoPrevSink=1 时只记线不下令),
+ * 预览=终判同一套数学, 终判松手重算一次。 */
+static OU_PrevLine s_SoPrevBuf[OU_PREV_CAP];
+static int s_SoPrevN = 0;
+static int s_SoPrevSink = 0;      /* 1=预览只记线 (不碰 Pend/Obj 队列) */
 
 static void SO_NodePush(int cx, int cy, int px, int py)
 {
@@ -294,6 +305,8 @@ static void SO_Press(void)
     g_SoPx = mx; g_SoPy = my;
     g_SoCount = nu;
     g_SoNodeCount = 0;
+    s_SoPrevN = 0;
+    s_SoPrevSink = 0;
     SO_NodePush(ax, ay, mx, my); /* 首节点=锚点 (格+实测像素) */
 }
 
@@ -526,20 +539,22 @@ static void* SO_CellBuilding(int cx, int cy)
  * 落点与之是同一建筑且判定为攻击时保持移动 (不把护驻军打回来)。 */
 static void* g_SoProtTgt = 0;
 
+/* ---------------- 移动分配 (松手下令 / 按住预览共用入口) ---------------- */
+
 static void SO_Queue(int ui, int cx, int cy)
 {
     int ox, oy;
     SOUnit* u;
-    void* slotObj;
     if (ui < 0 || ui >= g_SoCount) return;
     u = &g_SoUnits[ui];
     if (!SO_NearValid(cx, cy, &ox, &oy)) return;
     /* 落点转换: 地面单位落点格上有建筑时, 按直接下令处理
      * (进驻/攻击/占领), 而不是走过去再转攻击。
-     * 空军不管地面建筑; 护航目标同建筑的攻击保持移动。 */
+     * 空军不管地面建筑; 护航目标同建筑的攻击保持移动。
+     * 预览时同规则只记线 (预览期 g_SoHouse 已暂存为当前家)。 */
     if (u->fly == 0 && g_SoHouse)
     {
-        slotObj = SO_CellBuilding(ox, oy);
+        void* slotObj = SO_CellBuilding(ox, oy);
         if (slotObj)
         {
             char tb[8];
@@ -552,20 +567,34 @@ static void SO_Queue(int ui, int cx, int cy)
                 act = OU_MouseOverObject(u->unit, slotObj);
                 ms = (act < 0) ? -1 : SO_MissionFor(ABS_BUILDING, act);
                 if ((ms == MISSION_ATTACK || ms == MISSION_ENTER ||
-                     ms == MISSION_SABOTAGE || ms == MISSION_CAPTURE) &&
-                    !(slotObj == g_SoProtTgt && ms == MISSION_ATTACK) &&
-                    g_SoObjCount < SO_PEND_CAP)
+                      ms == MISSION_SABOTAGE || ms == MISSION_CAPTURE) &&
+                    !(slotObj == g_SoProtTgt && ms == MISSION_ATTACK))
                 {
-                    g_SoObj[g_SoObjCount].unit = u->unit;
-                    g_SoObj[g_SoObjCount].uid = u->id;
-                    g_SoObj[g_SoObjCount].tgt = slotObj;
-                    g_SoObj[g_SoObjCount].tid = tid;
-                    g_SoObj[g_SoObjCount].mission = ms;
-                    g_SoObjCount++;
-                    return;
+                    if (s_SoPrevSink)
+                    {
+                        if (OU_PtrAlive(u->unit, u->id, g_SoIdxOk))
+                            OU_PrevPushObjs(s_SoPrevBuf, &s_SoPrevN, u->unit, slotObj);
+                        return;
+                    }
+                    if (g_SoObjCount < SO_PEND_CAP)
+                    {
+                        g_SoObj[g_SoObjCount].unit = u->unit;
+                        g_SoObj[g_SoObjCount].uid = u->id;
+                        g_SoObj[g_SoObjCount].tgt = slotObj;
+                        g_SoObj[g_SoObjCount].tid = tid;
+                        g_SoObj[g_SoObjCount].mission = ms;
+                        g_SoObjCount++;
+                        return;
+                    }
                 }
             }
         }
+    }
+    if (s_SoPrevSink)
+    {
+        if (OU_PtrAlive(u->unit, u->id, g_SoIdxOk))
+            OU_PrevPushCell(s_SoPrevBuf, &s_SoPrevN, u->unit, u->fly, ox, oy);
+        return;
     }
     if (g_SoPendCount >= SO_PEND_CAP) return;
     g_SoPend[g_SoPendCount].unit = u->unit;
@@ -573,6 +602,68 @@ static void SO_Queue(int ui, int cx, int cy)
     g_SoPend[g_SoPendCount].x = (short)ox;
     g_SoPend[g_SoPendCount].y = (short)oy;
     g_SoPendCount++;
+}
+
+/* 螺旋格表 (点按散开 / SmartPoint 移动子集 / 预览三处共用):
+ * 以 (bx,by) 为中心向外, 只收有效格 (上限 512);
+ * skipCenter=1 跳过中心格 (建筑目标移动子集用, 防往建筑本体派移动令)。
+ * 配额计数一并清零, 回格数。 */
+static int SO_SpiralCells(int bx, int by, int skipCenter,
+                          int* qcx, int* qcy, int* quA, int* quI, int* quV)
+{
+    int qn = 0, r;
+    if (!skipCenter)
+    {
+        qcx[0] = bx; qcy[0] = by;
+        quA[0] = quI[0] = quV[0] = 0;
+        qn = OU_CellValid(bx, by) ? 1 : 0;
+    }
+    for (r = 1; r <= 40 && qn < 512; r++)
+    {
+        int dx, dy;
+        for (dx = -r; dx <= r && qn < 512; dx++)
+            if (OU_CellValid(bx + dx, by - r))
+            { qcx[qn] = bx + dx; qcy[qn] = by - r; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
+        for (dy = -r + 1; dy <= r && qn < 512; dy++)
+            if (OU_CellValid(bx + r, by + dy))
+            { qcx[qn] = bx + r; qcy[qn] = by + dy; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
+        for (dx = r - 1; dx >= -r && qn < 512; dx--)
+            if (OU_CellValid(bx + dx, by + r))
+            { qcx[qn] = bx + dx; qcy[qn] = by + r; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
+        for (dy = r - 1; dy >= -r + 1 && qn < 512; dy--)
+            if (OU_CellValid(bx - r, by + dy))
+            { qcx[qn] = bx - r; qcy[qn] = by + dy; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
+    }
+    return qn;
+}
+
+/* 螺旋配额分配 (三处共用, 经 SO_Queue: 预览 sink 下只记线)。
+ * 步兵 3/格, 飞机 1/格, 车辆 1/格 (三类计数独立)。
+ * missions==0 全员; 否则只分 missions[k]==MISSION_MOVE 的单位。 */
+static void SO_SpiralAssign(int bx, int by, int skipCenter, int* missions)
+{
+    static int qcx[512], qcy[512];
+    static int quA[512], quI[512], quV[512];
+    int qn, k;
+    qn = SO_SpiralCells(bx, by, skipCenter, qcx, qcy, quA, quI, quV);
+    for (k = 0; k < g_SoCount; k++)
+    {
+        SOUnit* u = &g_SoUnits[k];
+        int c;
+        if (missions && missions[k] != MISSION_MOVE) continue;
+        if (u->fly != 1 && u->fly != 0) continue;
+        if (u->w != ABS_UNIT && u->w != ABS_AIRCRAFT && u->w != ABS_INFANTRY) continue;
+        if (!OU_PtrAlive(u->unit, u->id, g_SoIdxOk)) continue;
+        if (s_SoPrevSink && s_SoPrevN >= OU_PREV_CAP) break;
+        for (c = 0; c < qn; c++)
+        {
+            if (u->w == ABS_INFANTRY) { if (quI[c] >= 3) continue; quI[c]++; }
+            else if (u->w == ABS_AIRCRAFT) { if (quA[c] >= 1) continue; quA[c]++; }
+            else { if (quV[c] >= 1) continue; quV[c]++; }
+            SO_Queue(k, qcx[c], qcy[c]);
+            break;
+        }
+    }
 }
 
 /* 一组按轨迹弧长重采样 (sqrt 是 gcc 内建, 无需 libm, PatrolCircle 同式)。 */
@@ -717,12 +808,20 @@ static int SO_SmartPoint(int bx, int by, void* tgt)
         return 0; /* 全局即移动: 回落原散开 (保持配额/螺旋逻辑一致) */
     if (nAtk + nEnt + nGar + nCap <= 0)
         return 2; /* 无对象令: 无操作, 禁往对象散开 */
-    /* 对象令入队 (攻击 Target=敌, 进入类 Destination=目标)。 */
+    /* 对象令入队 (攻击 Target=敌, 进入类 Destination=目标)。
+     * 预览时同规则只记线。 */
     for (i = 0; i < g_SoCount; i++)
     {
         int ms = missions[i];
         if (ms == MISSION_MOVE || ms < 0) continue;
         if (g_SoUnits[i].fly != 1 && g_SoUnits[i].fly != 0) continue;
+        if (s_SoPrevSink)
+        {
+            if (s_SoPrevN >= OU_PREV_CAP) break;
+            if (OU_PtrAlive(g_SoUnits[i].unit, g_SoUnits[i].id, g_SoIdxOk))
+                OU_PrevPushObjs(s_SoPrevBuf, &s_SoPrevN, g_SoUnits[i].unit, tgt);
+            continue;
+        }
         if (g_SoObjCount >= SO_PEND_CAP) break;
         g_SoObj[g_SoObjCount].unit = g_SoUnits[i].unit;
         g_SoObj[g_SoObjCount].uid = g_SoUnits[i].id;
@@ -738,62 +837,79 @@ static int SO_SmartPoint(int bx, int by, void* tgt)
     if (nMov > 0)
     {
         g_SoProtTgt = tgt;
-        static int qcx[512], qcy[512];
-        static int quA[512], quI[512], quV[512];
-        int qn = 0, r, k;
-        if (tgtWhat == ABS_BUILDING) qn = 0;
-        else
-        {
-            qcx[0] = bx; qcy[0] = by;
-            quA[0] = quI[0] = quV[0] = 0;
-            qn = OU_CellValid(bx, by) ? 1 : 0;
-        }
-        for (r = 1; r <= 40 && qn < 512; r++)
-        {
-            int dx, dy;
-            for (dx = -r; dx <= r && qn < 512; dx++)
-                if (OU_CellValid(bx + dx, by - r))
-                { qcx[qn] = bx + dx; qcy[qn] = by - r; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
-            for (dy = -r + 1; dy <= r && qn < 512; dy++)
-                if (OU_CellValid(bx + r, by + dy))
-                { qcx[qn] = bx + r; qcy[qn] = by + dy; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
-            for (dx = r - 1; dx >= -r && qn < 512; dx--)
-                if (OU_CellValid(bx + dx, by + r))
-                { qcx[qn] = bx + dx; qcy[qn] = by + r; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
-            for (dy = r - 1; dy >= -r + 1 && qn < 512; dy--)
-                if (OU_CellValid(bx - r, by + dy))
-                { qcx[qn] = bx - r; qcy[qn] = by + dy; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
-        }
-        for (k = 0; k < g_SoCount; k++)
-        {
-            SOUnit* u = &g_SoUnits[k];
-            int cap, c;
-            if (missions[k] != MISSION_MOVE) continue;
-            if (u->fly != 1 && u->fly != 0) continue;
-            if (u->w != ABS_UNIT && u->w != ABS_AIRCRAFT && u->w != ABS_INFANTRY) continue;
-            for (c = 0; c < qn; c++)
-            {
-                if (u->w == ABS_INFANTRY) { cap = 3; if (quI[c] >= cap) continue; quI[c]++; }
-                else if (u->w == ABS_AIRCRAFT) { cap = 1; if (quA[c] >= cap) continue; quA[c]++; }
-                else { cap = 1; if (quV[c] >= cap) continue; quV[c]++; }
-                SO_Queue(k, qcx[c], qcy[c]);
-                break;
-            }
-            (void)cap;
-        }
+        SO_SpiralAssign(bx, by, tgtWhat == ABS_BUILDING, missions);
     }
+    if (s_SoPrevSink) return 1;   /* 预览: 只记线, 不排空下令 */
     SO_Drain();
     return 1;
+}
+
+/* 绿线预览: 当前鼠标格/目标 + 现有轨迹节点, 与 SO_Release 同规则分配,
+ * s_SoPrevSink=1 下只记线不下令。节流: 换格/节点数变且距上次>80ms,
+ * 或超 400ms 刷一次 (单位会动)。 */
+static void SO_Preview(void)
+{
+    void* cur;
+    int bx, by, i;
+    void* tgt = 0;
+    static unsigned s_LastMs = 0;
+    static int s_LastBx = -9999, s_LastBy = -9999, s_LastNc = -1;
+    int airN = 0, gndN = 0;
+    void* saveHouse;
+    int saveIdx;
+    void* saveProt;
+    int done = 0;
+
+    if (!OU_MouseCellTarget(&bx, &by, &tgt, 0, 0)) { s_SoPrevN = 0; return; }
+    if (!OU_PrevThrottle(&s_LastMs, &s_LastBx, &s_LastBy, &s_LastNc,
+                         bx, by, g_SoNodeCount, 80, 400)) return;
+    cur = *(void**)ADDR_CURPLAYER;
+    if (!cur || !IsPlausiblePtr(cur)) { s_SoPrevN = 0; return; }
+    if (g_SoCount <= 0) { s_SoPrevN = 0; return; }
+    /* 存活分组 (Release 同式, 不写 fly, 只分组): */
+    airN = 0; gndN = 0;
+    for (i = 0; i < g_SoCount; i++)
+    {
+        SOUnit* u = &g_SoUnits[i];
+        if (!OU_PtrAlive(u->unit, u->id, g_SoIdxOk)) continue;
+        if (u->fly == 1) { if (airN < SO_CAP) s_SoAir[airN++] = i; }
+        else if (u->fly == 0) { if (gndN < SO_CAP) s_SoGnd[gndN++] = i; }
+    }
+    if (airN + gndN <= 0) { s_SoPrevN = 0; return; }
+    s_SoPrevN = 0;
+    s_SoPrevSink = 1;
+    saveHouse = g_SoHouse; saveIdx = g_SoHouseIdx; saveProt = g_SoProtTgt;
+    g_SoHouse = cur;
+    g_SoHouseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
+    g_SoProtTgt = 0;
+    if (tgt && IsPlausiblePtr(tgt))
+        done = SO_SmartPoint(bx, by, tgt);
+    if (!done)
+    {
+        if (g_SoNodeCount <= 1)
+        {
+            /* 点按: 松开格为中心螺旋配额 (Release 同式)。 */
+            SO_SpiralAssign(bx, by, 0, 0);
+        }
+        else
+        {
+            /* 划线: 空军/地面分组弧长重采样 (Release 同式, 经 SO_Queue 记线)。 */
+            SO_ArcGroup(s_SoAir, airN);
+            SO_ArcGroup(s_SoGnd, gndN);
+        }
+    }
+    g_SoHouse = saveHouse; g_SoHouseIdx = saveIdx; g_SoProtTgt = saveProt;
+    s_SoPrevSink = 0;
 }
 
 static void SO_Release(void)
 {
     int bx, by, mx, my;
     int i;
-    static int airList[SO_CAP], gndList[SO_CAP];
     int airN = 0, gndN = 0;
     void* tgt = 0;
     g_SoArmed = 0;
+    s_SoPrevN = 0;
     if (OU_MouseCellTarget(&bx, &by, &tgt, &mx, &my))
     {
         /* 松开格收尾 (与末节点不同则补记, 尾段不丢)。 */
@@ -813,8 +929,8 @@ static void SO_Release(void)
     {
         SOUnit* u = &g_SoUnits[i];
         if (!OU_PtrAlive(u->unit, u->id, g_SoIdxOk)) { u->fly = -1; continue; }
-        if (u->fly == 1) airList[airN++] = i;
-        else if (u->fly == 0) gndList[gndN++] = i;
+        if (u->fly == 1) s_SoAir[airN++] = i;
+        else if (u->fly == 0) s_SoGnd[gndN++] = i;
     }
     if (airN + gndN <= 0) return;
     {
@@ -841,58 +957,13 @@ static void SO_Release(void)
         /* 点按: 像左键点移动一样到目的地, 按配额分开。
          * 步兵 3/格, 飞机 1/格, 车辆 1/格 (三类计数独立)。
          * 以松开格为中心螺旋向外 (只收有效格, 上限 512 格)。 */
-        static int qcx[512], qcy[512];
-        static int quA[512], quI[512], quV[512];
-        int qn = 0, r;
-        qcx[0] = bx; qcy[0] = by;
-        quA[0] = quI[0] = quV[0] = 0;
-        qn = OU_CellValid(bx, by) ? 1 : 0;
-        for (r = 1; r <= 40 && qn < 512; r++)
-        {
-            int dx, dy;
-            for (dx = -r; dx <= r && qn < 512; dx++)
-            {
-                if (OU_CellValid(bx + dx, by - r))
-                { qcx[qn] = bx + dx; qcy[qn] = by - r; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
-            }
-            for (dy = -r + 1; dy <= r && qn < 512; dy++)
-            {
-                if (OU_CellValid(bx + r, by + dy))
-                { qcx[qn] = bx + r; qcy[qn] = by + dy; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
-            }
-            for (dx = r - 1; dx >= -r && qn < 512; dx--)
-            {
-                if (OU_CellValid(bx + dx, by + r))
-                { qcx[qn] = bx + dx; qcy[qn] = by + r; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
-            }
-            for (dy = r - 1; dy >= -r + 1 && qn < 512; dy--)
-            {
-                if (OU_CellValid(bx - r, by + dy))
-                { qcx[qn] = bx - r; qcy[qn] = by + dy; quA[qn] = quI[qn] = quV[qn] = 0; qn++; }
-            }
-        }
-        for (i = 0; i < g_SoCount; i++)
-        {
-            SOUnit* u = &g_SoUnits[i];
-            int cap, c;
-            if (u->fly != 1 && u->fly != 0) continue;
-            if (u->w != ABS_UNIT && u->w != ABS_AIRCRAFT && u->w != ABS_INFANTRY) continue;
-            for (c = 0; c < qn; c++)
-            {
-                if (u->w == ABS_INFANTRY) { cap = 3; if (quI[c] >= cap) continue; quI[c]++; }
-                else if (u->w == ABS_AIRCRAFT) { cap = 1; if (quA[c] >= cap) continue; quA[c]++; }
-                else { cap = 1; if (quV[c] >= cap) continue; quV[c]++; }
-                SO_Queue(i, qcx[c], qcy[c]);
-                break;
-            }
-            (void)cap;
-        }
+        SO_SpiralAssign(bx, by, 0, 0);
         SO_Drain();
         return;
     }
     /* 划线: 空军/地面分组, 各按轨迹弧长重采样为本组槽位数 (弧形怎么画就怎么排)。 */
-    SO_ArcGroup(airList, airN);
-    SO_ArcGroup(gndList, gndN);
+    SO_ArcGroup(s_SoAir, airN);
+    SO_ArcGroup(s_SoGnd, gndN);
     SO_Drain();
 }
 
@@ -901,7 +972,7 @@ void SmartOrder_Poll(void)
     int trigDown;
     SO_EnsureInit();
     trigDown = OU_KeyDown(g_SoHk.vk);
-    if (!g_SoEnable) { g_SoArmed = 0; g_SoPrevTrig = trigDown; return; }
+    if (!g_SoEnable) { g_SoArmed = 0; s_SoPrevN = 0; g_SoPrevTrig = trigDown; return; }
     if (g_SoPendCount > 0 || g_SoObjCount > 0) { SO_Drain(); g_SoPrevTrig = trigDown; return; }
     if (trigDown && g_SoArmed)
     {
@@ -912,14 +983,19 @@ void SmartOrder_Poll(void)
         if (!OU_ModsDown(g_SoHk.mods) || !OU_ExtraDown(&g_SoHk) ||
             OU_KeyDown('Z') || OU_KeyDown(VK_CONTROL) ||
             SmartArea_ClaimsMiddle() || DeployPreview_ClaimsMiddle())
+        {
             g_SoArmed = 0;
+            s_SoPrevN = 0;
+        }
     }
     if (trigDown && g_SoArmed)
     {
-        /* 按住拖动: 采样轨迹节点 (格+实测像素, 稀疏记录, 弧形槽位源)。 */
+        /* 按住拖动: 采样轨迹节点 (格+实测像素, 稀疏记录, 弧形槽位源)。
+         * 同步刷绿线预览 (单位→预估落点, 与松手分配同规则)。 */
         int cx, cy, px, py;
         if (OU_MouseCellPx(&cx, &cy, &px, &py))
             SO_NodePush(cx, cy, px, py);
+        SO_Preview();
     }
     if (trigDown && !g_SoPrevTrig)
     {
@@ -1021,6 +1097,8 @@ void SmartOrder_Draw(void* surf, int w, int h, int pitch)
         SO_Mark(x0, y0, 3, 255); /* 锚点 7x7 */
         SO_Mark(x1, y1, 2, 255); /* 当前 5x5 */
     }
+    /* 绿线预览 (单位中心→预估落点/目标中心, 含高度, 只在按住时存在)。 */
+    OU_PrevDraw(s_SoPrevBuf, s_SoPrevN, locked, w, h, pitch, 0, 255, 0, 255);
     s_AsLocked = 0;
     unlockFn(surf, NULL);
 }

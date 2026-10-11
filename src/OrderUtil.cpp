@@ -208,6 +208,145 @@ int OU_PtrAlive(void* u, int id, int idxOk)
     return OU_PtrAliveRaw(u, id);
 }
 
+/* ---------------- 规划线共享 (红绿线投影/取高/细线/线缓冲) ---------------- */
+
+typedef int __attribute__((thiscall)) (*Fn_OUC2C)(void* tac,
+    const CoordStruct* c, Point2D* out);
+typedef int __attribute__((thiscall)) (*Fn_OUFloorH)(void* cell, const Point2D* p);
+#define FN_OU_C2C ((Fn_OUC2C)(void*)0x6D2140u)
+#define OU_TAC_INSTANCE 0x887324u
+#define FN_OU_FLOORH ((Fn_OUFloorH)(void*)0x47B3A0u)
+
+/* 世界点 → 屏像素 (含高度; CoordsToClient 给渲染面坐标, 缩放档再折到屏幕)。 */
+int OU_ProjWorld(int lx, int ly, int lz, int* px, int* py)
+{
+    void* tac = *(void**)OU_TAC_INSTANCE;
+    CoordStruct c;
+    Point2D o;
+    if (!px || !py) return 0;
+    if (!tac || !IsPlausiblePtr(tac)) return 0;
+    c.X = lx; c.Y = ly; c.Z = lz;
+    o.X = 0; o.Y = 0;
+    FN_OU_C2C(tac, &c, &o);
+    if (!SB_ViewToScreen(o.X, o.Y, px, py)) { *px = o.X; *py = o.Y; }
+    return 1;
+}
+
+int OU_CellGroundZ(int cx, int cy, int* zOut)
+{
+    void** cells;
+    int maxc, idx;
+    void* cell;
+    Point2D zero;
+    int z;
+    if (!zOut) return 0;
+    if (cx < 0 || cy < 0 || cx >= 512 || cy >= 512) return 0;
+    cells = *(void***)(ADDR_DISPLAY + OFF_MAP_CELLS);
+    maxc = *(int*)(ADDR_DISPLAY + OFF_MAP_MAXC);
+    if (!cells || !IsPlausiblePtr(cells) || maxc <= 0 || maxc > 512 * 512) return 0;
+    idx = (cy << 9) + cx;
+    if (idx < 0 || idx >= maxc) return 0;
+    cell = cells[idx];
+    if (!cell || !IsPlausiblePtr(cell)) return 0;
+    zero.X = 0; zero.Y = 0;
+    z = FN_OU_FLOORH(cell, &zero);
+    if (z < -8192 || z > 8192) return 0;
+    *zOut = z;
+    return 1;
+}
+
+void OU_ThinLine(unsigned char* locked, int w, int h, int pitch,
+                 int x0, int y0, int x1, int y1,
+                 unsigned r, unsigned g, unsigned b, unsigned a)
+{
+    int dx, dy, sx, sy, err, e2, x, y, n;
+    unsigned short* dstRow;
+    if (!locked || !IsPlausiblePtr(locked)) return;
+    if (w <= 0 || h <= 0 || pitch <= 0) return;
+    dx = x1 - x0; dy = y1 - y0;
+    sx = (dx >= 0) ? 1 : -1;
+    sy = (dy >= 0) ? 1 : -1;
+    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
+    err = dx - dy;
+    x = x0; y = y0;
+    for (n = 0; n < 4096; n++)
+    {
+        if (x >= 0 && y >= 0 && x < w && y < h)
+        {
+            dstRow = (unsigned short*)(locked + y * pitch);
+            dstRow[x] = Blend16(dstRow[x], r, g, b, a);
+        }
+        if (x == x1 && y == y1) break;
+        e2 = err * 2;
+        if (e2 > -dy) { err -= dy; x += sx; }
+        if (e2 < dx) { err += dx; y += sy; }
+    }
+}
+
+int OU_PrevPush(OU_PrevLine* buf, int* nio,
+                int ulx, int uly, int ulz, int tlx, int tly, int tlz)
+{
+    int n;
+    if (!buf || !nio) return 0;
+    n = *nio;
+    if (n < 0 || n >= OU_PREV_CAP) return 0;
+    buf[n].ulx = ulx; buf[n].uly = uly; buf[n].ulz = ulz;
+    buf[n].tlx = tlx; buf[n].tly = tly; buf[n].tlz = tlz;
+    *nio = n + 1;
+    return 1;
+}
+
+int OU_PrevPushObjs(OU_PrevLine* buf, int* nio, void* u, void* t)
+{
+    CoordStruct a, b;
+    if (!OU_GetCoords(u, &a) || !OU_GetCoords(t, &b)) return 0;
+    return OU_PrevPush(buf, nio, a.X, a.Y, a.Z, b.X, b.Y, b.Z);
+}
+
+int OU_PrevPushCell(OU_PrevLine* buf, int* nio, void* u, int fly, int cx, int cy)
+{
+    CoordStruct a;
+    int gz;
+    if (!OU_GetCoords(u, &a)) return 0;
+    if (fly) gz = a.Z;
+    else if (!OU_CellGroundZ(cx, cy, &gz)) gz = 0;
+    return OU_PrevPush(buf, nio, a.X, a.Y, a.Z,
+                       cx * OU_LEP_PER_CELL + OU_LEP_PER_CELL / 2,
+                       cy * OU_LEP_PER_CELL + OU_LEP_PER_CELL / 2, gz);
+}
+
+void OU_PrevDraw(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, int pitch,
+                 unsigned r, unsigned g, unsigned b, unsigned a)
+{
+    void* tac;
+    int k;
+    if (!buf || n <= 0) return;
+    if (n > OU_PREV_CAP) n = OU_PREV_CAP;
+    tac = *(void**)OU_TAC_INSTANCE;
+    if (!tac || !IsPlausiblePtr(tac)) return;
+    for (k = 0; k < n; k++)
+    {
+        int ux, uy, tx, ty;
+        if (!OU_ProjWorld(buf[k].ulx, buf[k].uly, buf[k].ulz, &ux, &uy)) continue;
+        if (!OU_ProjWorld(buf[k].tlx, buf[k].tly, buf[k].tlz, &tx, &ty)) continue;
+        OU_ThinLine(locked, w, h, pitch, ux, uy, tx, ty, r, g, b, a);
+    }
+}
+
+int OU_PrevThrottle(unsigned* lastMs, int* lastCx, int* lastCy, int* lastKey,
+                    int cx, int cy, int key, unsigned minMs, unsigned refreshMs)
+{
+    unsigned now;
+    if (!lastMs || !lastCx || !lastCy || !lastKey) return 0;
+    now = GetTickCount();
+    if (now - *lastMs < minMs) return 0;
+    if (cx == *lastCx && cy == *lastCy && key == *lastKey &&
+        now - *lastMs < refreshMs) return 0;
+    *lastMs = now;
+    *lastCx = cx; *lastCy = cy; *lastKey = key;
+    return 1;
+}
+
 /* ---------------- 热键串 (照 AutoLoadDev Hotkey= 写法, 无 CRT) ---------------- */
 
 static int OU_Lower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }

@@ -97,6 +97,35 @@ int OU_PtrAliveRaw(void* u, int id);
 /* 同上, idxOk=0 时 fail-open 全回活 (索引自检未通过时功能不变)。 */
 int OU_PtrAlive(void* u, int id, int idxOk);
 
+/* ---------------- 规划线共享 (FuzzyAttack/SmartArea/SmartOrder 红绿线) -----
+ * 端点存 leptons 世界坐标 (单位中心含高度), 绘制期经引擎投影。
+ * 不存屏像素: 中键拖动平移镜头时屏像素跨帧即漂, 世界坐标恒准。
+ * 全只读 + 渲染面绘制, 不写模拟内存 (联机安全)。 */
+#define OU_PREV_CAP 128
+typedef struct { int ulx, uly, ulz, tlx, tly, tlz; } OU_PrevLine;
+/* 世界点 → 屏像素 (引擎 CoordsToClient 0x6D2140 + 缩放折算, 含高度, 只读)。 */
+int OU_ProjWorld(int lx, int ly, int lz, int* px, int* py);
+/* 格地面高度 (CellClass::GetFloorHeight 0x47B3A0, 只读)。 */
+int OU_CellGroundZ(int cx, int cy, int* zOut);
+/* 单像素细线 (Bresenham, 自带裁剪; locked=已锁定渲染面)。 */
+void OU_ThinLine(unsigned char* locked, int w, int h, int pitch,
+                 int x0, int y0, int x1, int y1,
+                 unsigned r, unsigned g, unsigned b, unsigned a);
+/* 存一对端点 (leptons 世界坐标; 满回 0)。 */
+int OU_PrevPush(OU_PrevLine* buf, int* nio,
+                int ulx, int uly, int ulz, int tlx, int tly, int tlz);
+/* 双端取 OU_GetCoords 存线 (任一失败回 0)。 */
+int OU_PrevPushObjs(OU_PrevLine* buf, int* nio, void* u, void* t);
+/* 起点取单位中心, 终点取落点格心 (地面高度; fly!=0 用单位自身高度)。 */
+int OU_PrevPushCell(OU_PrevLine* buf, int* nio, void* u, int fly, int cx, int cy);
+/* 绘制全部预览线 (逐对引擎投影, 失败跳过)。 */
+void OU_PrevDraw(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, int pitch,
+                 unsigned r, unsigned g, unsigned b, unsigned a);
+/* 预览节流 (三家规划线共用): 换格/换key且距上次>minMs, 或超 refreshMs 刷一次。
+ * 回 1=该刷 (已更新 *last*); 0=跳过。首轮恒刷。 */
+int OU_PrevThrottle(unsigned* lastMs, int* lastCx, int* lastCy, int* lastKey,
+                    int cx, int cy, int key, unsigned minMs, unsigned refreshMs);
+
 /* 热键串 (照 AutoLoadDev Hotkey=Ctrl+D 写法, 另支持鼠标键与多主键)。
  * 语法: 修饰键 Ctrl/Alt/Shift/Win (大小写无所谓, 可多个, +/空格分隔) + 按键。
  * 大小写不敏感, 空格/Tab 自动忽略, 行尾 ;注释在加载时由 OU_ReadHotkey

@@ -7,7 +7,8 @@
  * 以鼠标格为基准扫 Range x Range (默认 4x4, 可配 2~16) 找敌方对象,
  * 选中单位分组强制攻击 (MegaMission Mission=Attack=1, Target=敌对象,
  * 直接下令 IsPlanningEvent=0)。点中敌人则它在 0 环必在首位, 点空地则扫
- * 附近敌人。端点坐标走 OU_GetCoords (vtbl+0x48), 投影与框同系。
+ * 附近敌人。端点坐标走 OU_GetCoords (vtbl+0x48, 单位中心含高度),
+ * 绘制期经引擎 CoordsToClient 投影。
  * 与巡逻圈/砍树/散开全互斥: 要 Ctrl 且不能按 Z (Z+中键=巡逻,
  * Ctrl+Z+中键=砍树, 裸中键=散开)。
  *
@@ -31,7 +32,6 @@
 #include <windows.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
-#include "ScaleBar.h"
 
 #define FA_SECTION "FuzzyAttack"
 
@@ -296,38 +296,11 @@ static void FA_Drain(void)
     }
 }
 
-/* ---------------- 规划线预览 (按住时跑, 与松手分组同规则) ---------------- */
+/* ---------------- 规划线预览 (按住时跑, 与松手分组同规则, 含高度) ---------------- */
 
-#define FA_PREV_CAP 128
-static int s_FaPrevUx[FA_PREV_CAP], s_FaPrevUy[FA_PREV_CAP];
-static int s_FaPrevTx[FA_PREV_CAP], s_FaPrevTy[FA_PREV_CAP];
+/* 规划线缓冲 (端点 leptons 世界坐标, 见 OrderUtil.h OU_PrevLine)。 */
+static OU_PrevLine s_FaPrevBuf[OU_PREV_CAP];
 static int s_FaPrevN = 0;
-static int s_FaPrevRefPx = 0, s_FaPrevRefPy = 0, s_FaPrevRefCx = 0, s_FaPrevRefCy = 0;
-
-/* leptons → 屏像素 (预览参考点换算, 忽略高度, 与框同系)。 */
-static void FA_ProjLep(int lx, int ly, int* px, int* py)
-{
-    int dx = lx - (s_FaPrevRefCx * 256 + 128);
-    int dy = ly - (s_FaPrevRefCy * 256 + 128);
-    int ex = (dx * 30 - dy * 30) / 256;
-    int ey = (dx * 15 + dy * 15) / 256;
-    SB_MapDeltaToScreen(&ex, &ey);   /* 缩放档: 地图像素差要按 A/R 折成屏幕差 */
-    *px = s_FaPrevRefPx + ex;
-    *py = s_FaPrevRefPy + ey;
-}
-
-static void FA_PrevStore(void* u, void* t)
-{
-    CoordStruct a, b;
-    int ux, uy, tx, ty;
-    if (s_FaPrevN >= FA_PREV_CAP) return;
-    if (!OU_GetCoords(u, &a) || !OU_GetCoords(t, &b)) return;
-    FA_ProjLep(a.X, a.Y, &ux, &uy);
-    FA_ProjLep(b.X, b.Y, &tx, &ty);
-    s_FaPrevUx[s_FaPrevN] = ux; s_FaPrevUy[s_FaPrevN] = uy;
-    s_FaPrevTx[s_FaPrevN] = tx; s_FaPrevTy[s_FaPrevN] = ty;
-    s_FaPrevN++;
-}
 
 /* 预览: 当前块找敌、与 FA_Press 同式分组, 只存线不下令。
  * 节流: 换格且距上次>80ms, 或超 400ms 刷一次。 */
@@ -336,22 +309,16 @@ static void FA_Preview(void)
     void* cur;
     void** items;
     int selN, i, nu = 0, ne = 0, nUsed, pos;
-    int cx, cy, rpx, rpy;
-    unsigned now;
+    int cx, cy;
     static unsigned s_LastMs = 0;
-    static int s_LastCx = -9999, s_LastCy = -9999;
+    static int s_LastCx = -9999, s_LastCy = -9999, s_LastKey = 0;
     static void* s_pu[FA_UNIT_CAP];
     static void* s_pf[FA_ENEMY_CAP];
     static int s_pfid[FA_ENEMY_CAP];
 
-    now = GetTickCount();
-    if (!OU_MouseCell(&cx, &cy) || !GtMouseGameXY(&rpx, &rpy)) return;
-    if (now - s_LastMs < 80) return;
-    if (cx == s_LastCx && cy == s_LastCy && now - s_LastMs < 400) return;
-    s_LastMs = now;
-    s_LastCx = cx; s_LastCy = cy;
-    s_FaPrevRefPx = rpx; s_FaPrevRefPy = rpy;
-    s_FaPrevRefCx = cx; s_FaPrevRefCy = cy;
+    if (!OU_MouseCell(&cx, &cy)) return;
+    if (!OU_PrevThrottle(&s_LastMs, &s_LastCx, &s_LastCy, &s_LastKey,
+                         cx, cy, 0, 80, 400)) return;
     cur = *(void**)ADDR_CURPLAYER;
     if (!cur || !IsPlausiblePtr(cur)) { s_FaPrevN = 0; return; }
     selN = *(int*)ADDR_SELOBJ_COUNT;
@@ -381,7 +348,7 @@ static void FA_Preview(void)
             int take = base + (j < rem ? 1 : 0);
             int k;
             for (k = 0; k < take && pos < nu; k++, pos++)
-                FA_PrevStore(s_pu[pos], s_pf[j]);
+                OU_PrevPushObjs(s_FaPrevBuf, &s_FaPrevN, s_pu[pos], s_pf[j]);
         }
     }
 }
@@ -586,32 +553,6 @@ static void FA_Mark(int cx, int cy, int m, unsigned a)
             FA_Plot(cx + k, cy + j, a);
 }
 
-/* 细线 (Bresenham 单像素, 规划线用, 自带裁剪)。 */
-static void FA_ThinLine(int x0, int y0, int x1, int y1,
-                        unsigned r, unsigned g, unsigned b, unsigned a)
-{
-    int dx, dy, sx, sy, err, e2, x, y, n;
-    unsigned short* dstRow;
-    dx = x1 - x0; dy = y1 - y0;
-    sx = (dx >= 0) ? 1 : -1;
-    sy = (dy >= 0) ? 1 : -1;
-    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
-    err = dx - dy;
-    x = x0; y = y0;
-    for (n = 0; n < 4096; n++)
-    {
-        if (x >= 0 && y >= 0 && x < s_FaW && y < s_FaH)
-        {
-            dstRow = (unsigned short*)(s_FaLocked + y * s_FaPitch);
-            dstRow[x] = Blend16(dstRow[x], r, g, b, a);
-        }
-        if (x == x1 && y == y1) break;
-        e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
-    }
-}
-
 /* 格块角 → 像素 (参考点 + 固定等距差)。 */
 static void FA_BoxCorner(int ccx, int ccy, int* px, int* py)
 {
@@ -659,13 +600,8 @@ void FuzzyAttack_Draw(void* surf, int w, int h, int pitch)
     FA_Mark(x1, y1, 1, 230);
     FA_Mark(x2, y2, 1, 230);
     FA_Mark(x3, y3, 1, 230);
-    /* 规划线 (红色细线, 单位→分到的敌, 只在按住时存在)。 */
-    {
-        int k;
-        for (k = 0; k < s_FaPrevN; k++)
-            FA_ThinLine(s_FaPrevUx[k], s_FaPrevUy[k],
-                        s_FaPrevTx[k], s_FaPrevTy[k], 255, 0, 0, 255);
-    }
+    /* 规划线 (红色细线, 单位中心→分到的敌中心, 含高度, 只在按住时存在)。 */
+    OU_PrevDraw(s_FaPrevBuf, s_FaPrevN, locked, w, h, pitch, 255, 0, 0, 255);
     s_FaLocked = 0;
     unlockFn(surf, NULL);
 }

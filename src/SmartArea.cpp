@@ -18,8 +18,9 @@
  * 下令走标准 0x04 MegaMission (攻击 Target=对象, 进入类 Destination=对象,
  * IsPlanningEvent=0, 与手点同形), OutList 满 drip 跨帧续发。
  * 规划线 (按住时): 预览=快照+分配, 与终判同一套输入同一套规则 (终判松手
- * 重扫一次); 预览截断前 64 单位/前 96 目标 (终判全量), 限 128 线, 换格或
- * 400ms 刷一次, 80ms 节流, 松手即消。端点坐标走 OU_GetCoords (vtbl+0x48)。
+ * 重扫一次); 预览截断前 64 单位/前 96 目标 (终判全量), 限 128 线, 换格、
+ * 节点数变或 400ms 刷一次, 80ms 节流, 松手即消。端点存 leptons 世界坐标
+ * (单位中心含高度, 见 OrderUtil.h OU_PrevLine), 绘制期经引擎投影。
  * 仲裁: 须无 Ctrl (含 Ctrl 归模糊); Z 不禁 (Z+裸中键仍归巡逻圈)。
  * 原生 Shift (多选/排路点) 只在左/右键上, 中键无原生功能, 无冲突。
  * 关或热键坏则不认领, 组合中键回落裸中键; 待命框超 300 轮丢弃。
@@ -32,7 +33,6 @@
 #include <windows.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
-#include "ScaleBar.h"
 #include "SmartArea.h"
 
 #define SA_SECTION "SmartArea"
@@ -532,7 +532,6 @@ static void SA_NodePush(int cx, int cy)
 #define SA_UNIT_CAP 256
 
 static void SA_BoxReset(void);
-static void SA_Drain(void);
 
 /* 快照: 单位 + 目标存静态 (找目标与修饰键无关, 决策见 DecideFire)。
  * 返回 1=有可处理快照。 */
@@ -657,40 +656,12 @@ static int s_SaSinkPairs = 0;
 
 /* ---------------- 规划线预览基础设施 ---------------- */
 
-#define SA_PREV_CAP 128   /* 预览线上限 (多了看不清, 忠于可读性) */
+/* 规划线缓冲 (端点 leptons 世界坐标, 见 OrderUtil.h OU_PrevLine)。
+ * 预览线上限 128 (多了看不清, 忠于可读性)。 */
 #define SA_PREV_UNITS 64  /* 预览参与单位上限 (逐对 MouseOver, 控开销) */
 #define SA_PREV_TGTS 96   /* 预览参与目标上限 (最近优先, 终判全量) */
-static int s_PrevUx[SA_PREV_CAP], s_PrevUy[SA_PREV_CAP];
-static int s_PrevTx[SA_PREV_CAP], s_PrevTy[SA_PREV_CAP];
+static OU_PrevLine s_PrevBuf[OU_PREV_CAP];
 static int s_PrevN = 0;
-static int s_PrevRefPx = 0, s_PrevRefPy = 0, s_PrevRefCx = 0, s_PrevRefCy = 0;
-
-
-/* leptons → 屏像素 (预览参考点换算, 忽略高度, 与方框同系)。 */
-static void SA_ProjLep(int lx, int ly, int* px, int* py)
-{
-    int dx = lx - (s_PrevRefCx * 256 + 128);
-    int dy = ly - (s_PrevRefCy * 256 + 128);
-    int ex = (dx * 30 - dy * 30) / 256;
-    int ey = (dx * 15 + dy * 15) / 256;
-    SB_MapDeltaToScreen(&ex, &ey);   /* 缩放档: 地图像素差要按 A/R 折成屏幕差 */
-    *px = s_PrevRefPx + ex;
-    *py = s_PrevRefPy + ey;
-}
-
-/* 存一对规划线端点 (双端取坐标, 任一失败则丢弃)。 */
-static void SA_PrevStore(void* u, void* t)
-{
-    CoordStruct a, b;
-    int ux, uy, tx, ty;
-    if (s_PrevN >= SA_PREV_CAP) return;
-    if (!OU_GetCoords(u, &a) || !OU_GetCoords(t, &b)) return;
-    SA_ProjLep(a.X, a.Y, &ux, &uy);
-    SA_ProjLep(b.X, b.Y, &tx, &ty);
-    s_PrevUx[s_PrevN] = ux; s_PrevUy[s_PrevN] = uy;
-    s_PrevTx[s_PrevN] = tx; s_PrevTy[s_PrevN] = ty;
-    s_PrevN++;
-}
 
 /* 装令: 任务就绪则入队 (发令) 或记线 (预览), take 计数可空。
  * 回 1=装上。 */
@@ -699,9 +670,8 @@ static int SA_QueueOne(int i, int j, int ms, int* takeOrNull)
     if (ms < 0) return 0;
     if (s_SaSinkPairs)
     {
-        int before = s_PrevN;
-        SA_PrevStore(s_SnapUnits[i], s_SnapTgts[j]);
-        if (s_PrevN == before) return 0;   /* 坐标失败 */
+        if (!OU_PrevPushObjs(s_PrevBuf, &s_PrevN, s_SnapUnits[i], s_SnapTgts[j]))
+            return 0;   /* 满或坐标失败 */
         s_SnapBusy[i] = 1;
         if (takeOrNull) (*takeOrNull)++;
         return 1;
@@ -838,25 +808,17 @@ static void SA_DecideFire(void)
     }
 }
 
-/* 规划线预览基础设施 (静态量/换算/存线) 定义在快照区之前 (QueueOne 先用)。 */
-
 static void SA_Preview(void)
 {
     void* cur;
-    int cx, cy, rpx, rpy;
-    unsigned now;
+    int cx, cy;
     static unsigned s_LastMs = 0;
-    static int s_LastCx = -9999, s_LastCy = -9999;
+    static int s_LastCx = -9999, s_LastCy = -9999, s_LastNc = -1;
 
-    /* 节流: 换格且距上次>80ms, 或超 400ms 刷一次 (目标会动)。 */
-    now = GetTickCount();
-    if (!OU_MouseCell(&cx, &cy) || !GtMouseGameXY(&rpx, &rpy)) return;
-    if (now - s_LastMs < 80) return;
-    if (cx == s_LastCx && cy == s_LastCy && now - s_LastMs < 400) return;
-    s_LastMs = now;
-    s_LastCx = cx; s_LastCy = cy;
-    s_PrevRefPx = rpx; s_PrevRefPy = rpy;
-    s_PrevRefCx = cx; s_PrevRefCy = cy;
+    /* 节流: 换格/节点数变且距上次>80ms, 或超 400ms 刷一次 (目标会动)。 */
+    if (!OU_MouseCell(&cx, &cy)) return;
+    if (!OU_PrevThrottle(&s_LastMs, &s_LastCx, &s_LastCy, &s_LastNc,
+                         cx, cy, g_SaNodeCount, 80, 400)) return;
     cur = *(void**)ADDR_CURPLAYER;
     if (!cur || !IsPlausiblePtr(cur)) { s_PrevN = 0; return; }
     /* 整轨迹快照 (与终判同输入, 松手重扫一次, 这里只借来画线)。
@@ -994,32 +956,6 @@ static void SA_Mark(int cx, int cy, int m, unsigned a)
             SA_Plot(cx + k, cy + j, a);
 }
 
-/* 细线 (Bresenham 单像素, 规划线用, 自带裁剪)。 */
-static void SA_ThinLine(int x0, int y0, int x1, int y1,
-                        unsigned r, unsigned g, unsigned b, unsigned a)
-{
-    int dx, dy, sx, sy, err, e2, x, y, n;
-    unsigned short* dstRow;
-    dx = x1 - x0; dy = y1 - y0;
-    sx = (dx >= 0) ? 1 : -1;
-    sy = (dy >= 0) ? 1 : -1;
-    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
-    err = dx - dy;
-    x = x0; y = y0;
-    for (n = 0; n < 4096; n++)
-    {
-        if (x >= 0 && y >= 0 && x < s_SaW && y < s_SaH)
-        {
-            dstRow = (unsigned short*)(s_SaLocked + y * s_SaPitch);
-            dstRow[x] = Blend16(dstRow[x], r, g, b, a);
-        }
-        if (x == x1 && y == y1) break;
-        e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
-    }
-}
-
 static void SA_BoxCorner(int ccx, int ccy, int* px, int* py)
 {
     int dx = ccx - g_SaBRcx, dy = ccy - g_SaBRcy;
@@ -1070,14 +1006,9 @@ void SmartArea_Draw(void* surf, int w, int h, int pitch)
         SA_Mark(x2, y2, 1, 230);
         SA_Mark(x3, y3, 1, 230);
     }
-    /* 规划线 (绿色细线, 单位→分到的目标, 只在按住时存在)。 */
+    /* 规划线 (绿色细线, 单位中心→分到的目标中心, 含高度, 只在按住时存在)。 */
     if (showLines)
-    {
-        int k;
-        for (k = 0; k < s_PrevN; k++)
-            SA_ThinLine(s_PrevUx[k], s_PrevUy[k],
-                        s_PrevTx[k], s_PrevTy[k], 0, 255, 0, 255);
-    }
+        OU_PrevDraw(s_PrevBuf, s_PrevN, locked, w, h, pitch, 0, 255, 0, 255);
     s_SaLocked = 0;
     unlockFn(surf, NULL);
 }
