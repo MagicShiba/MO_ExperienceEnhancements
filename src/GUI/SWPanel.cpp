@@ -106,6 +106,8 @@ void SWPanel_EnsureInit(void)
     p += UtoA((unsigned)g_SW.FontPx, buf + p);
     p = AppendCStr(buf, p, " classic=", sizeof(buf));
     p += UtoA((unsigned)g_SW.Classic, buf + p);
+    p = AppendCStr(buf, p, " gap=", sizeof(buf));
+    p += UtoA((unsigned)g_SW.Gap, buf + p);
     LogLine(buf);
 }
 

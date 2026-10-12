@@ -585,6 +585,14 @@ int g_SWCompW = 0, g_SWCompH = 0;
 int g_MapRight = 0;
 int g_SWPanelOn = 0;
 
+/* 超武串首尾补白 (半角空格/制表/全角空格): 引擎名串尾、计时器串首常带填充,
+ * 右/左对齐时正好落在名与计时中间缝里, Gap 再小也盖不掉。收表时统一剥掉。 */
+static int VecSWBlank(wchar_t c)
+{
+    unsigned u = (unsigned)c & 0xFFFFu;
+    return (u == 0x20u || u == 0x09u || u == 0x3000u) ? 1 : 0;
+}
+
 /* 收表 (同 y/kind 归并, 空串也收)。后备不覆盖新鲜正文。 */
 static void VecSWStore(int kind, const wchar_t* s, int n, int fore, int x,
                        int y, int src)
@@ -623,7 +631,15 @@ static void VecSWStore(int kind, const wchar_t* s, int n, int fore, int x,
             GetTickCount() - r->tick <= SW_FRESH_MS) return;
     }
     if (n > 63) n = 63;
-    for (i = 0; i <= n; i++) r->s[i] = s[i];
+    /* 剥首尾补白 (见 VecSWBlank): 全空串照常收 (只拦底色条, 不拦正文)。 */
+    {
+        int a = 0, b = n;
+        while (a < b && VecSWBlank(s[a])) a++;
+        while (b > a && VecSWBlank(s[b - 1])) b--;
+        s += a; n = b - a;
+    }
+    for (i = 0; i < n; i++) r->s[i] = s[i];
+    r->s[n] = 0;
     r->s[63] = 0;
     r->kind = kind;
     if (fore >= 0) r->fore = fore;
