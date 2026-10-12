@@ -564,13 +564,13 @@ __attribute__((naked)) void MOExperience_ClickCoordsEntry(void)
         : "memory", "cc");
 }
 
-/* Clamp_Center 接管: 视口比地图大时钉正中 (SB_ClampFix)。原版裸 ret 4, 照原样返回。
- * Entry 只保 ecx/实参指针。 */
+/* Clamp_Center 接管: 视口比地图大时钉正中 (SB_ClampFix)。⚠️ 本钩把 0x6D8640 整条替换、
+ * 不回调原版 (原版就是真正的钳制函数, 末尾 ret 4), 所以只在缩放真在管事时装钩
+ * (VecText.cpp 判 SB_Enabled)。没装 = 原版钳制照跑。 */
 static int SbClampCenter(void* self, Point2D* c)
 {
     (void)self;
     if (!IsPlausiblePtr(c)) return 0;
-    if (!SB_ClampNeeded()) return 0;
     return SB_ClampFix(c);
 }
 static void* g_CallClamp = (void*)SbClampCenter;
@@ -585,7 +585,7 @@ __attribute__((naked)) void MOExperience_ClampCenterEntry(void)
         "call *%0\n\t"
         "addl $8, %%esp\n\t"
         "popl %%ecx\n\t"
-        "ret $4\n\t"                     /* 原版 ret 4, 照原样清栈 */
+        "ret $4\n\t"                     /* 与原版 epilogue 一致 */
         :
         : "m" (g_CallClamp)
         : "memory", "cc");

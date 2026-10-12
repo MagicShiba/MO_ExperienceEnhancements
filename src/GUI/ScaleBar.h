@@ -6,6 +6,10 @@
 /* 读 [BottomBar] 节 (幂等)。 */
 void SB_EnsureInit(void);
 
+/* 缩放总开关 (ini ScaleEnable=1 才真在管事, 与 [Sidebar] HideEnable 无关)。
+ * 只判这个的钩子: 原版那条被整条换掉、不回调原版, 不在管事时不能装。*/
+int SB_Enabled(void);
+
 /* 每循环 (prepare 钩) 调: 摆刻度条矩形 + 处理点击换档 + 准备缩小档大面。 */
 void SB_Poll(void);
 
@@ -82,8 +86,6 @@ int SB_PtInRawView(int x, int y);
 
 /* 视口比地图大：居中钳位。退化轴钉地图正中。 */
 int SB_ClampFix(Point2D* c);
-/* 1 = 缩放接管中。 */
-int SB_ClampNeeded(void);
 
 /* 三趟地图后、降采样前铺一次本帧最终面的图外。 */
 void SB_PaintVoid(void);

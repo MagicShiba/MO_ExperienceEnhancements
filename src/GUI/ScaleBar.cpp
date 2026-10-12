@@ -162,8 +162,7 @@ static unsigned Sb_Fmt1(char* p, double v)
 }
 
 /* ---------------- 初始化 ----------------
- * 1 = 完全不接管: 消息钩不调放大/刻度条, prepare 不跑 SB_Poll, 查格不折算。
- * 用来二分"崩溃到底跟缩放有没有关系" (Enable=0 只是不画, 钩子还在跑)。*/
+ * 1 = 完全不接管: 消息钩不调放大/刻度条, prepare 不跑 SB_Poll, 查格不折算。*/
 
 void SB_EnsureInit(void)
 {
@@ -204,7 +203,6 @@ void SB_EnsureInit(void)
     UtoA((unsigned)s_Level, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " nlev=", sizeof(buf));
     UtoA((unsigned)s_NLev, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    if (s_Enable)
     {
         double ms = Sb_CalcMaxScale();
         p = AppendCStr(buf, p, " maxscale=", sizeof(buf));
@@ -222,6 +220,12 @@ void SB_EnsureInit(void)
     p = AppendCStr(buf, p, " limit=", sizeof(buf));
     UtoA((unsigned)s_LimitFallback, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     LogLine(buf);
+}
+
+int SB_Enabled(void)
+{
+    SB_EnsureInit();
+    return s_Enable;
 }
 
 /* ---------------- 档位文字 ("4x" / "2x" / "1x" …) --- */
@@ -1491,12 +1495,6 @@ int SB_ClampFix(Point2D* c)
     else if (c->X < mnX) { c->X = mnX; return 1; }
     else if (c->X > mxX) { c->X = mxX; return 1; }
     return bl;
-}
-
-/* 视口比地图大时，图外那一圈要不要钉住视口中心。 */
-int SB_ClampNeeded(void)
-{
-    return s_Enable ? 1 : 0;
 }
 
 /* 图外底色每帧重铺 (增量拷贝的旧像素没人覆盖)。

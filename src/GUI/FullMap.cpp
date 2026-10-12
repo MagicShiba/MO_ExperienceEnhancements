@@ -126,6 +126,7 @@ static int s_Init = 0;
 static int s_Mode = FM_MODE_FULL;
 static OU_Hotkey s_ToggleHk;   /* [Sidebar] ToggleKey (默认 F11) */
 static int s_Enable = 0;
+static int s_LockedFull = 0;   /* HideEnable=0 但缩放开着: 锁定完全显示, 不许 F11 切换 */
 static int s_ExtraH = 5;
 /* 左键"本次按下已处理"标记 —— 只由点击门维护 (读 GetAsyncKeyState, 松开时清) */
 static int s_LbPress = 0;
@@ -148,7 +149,7 @@ void FM_EnsureInit(void)
     s_Init = 1;
     GtEnsureLog();
     if (!g_Log) return;
-    s_Enable = GetPrivateProfileIntA(FM_SECTION, "HideEnable", 0, g_IniPath) ? 1 : 0;
+    s_Enable = GetPrivateProfileIntA(FM_SECTION, "HideEnable", 1, g_IniPath) ? 1 : 0;
     s_ExtraH = GetPrivateProfileIntA(FM_SECTION, "ExtraH", 5, g_IniPath);
     if (s_ExtraH < 0) s_ExtraH = 0;
     if (s_ExtraH > 64) s_ExtraH = 64;
@@ -156,12 +157,23 @@ void FM_EnsureInit(void)
     OU_ReadHotkey(FM_SECTION, "ToggleKey", &s_ToggleHk);
     s_Mode = GetPrivateProfileIntA(FM_SECTION, "Mode", FM_MODE_FULL, g_IniPath);
     if (s_Mode < FM_MODE_FULL || s_Mode > FM_MODE_BARE) s_Mode = FM_MODE_FULL;
+    /* 隐藏关掉也不影响底栏: 缩放开着就锁定完全显示跑全套补偿 (视口/列起点/blitsidebar
+     * 全按原版几何), 只是不许 F11 切走。否则缩放改了 ViewBounds 而侧栏仍走引擎原生,
+     * 整条侧栏会被画错位置并闪烁。只读 ini, 不碰引擎内存, DllMain 里调也安全。 */
+    if (!s_Enable
+        && GetPrivateProfileIntA("BottomBar", "ScaleEnable", 0, g_IniPath))
+    {
+        s_Enable = 1;
+        s_LockedFull = 1;
+        s_Mode = FM_MODE_FULL;
+    }
     if (!s_Enable) return;
     p = 0;
     p = AppendCStr(buf, p, "fullmap: en=", sizeof(buf));
     UtoA((unsigned)s_Enable, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     p = AppendCStr(buf, p, " mode=", sizeof(buf));
     UtoA((unsigned)s_Mode, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    if (s_LockedFull) p = AppendCStr(buf, p, " locked-full", sizeof(buf));
     LogLine(buf);
 }
 
@@ -635,6 +647,24 @@ void FM_Install(void)
             LogLine(buf);
         }
     }
+    /* 边缘卷屏 (0x692B60, 每帧由 MouseClass::ProcessInput 0x692F30 调) 判"鼠标越出
+     * 可绘制区"取 `ebp = Composite::GetWidth() + Sidebar::GetWidth() - 1`, 右缘判据是
+     * `鼠标X >= ebp`。引擎假设面 + 侧栏正好铺满窗口, 原版 1752 + 168 = 1920, 这条
+     * 线正好落在窗口右缘 (1919); 我们面恒全宽, 加侧栏就跑到屏外 ⇒ 右缘永不触发
+     * (左/上/下三条界与面宽无关, 所以只坏右侧)。改成取面右缘, 等长、只写 ebp:
+     *   lea ebp,[eax+ebp-1]  ->  lea ebp,[eax-1] ; nop
+     * `8D 68 FF` 这个形状在 gamemd 里有现成实例 (0x6FBB09 / 0x4563BC)。*/
+    {
+        static const unsigned char kWantEdge[4] = { 0x8D, 0x6C, 0x28, 0xFF };
+        static const unsigned char kEdge[4]     = { 0x8D, 0x68, 0xFF, 0x90 };
+        if (Fm_BytesSame((unsigned char*)0x00692BB4u, kWantEdge, 4))
+            LogLine(Fm_PatchBytes(0x00692BB4u, kEdge, 4)
+                ? "fullmap: edge-scroll zone ON (composite right edge)"
+                : "fullmap: edge-scroll zone patch fail");
+        else if (Fm_BytesSame((unsigned char*)0x00692BB4u, kEdge, 4))
+            LogLine("fullmap: edge-scroll zone ON (already patched)");
+        else LogLine(Fm_SiteBad("edgezone", 0x00692BB4u));
+    }
     LogLine("fullmap: viewrect hook ON (surface full width / view follows mode)");
 }
 /* ---------------- 小地图矩形 (侧栏面内坐标) ----------------
@@ -971,8 +1001,9 @@ static int Fm_ViewPatchSet(int wide)
     return 1;
 }
 
-/* 建面矩形恒全宽全高 (读档路 Composite 会矮 32 出残影带, 高不减才一致)。
- * ViewBounds.Height 事后由 Fm_ApplyViewWidth 纠回。 */
+/* 建面矩形恒全宽全高 (态0 视口回原版宽度时面也不缩, 否则安全阀把视口夹窄)。
+ * 边缘卷屏那条判据按面宽算, 所以面必须是全宽才等于窗口右缘 (见 Fm_Install 的
+ * edge-zone 补丁)。ViewBounds.Height 事后由 Fm_ApplyViewWidth 纠回。 */
 static RectangleStruct* __fastcall Fm_ViewRectStub(RectangleStruct* out)
 {
     RectangleStruct* wb = (RectangleStruct*)(size_t)ADDR_WINDOWBOUNDS;
@@ -1013,12 +1044,24 @@ static void Fm_DirtyRedraw(void)
     s_DirtyFrames--;
 }
 
-/* 本循环用的两个视口矩形 (给 ScaleBar 的拉伸与鼠标反变换)。 */
+/* 本循环用的两个视口矩形 (给 ScaleBar 的拉伸与鼠标反变换)。
+ * 关闭时报引擎当前的视口: s_ViewA/s_ViewR 只由 Fm_ApplyViewWidth 刷新, 它不跑时
+ * 停在初值 640x448, 而调用方拿它当"引擎本该有的视口"去重建 ZBuffer。*/
 void FM_GetViewRects(RectangleStruct* a, RectangleStruct* r)
 {
+    const RectangleStruct* vb = (const RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
+    if (!s_Enable)
+    {
+        if (a) *a = *vb;
+        if (r) *r = *vb;
+        return;
+    }
     if (a) *a = s_ViewA;
     if (r) *r = s_ViewR;
 }
+
+/* 隐藏侧栏总开关 ([Sidebar] HideEnable)。底栏缩放不再依赖它。 */
+int FM_Enabled(void) { return s_Enable; }
 
 static void Fm_ApplyViewWidth(void)
 {
@@ -1221,7 +1264,7 @@ static void Fm_PollToggle(void)
     char buf[96];
     unsigned p = 0;
     int fr, down;
-    if (!s_Enable || s_ToggleHk.disabled) return;
+    if (!s_Enable || s_LockedFull || s_ToggleHk.disabled) return;
     fr = *(int*)(size_t)ADDR_FRAME_COUNT;
     if (fr == s_TogLastFrame) return;
     s_TogLastFrame = fr;
