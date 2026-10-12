@@ -52,12 +52,8 @@ void FM_TrimViewGadget(void);
  *   a = 满视图区 (侧栏模式决定宽度, 引擎"本该"用的视口)
  *   r = 引擎实际拿到的视口 = a 居中的 1/m 子矩形 (m = ScaleBar 的放大倍数,
  *       m=1 时与 a 相同)。r 会被写进 ViewBounds。
- * 两个指针都可传 0 表示不要那个。FM_Poll 每循环刷新; HideEnable=0 且缩放开着时
- * 照常报 A/R, 都没开才报引擎当前的 ViewBounds。*/
+ * 两个指针都可传 0 表示不要那个。FM_Poll 每循环刷新; 关闭时报引擎当前视口。*/
 void FM_GetViewRects(RectangleStruct* a, RectangleStruct* r);
-
-/* 隐藏侧栏总开关 ([Sidebar] HideEnable)。底栏缩放不再依赖它。 */
-int  FM_Enabled(void);
 
 /* DisplayClass::ProcessClickCoords (0x692300) 落点 0x692406 的点击门 (Syringe 钩,
  * 见 MOExperience.dll.inj): 点击落在屏幕上那块小地图矩形里时, 自己把视口对准

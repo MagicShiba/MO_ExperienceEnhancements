@@ -953,9 +953,6 @@ void SB_RenderSwapOut(void)
     *(void**)ADDR_CUR_SURF_SB = s_RenderOldComp;
 }
 
-/* "在场"探针 0x6D9B50: 不接管 (见 ScaleBar.h)。 */
-
-
 /* 迷雾越界写护栏：ViewBounds=R 而 [0x887314] 是窗口面时写入越界，
  * 临时换 s_CurC 挡。1x 空操作。 */
 static int s_ShroudWarn = 0;

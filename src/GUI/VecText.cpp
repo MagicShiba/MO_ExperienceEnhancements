@@ -2636,8 +2636,7 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: clickcoords bytes mismatch"); LogBytes((unsigned char*)0x692300u); }
     }
-/* Clamp_Center 入口接管: 本钩把 0x6D8640 整条替换、不回调原版, 所以只在缩放真在
-     * 管事时装 —— 不装才是原版 (摄像机钳在图内)。*/
+/* Clamp_Center 整条替换原版、不回调, 只在缩放启用时装; 不装即原版钳制。 */
     if (!SB_Enabled())
     {
         LogLine("vtext: clampcenter hook OFF (scale off -> vanilla clamp)");

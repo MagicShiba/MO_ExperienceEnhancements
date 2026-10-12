@@ -157,9 +157,8 @@ void FM_EnsureInit(void)
     OU_ReadHotkey(FM_SECTION, "ToggleKey", &s_ToggleHk);
     s_Mode = GetPrivateProfileIntA(FM_SECTION, "Mode", FM_MODE_FULL, g_IniPath);
     if (s_Mode < FM_MODE_FULL || s_Mode > FM_MODE_BARE) s_Mode = FM_MODE_FULL;
-    /* 隐藏关掉也不影响底栏: 缩放开着就锁定完全显示跑全套补偿 (视口/列起点/blitsidebar
-     * 全按原版几何), 只是不许 F11 切走。否则缩放改了 ViewBounds 而侧栏仍走引擎原生,
-     * 整条侧栏会被画错位置并闪烁。只读 ini, 不碰引擎内存, DllMain 里调也安全。 */
+    /* 缩放开着时锁定完全显示跑全套补偿, 不许 F11 切走。
+     * 否则缩放改了 ViewBounds 而侧栏仍走引擎原生, 整条侧栏错位闪烁。 */
     if (!s_Enable
         && GetPrivateProfileIntA("BottomBar", "ScaleEnable", 0, g_IniPath))
     {
@@ -647,13 +646,9 @@ void FM_Install(void)
             LogLine(buf);
         }
     }
-    /* 边缘卷屏 (0x692B60, 每帧由 MouseClass::ProcessInput 0x692F30 调) 判"鼠标越出
-     * 可绘制区"取 `ebp = Composite::GetWidth() + Sidebar::GetWidth() - 1`, 右缘判据是
-     * `鼠标X >= ebp`。引擎假设面 + 侧栏正好铺满窗口, 原版 1752 + 168 = 1920, 这条
-     * 线正好落在窗口右缘 (1919); 我们面恒全宽, 加侧栏就跑到屏外 ⇒ 右缘永不触发
-     * (左/上/下三条界与面宽无关, 所以只坏右侧)。改成取面右缘, 等长、只写 ebp:
-     *   lea ebp,[eax+ebp-1]  ->  lea ebp,[eax-1] ; nop
-     * `8D 68 FF` 这个形状在 gamemd 里有现成实例 (0x6FBB09 / 0x4563BC)。*/
+    /* 边缘卷屏右缘 (0x692B60): 引擎按 面宽+侧栏宽 判定, 面恒全宽后判据跑到屏外、
+     * 右缘永不触发。改取面右缘, 等长只写 ebp
+     * (lea ebp,[eax+ebp-1] -> lea ebp,[eax-1]; nop)。 */
     {
         static const unsigned char kWantEdge[4] = { 0x8D, 0x6C, 0x28, 0xFF };
         static const unsigned char kEdge[4]     = { 0x8D, 0x68, 0xFF, 0x90 };
@@ -1001,9 +996,8 @@ static int Fm_ViewPatchSet(int wide)
     return 1;
 }
 
-/* 建面矩形恒全宽全高 (态0 视口回原版宽度时面也不缩, 否则安全阀把视口夹窄)。
- * 边缘卷屏那条判据按面宽算, 所以面必须是全宽才等于窗口右缘 (见 Fm_Install 的
- * edge-zone 补丁)。ViewBounds.Height 事后由 Fm_ApplyViewWidth 纠回。 */
+/* 建面矩形恒全宽全高 (高不减, 免读档残影带)。
+ * ViewBounds.Height 事后由 Fm_ApplyViewWidth 纠回。 */
 static RectangleStruct* __fastcall Fm_ViewRectStub(RectangleStruct* out)
 {
     RectangleStruct* wb = (RectangleStruct*)(size_t)ADDR_WINDOWBOUNDS;
@@ -1045,8 +1039,7 @@ static void Fm_DirtyRedraw(void)
 }
 
 /* 本循环用的两个视口矩形 (给 ScaleBar 的拉伸与鼠标反变换)。
- * 关闭时报引擎当前的视口: s_ViewA/s_ViewR 只由 Fm_ApplyViewWidth 刷新, 它不跑时
- * 停在初值 640x448, 而调用方拿它当"引擎本该有的视口"去重建 ZBuffer。*/
+ * 关闭时报引擎当前视口 (s_ViewA/R 此时停在初值, 不可用)。 */
 void FM_GetViewRects(RectangleStruct* a, RectangleStruct* r)
 {
     const RectangleStruct* vb = (const RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
@@ -1059,9 +1052,6 @@ void FM_GetViewRects(RectangleStruct* a, RectangleStruct* r)
     if (a) *a = s_ViewA;
     if (r) *r = s_ViewR;
 }
-
-/* 隐藏侧栏总开关 ([Sidebar] HideEnable)。底栏缩放不再依赖它。 */
-int FM_Enabled(void) { return s_Enable; }
 
 static void Fm_ApplyViewWidth(void)
 {

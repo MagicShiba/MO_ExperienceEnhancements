@@ -702,6 +702,21 @@ static int PickLines(MsgRing* R, int wantSp, int ignoreTimeout, unsigned tmoMul,
     return total;
 }
 
+/* 框宽与列起点 (DrawBox 与 CampTriggerRect 同口径, 含夹取顺序)。 */
+static int MsgBoxGeom(int screenW, int cfgW, int cfgWPm, int centered, int cfgX, int* px)
+{
+    int maxW = cfgW, x;
+    if (cfgWPm > 0) maxW = screenW * cfgWPm / 1000;
+    else if (maxW <= 0) maxW = screenW / 2;
+    if (maxW > screenW - 170) maxW = screenW - 170;
+    x = centered ? (screenW - maxW) / 2 : cfgX;
+    if (maxW < 80) maxW = 80;
+    if (maxW > screenW - x - 8) maxW = screenW - x - 8;
+    if (maxW < 80) maxW = 80;
+    if (px) *px = x;
+    return maxW;
+}
+
 /* 画一个框。返回 1=画出, 0=无内容, -1=GDI失败, -2=Lock失败。 */
 static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
                    int surfW, int surfH, int surfPitch)
@@ -717,28 +732,18 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
     if (!GdiEnsure(fontPx, B->bold, B->slot, B->face)) return -1;
     adv = g_G->adv > 0 ? g_G->adv : bitLineH;
 
-    maxW = B->maxW;
-    if (B->maxWPm > 0) maxW = screenW * B->maxWPm / 1000;   /* 百分比宽度 */
-    else if (maxW <= 0) maxW = screenW / 2;                 /* 自动半屏 */
-    if (maxW > screenW - 170) maxW = screenW - 170;         /* 上限: 屏宽-170 */
-    x = B->centered ? (screenW - maxW) / 2 : B->x;             /* 居中或左对齐 */
-    if (maxW < 80) maxW = 80;
-    if (maxW > screenW - x - 8) maxW = screenW - x - 8;
-    if (maxW < 80) maxW = 80;
+    maxW = MsgBoxGeom(screenW, B->maxW, B->maxWPm, B->centered, B->x, &x);
     textW = maxW;
     if (textW < 40) textW = 40;
 
-    /* ★ 聊天输入框 (ChatEdit.cpp) 的锚点在这里缓存 —— 必须在下面**所有**提前
-     * 返回之前。DrawBox 有两处提前返回: `picked<=0` (一条消息都没有) 和
-     * `totalRows<=0` (窗口被滚空)。而输入框是在消息帧的最后一层才画的, 只能读
-     * 缓存; 只读绘制时这份结果, 结构上不可能错开。
-     * 底部模式取**底边** (行数无关的不变量); 顶部模式只按 1 行, 免得随条数抖。*/
+    /* 输入框锚点缓存: 必须在下面所有提前返回之前写。
+     * 底部取底边, 顶部取顶边, 均与行数无关、不随条数抖。 */
     if (B->pSkip)
     {
         g_AnchorX = x;
         g_AnchorY = B->autoBottom
                   ? surfH - B->bottomMargin + 2
-                  : (B->yBase + B->topGap * adv) + (adv + 4);
+                  : (B->yBase + B->topGap * adv);
         g_AnchorValid = 1;
     }
 
@@ -827,11 +832,15 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
             if (vis > g_LineBuf[k][r].len) vis = g_LineBuf[k][r].len;
             w = RenderLine(g_LineBuf[k][r].start, vis);
             if (w <= 0) { drawn++; continue; }
-            /* 包裹模式: 黑底只包已揭示的墨水 (与整块同边距: 左右 3, 上下 2) */
+            /* 包裹模式: 黑底只包已揭示的墨水。相邻行在行缝处拼接不重叠,
+             * 否则重叠区被混合两次、透明度翻倍发黑。 */
             if (!B->fullBoard && boardOp > 0)
             {
                 RectangleStruct wr;
-                wr.X = x - 3; wr.Y = ly - 2; wr.Width = w + 6; wr.Height = adv + 4;
+                int vi = globalRow - rowBegin;
+                wr.X = x - 3; wr.Width = w + 6;
+                wr.Y = (vi == 0) ? ly - 2 : ly;
+                wr.Height = adv + (vi == 0 ? 2 : 0) + (vi == totalRows - 1 ? 2 : 0);
                 GtFillRectTrans(surf, &wr, &board, boardOp);
             }
             /* 阴影 (战役框底板透明度 0 时跳过; 提示框 0 也画; ShadowSize>1 加厚) */
@@ -885,11 +894,7 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
     return 1;
 }
 
-/* 触发条几何: 与战役文本框同 x / 同宽、1 行高。
- * 与 DrawBox 的战役分支同口径 (rect.X=x-3, rect.Y=y-2,
- * rect.Width=maxW+6, 高=adv+4), 只是行数固定为 1。
- * 底部模式时与 DrawBox 的 autoBottom 同公式 (totalRows=1),
- * 底边固定在 surfH-bottomMargin, 文本向上增长。
+/* 触发条几何: 与战役文本框同 x / 同宽、1 行高, 底部时底边固定向上增长。
  * 返回战役字体行高 adv (GDI 未就绪时回退估算)。 */
 static int CampTriggerRect(int bitLineH, int screenW, int surfH, RectangleStruct* out)
 {
@@ -900,14 +905,8 @@ static int CampTriggerRect(int bitLineH, int screenW, int surfH, RectangleStruct
         adv = (g_G->adv > 0 ? g_G->adv : fontPx + 2);
     else
         adv = fontPx + 2;
-    maxW = g_Cfg.MaxWidth;
-    if (g_Cfg.MaxWidthPm > 0) maxW = screenW * g_Cfg.MaxWidthPm / 1000;
-    else if (maxW <= 0) maxW = screenW / 2;
-    if (maxW > screenW - 170) maxW = screenW - 170;
-    x = g_Cfg.CampCentered ? (screenW - maxW) / 2 : g_Cfg.PosX;
-    if (maxW < 80) maxW = 80;
-    if (maxW > screenW - x - 8) maxW = screenW - x - 8;
-    if (maxW < 80) maxW = 80;
+    maxW = MsgBoxGeom(screenW, g_Cfg.MaxWidth, g_Cfg.MaxWidthPm,
+                      g_Cfg.CampCentered, g_Cfg.PosX, &x);
     if (g_Cfg.CampBottom)
         y = surfH - g_Cfg.CampBottomMargin - (adv + 4) + 2;
     else
@@ -919,37 +918,31 @@ static int CampTriggerRect(int bitLineH, int screenW, int surfH, RectangleStruct
     return adv;
 }
 
-/* 聊天输入框锚点 (供 ChatEdit.cpp): 与战役框对齐 (左缘同列 + 贴在它下沿)。
- * 返回 1=有锚点 (写 px/py), 0=无 (调用方退回原生位置)。
- *
- * ★ 底部模式必须读**实际画出来的**矩形 `g_CampRect` (DrawBox 存), 不要用
- *   `CampTriggerRect` 的 1 行估算再自己算 `surfH - CampBottomMargin + gap`。
- *   两条路各算各的: 只要宽度来源/夹取顺序/居中基准有一处不同 (screenW vs
- *   surfW、maxW 夹取次序), 输入框就会和战役框错开, 而且两边都"看着合理",
- *   永远对不上。直接读绘制结果 = 构造上就对齐。
- * ★ 顶部模式**不能**用 g_CampRect: 战役框随消息条数向下长, 输入框会跟着抖。
- *   那里用 1 行触发矩形 (位置与行数无关, 稳定), 同样给锚点。*/
+/* 输入框锚点 (供 ChatEdit.cpp): 底部贴战役框下沿+6px, 顶部贴战役框顶边。
+ * 读 DrawBox 缓存的绘制结果 (与战役框同源, 不另算); 缓存未就绪时退回 1 行触发矩形。
+ * 返回 1=有锚点, 0=无 (调用方退回原生位置)。 */
 int MsgText_ChatAnchor(int surfW, int surfH, int bitLineH, int* px, int* py)
 {
     RectangleStruct tr;
     int adv, gap = 6, ax, ay;
     if (!g_Cfg.Enable) return 0;
     if (surfW <= 0 || surfH <= 0) return 0;
-    /* 首选: 绘制战役框时缓存下来的锚点 (DrawBox 里, 提前返回之前写)。
-     * 那是**本次绘制用的同一批数字**, 结构上不可能和战役框错开。*/
+    /* 缓存是本次绘制用的同一批数字, 与战役框天然对齐。 */
     if (g_AnchorValid)
     {
         ax = g_AnchorX;
-        ay = g_AnchorY + gap;
+        ay = g_Cfg.CampBottom ? g_AnchorY + gap : g_AnchorY;
     }
     else
     {
-        /* 战役框还没走过一遍 (游戏刚起/被 Enable 关过): 退回 1 行触发矩形。
-         * 只在这一帧用, 下一帧就会被上面的缓存接管。*/
+        /* 首帧缓存未就绪时退回 1 行触发矩形, 下一帧被缓存接管。 */
         adv = CampTriggerRect(bitLineH, surfW, surfH, &tr);
         if (adv < 8) adv = 16;
         ax = tr.X + 3;
-        ay = tr.Y + tr.Height + gap;
+        if (g_Cfg.CampBottom)
+            ay = tr.Y + tr.Height + gap;
+        else
+            ay = tr.Y + 2;
     }
     if (ax < 0) ax = 0;
     if (ax > surfW - 40) ax = surfW - 40;

@@ -928,7 +928,7 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     if (lineH < 8 || lineH > 64) lineH = 16;
     fieldW = CE_NativeFieldW();
     if (fieldW < 80 || fieldW > surfW) fieldW = (surfW - 16 > 80) ? surfW - 16 : 640;
-    /* 落位: 底部模式贴战役框下沿 (MsgText_ChatAnchor); 顶部模式留原生行原位。
+    /* 落位: 底部模式贴战役框下沿, 顶部模式贴战役框顶边 (MsgText_ChatAnchor);
      * 兜底: 对话框 EditPos (+0x1C) → label 自身 X/Y → 底部条带。 */
     lx = 8; ly = surfH - lineH - 12;
     {

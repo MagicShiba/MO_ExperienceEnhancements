@@ -564,9 +564,8 @@ __attribute__((naked)) void MOExperience_ClickCoordsEntry(void)
         : "memory", "cc");
 }
 
-/* Clamp_Center 接管: 视口比地图大时钉正中 (SB_ClampFix)。⚠️ 本钩把 0x6D8640 整条替换、
- * 不回调原版 (原版就是真正的钳制函数, 末尾 ret 4), 所以只在缩放真在管事时装钩
- * (VecText.cpp 判 SB_Enabled)。没装 = 原版钳制照跑。 */
+/* Clamp_Center 接管: 视口比地图大时钉正中。整条替换原版、不回调,
+ * 只在缩放启用时装钩 (见 VecText.cpp)。 */
 static int SbClampCenter(void* self, Point2D* c)
 {
     (void)self;
@@ -1043,11 +1042,12 @@ __attribute__((naked)) void MOExperience_GadgetInputEntry(void)
 
 /* UI 层链路 (放大呈现之后跑, 各层仍 1:1。顺序见函数内, 后者压前者)。 */
 int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch,
-                     int* bitLineH, int* screenW)
+                     int* bitLineH, int* screenW, int* pMsgDrew)
 {
     int drew = 0, rc, lh, sw;
     RectangleStruct viewA;
     MOE_SetPhase(MP_UILAYER);
+    if (pMsgDrew) *pMsgDrew = 0;
     if (!IsPlausiblePtr(surf)) return 0;
     if (surfW <= 0 || surfH <= 0 || surfPitch <= 0) return 0;
     lh = GtBitLineHeight();
@@ -1061,7 +1061,7 @@ int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch,
     g_MapRight = FM_MapRightEdge();
     rc = MsgText_DrawFrame(surf, lh, sw, surfW, surfH, surfPitch);
     if (rc < 0) return drew;
-    if (rc == 1) drew = 1;
+    if (rc == 1) { drew = 1; if (pMsgDrew) *pMsgDrew = 1; }
     rc = SWPanel_Draw(surf, lh, surfW, surfH, surfPitch);
     if (rc < 0) return drew;
     if (rc == 1) drew = 1;
@@ -1092,7 +1092,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     unsigned tick;
     int surfW, surfH, surfPitch;
     int bitLineH = 0, screenW = 0;
-    int drew = 0;
+    int drew = 0, msgDrew = 0;
     static int s_firstDraw = 1;
 
     (void)regs;
@@ -1139,7 +1139,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     if (SB_In()) SB_CompositeMagnify();
     else if (SB_Out() && !g_AfterMapTramp) { SB_PaintVoid(); SB_CompositeDemagnify(); }
 
-    drew = MOE_DrawUILayers(surf, surfW, surfH, surfPitch, &bitLineH, &screenW);
+    drew = MOE_DrawUILayers(surf, surfW, surfH, surfPitch, &bitLineH, &screenW, &msgDrew);
 
     /* 聊天输入框 (顶层)。ce_Active/CE_NoteSent 只由它驱动, 不接则颜色丢失。 */
     {
@@ -1185,6 +1185,8 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
         p = AppendCStr(buf, p, b2, sizeof(buf));
         LogLine(buf);
     }
+    /* 原版消息只看消息层: 它没画 (关/无内容/失败) 就放行原版, 其它层画了也不跳过。 */
+    if (!msgDrew) return 0;
     return ADDR_AFTER_MSGLIST_DRAW;
 }
 

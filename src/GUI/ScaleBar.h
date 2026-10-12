@@ -90,8 +90,6 @@ int SB_ClampFix(Point2D* c);
 /* 三趟地图后、降采样前铺一次本帧最终面的图外。 */
 void SB_PaintVoid(void);
 
-/* "在场"探针：不接管。 */
-
 /* 迷雾越界写护栏：[0x887314] 非我方大面时换 s_CurC 挡写。 */
 void SB_ShroudGuard(void);
 void SB_ShroudReport(void);
