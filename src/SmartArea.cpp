@@ -355,8 +355,7 @@ static int SA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
             tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
     ev[OFF_PLANFLAG] = 0;
-    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
-    return OU_Enqueue(ev);
+    return OT_Fire(ev, unit, uid, idxOk);
 }
 
 static int SA_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
@@ -369,8 +368,7 @@ static int SA_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, mission,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = 0;
-    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
-    return OU_Enqueue(ev);
+    return OT_Fire(ev, unit, uid, idxOk);
 }
 
 #define SA_PEND_CAP 1024   /* 待发上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */

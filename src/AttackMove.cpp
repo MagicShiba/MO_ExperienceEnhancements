@@ -69,8 +69,7 @@ static int AM_Fire(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACKMOVE,
             tgtID, (unsigned)tgtRtti, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = (char)(plan ? 1 : 0);
-    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
-    return OU_Enqueue(ev);
+    return OT_Fire(ev, unit, uid, idxOk);
 }
 
 static void AM_ShiftDown(void)

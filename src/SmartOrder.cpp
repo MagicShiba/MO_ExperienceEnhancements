@@ -358,8 +358,7 @@ static int SO_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = 0;
-    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
-    return OU_Enqueue(ev);
+    return OT_Fire(ev, unit, uid, idxOk);
 }
 
 /* ---------------- 智能对象令 (攻击/进入/进驻/占领, 与原生点击同形) ---
@@ -383,8 +382,7 @@ static int SO_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
             tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
     ev[OFF_PLANFLAG] = 0;
-    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
-    return OU_Enqueue(ev);
+    return OT_Fire(ev, unit, uid, idxOk);
 }
 
 static int SO_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
@@ -397,8 +395,7 @@ static int SO_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, mission,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = 0;
-    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
-    return OU_Enqueue(ev);
+    return OT_Fire(ev, unit, uid, idxOk);
 }
 
 /* Action(光标) → Mission(订单): gamemd 0x4D74E0 跳转表实证

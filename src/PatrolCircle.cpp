@@ -159,8 +159,7 @@ static int PC_FireMega(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
             0, 0, dstID, (unsigned)dstRtti, dstID, (unsigned)dstRtti);
     ev[OFF_PLANFLAG] = 1;
-    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
-    return OU_Enqueue(ev);
+    return OT_Fire(ev, unit, uid, idxOk);
 }
 
 static int PC_FireCommit(int houseIdx)
@@ -182,8 +181,7 @@ static int PC_FireConnect(int houseIdx, int srcID, unsigned char srcRtti,
     for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
     FN_PLANCONNECT(ev, houseIdx, EVT_PLANCONNECT,
                    srcID, (unsigned)srcRtti, dstID, (unsigned)dstRtti);
-    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
-    return OU_Enqueue(ev);
+    return OT_Fire(ev, unit, uid, idxOk);
 }
 
 /* ---------------- 待发队列 (保序 drip) ---------------- */

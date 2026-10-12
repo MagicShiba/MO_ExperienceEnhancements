@@ -363,8 +363,7 @@ static int DP_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = 0;
-    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
-    return OU_Enqueue(ev);
+    return OT_Fire(ev, unit, uid, idxOk);
 }
 
 /* 展开令: EventType 0x9 (Deploy), Whom=该车 (与手按 D 同形, ctor 0x4C65E0)。 */
@@ -375,8 +374,7 @@ static int DP_FireDeploy(int houseIdx, int id, unsigned char rtti,
     unsigned i;
     for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
     FN_DP_DEPLOY(ev, houseIdx, EVT_DP_DEPLOY, id, (unsigned)rtti);
-    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
-    return OU_Enqueue(ev);
+    return OT_Fire(ev, unit, uid, idxOk);
 }
 
 static int DP_UnitCell(void* u, int* cx, int* cy)

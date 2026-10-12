@@ -329,8 +329,7 @@ void SS_Poll(void)
         q = AppendCStr(buf, q, ",", sizeof(buf));
         q += UtoA((unsigned)g.by, buf + q);
         q = AppendCStr(buf, q, " ", sizeof(buf));
-        q += UtoA((unsigned)g.bw, t1);
-        q = AppendCStr(buf, q, "x", sizeof(buf));
+        UtoA((unsigned)g.bw, t1);
         UtoA((unsigned)g.bh, t2);
         q = AppendCStr(buf, q, t1, sizeof(buf));
         q = AppendCh(buf, q, 'x', sizeof(buf));

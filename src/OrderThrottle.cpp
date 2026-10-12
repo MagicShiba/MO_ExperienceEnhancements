@@ -1,17 +1,17 @@
-/* OrderThrottle.cpp - 大量单位分帧下令。
+/* OrderThrottle.cpp - 大量单位下令: 单机同步直写 DoList, 联机分帧排队。
  *
- * 原版 EventClass::OutList 一帧只装 128 条, 而一次下令给选区每个单位各发一条,
- * 于是第 129 条起被静默丢弃。钩两处: ClickedMission @ 0x6FFBE0 (右键移动/
- * 攻击、G 警戒, 槽 0x378) 与槽 0x374 @ 0x6FFE00 (S 停止传 6、E 进入系传 7,
- * 体内直塞 OutList, 同样一单位一条)。OutList 放得下且无排队则放行,
- * 否则入队; Poll 每帧经跳板补发, 判据与原版 Add 同一句。
- * 补发前验存活, 换图/超时丢弃。
+ * 原版 EventClass::OutList 一帧只装 128 条, 一次下令每单位各发一条,
+ * 第 129 条起静默丢弃。钩两处上游: ClickedMission @ 0x6FFBE0 (右键移动/
+ * 攻击、G 警戒) 与槽 0x374 @ 0x6FFE00 (S 停止、E 进入系); 另钩三处满分支
+ * (Mega @ 0x646EF5、374 槽 @ 0x6FFE55、正统入队 @ 0x6521C9, Z 路径点走这里)。
  *
- * 配置 [Features] OrderThrottle (单键三态, 缺失=1, 改后重启):
- *   0=禁用 (完全旁路, 与原版逐位相同), 1=仅单机启用 (默认),
- *   2=联机也启用 (LAN/Internet 照常分帧)。
- * 2 纯粹保守: 分帧本身不影响同步 (见 notes/选中与下令上限.md §5), 挡的是
- * 下一层 Winsock 出站缓冲 —— 每帧命令量被顶到上限时的表现没验证过。
+ * 单机永不分帧: 单位令一律直写 DoList (原版转运手续, 执行帧 cur+1),
+ * 上限即 DoList 的 16384。联机保持原版语义, OrderThrottle=2 时普通令
+ * 才跨帧排队, 规划令永不排队。补发前验存活, 换图/超时丢弃。
+ *
+ * 配置 [Features] OrderThrottle (缺失=1, 改后重启):
+ *   0=禁用 (完全旁路), 1=单机直写+联机原版 (默认), 2=联机普通令也分帧。
+ * 分帧不影响同步 (见 notes/选中与下令上限.md §5)。
  *
  * 引擎事实与推导见 notes/选中与下令上限.md。 */
 
@@ -31,17 +31,31 @@
 #define ADDR_CLICKED374 0x006FFE00u
 #define OT374_STOLEN 5u                       /* sub esp,0x78 + push esi + push edi */
 
-#define ADDR_GAMEMODE 0xA8B238u   /* SessionClass::Instance->GameMode (首个 int) */
+/* 溢出钩 (SP 直写 DoList, 同波不分队; MP 走原版失败路, 行为不变):
+ * MegaMission 内联追加 @ 0x646EF5, 槽 0x374 内联追加 @ 0x6FFE55,
+ * 正统入队 @ 0x6521C9 (Z 路径点经 0x637DD0 调 0x6521C0 走这里, 另 4 处调用方同覆盖)。 */
+#define ADDR_MEGAFULL  0x00646EF5u
+#define ADDR_MEGANORM  0x00646F01u
+#define ADDR_MEGASUCC  0x00646F4Eu   /* mov $1,al + 原版尾 (直写成功走这里, 返 1) */
+#define ADDR_MEGAFAIL  0x00646F58u   /* xor al,al + 原版尾 */
+#define ADDR_STOPFULL  0x006FFE55u
+#define ADDR_STOPNORM  0x006FFE61u
+#define ADDR_STOPTAIL  0x006FFEADu   /* 成功/失败同落 (都返 1, 与原版静默丢同形) */
+#define ADDR_ENQFULL  0x006521C9u
+#define ADDR_ENQNORM  0x006521D5u
+#define ADDR_ENQSUCC  0x00652225u   /* mov al,1 + ret (直写成功走这里, 返 1) */
+#define ADDR_ENQFAIL  0x0065222Au
+
+/* 正统入队 (0x6521C0) 的满分支 (`mov OutCount,%eax + cmp $0x80,%eax` 10B + jge):
+ * Z 规划 (0x637DD0 及另 4 处调用方) 全走这里进 OutList, 满静默丢。
+ * 事件取 entry-esp+0x4; eax 原样保留 (追加体 `mov %eax,%esi` 当源用)。
+ * r==0→追加体, r==1→成功尾 (事件已落 DoList), r==2→失败尾 (原版)。
+ * 三尾皆 reg-safe, esp 进出平衡。 */
+
 #define ADDR_SCENARIO 0xA8B230u   /* ScenarioClass::Instance (换图代号) */
 #define ADDR_FRAME    0xA8ED84u   /* Unsorted::CurrentFrame */
 #define ADDR_MOVE_FB  0x822CF2u   /* Unsorted::MoveFeedback */
-
-#define GAME_LAN      3
-#define GAME_INTERNET 4
-
-/* gamemd 映像范围 (同 RepairAll): 虚表与引擎函数都落里面, 验对象用。 */
-#define OT_EXE_LO 0x401000u
-#define OT_EXE_HI 0x8A0000u
+#define ADDR_PLANMODE 0xAC4CF4u   /* PlanningModeActive (ClickedMission 内 0x637AA0 读它定规划令) */
 
 #define OFF_INLIMBO 0x81u
 #define OFF_ISALIVE 0x90u
@@ -57,12 +71,16 @@ static int g_OtInit = 0;
 static int g_OtMode = 1;        /* [Features] OrderThrottle: 0=禁用,1=仅单机,2=联机也启用 */
 static int g_OtMpWarned = 0;
 static int g_OtFirstLog = 0;
+static void OT_MarkFirstDefer(void);
 
 static unsigned long g_OtStatSent = 0, g_OtStatDrop = 0;
 static int g_OtStatFrame = 0;
 /* 诊断: 放行数 + 按 kind 入队数 + Attack 入队数。 */
 static unsigned long s_DecPass = 0, s_DecQ0 = 0, s_DecQ1 = 0, s_DecQ2 = 0;
 static unsigned long s_DecAtk = 0;
+/* 诊断: 单机直写成功/失败累计 (+上次已上报失败快照, 变才打日志)。 */
+static unsigned long s_SpillOk = 0, s_SpillFail = 0;
+static unsigned long s_SpillRepFail = 0;
 
 /* ---------------- 待发队列 (环形, 不另存 tail) ---------------- */
 
@@ -77,6 +95,7 @@ typedef struct
                         * 2=中键托管 raw 事件 (自带 111B, 补发=OU_Enqueue) */
     int   wait;        /* 已等逻辑帧 */
     unsigned char mf;  /* 入队瞬间的 MoveFeedback (补发时还原, 语音不变) */
+    unsigned char plan; /* 入队瞬间的 PlanningModeActive (补发时还原, 防规划令变直发) */
     /* kind=2 专用 */
     char  ev[EVT_SIZE];
     void* whom;        /* 事件 Whom 单位 (存活校验用) */
@@ -100,15 +119,15 @@ static void* g_OtTramp = NULL;
 static int   g_OtHookState = 0;    /* 0=没试 1=已装 2=放弃 */
 static void* g_OtTramp374 = NULL;
 static int   g_OtHookState374 = 0; /* 槽 0x374 钩, 状态机同上 */
+static int   g_OtHookStateMega = 0;
+static int   g_OtHookStateStop = 0;
 static volatile int g_OtRet = 0;    /* 裸壳跨 popal 传返回值 */
 
-static int OT_InExe(unsigned v) { return (v >= OT_EXE_LO && v < OT_EXE_HI) ? 1 : 0; }
-
-/* IsPlausiblePtr 只判 [64K,2G)+4 对齐, 堆/栈数字也能过, 须再验虚表落 exe 内。 */
+/* 对象指针须再验虚表落 exe 内 (IsPlausiblePtr 只判范围对齐)。 */
 static int OT_IsObj(void* p)
 {
     if (!p || !IsPlausiblePtr(p)) return 0;
-    return OT_InExe((unsigned)(size_t)*(void***)p);
+    return OU_InExe((unsigned)(size_t)*(void***)p);
 }
 
 static int OT_ObjLive(void* p)
@@ -119,11 +138,7 @@ static int OT_ObjLive(void* p)
     return 1;
 }
 
-static int OT_IsMP(void)
-{
-    int gm = *(int*)ADDR_GAMEMODE;
-    return (gm == GAME_LAN || gm == GAME_INTERNET) ? 1 : 0;
-}
+/* 联机判定见 OU_IsMP (OrderUtil.h, 订单系统共用)。 */
 
 static void OT_EnsureInit(void)
 {
@@ -146,8 +161,8 @@ static int OT_On(void)
 {
     OT_EnsureInit();
     if (g_OtMode <= 0) return 0;
-    if (OT_IsMP() && g_OtMode < 2) return 0;
-    if (OT_IsMP() && !g_OtMpWarned)
+    if (OU_IsMP() && g_OtMode < 2) return 0;
+    if (OU_IsMP() && !g_OtMpWarned)
     {
         g_OtMpWarned = 1;
         LogLine("othrottle: MP ON - refilling OutList to 128 every catch-up frame");
@@ -157,11 +172,11 @@ static int OT_On(void)
 
 static void OT_Flush(const char* why)
 {
-    char buf[96], b1[16];
+    char buf[96];
     unsigned q = 0;
     if (s_QCount <= 0) return;
     q = AppendCStr(buf, q, "othrottle: drop queued=", sizeof(buf));
-    q += UtoA((unsigned)s_QCount, b1);
+    q = OU_AppendU(buf, q, (unsigned)s_QCount, sizeof(buf));
     q = AppendCStr(buf, q, " (", sizeof(buf));
     q = AppendCStr(buf, q, why ? why : "?", sizeof(buf));
     q = AppendCStr(buf, q, ")", sizeof(buf));
@@ -176,9 +191,13 @@ static int __cdecl OT_DecideKind(void* self, int mission, void* target,
 {
     OtOrder* e;
     unsigned cnt;
+    int mp;
     OT_EnsureInit();
     if (g_OtMode <= 0) return 0;
-    if (OT_IsMP() && g_OtMode < 2) return 0;
+    if (*(unsigned char*)ADDR_PLANMODE) { s_DecPass++; return 0; }   /* 规划令永不排队 */
+    mp = OU_IsMP();
+    if (mp && g_OtMode < 2) return 0;
+    if (!mp) { s_DecPass++; return 0; }   /* SP: 永不排队, 同步直行 */
     /* 有排队保序; 无排队且原版放得下 (与 Add 同一句) 则放行。 */
     if (s_QCount <= 0)
     {
@@ -199,14 +218,11 @@ static int __cdecl OT_DecideKind(void* self, int mission, void* target,
     e->kind = kind;
     e->wait = 0;
     e->mf = *(unsigned char*)ADDR_MOVE_FB;
+    e->plan = *(unsigned char*)ADDR_PLANMODE;
     s_QCount++;
     if (kind == 0) s_DecQ0++; else s_DecQ1++;
     if (kind == 0 && mission == 1) s_DecAtk++;
-    if (!g_OtFirstLog)
-    {
-        g_OtFirstLog = 1;
-        LogLine("othrottle: first defer (queueing orders)");
-    }
+    OT_MarkFirstDefer();
     return 1;
 }
 
@@ -226,20 +242,117 @@ static int __cdecl OT_Decide374(void* self, int arg)
 static void* g_CallOtDecide = (void*)OT_Decide;
 static void* g_CallOtDecide374 = (void*)OT_Decide374;
 
-/* 中键托管: 预制好的标准 MegaMission 事件 (111B) 交 OT 跨帧补发。
- * 回 1=已接管 (调用方直接当成功); 回 0=没接管 (OT 关/联机未启用/队满),
- * 调用方走原 drip。存与发的都是标准事件、走同一 OutList 通道, 不影响同步;
- * 默认配置下联机回 0, 各家中键保持原 drip。 */
+/* OutList 满处置 (溢出钩用): MP 走原版 (0=有空位追加, 2=满失败);
+ * SP 一律直写 DoList (1=成功, 2=DoList 满), 上限 16384。 */
+static int __cdecl OT_SpillDecide(const char* ev)
+{
+    if (OU_IsMP())
+        return (*(unsigned*)ADDR_OUT_COUNT < EVT_CAP) ? 0 : 2;
+    if (OU_DirectToDoList(ev)) { s_SpillOk++; return 1; }
+    s_SpillFail++;
+    return 2;
+}
+
+static void* g_CallSpillDecide = (void*)OT_SpillDecide;
+
+static void* g_MegaNormal = (void*)ADDR_MEGANORM;
+static void* g_MegaSucc = (void*)ADDR_MEGASUCC;
+static void* g_MegaFail = (void*)ADDR_MEGAFAIL;
+static void* g_StopNormal = (void*)ADDR_STOPNORM;
+static void* g_StopTail = (void*)ADDR_STOPTAIL;
+
+/* 0x646E90 满分支壳: 事件指针取 eax (原版追加体 `mov %eax,%esi` 的同一源,
+ * 即 0x646EF0 处 call 的返回值, 与调用者栈形无关)。壳原样保留 eax
+ * (判定结果走 ecx 中转); ecx/edx 在三目标处都重建, 可借用。 */
+__attribute__((naked)) void OrderThrottle_MegaSpillEntry(void)
+{
+    __asm__ volatile (
+        "pushl %%eax\n\t"            /* 存原 eax (=真事件, 追加体也要它) */
+        "pushl %%eax\n\t"            /* dec 参数: 直接传 eax 值, 不算 esp 偏移 */
+        "call *%0\n\t"
+        "addl $4, %%esp\n\t"
+        "movl %%eax, %%ecx\n\t"     /* dec 结果转 ecx */
+        "popl %%eax\n\t"            /* 恢复原 eax, esp 回到入口值 */
+        "cmpl $1, %%ecx\n\t"
+        "je 1f\n\t"
+        "cmpl $2, %%ecx\n\t"
+        "je 2f\n\t"
+        "jmp *%1\n\t"
+        "1:\n\t"
+        "jmp *%2\n\t"
+        "2:\n\t"
+        "jmp *%3\n\t"
+        :
+        : "m" (g_CallSpillDecide), "m" (g_MegaNormal),
+          "m" (g_MegaSucc), "m" (g_MegaFail)
+        : "cc", "memory");
+}
+
+/* 0x6FFE00 满分支壳: 事件在 esp+0x10。r==0 走原追加体,
+ * r==1/2 同落原版尾 (都返 1, 直写成功与原版静默丢同形)。
+ * 追加体 (0x6FFE61) 首句即重建 eax/esi, 不依赖入口寄存器, 故无需保留。 */
+__attribute__((naked)) void OrderThrottle_StopSpillEntry(void)
+{
+    __asm__ volatile (
+        "leal 0x10(%%esp), %%eax\n\t"
+        "pushl %%eax\n\t"
+        "call *%0\n\t"
+        "addl $4, %%esp\n\t"
+        "testl %%eax, %%eax\n\t"
+        "jnz 1f\n\t"
+        "jmp *%1\n\t"
+        "1:\n\t"
+        "jmp *%2\n\t"
+        :
+        : "m" (g_CallSpillDecide), "m" (g_StopNormal), "m" (g_StopTail)
+        : "cc", "memory");
+}
+
+static void* g_EnqNormal = (void*)ADDR_ENQNORM;
+static void* g_EnqSucc = (void*)ADDR_ENQSUCC;
+static void* g_EnqFail = (void*)ADDR_ENQFAIL;
+static int   g_OtHookStateEnq = 0;
+
+/* 正统入队溢出壳 (见 ADDR_ENQ* 注释): ev=入口 esp+0x4, eax 原样保留。 */
+__attribute__((naked)) void OrderThrottle_EnqSpillEntry(void)
+{
+    __asm__ volatile (
+        "pushl %%eax\n\t"            /* 存原 eax (=OutCount, 追加体要它) */
+        "leal 0x08(%%esp), %%eax\n\t" /* 事件 (入口 esp+0x4) */
+        "pushl %%eax\n\t"
+        "call *%0\n\t"
+        "addl $4, %%esp\n\t"
+        "movl %%eax, %%ecx\n\t"
+        "popl %%eax\n\t"            /* 恢复, esp 回到入口值 */
+        "cmpl $1, %%ecx\n\t"
+        "je 1f\n\t"
+        "cmpl $2, %%ecx\n\t"
+        "je 2f\n\t"
+        "jmp *%1\n\t"
+        "1:\n\t"
+        "jmp *%2\n\t"
+        "2:\n\t"
+        "jmp *%3\n\t"
+        :
+        : "m" (g_CallSpillDecide), "m" (g_EnqNormal),
+          "m" (g_EnqSucc), "m" (g_EnqFail)
+        : "cc", "memory");
+}
+
+/* 中键托管: 预制好的标准 MegaMission 事件 (111B) 交 OT 队列。
+ * 单机永不接管 (回 0, 调用方 OU_Enqueue 单机直写 DoList);
+ * 联机仅 OrderThrottle=2 时接管 (回 1, 跨帧补发), 否则回 0 走原 drip。
+ * 存与发的都是标准事件; 联机补发走同一 OutList 通道, 不影响同步。 */
 int OT_SubmitRaw(const char* ev, void* whom, int whomID, int idxOk)
 {
     OtOrder* e;
-    unsigned i;
     OT_EnsureInit();
     if (g_OtMode <= 0) return 0;
-    if (OT_IsMP() && g_OtMode < 2) return 0;
+    if (OU_IsMP() && g_OtMode < 2) return 0;
+    if (!OU_IsMP()) return 0;   /* SP: 调用方 OU_Enqueue 直发/直注, 不进 OT 队 */
     if (s_QCount >= OT_QCAP) return 0;   /* 队满: 调用方回落自家 drip, 绝不丢 */
     e = s_QTail();
-    for (i = 0; i < EVT_SIZE; i++) e->ev[i] = ev[i];
+    OU_CopyEvt(e->ev, ev);
     e->self = whom;
     e->whom = whom;
     e->whomID = whomID;
@@ -251,15 +364,16 @@ int OT_SubmitRaw(const char* ev, void* whom, int whomID, int idxOk)
     e->mission = -1;
     e->kind = 2;
     e->wait = 0;
-    e->mf = *(unsigned char*)ADDR_MOVE_FB;
     s_QCount++;
     s_DecQ2++;
-    if (!g_OtFirstLog)
-    {
-        g_OtFirstLog = 1;
-        LogLine("othrottle: first defer (queueing orders)");
-    }
+    OT_MarkFirstDefer();
     return 1;
+}
+
+int OT_Fire(char* ev, void* whom, int whomID, int idxOk)
+{
+    if (OT_SubmitRaw(ev, whom, whomID, idxOk)) return 1;
+    return OU_Enqueue(ev);
 }
 
 /* 裸钩铁律见 MOExperience.cpp 文件头: 操作数只许 "m" 禁止 "r"。
@@ -328,21 +442,31 @@ static void OT_HookLog(const char* tag, const char* msg)
     char buf[64];
     unsigned q = 0;
     q = AppendCStr(buf, q, "othrottle: ", sizeof(buf));
-    q = AppendCStr(buf, q, tag, sizeof(buf));
-    q = AppendCStr(buf, q, msg, sizeof(buf));
-    LogLine(buf);
+    q = AppendCStr(buf, q, tag ? tag : "?", sizeof(buf));
+    OU_LogTag(buf, msg);
 }
+
+static void OT_MarkFirstDefer(void)
+{
+    if (!g_OtFirstLog)
+    {
+        g_OtFirstLog = 1;
+        LogLine("othrottle: first defer (queueing orders)");
+    }
+}
+
+/* 钩点只需落在 gamemd .text 内, 不必 4 对齐。 */
 
 static void OT_InstallHook(unsigned addr, unsigned stolen,
                              const unsigned char* want, void* entry,
                              void** trampOut, int* stateOut, const char* tag)
 {
     unsigned char* site;
-    unsigned char* st;
+    unsigned char* st = NULL;
     DWORD old = 0;
     unsigned i;
     if (*stateOut) return;
-    if (!IsPlausiblePtr((void*)addr)) return;
+    if (!OU_InExe(addr)) return;
     if (*(int*)ADDR_FRAME < 60) return;      /* 等 exe 解包稳定 */
     site = (unsigned char*)addr;
     if (site[0] == 0xE9)
@@ -360,21 +484,25 @@ static void OT_InstallHook(unsigned addr, unsigned stolen,
         OT_HookLog(tag, " prologue mismatch - OFF");
         return;
     }
-    st = (unsigned char*)VirtualAlloc(NULL, 32, MEM_COMMIT | MEM_RESERVE,
-                                      PAGE_EXECUTE_READWRITE);
-    if (!st)
+    /* 溢出钩 (trampOut 空) 不需跳板: 壳自行分流到原成功/失败尾。 */
+    if (trampOut)
     {
-        *stateOut = 2;
-        OT_HookLog(tag, " VirtualAlloc fail - OFF");
-        return;
+        st = (unsigned char*)VirtualAlloc(NULL, 32, MEM_COMMIT | MEM_RESERVE,
+                                          PAGE_EXECUTE_READWRITE);
+        if (!st)
+        {
+            *stateOut = 2;
+            OT_HookLog(tag, " VirtualAlloc fail - OFF");
+            return;
+        }
+        for (i = 0; i < stolen; i++) st[i] = site[i];
+        st[stolen] = 0xE9;
+        *(int*)(st + stolen + 1) =
+            (int)(long)(site + stolen) - (int)(long)(st + stolen + 5);
     }
-    for (i = 0; i < stolen; i++) st[i] = site[i];
-    st[stolen] = 0xE9;
-    *(int*)(st + stolen + 1) =
-        (int)(long)(site + stolen) - (int)(long)(st + stolen + 5);
     if (!VirtualProtect(site, 5, PAGE_EXECUTE_READWRITE, &old))
     {
-        VirtualFree(st, 0, MEM_RELEASE);
+        if (st) VirtualFree(st, 0, MEM_RELEASE);
         *stateOut = 2;
         OT_HookLog(tag, " VirtualProtect fail - OFF");
         return;
@@ -383,7 +511,7 @@ static void OT_InstallHook(unsigned addr, unsigned stolen,
     *(int*)(site + 1) = (int)(long)entry - (int)(long)(site + 5);
     VirtualProtect(site, 5, old, &old);
     FlushInstructionCache(GetCurrentProcess(), site, 5);
-    *trampOut = st;
+    if (trampOut) *trampOut = st;
     *stateOut = 1;
     OT_HookLog(tag, " hook ON");
 }
@@ -402,6 +530,25 @@ static void OT_EnsureHook(void)
     OT_InstallHook(ADDR_CLICKED374, OT374_STOLEN, kPrologue374,
                    (void*)OrderThrottle_Entry374, &g_OtTramp374,
                    &g_OtHookState374, "Clicked374");
+    /* 三处溢出钩只在单机装 (联机完全绕过)。单机直写 DoList。 */
+    if (OU_IsMP()) return;
+    static const unsigned char kOutFull[10] =
+        { 0x81, 0x3D, 0xC8, 0x02, 0xA8, 0x00, 0x80, 0x00, 0x00, 0x00 };
+    OT_InstallHook(ADDR_MEGAFULL, 10u, kOutFull,
+                   (void*)OrderThrottle_MegaSpillEntry, NULL,
+                   &g_OtHookStateMega, "MegaSpill");
+    OT_InstallHook(ADDR_STOPFULL, 10u, kOutFull,
+                   (void*)OrderThrottle_StopSpillEntry, NULL,
+                   &g_OtHookStateStop, "StopSpill");
+    /* 正统入队满分支 (`mov OutCount,%eax + cmp $0x80,%eax`)。
+     * Z 路径点经 0x637DD0 调 0x6521C0 全走这里, 一钩覆盖 5 处调用方。 */
+    {
+        static const unsigned char kEnqFull[10] =
+            { 0xA1, 0xC8, 0x02, 0xA8, 0x00, 0x3D, 0x80, 0x00, 0x00, 0x00 };
+        OT_InstallHook(ADDR_ENQFULL, 10u, kEnqFull,
+                       (void*)OrderThrottle_EnqSpillEntry, NULL,
+                       &g_OtHookStateEnq, "EnqSpill");
+    }
 }
 
 /* ---------------- 补发 ---------------- */
@@ -410,33 +557,31 @@ typedef int __attribute__((thiscall)) (*Fn_ClickedMission)(void* self, int missi
     void* target, void* cell, void* nearCell);
 typedef int __attribute__((thiscall)) (*Fn_Clicked374)(void* self, int arg);
 
-/* 走跳板 (原函数头部字节, 不是被补丁的入口, 不递归)。kind=1 的原函数
- * (0x6FFE00) 内部自带 128 检查 (满静默丢但返 1), Poll 已保证 cnt<128 才调。
- * kind=2 直接 OU_Enqueue, 满回 0 (调用方 Poll 见 0 则 break 留下轮)。
- * 回 1=已处理 (pop), 0=OutList 真满 (break, 不 pop)。 */
+/* 走跳板 (原函数头部, 不递归)。kind=2 直接 OU_Enqueue, 满回 0 留下轮。
+ * 回 1=已处理, 0=跳板未装 (留下轮重试)。 */
 static int OT_Replay(OtOrder* e)
 {
-    unsigned char mf;
+    unsigned char mf, pm;
+    int ok = 0;
     if (e->kind == 2) return OU_Enqueue(e->ev);
+    /* 原函数读 live 的 MoveFeedback 与 PlanningModeActive, 还原成入队瞬间再调。 */
+    mf = *(unsigned char*)ADDR_MOVE_FB;
+    pm = *(unsigned char*)ADDR_PLANMODE;
+    *(unsigned char*)ADDR_MOVE_FB = e->mf;
+    *(unsigned char*)ADDR_PLANMODE = e->plan;
     if (e->kind == 1)
     {
         Fn_Clicked374 fn = (Fn_Clicked374)g_OtTramp374;
-        if (!fn) return 1;
-        mf = *(unsigned char*)ADDR_MOVE_FB;
-        *(unsigned char*)ADDR_MOVE_FB = e->mf;
-        fn(e->self, e->mission);
-        *(unsigned char*)ADDR_MOVE_FB = mf;
-        return 1;
+        if (fn) { fn(e->self, e->mission); ok = 1; }
     }
+    else
     {
         Fn_ClickedMission fn = (Fn_ClickedMission)g_OtTramp;
-        if (!fn) return 1;
-        mf = *(unsigned char*)ADDR_MOVE_FB;
-        *(unsigned char*)ADDR_MOVE_FB = e->mf;
-        fn(e->self, e->mission, e->target, e->cell, e->nearCell);
-        *(unsigned char*)ADDR_MOVE_FB = mf;
-        return 1;
+        if (fn) { fn(e->self, e->mission, e->target, e->cell, e->nearCell); ok = 1; }
     }
+    *(unsigned char*)ADDR_MOVE_FB = mf;
+    *(unsigned char*)ADDR_PLANMODE = pm;
+    return ok;
 }
 
 /* self 必须活; kind=0 另验 target/cell;
@@ -463,7 +608,7 @@ void OrderThrottle_Poll(void)
     static void* s_LastScen = NULL;
     void* scen;
     unsigned cnt;
-    char buf[192], b1[16], b2[16];
+    char buf[192];
     unsigned q;
 
     OT_EnsureInit();
@@ -471,12 +616,53 @@ void OrderThrottle_Poll(void)
     OT_EnsureHook();
     /* 换图/读档: 队列里的对象与格指针全部作废。 */
     scen = *(void**)ADDR_SCENARIO;
-    if (scen != s_LastScen) { s_LastScen = scen; OT_Flush("map changed"); }
+    if (scen != s_LastScen)
+    {
+        s_LastScen = scen;
+        OT_Flush("map changed");
+    }
     if (!OT_On()) { OT_Flush("inactive"); return; }
-    if (s_QCount <= 0) return;
 
-    /* 不发超: cnt 是 OutList 当前数的上界 —— 一条令恰好推进 1, 原版中途拒收只会
-     * 让 cnt 高估, 高估是安全方向 (少发而非多发)。`cnt < EVT_CAP` 保证不溢出。 */
+    /* 统计 (~20 秒一结): 正常时静默, 只在丢单/直写失败时记一行。
+     * q0/q1/q2=三路入队, atk=Attack 入队, pass=直发放行,
+     * spill=单机直写成功/失败, do=DoList 当前数。 */
+    if (*(int*)ADDR_FRAME - g_OtStatFrame >= OT_STATFRAMES)
+    {
+        int bad = (g_OtStatDrop || s_SpillFail != s_SpillRepFail) ? 1 : 0;
+        g_OtStatFrame = *(int*)ADDR_FRAME;
+        if (bad)
+        {
+            q = AppendCStr(buf, 0, "othrottle: sent=", sizeof(buf));
+            q = OU_AppendU(buf, q, (unsigned)g_OtStatSent, sizeof(buf));
+            q = AppendCStr(buf, q, " drop=", sizeof(buf));
+            q = OU_AppendU(buf, q, (unsigned)g_OtStatDrop, sizeof(buf));
+            q = AppendCStr(buf, q, " pending=", sizeof(buf));
+            q = OU_AppendU(buf, q, (unsigned)s_QCount, sizeof(buf));
+            q = AppendCStr(buf, q, " q0=", sizeof(buf));
+            q = OU_AppendU(buf, q, (unsigned)s_DecQ0, sizeof(buf));
+            q = AppendCStr(buf, q, " q1=", sizeof(buf));
+            q = OU_AppendU(buf, q, (unsigned)s_DecQ1, sizeof(buf));
+            q = AppendCStr(buf, q, " q2=", sizeof(buf));
+            q = OU_AppendU(buf, q, (unsigned)s_DecQ2, sizeof(buf));
+            q = AppendCStr(buf, q, " atk=", sizeof(buf));
+            q = OU_AppendU(buf, q, (unsigned)s_DecAtk, sizeof(buf));
+            q = AppendCStr(buf, q, " pass=", sizeof(buf));
+            q = OU_AppendU(buf, q, (unsigned)s_DecPass, sizeof(buf));
+            q = AppendCStr(buf, q, " spill=", sizeof(buf));
+            q = OU_AppendU(buf, q, (unsigned)s_SpillOk, sizeof(buf));
+            q = AppendCStr(buf, q, "/", sizeof(buf));
+            q = OU_AppendU(buf, q, (unsigned)s_SpillFail, sizeof(buf));
+            q = AppendCStr(buf, q, " do=", sizeof(buf));
+            q = OU_AppendU(buf, q, *(unsigned*)ADDR_DO_COUNT, sizeof(buf));
+            LogLine(buf);
+        }
+        g_OtStatSent = 0;
+        g_OtStatDrop = 0;
+        s_SpillRepFail = s_SpillFail;
+    }
+    if (s_QCount <= 0) return;   /* SP 永不排队, 到此恒为 0; 下为联机模式 2 专用 */
+
+    /* cnt 是 OutList 数的上界 (一条令推进 1, 中途拒收只会高估=少发方向)。 */
     cnt = *(unsigned*)ADDR_OUT_COUNT;
     if (cnt >= EVT_CAP) return;
     while (s_QCount > 0 && cnt < EVT_CAP)
@@ -485,39 +671,9 @@ void OrderThrottle_Poll(void)
         e->wait++;
         if (e->wait >= OT_MAXWAIT) { s_QPop(); g_OtStatDrop++; continue; }
         if (!OT_EntryOk(e)) { s_QPop(); g_OtStatDrop++; continue; }
-        if (!OT_Replay(e)) break;   /* OutList 真满 (仅 kind=2 回 0): 留到下轮 */
+        if (!OT_Replay(e)) break;   /* 满或跳板未装: 留下轮 */
         cnt++;
         g_OtStatSent++;
         s_QPop();
-    }
-
-    /* 统计 (~20 秒一行, 顺带报 pending, 确认节流在动)。
-     * q0/q1/q2=三路入队累计 (0=右键系, 1=S/E 组命令, 2=中键托管),
-     * atk=Attack 入队累计, pass=水位放行累计。 */
-    if (*(int*)ADDR_FRAME - g_OtStatFrame >= OT_STATFRAMES)
-    {
-        g_OtStatFrame = *(int*)ADDR_FRAME;
-        if (g_OtStatSent || g_OtStatDrop)
-        {
-            q = AppendCStr(buf, 0, "othrottle: sent=", sizeof(buf));
-            q += UtoA((unsigned)g_OtStatSent, b1);
-            q = AppendCStr(buf, q, " drop=", sizeof(buf));
-            q += UtoA((unsigned)g_OtStatDrop, b2);
-            q = AppendCStr(buf, q, " pending=", sizeof(buf));
-            q += UtoA((unsigned)s_QCount, b1);
-            q = AppendCStr(buf, q, " q0=", sizeof(buf));
-            q += UtoA((unsigned)s_DecQ0, b2);
-            q = AppendCStr(buf, q, " q1=", sizeof(buf));
-            q += UtoA((unsigned)s_DecQ1, b1);
-            q = AppendCStr(buf, q, " q2=", sizeof(buf));
-            q += UtoA((unsigned)s_DecQ2, b2);
-            q = AppendCStr(buf, q, " atk=", sizeof(buf));
-            q += UtoA((unsigned)s_DecAtk, b1);
-            q = AppendCStr(buf, q, " pass=", sizeof(buf));
-            q += UtoA((unsigned)s_DecPass, b2);
-            LogLine(buf);
-            g_OtStatSent = 0;
-            g_OtStatDrop = 0;
-        }
     }
 }

@@ -30,6 +30,8 @@
 #include "SWSBar.h"
 #include "SWPanel.h"
 #include "TreeChop.h"
+#include "WaypointCap.h"
+#include "MegaListCap.h"
 #include "WeaponRange.h"
 #include "ScaleBar.h"
 #include "PauseView.h"
@@ -244,6 +246,8 @@ static void PowerDrawBoth(void)
     DeployPreview_Poll();
     MindSelect_Poll();
     OrderThrottle_Poll();
+    WpCap_Poll();
+    MlCap_Poll();
     SWS_Poll();
     RepairAll_Poll();
     /* 侧栏放建筑时驱散地基上的自家单位 (只读+标准 Move 事件)。 */

@@ -1,10 +1,12 @@
 /* OrderUtil.cpp - 下单模块共享工具实现 (声明见 OrderUtil.h)。
- * 全只读 + OutList 入队, 不写模拟内存 (联机安全)。 */
+ * 只读查询 + 标准事件入队; 单机单位令直写 DoList, 联机只走 OutList。 */
 
 #include <windows.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "ScaleBar.h"
+
+#define ADDR_FRAME 0xA8ED84u   /* Unsorted::CurrentFrame */
 
 int OU_WhatAmI(void* p)
 {
@@ -18,36 +20,31 @@ int OU_WhatAmI(void* p)
     return fn(p);
 }
 
-int OU_Enqueue(char ev[EVT_SIZE])
+int OU_IsMP(void)
 {
-    unsigned count = *(unsigned*)ADDR_OUT_COUNT;
-    unsigned next;
-    unsigned i;
-    Fn_SndCb snd;
-    unsigned eaxAfter;
-    if (count >= EVT_CAP) return 0;
-    next = *(unsigned*)ADDR_OUT_NEXT & 0x7Fu;   /* 当写下标用之前先夹 */
-    if (next >= EVT_CAP) return 0;
-    for (i = 0; i < EVT_SIZE; i++)
-        ((char*)(ADDR_OUT_BUF + next * EVT_SIZE))[i] = ev[i];
-    snd = *(Fn_SndCb*)0x7E1530u;
-    /* 这条内联 "call *%1" 必须声明 ebx/esi/edi/ebp 被破坏: 真实 call 会改这四个
-     * callee-saved 寄存器, 漏声明则紧接着用它算索引 / 写 OutList 账本时写进的是
-     * callee 改过的垃圾 → 引擎按坏账本派发事件跳进野地址 (0xC0000005)。
-     * 同坑见 notes/智能中键.md。 */
-    __asm__ volatile (
-        "call *%1\n\t"
-        "movl %%eax, %0"
-        : "=r" (eaxAfter)
-        : "r" (snd)
-        : "ecx", "edx", "ebx", "esi", "edi", "ebp", "cc", "memory");
-    *(unsigned*)(ADDR_OUT_PAR + next * 4u) = eaxAfter;
-    *(unsigned*)ADDR_OUT_NEXT = (next + 1u) & 0x7Fu;
-    *(unsigned*)ADDR_OUT_COUNT = count + 1u;
-    return 1;
+    int gm = *(int*)0xA8B238u;   /* SessionClass::Instance->GameMode */
+    return (gm == 3 || gm == 4) ? 1 : 0;   /* 3=LAN, 4=Internet */
 }
 
-int OU_CellValid(int cx, int cy)
+/* ---------------- 跨模块共享小函数 (OT/WP/ML 共用, 免各文件手写一份) ---------------- */
+
+void OU_LogTag(const char* tag, const char* msg)
+{
+    char buf[64];
+    unsigned q = 0;
+    q = AppendCStr(buf, q, tag ? tag : "?", sizeof(buf));
+    q = AppendCStr(buf, q, msg ? msg : "", sizeof(buf));
+    LogLine(buf);
+}
+
+unsigned OU_AppendU(char* dst, unsigned pos, unsigned v, unsigned cap)
+{
+    char tmp[16];
+    UtoA(v, tmp);
+    return AppendCStr(dst, pos, tmp, cap);
+}
+
+void* OU_CellPtr(int cx, int cy)
 {
     void** cells;
     int maxc, idx;
@@ -57,41 +54,80 @@ int OU_CellValid(int cx, int cy)
     if (!cells || !IsPlausiblePtr(cells) || maxc <= 0 || maxc > 512 * 512) return 0;
     idx = (cy << 9) + cx;
     if (idx < 0 || idx >= maxc) return 0;
-    return cells[idx] ? 1 : 0;
+    return cells[idx];
 }
 
-int OU_MouseCellPx(int* cx, int* cy, int* px, int* py)
+void OU_CopyEvt(char* dst, const char* src)
 {
-    int mx, my;
-    Point2D pt;
-    CellStruct center;
-    CoordStruct crd;
-    void* tgtObj = 0;
-    unsigned char b5 = 0, b6 = 0;
-    center.X = center.Y = 0;
-    crd.X = crd.Y = crd.Z = 0;
-    if (!GtMouseGameXY(&mx, &my)) return 0;
-    pt.X = mx; pt.Y = my;
-    /* ProcessClickCoords 按**视口空间**判格/拾取对象, 而 GtMouseGameXY 给的是
-     * 物理屏幕点 —— 放大档 (视口 R = A*scale) 下必须先过缩放模块的反变换,
-     * 否则取到的格偏 A/R 倍。scale=1 时恒等。*/
-    if (!SB_MapPoint(&pt)) return 0;   /* 栏带不进引擎查询 (无上界) */
-    if (!FN_CLICKCOORDS((void*)ADDR_DISPLAY, &pt, &center, &crd,
-                        &tgtObj, &b5, &b6))
-        return 0;
-    *cx = (int)center.X; *cy = (int)center.Y;
-    if (px) *px = mx;
-    if (py) *py = my;
-    return OU_CellValid(*cx, *cy);
+    unsigned i;
+    if (!dst || !src) return;
+    for (i = 0; i < EVT_SIZE; i++) dst[i] = src[i];
 }
 
-int OU_MouseCell(int* cx, int* cy)
+/* 现造 Timings (与原版追加体同函数)。内联 call 须声明 ebx/esi/edi/ebp
+ * 被破坏, 否则后续账本写进垃圾值。 */
+static unsigned OU_SndTimings(void)
 {
-    return OU_MouseCellPx(cx, cy, 0, 0);
+    Fn_SndCb snd = *(Fn_SndCb*)0x7E1530u;
+    unsigned r;
+    __asm__ volatile (
+        "call *%1\n\t"
+        "movl %%eax, %0"
+        : "=r" (r)
+        : "r" (snd)
+        : "ecx", "edx", "ebx", "esi", "edi", "ebp", "cc", "memory");
+    return r;
 }
 
-/* 取格 + 点中对象 (ProcessClickCoords 原型见 OrderUtil.h, tgt 透出)。 */
-int OU_MouseCellTarget(int* cx, int* cy, void** tgtOut, int* px, int* py)
+/* 单机直写 DoList (111B 拷 + 现造 PAR + 原版转运三手续), 联机永不调用。 */
+int OU_DirectToDoList(const char* ev)
+{
+    unsigned count = *(unsigned*)ADDR_DO_COUNT;
+    unsigned next;
+    char* slot;
+    void* hp;
+    if (OU_IsMP()) return 0;
+    if (count >= DO_CAP) return 0;
+    next = *(unsigned*)ADDR_DO_NEXT & DO_MASK;
+    if (next >= DO_CAP) return 0;
+    OU_CopyEvt((char*)(ADDR_DO_BUF + next * EVT_SIZE), ev);
+    *(unsigned*)(ADDR_DO_PAR + next * 4u) = OU_SndTimings();
+    slot = (char*)(ADDR_DO_BUF + next * EVT_SIZE);
+    slot[1] = (char)(((unsigned char)slot[1]) & 0xFEu);
+    hp = *(void**)ADDR_CURPLAYER;
+    if (hp) slot[2] = *(const char*)((const char*)hp + OFF_HOUSE_INDEX);
+    /* +3 执行帧 = 当前帧+1: 同帧批次转运前已定稿, 盖 +0 会错过。 */
+    *(int*)(slot + 3) = *(int*)ADDR_FRAME + 1;
+    *(unsigned*)ADDR_DO_NEXT = (next + 1u) & DO_MASK;
+    *(unsigned*)ADDR_DO_COUNT = count + 1u;
+    return 1;
+}
+
+int OU_Enqueue(char ev[EVT_SIZE])
+{
+    unsigned count;
+    unsigned next;
+    /* SP: 一律直写 DoList; MP 走 OutList, 满回 0。 */
+    if (!OU_IsMP()) return OU_DirectToDoList(ev);
+    count = *(unsigned*)ADDR_OUT_COUNT;
+    if (count >= EVT_CAP) return 0;
+    next = *(unsigned*)ADDR_OUT_NEXT & 0x7Fu;
+    if (next >= EVT_CAP) return 0;
+    OU_CopyEvt((char*)(ADDR_OUT_BUF + next * EVT_SIZE), ev);
+    *(unsigned*)(ADDR_OUT_PAR + next * 4u) = OU_SndTimings();
+    *(unsigned*)ADDR_OUT_NEXT = (next + 1u) & 0x7Fu;
+    *(unsigned*)ADDR_OUT_COUNT = count + 1u;
+    return 1;
+}
+
+int OU_CellValid(int cx, int cy)
+{
+    return OU_CellPtr(cx, cy) ? 1 : 0;
+}
+
+/* 鼠标屏坐标 → 格 + 点中对象。filterTgt 非 0 时只透出单位/建筑类对象。 */
+static int OU_MouseCellInner(int* cx, int* cy, void** tgtOut, int* px, int* py,
+                             int filterTgt)
 {
     int mx, my;
     Point2D pt;
@@ -104,7 +140,9 @@ int OU_MouseCellTarget(int* cx, int* cy, void** tgtOut, int* px, int* py)
     if (tgtOut) *tgtOut = 0;
     if (!GtMouseGameXY(&mx, &my)) return 0;
     pt.X = mx; pt.Y = my;
-    if (!SB_MapPoint(&pt)) return 0;   /* 栏带不进引擎查询, 见上 */
+    /* ProcessClickCoords 按视口空间判格, GtMouseGameXY 给物理点,
+     * 放大档须先过缩放反变换 (scale=1 恒等); 栏带不进引擎查询。 */
+    if (!SB_MapPoint(&pt)) return 0;
     if (!FN_CLICKCOORDS((void*)ADDR_DISPLAY, &pt, &center, &crd,
                         &tgtObj, &b5, &b6))
         return 0;
@@ -114,18 +152,37 @@ int OU_MouseCellTarget(int* cx, int* cy, void** tgtOut, int* px, int* py)
     if (!OU_CellValid(*cx, *cy)) return 0;
     if (tgtOut && tgtObj && IsPlausiblePtr(tgtObj))
     {
-        int w = OU_WhatAmI(tgtObj);
-        if (w == ABS_UNIT || w == ABS_INFANTRY ||
-            w == ABS_AIRCRAFT || w == ABS_BUILDING)
-            *tgtOut = tgtObj;
+        if (!filterTgt) *tgtOut = tgtObj;
+        else
+        {
+            int w = OU_WhatAmI(tgtObj);
+            if (w == ABS_UNIT || w == ABS_INFANTRY ||
+                w == ABS_AIRCRAFT || w == ABS_BUILDING)
+                *tgtOut = tgtObj;
+        }
     }
     return 1;
 }
 
+int OU_MouseCellPx(int* cx, int* cy, int* px, int* py)
+{
+    return OU_MouseCellInner(cx, cy, 0, px, py, 0);
+}
+
+int OU_MouseCell(int* cx, int* cy)
+{
+    return OU_MouseCellPx(cx, cy, 0, 0);
+}
+
+/* 取格 + 点中对象 (tgtOut 可空, 无目标写 0, 返回值仍是格有效性)。 */
+int OU_MouseCellTarget(int* cx, int* cy, void** tgtOut, int* px, int* py)
+{
+    return OU_MouseCellInner(cx, cy, tgtOut, px, py, 1);
+}
+
 typedef int __attribute__((thiscall)) (*Fn_MouseOverObj)(void* self, void* target, int ignoreForce);
 
-/* vtbl+0x74 = MouseOverObject (Unit 0x73FD50 / Infantry 0x51E3B0 同槽,
- * gamemd 反汇编 + 虚表扫描双确认; DecideAction 内部同入口)。 */
+/* vtbl+0x74 = MouseOverObject (DecideAction 内部同入口, 只读不下单)。 */
 int OU_MouseOverObject(void* self, void* target)
 {
     void** vt;
@@ -234,19 +291,11 @@ int OU_ProjWorld(int lx, int ly, int lz, int* px, int* py)
 
 int OU_CellGroundZ(int cx, int cy, int* zOut)
 {
-    void** cells;
-    int maxc, idx;
     void* cell;
     Point2D zero;
     int z;
     if (!zOut) return 0;
-    if (cx < 0 || cy < 0 || cx >= 512 || cy >= 512) return 0;
-    cells = *(void***)(ADDR_DISPLAY + OFF_MAP_CELLS);
-    maxc = *(int*)(ADDR_DISPLAY + OFF_MAP_MAXC);
-    if (!cells || !IsPlausiblePtr(cells) || maxc <= 0 || maxc > 512 * 512) return 0;
-    idx = (cy << 9) + cx;
-    if (idx < 0 || idx >= maxc) return 0;
-    cell = cells[idx];
+    cell = OU_CellPtr(cx, cy);
     if (!cell || !IsPlausiblePtr(cell)) return 0;
     zero.X = 0; zero.Y = 0;
     z = FN_OU_FLOORH(cell, &zero);
