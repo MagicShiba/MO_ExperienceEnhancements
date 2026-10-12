@@ -23,6 +23,7 @@
 #include <math.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "OrderThrottle.h"
 #include "ScaleBar.h"
 #include "SmartArea.h"
 #include "DeployPreview.h"
@@ -353,7 +354,8 @@ static int DP_NearValid(int x, int y, int* ox, int* oy)
 /* 普通移动令: Mission=Move, Target=空, Destination=格, IsPlanningEvent=0
  * (与 SmartOrder SO_FireMove、手点右键移动同形)。 */
 static int DP_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
-                       int dstID, unsigned char dstRtti)
+                       int dstID, unsigned char dstRtti,
+                       void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
     unsigned i;
@@ -361,16 +363,19 @@ static int DP_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = 0;
+    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
     return OU_Enqueue(ev);
 }
 
 /* 展开令: EventType 0x9 (Deploy), Whom=该车 (与手按 D 同形, ctor 0x4C65E0)。 */
-static int DP_FireDeploy(int houseIdx, int id, unsigned char rtti)
+static int DP_FireDeploy(int houseIdx, int id, unsigned char rtti,
+                         void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
     unsigned i;
     for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
     FN_DP_DEPLOY(ev, houseIdx, EVT_DP_DEPLOY, id, (unsigned)rtti);
+    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
     return OU_Enqueue(ev);
 }
 
@@ -739,7 +744,8 @@ static int DP_TryMoveHead(void)
         OU_WhatAmI(e->unit) != ABS_INFANTRY) goto drop;
     if (!FN_TGT_OBJ(srcB, e->unit)) goto drop;
     srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
-    if (!DP_FireMove(houseIdx, srcID, srcR, dstID, dstR))
+    if (!DP_FireMove(houseIdx, srcID, srcR, dstID, dstR,
+                      e->unit, e->id, s_DpIdxOk))
         return 0; /* OutList 满: 下轮继续 */
 drop:
     {
@@ -833,7 +839,7 @@ static void DP_ServiceDeps(void)
             id = *(int*)(tb + 0); rt = (unsigned char)tb[4];
             hIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
             if (hIdx != e->houseIdx) { DP_DepShiftDown(i); continue; }
-            if (DP_FireDeploy(hIdx, id, rt))
+            if (DP_FireDeploy(hIdx, id, rt, e->unit, e->id, s_DpIdxOk))
             {
                 DP_DepShiftDown(i);
                 LogLine("deploy: fired");

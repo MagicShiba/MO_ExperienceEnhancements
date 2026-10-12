@@ -45,6 +45,7 @@
 #include <math.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "OrderThrottle.h"
 #include "SmartArea.h"
 
 #define PC_SECTION "PatrolCircle"
@@ -147,7 +148,8 @@ static void PC_Trace(const char* head, int a, int b, int c)
 }
 
 static int PC_FireMega(int houseIdx, int srcID, unsigned char srcRtti,
-                       int dstID, unsigned char dstRtti)
+                       int dstID, unsigned char dstRtti,
+                       void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
     unsigned i;
@@ -157,6 +159,7 @@ static int PC_FireMega(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
             0, 0, dstID, (unsigned)dstRtti, dstID, (unsigned)dstRtti);
     ev[OFF_PLANFLAG] = 1;
+    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
     return OU_Enqueue(ev);
 }
 
@@ -171,21 +174,23 @@ static int PC_FireCommit(int houseIdx)
 
 /* PlanConnect (单位挂已有节点, 不建新节点): src=单位 Whom, dst=角格。 */
 static int PC_FireConnect(int houseIdx, int srcID, unsigned char srcRtti,
-                          int dstID, unsigned char dstRtti)
+                          int dstID, unsigned char dstRtti,
+                          void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
     unsigned i;
     for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
     FN_PLANCONNECT(ev, houseIdx, EVT_PLANCONNECT,
                    srcID, (unsigned)srcRtti, dstID, (unsigned)dstRtti);
+    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
     return OU_Enqueue(ev);
 }
 
 /* ---------------- 待发队列 (保序 drip) ---------------- */
 
-#define PC_CLOSE_CAP 256   /* 快照上限 (不限单位, 原生逻辑兜底; 静态数组取 256) */
+#define PC_CLOSE_CAP 1024   /* 快照上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */
 #define PC_WP_CAP 16       /* 单圈路点上限 (引擎 token 最多 16 节点, 矩环 4/曲线均分 16) */
-#define PC_PEND_CAP 8192   /* Mega 16*256 + 合环 256, 静态 */
+#define PC_PEND_CAP 17408  /* Mega 16*1024 + 合环 1024, 静态 */
 #define PC_DRAIN_PER_POLL 128
 /* 触发即突发, OutList (上限 0x80) 满则 drip 跨帧续发; Mega 逐点全员,
  * Connect 合环, 跨帧不影响。 */
@@ -400,10 +405,12 @@ static int PC_Drain(void)
         srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
         if (e->conn == 1)
         {
-            if (!PC_FireConnect(houseIdx, srcID, srcR, dstID, dstR))
+            if (!PC_FireConnect(houseIdx, srcID, srcR, dstID, dstR,
+                                 e->unit, e->id, g_PcIdxOk))
                 return 0; /* 满: 下轮继续 */
         }
-        else if (!PC_FireMega(houseIdx, srcID, srcR, dstID, dstR))
+        else if (!PC_FireMega(houseIdx, srcID, srcR, dstID, dstR,
+                              e->unit, e->id, g_PcIdxOk))
             return 0; /* 满: 下轮继续 */
         PC_ShiftDown();
         sent++;

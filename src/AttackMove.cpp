@@ -15,6 +15,7 @@
 #include <windows.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "OrderThrottle.h"
 
 #define AM_SECTION "Features"
 #define MISSION_ATTACKMOVE 29   /* Mission::AttackMove (YRpp GeneralDefinitions.h) */
@@ -22,8 +23,8 @@
 typedef void* __attribute__((thiscall)) (*Fn_TargetFromCell)(void* tgt, const CellStruct* cell);
 #define FN_TGT_CELL ((Fn_TargetFromCell)(void*)0x6E6B20u)
 
-#define AM_UNIT_CAP 256
-#define AM_PEND_CAP 512
+#define AM_UNIT_CAP 1024   /* 快照单位上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */
+#define AM_PEND_CAP 1024   /* 待发上限 (同上) */
 #define AM_DRAIN_PER_POLL 128
 
 typedef struct { void* unit; int uid; void* tgt; int tid; short x, y; } AMPend;
@@ -59,7 +60,8 @@ static int AM_IsAttacker(void* p)
 
 static int AM_Fire(int houseIdx, int srcID, unsigned char srcRtti,
                    int tgtID, unsigned char tgtRtti,
-                   int dstID, unsigned char dstRtti, int plan)
+                   int dstID, unsigned char dstRtti, int plan,
+                   void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
     unsigned i;
@@ -67,6 +69,7 @@ static int AM_Fire(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACKMOVE,
             tgtID, (unsigned)tgtRtti, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = (char)(plan ? 1 : 0);
+    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
     return OU_Enqueue(ev);
 }
 
@@ -108,7 +111,8 @@ static void AM_Drain(void)
         }
         {
             int plan = OU_KeyDown('Z') ? 1 : 0;
-            if (!AM_Fire(houseIdx, srcID, srcR, tgtID, tgtR, dstID, dstR, plan))
+            if (!AM_Fire(houseIdx, srcID, srcR, tgtID, tgtR, dstID, dstR, plan,
+                          e->unit, e->uid, g_AmIdxOk))
                 return; /* OutList full: continue next poll */
         }
         AM_ShiftDown();

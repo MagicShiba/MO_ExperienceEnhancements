@@ -33,6 +33,7 @@
 #include <windows.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "OrderThrottle.h"
 #include "SmartArea.h"
 
 #define SA_SECTION "SmartArea"
@@ -345,7 +346,8 @@ static int SA_Fallback(void* u, void* t, int act, void* house)
 /* ---------------- 下令 (与 SmartOrder/FuzzyAttack 同形) ---------------- */
 
 static int SA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
-                         int tgtID, unsigned char tgtRtti)
+                         int tgtID, unsigned char tgtRtti,
+                         void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
     unsigned i;
@@ -353,11 +355,13 @@ static int SA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
             tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
     ev[OFF_PLANFLAG] = 0;
+    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
     return OU_Enqueue(ev);
 }
 
 static int SA_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
-                       int dstID, unsigned char dstRtti, int mission)
+                       int dstID, unsigned char dstRtti, int mission,
+                       void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
     unsigned i;
@@ -365,10 +369,11 @@ static int SA_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, mission,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = 0;
+    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
     return OU_Enqueue(ev);
 }
 
-#define SA_PEND_CAP 512
+#define SA_PEND_CAP 1024   /* 待发上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */
 #define SA_DRAIN_PER_POLL 128
 
 typedef struct { void* unit; int uid; void* tgt; int tid; int mission; } SAPend;
@@ -418,11 +423,13 @@ static void SA_Drain(void)
         tgtID = *(int*)(tgtB + 0); tgtR = (unsigned char)tgtB[4];
         if (e->mission == MISSION_ATTACK)
         {
-            if (!SA_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR)) return;
+            if (!SA_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR,
+                                 e->unit, e->uid, g_SaIdxOk)) return;
         }
         else
         {
-            if (!SA_FireDest(houseIdx, srcID, srcR, tgtID, tgtR, e->mission)) return;
+            if (!SA_FireDest(houseIdx, srcID, srcR, tgtID, tgtR, e->mission,
+                              e->unit, e->uid, g_SaIdxOk)) return;
         }
         SA_ShiftDown();
         sent++;
@@ -529,7 +536,7 @@ static void SA_NodePush(int cx, int cy)
 
 /* ---------------- 执行 ---------------- */
 
-#define SA_UNIT_CAP 256
+#define SA_UNIT_CAP 1024   /* 快照单位上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */
 
 static void SA_BoxReset(void);
 

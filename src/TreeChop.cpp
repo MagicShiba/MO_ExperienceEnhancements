@@ -8,6 +8,7 @@
 #include <windows.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "OrderThrottle.h"
 #include "ScaleBar.h"
 
 #define TC_SECTION "TreeChop"
@@ -66,7 +67,8 @@ static int TC_IsChopper(void* p)
 
 /* 强制攻击树 (MegaMission Attack + IsPlanningEvent=1)。 */
 static int TC_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
-                         int tgtID, unsigned char tgtRtti)
+                         int tgtID, unsigned char tgtRtti,
+                         void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
     unsigned i;
@@ -74,6 +76,7 @@ static int TC_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
             tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
     ev[OFF_PLANFLAG] = 1;
+    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
     return OU_Enqueue(ev);
 }
 
@@ -312,8 +315,8 @@ static int TC_FindTrees(int cx, int cy, void** trees, int* treeIDs)
 
 /* 待发队列 */
 
-#define TC_UNIT_CAP 256
-#define TC_PEND_CAP 512
+#define TC_UNIT_CAP 1024   /* 快照单位上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */
+#define TC_PEND_CAP 1024   /* 待发上限 (同上) */
 #define TC_DRAIN_PER_POLL 128
 
 typedef struct { void* unit; int uid; void* tree; int tid; } TCPend;
@@ -365,7 +368,8 @@ static void TC_Drain(void)
         if (!FN_TGT_OBJ(srcB, e->unit)) { TC_ShiftDown(); continue; }
         srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
         tgtID = *(int*)(tgtB + 0); tgtR = (unsigned char)tgtB[4];
-        if (!TC_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR))
+        if (!TC_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR,
+                             e->unit, e->uid, g_TcIdxOk))
             return;
         TC_ShiftDown();
         sent++;

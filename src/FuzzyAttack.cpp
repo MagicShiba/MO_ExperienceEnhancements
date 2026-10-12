@@ -32,6 +32,7 @@
 #include <windows.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "OrderThrottle.h"
 
 #define FA_SECTION "FuzzyAttack"
 
@@ -102,7 +103,8 @@ static int FA_IsTargetType(void* p)
 
 /* 强制攻击: MegaMission(Attack, Target=敌对象, Dst=空, 直接下令 flag=0)。 */
 static int FA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
-                         int tgtID, unsigned char tgtRtti)
+                         int tgtID, unsigned char tgtRtti,
+                         void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
     unsigned i;
@@ -110,6 +112,7 @@ static int FA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
             tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
     ev[OFF_PLANFLAG] = 0;
+    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
     return OU_Enqueue(ev);
 }
 
@@ -227,8 +230,8 @@ static int FA_FindEnemies(int cx, int cy, void* curHouse,
 
 /* ---------------- 待发队列 (保序 drip) ---------------- */
 
-#define FA_UNIT_CAP 256
-#define FA_PEND_CAP 512
+#define FA_UNIT_CAP 1024   /* 快照单位上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */
+#define FA_PEND_CAP 1024   /* 待发上限 (同上) */
 #define FA_DRAIN_PER_POLL 128
 
 typedef struct { void* unit; int uid; void* foe; int fid; } FAPend;
@@ -280,7 +283,8 @@ static void FA_Drain(void)
         if (!FN_TGT_OBJ(srcB, e->unit)) { FA_ShiftDown(); continue; }
         srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
         tgtID = *(int*)(tgtB + 0); tgtR = (unsigned char)tgtB[4];
-        if (!FA_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR))
+        if (!FA_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR,
+                             e->unit, e->uid, g_FaIdxOk))
             return; /* 满: 下轮继续 */
         FA_ShiftDown();
         sent++;

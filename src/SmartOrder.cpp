@@ -33,6 +33,7 @@
 #include "GdiText.h"
 #include "SmartOrder.h"
 #include "OrderUtil.h"
+#include "OrderThrottle.h"
 #include "SmartArea.h"
 #include "DeployPreview.h"
 
@@ -43,8 +44,8 @@
 #define ADDR_TYPARRAY 0xA8EB00u
 #define OFF_VEC_ITEMS 4u
 #define OFF_VEC_COUNT 16u
-#define SO_CAP 256
-#define SO_PEND_CAP 512
+#define SO_CAP 1024         /* 快照单位上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */
+#define SO_PEND_CAP 1024    /* 待发上限 (同上) */
 #define SO_DRAIN_PER_POLL 128
 #define FN_TGT_CELL ((Fn_TargetFromCell)(void*)0x6E6B20u)
 
@@ -348,7 +349,8 @@ static int g_SoHouseIdx = 0;
 /* 普通移动令: Mission=Move, Target=空, Destination=格, IsPlanningEvent=0
  * (与手点右键移动同形, 非巡逻)。 */
 static int SO_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
-                       int dstID, unsigned char dstRtti)
+                       int dstID, unsigned char dstRtti,
+                       void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
     unsigned i;
@@ -356,6 +358,7 @@ static int SO_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = 0;
+    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
     return OU_Enqueue(ev);
 }
 
@@ -371,7 +374,8 @@ static SOObj g_SoObj[SO_PEND_CAP];
 static int g_SoObjCount = 0;
 
 static int SO_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
-                         int tgtID, unsigned char tgtRtti)
+                         int tgtID, unsigned char tgtRtti,
+                         void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
     unsigned i;
@@ -379,11 +383,13 @@ static int SO_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
             tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
     ev[OFF_PLANFLAG] = 0;
+    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
     return OU_Enqueue(ev);
 }
 
 static int SO_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
-                       int dstID, unsigned char dstRtti, int mission)
+                       int dstID, unsigned char dstRtti, int mission,
+                       void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
     unsigned i;
@@ -391,6 +397,7 @@ static int SO_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, mission,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = 0;
+    if (OT_SubmitRaw(ev, unit, uid, idxOk)) return 1;  /* OT 开: 托管跨帧补发 */
     return OU_Enqueue(ev);
 }
 
@@ -474,12 +481,14 @@ static void SO_Drain(void)
         tgtID = *(int*)(tgtB + 0); tgtR = (unsigned char)tgtB[4];
         if (e->mission == MISSION_ATTACK)
         {
-            if (!SO_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR))
+            if (!SO_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR,
+                               e->unit, e->uid, g_SoIdxOk))
                 return;
         }
         else
         {
-            if (!SO_FireDest(houseIdx, srcID, srcR, tgtID, tgtR, e->mission))
+            if (!SO_FireDest(houseIdx, srcID, srcR, tgtID, tgtR, e->mission,
+                              e->unit, e->uid, g_SoIdxOk))
                 return;
         }
         SO_ObjShiftDown();
@@ -503,7 +512,8 @@ static void SO_Drain(void)
             OU_WhatAmI(e->unit) != ABS_INFANTRY) { SO_ShiftDown(); continue; }
         if (!FN_TGT_OBJ(srcB, e->unit)) { SO_ShiftDown(); continue; }
         srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
-        if (!SO_FireMove(houseIdx, srcID, srcR, dstID, dstR))
+        if (!SO_FireMove(houseIdx, srcID, srcR, dstID, dstR,
+                          e->unit, e->id, g_SoIdxOk))
             return; /* OutList 满: 下轮继续 */
         SO_ShiftDown();
         sent++;
