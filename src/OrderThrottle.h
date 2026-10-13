@@ -5,6 +5,7 @@
  * 钩子是 .text 直接补丁, 幂等且冲突时自动放弃:
  * ClickedMission @ 0x6FFBE0 与槽 0x374 @ 0x6FFE00,
  * 另三处满分支 (Mega/374/正统入队, 单机直写用)。
+ * 联机默认 (mode<2) 完全绕过: 不留钩 (已装则恢复原版并释放跳板)。
  * 中键托管见 OT_SubmitRaw。 */
 #pragma once
 
@@ -21,6 +22,5 @@ void OrderThrottle_Poll(void);
 int OT_SubmitRaw(const char* ev, void* whom, int whomID, int idxOk);
 
 /* 发一条自家事件: 先 OT_SubmitRaw (联机 mode=2 才接管), 没接管则 OU_Enqueue。
- * 即上面两行的固定组合, 各家 Fire* 尾统一走这里。
- * 单机/联机二选一, 进程内不变。 */
+ * 即上面两行的固定组合, 各家 Fire* 尾统一走这里。 */
 int OT_Fire(char* ev, void* whom, int whomID, int idxOk);

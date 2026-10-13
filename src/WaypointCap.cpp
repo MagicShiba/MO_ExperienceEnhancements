@@ -1,5 +1,5 @@
 /* WaypointCap.cpp - 同路线分支 16 上限 + 下令前检查 128 上限, 单机解除。
- * 单机专用, 联机一个补丁都不装。
+ * 单机专用, 联机完全绕过 (实时判定: 不装新钩, 已装的恢复原版字节)。
  *
  * 原版两处拒收:
  *  - 0x6384DC `cmp $0x10,%eax / jne`: 同路线第 17 个单位起拒收。
@@ -48,10 +48,10 @@ static int   g_WpCfg = 0;            /* [Features] WaypointCap */
 static int   g_WpHookState = 0;      /* 0=没试 1=已装 2=放弃 */
 static int   g_WpHookState2 = 0;     /* 将满提示钩, 状态机同上 */
 static int   g_WpHookState3 = 0;     /* 下令前检查钩, 状态机同上 */
-static int   g_WpIsMP = 0;            /* 进程模式缓存 (单机/联机二选一, 定死不变) */
-static int   g_WpCap = WP_VANILLA;   /* 生效上限 (Poll 按单机/联机刷新) */
+static int   g_WpCap = WP_VANILLA;   /* 生效上限 (Poll 按实时单机/联机刷新) */
 static int   g_WpWarnAt = WP_VANILLA - 1;  /* 将满提示位 (上限-1) */
 static int   g_WpOrderCap = WP_ORDER_MP;   /* 下令前检查上限 (单机恒过/联机 128) */
+static int   g_WpMpLogged = 0;       /* 联机绕过日志只打一次 */
 static void* g_WpNormal = (void*)ADDR_WP_NORMAL;
 static void* g_WpRefuse = (void*)ADDR_WP_REFUSE;
 static void* g_WpWarnGo = (void*)ADDR_WP_WARNGO;
@@ -207,57 +207,98 @@ static void WP_InstallSite(unsigned addr, const unsigned char* want, int wantLen
     WP_Log2(tag, " hook ON");
 }
 
+/* 三处原版字节 (安装与卸载共用)。 */
+static const unsigned char kWpWantBranch[5] =
+    { 0x83, 0xF8, 0x10, 0x75, 0x96 };              /* 0x6384DC: cmp $0x10,%eax / jne */
+static const unsigned char kWpWantWarn[6] =
+    { 0x83, 0x7D, 0x14, 0x0F, 0x75, 0x0A };        /* 0x6383B4: cmpl $0xF,0x14(%ebp) / jne */
+static const unsigned char kWpWantOrder[6] =
+    { 0x81, 0xFD, 0x80, 0x00, 0x00, 0x00 };        /* 0x6391A7: cmp $0x80,%ebp */
+
+/* 联机绕过卸载: 自家钩还在就恢复原版字节, 状态清 0。 */
+static void WP_UninstallSite(unsigned addr, const unsigned char* want, int wantLen,
+                             void* entry, int* stateOut, const char* tag)
+{
+    unsigned char* site;
+    DWORD old = 0;
+    int i;
+    if (*stateOut != 1) return;
+    if (!OU_InExe(addr)) return;
+    site = (unsigned char*)addr;
+    if (site[0] != 0xE9 ||
+        (void*)(site + 5 + *(int*)(site + 1)) != entry)
+    {
+        *stateOut = 0;
+        return;
+    }
+    if (!VirtualProtect(site, wantLen, PAGE_EXECUTE_READWRITE, &old)) return;
+    for (i = 0; i < wantLen; i++) site[i] = want[i];
+    VirtualProtect(site, wantLen, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), site, wantLen);
+    *stateOut = 0;
+    WP_Log2(tag, " MP bypass, hook removed");
+}
+
 static void WP_EnsureHook(void)
 {
-    /* 联机完全绕过: 一个补丁都不装, 原版字节原样保留 (模式进程固定, 看缓存)。 */
-    if (g_WpIsMP) return;
-    /* 0x6384DC: `cmp $0x10,%eax / jne`, 偷 5B。 */
-    static const unsigned char kWant[5] = { 0x83, 0xF8, 0x10, 0x75, 0x96 };
-    /* 0x6383B4: `cmpl $0xF,0x14(%ebp) / jne`, 偷 6B (5B jmp + 1B NOP)。 */
-    static const unsigned char kWant2[6] = { 0x83, 0x7D, 0x14, 0x0F, 0x75, 0x0A };
-    /* 0x6391A7: `cmp $0x80,%ebp` (与 jle 之间隔 pop ebp/pop ebx, 壳内照原样),
-     * 偷 6B (5B jmp + 1B NOP)。 */
-    static const unsigned char kWant3[6] = { 0x81, 0xFD, 0x80, 0x00, 0x00, 0x00 };
-    WP_InstallSite(ADDR_WP_CHECK, kWant, 5,
+    /* 联机绕过: 不装新钩, 已装的恢复原版。单机/联机按实时判定, 不缓存。 */
+    if (OU_IsMP())
+    {
+        WP_UninstallSite(ADDR_WP_CHECK, kWpWantBranch, 5,
+                         (void*)WaypointCap_Entry, &g_WpHookState, "wpbranch");
+        WP_UninstallSite(ADDR_WP_WARN, kWpWantWarn, 6,
+                         (void*)WaypointCap_WarnEntry, &g_WpHookState2, "wpwarn");
+        WP_UninstallSite(ADDR_WP_ORDER, kWpWantOrder, 6,
+                         (void*)WaypointCap_OrderEntry, &g_WpHookState3, "wporder");
+        if (!g_WpMpLogged)
+        {
+            g_WpMpLogged = 1;
+            LogLine("waypointcap: MP bypass (vanilla 16/128)");
+        }
+        return;
+    }
+    g_WpMpLogged = 0;
+    WP_InstallSite(ADDR_WP_CHECK, kWpWantBranch, 5,
                    (void*)WaypointCap_Entry, &g_WpHookState, "wpbranch");
     /* 不限制时将满提示永不触发, 不装 (省一处补丁)。 */
     if (g_WpCap != WP_INF)
-        WP_InstallSite(ADDR_WP_WARN, kWant2, 6,
+        WP_InstallSite(ADDR_WP_WARN, kWpWantWarn, 6,
                        (void*)WaypointCap_WarnEntry, &g_WpHookState2, "wpwarn");
-    WP_InstallSite(ADDR_WP_ORDER, kWant3, 6,
+    WP_InstallSite(ADDR_WP_ORDER, kWpWantOrder, 6,
                    (void*)WaypointCap_OrderEntry, &g_WpHookState3, "wporder");
 }
 
 void WpCap_Poll(void)
 {
-    char buf[96];
-    unsigned q = 0;
+    int mp;
     if (!g_WpInit)
     {
+        char buf[96];
+        unsigned q = 0;
         g_WpInit = 1;
         BuildPaths();
         GtEnsureLog();
         g_WpCfg = GetPrivateProfileIntA(WP_SECTION, "WaypointCap", 0, g_IniPath);
         if (g_WpCfg < 0) g_WpCfg = 0;
         if (g_WpCfg > WP_MAXCFG) g_WpCfg = WP_MAXCFG;
-        /* 单机/联机二选一, 进程内不变: 联机恒原版且不装钩, 单机按配置, 一次定死。 */
-        g_WpIsMP = OU_IsMP();
-        if (g_WpIsMP)
-        {
-            g_WpCap = WP_VANILLA;
-            g_WpWarnAt = WP_VANILLA - 1;
-            g_WpOrderCap = WP_ORDER_MP;
-        }
-        else
-        {
-            g_WpCap = (g_WpCfg > 0) ? g_WpCfg : WP_INF;
-            g_WpWarnAt = (g_WpCfg > 0) ? (g_WpCfg - 1) : WP_INF;
-            g_WpOrderCap = WP_ORDER_SP;
-        }
         q = AppendCStr(buf, q, "waypointcap: cap=", sizeof(buf));
         q = OU_AppendU(buf, q, (unsigned)g_WpCfg, sizeof(buf));
         q = AppendCStr(buf, q, " (0=unlimited, SP only)", sizeof(buf));
         LogLine(buf);
+    }
+    /* 生效上限每轮按实时模式刷新: 联机恒原版 16/128, 单机按配置。 */
+    mp = OU_IsMP();
+    if (mp)
+    {
+        g_WpCap = WP_VANILLA;
+        g_WpWarnAt = WP_VANILLA - 1;
+        g_WpOrderCap = WP_ORDER_MP;
+    }
+    else
+    {
+        g_WpCap = (g_WpCfg > 0) ? g_WpCfg : WP_INF;
+        g_WpWarnAt = (g_WpCfg > 0) ? (g_WpCfg - 1) : WP_INF;
+        g_WpOrderCap = WP_ORDER_SP;
     }
     WP_EnsureHook();
 }

@@ -9,6 +9,10 @@
  * 上限即 DoList 的 16384。联机保持原版语义, OrderThrottle=2 时普通令
  * 才跨帧排队, 规划令永不排队。补发前验存活, 换图/超时丢弃。
  *
+ * 联机完全绕过 (实时判定, 不缓存): 默认 mode<2 时联机一个钩不留
+ * (不装新钩, 已装的恢复原版字节并释放跳板); mode=2 联机只留两处上游钩,
+ * 溢出钩 (SP 直写用) 照样不装。
+ *
  * 配置 [Features] OrderThrottle (缺失=1, 改后重启):
  *   0=禁用 (完全旁路), 1=单机直写+联机原版 (默认), 2=联机普通令也分帧。
  * 分帧不影响同步 (见 notes/选中与下令上限.md §5)。
@@ -69,7 +73,7 @@
 
 static int g_OtInit = 0;
 static int g_OtMode = 1;        /* [Features] OrderThrottle: 0=禁用,1=仅单机,2=联机也启用 */
-static int g_OtMpWarned = 0;
+static int g_OtMpBypassLogged = 0;   /* 联机绕过日志只打一次 (回单机清零) */
 static int g_OtFirstLog = 0;
 static void OT_MarkFirstDefer(void);
 
@@ -162,11 +166,6 @@ static int OT_On(void)
     OT_EnsureInit();
     if (g_OtMode <= 0) return 0;
     if (OU_IsMP() && g_OtMode < 2) return 0;
-    if (OU_IsMP() && !g_OtMpWarned)
-    {
-        g_OtMpWarned = 1;
-        LogLine("othrottle: MP ON - refilling OutList to 128 every catch-up frame");
-    }
     return 1;
 }
 
@@ -346,10 +345,12 @@ __attribute__((naked)) void OrderThrottle_EnqSpillEntry(void)
 int OT_SubmitRaw(const char* ev, void* whom, int whomID, int idxOk)
 {
     OtOrder* e;
+    int mp;
     OT_EnsureInit();
     if (g_OtMode <= 0) return 0;
-    if (OU_IsMP() && g_OtMode < 2) return 0;
-    if (!OU_IsMP()) return 0;   /* SP: 调用方 OU_Enqueue 直发/直注, 不进 OT 队 */
+    mp = OU_IsMP();
+    if (mp && g_OtMode < 2) return 0;
+    if (!mp) return 0;   /* SP: 调用方 OU_Enqueue 直发/直注, 不进 OT 队 */
     if (s_QCount >= OT_QCAP) return 0;   /* 队满: 调用方回落自家 drip, 绝不丢 */
     e = s_QTail();
     OU_CopyEvt(e->ev, ev);
@@ -455,6 +456,16 @@ static void OT_MarkFirstDefer(void)
     }
 }
 
+/* 钩点原版字节 (安装与卸载共用)。溢出钩只比对前 5B, 后 5B 原样不动。 */
+static const unsigned char kOtPrologue[OT_STOLEN] =
+    { 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00, 0x53, 0x55, 0x56, 0x57 };
+static const unsigned char kOtPrologue374[OT374_STOLEN] =
+    { 0x83, 0xEC, 0x78, 0x56, 0x57 };
+static const unsigned char kOtOutFull[10] =
+    { 0x81, 0x3D, 0xC8, 0x02, 0xA8, 0x00, 0x80, 0x00, 0x00, 0x00 };
+static const unsigned char kOtEnqFull[10] =
+    { 0xA1, 0xC8, 0x02, 0xA8, 0x00, 0x3D, 0x80, 0x00, 0x00, 0x00 };
+
 /* 钩点只需落在 gamemd .text 内, 不必 4 对齐。 */
 
 static void OT_InstallHook(unsigned addr, unsigned stolen,
@@ -516,39 +527,88 @@ static void OT_InstallHook(unsigned addr, unsigned stolen,
     OT_HookLog(tag, " hook ON");
 }
 
+/* 联机绕过卸载: 自家钩还在就恢复原版, 状态清 0 (下次单机重装)。
+ * 跳板钩有跳板就从跳板恢复, 无跳板则从原版字节恢复; 溢出钩恢复前 5B。
+ * 已不是自家钩则只清状态。 */
+static void OT_Uninstall(unsigned addr, unsigned stolen, const unsigned char* want,
+                         void* entry, void** trampOut, int* stateOut, const char* tag)
+{
+    unsigned char* site;
+    unsigned char* st;
+    DWORD old = 0;
+    unsigned i;
+    unsigned n;
+    if (*stateOut != 1) return;
+    if (!OU_InExe(addr)) return;
+    site = (unsigned char*)addr;
+    st = trampOut ? (unsigned char*)*trampOut : NULL;
+    if (site[0] != 0xE9 ||
+        (void*)(site + 5 + *(int*)(site + 1)) != entry)
+    {
+        if (st) { VirtualFree(st, 0, MEM_RELEASE); *trampOut = NULL; }
+        *stateOut = 0;
+        return;
+    }
+    n = trampOut ? stolen : 5;
+    if (!VirtualProtect(site, n, PAGE_EXECUTE_READWRITE, &old)) return;
+    for (i = 0; i < n; i++) site[i] = st ? st[i] : want[i];
+    VirtualProtect(site, n, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), site, n);
+    if (st) { VirtualFree(st, 0, MEM_RELEASE); *trampOut = NULL; }
+    *stateOut = 0;
+    OT_HookLog(tag, " MP bypass, hook removed");
+}
+
 static void OT_EnsureHook(void)
 {
-    /* 0x6FFBE0: `sub esp,0x88` + 四个 push, 偷 10B (跳板重放, 回跳 0x6FFBEA)。 */
-    static const unsigned char kPrologue[OT_STOLEN] =
-        { 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00, 0x53, 0x55, 0x56, 0x57 };
-    /* 0x6FFE00: `sub esp,0x78` + push esi + push edi, 偷 5B (回跳 0x6FFE05)。 */
-    static const unsigned char kPrologue374[OT374_STOLEN] =
-        { 0x83, 0xEC, 0x78, 0x56, 0x57 };
-    OT_InstallHook(ADDR_CLICKEDMISSION, OT_STOLEN, kPrologue,
+    int mp;
+    OT_EnsureInit();
+    mp = OU_IsMP();
+    if (mp && g_OtMode < 2)
+    {
+        /* 联机默认 (mode<2): 整模块绕过, 一个钩不留。Decide 本就实时放行, 队列恒空。 */
+        OT_Uninstall(ADDR_CLICKEDMISSION, OT_STOLEN, kOtPrologue,
+                     (void*)OrderThrottle_Entry, &g_OtTramp, &g_OtHookState,
+                     "ClickedMission");
+        OT_Uninstall(ADDR_CLICKED374, OT374_STOLEN, kOtPrologue374,
+                     (void*)OrderThrottle_Entry374, &g_OtTramp374,
+                     &g_OtHookState374, "Clicked374");
+        OT_Uninstall(ADDR_MEGAFULL, 10u, kOtOutFull,
+                     (void*)OrderThrottle_MegaSpillEntry, NULL,
+                     &g_OtHookStateMega, "MegaSpill");
+        OT_Uninstall(ADDR_STOPFULL, 10u, kOtOutFull,
+                     (void*)OrderThrottle_StopSpillEntry, NULL,
+                     &g_OtHookStateStop, "StopSpill");
+        OT_Uninstall(ADDR_ENQFULL, 10u, kOtEnqFull,
+                     (void*)OrderThrottle_EnqSpillEntry, NULL,
+                     &g_OtHookStateEnq, "EnqSpill");
+        if (!g_OtMpBypassLogged)
+        {
+            g_OtMpBypassLogged = 1;
+            LogLine("othrottle: MP bypass (vanilla, no hooks)");
+        }
+        return;
+    }
+    g_OtMpBypassLogged = 0;
+    OT_InstallHook(ADDR_CLICKEDMISSION, OT_STOLEN, kOtPrologue,
                    (void*)OrderThrottle_Entry, &g_OtTramp, &g_OtHookState,
                    "ClickedMission");
-    OT_InstallHook(ADDR_CLICKED374, OT374_STOLEN, kPrologue374,
+    OT_InstallHook(ADDR_CLICKED374, OT374_STOLEN, kOtPrologue374,
                    (void*)OrderThrottle_Entry374, &g_OtTramp374,
                    &g_OtHookState374, "Clicked374");
-    /* 三处溢出钩只在单机装 (联机完全绕过)。单机直写 DoList。 */
-    if (OU_IsMP()) return;
-    static const unsigned char kOutFull[10] =
-        { 0x81, 0x3D, 0xC8, 0x02, 0xA8, 0x00, 0x80, 0x00, 0x00, 0x00 };
-    OT_InstallHook(ADDR_MEGAFULL, 10u, kOutFull,
+    /* 三处溢出钩只在单机装 (mode=2 联机也不装)。 */
+    if (mp) return;
+    OT_InstallHook(ADDR_MEGAFULL, 10u, kOtOutFull,
                    (void*)OrderThrottle_MegaSpillEntry, NULL,
                    &g_OtHookStateMega, "MegaSpill");
-    OT_InstallHook(ADDR_STOPFULL, 10u, kOutFull,
+    OT_InstallHook(ADDR_STOPFULL, 10u, kOtOutFull,
                    (void*)OrderThrottle_StopSpillEntry, NULL,
                    &g_OtHookStateStop, "StopSpill");
     /* 正统入队满分支 (`mov OutCount,%eax + cmp $0x80,%eax`)。
      * Z 路径点经 0x637DD0 调 0x6521C0 全走这里, 一钩覆盖 5 处调用方。 */
-    {
-        static const unsigned char kEnqFull[10] =
-            { 0xA1, 0xC8, 0x02, 0xA8, 0x00, 0x3D, 0x80, 0x00, 0x00, 0x00 };
-        OT_InstallHook(ADDR_ENQFULL, 10u, kEnqFull,
-                       (void*)OrderThrottle_EnqSpillEntry, NULL,
-                       &g_OtHookStateEnq, "EnqSpill");
-    }
+    OT_InstallHook(ADDR_ENQFULL, 10u, kOtEnqFull,
+                   (void*)OrderThrottle_EnqSpillEntry, NULL,
+                   &g_OtHookStateEnq, "EnqSpill");
 }
 
 /* ---------------- 补发 ---------------- */
@@ -608,8 +668,6 @@ void OrderThrottle_Poll(void)
     static void* s_LastScen = NULL;
     void* scen;
     unsigned cnt;
-    char buf[192];
-    unsigned q;
 
     OT_EnsureInit();
     if (g_OtMode <= 0) { OT_Flush("disabled"); return; }
@@ -628,6 +686,8 @@ void OrderThrottle_Poll(void)
      * spill=单机直写成功/失败, do=DoList 当前数。 */
     if (*(int*)ADDR_FRAME - g_OtStatFrame >= OT_STATFRAMES)
     {
+        char buf[192];
+        unsigned q;
         int bad = (g_OtStatDrop || s_SpillFail != s_SpillRepFail) ? 1 : 0;
         g_OtStatFrame = *(int*)ADDR_FRAME;
         if (bad)
