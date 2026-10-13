@@ -21,7 +21,8 @@
  *     底板只包画出内容, 字体跟战役框 (MsgText_CampStyle)。
  *   粘贴 CF_UNICODETEXT, 复制/剪切写剪贴板; 组字串自画黄色+下划线。
  *   输入法: 组合窗 (隐藏) 指盒底上一行做堆叠锚点 + 候选窗 CANDIDATEPOS 指盒底
- *     (surface→客户区换算); 系统组合窗由主窗子类化隐藏 (WM_IME_SETCONTEXT 清位
+ *     (surface→呈现区换算, 基准每次开框重量, 见 CE_MeasureView);
+ *     系统组合窗由主窗子类化隐藏 (WM_IME_SETCONTEXT 清位
  *     + 吃掉 STARTCOMPOSITION), 候选条仍由系统画。
  *   代价: 打字时方向键镜头可能动一下 (不再吞键)。
  * 构建见 build-fast.bat (32 位 mingw, 无 CRT, -limm32)。
@@ -87,6 +88,7 @@ static int ce_Init = 0;
 static int ce_Enable = 1;
 static int ce_ChatBoxSP = 1;   /* 单人也建原生聊天框 */
 static int ce_ChatNameSP = 0;  /* 单人消息也显示 "名字: " */
+static int ce_ImeFsMode = -1;  /* IME 呈现基准: -1=自动 (问 ddraw 包装层), 0=客户区, 1=显示器 */
 static int ce_Active = 0;
 /* 本帧盒子是用战役框锚点 (0) 还是留在原生行原位 (1)。留在原位时不允许
  * 钳屏内位移, 否则和原生行分家, 合并黑板失效。 */
@@ -164,6 +166,9 @@ static void CE_EnsureInit(void)
     ce_Enable = GetPrivateProfileIntA(MSG_SECTION, "ChatEdit", 1, g_IniPath) ? 1 : 0;
     ce_ChatBoxSP = GetPrivateProfileIntA(MSG_SECTION, "ChatBoxSP", 1, g_IniPath) ? 1 : 0;
     ce_ChatNameSP = GetPrivateProfileIntA(MSG_SECTION, "ChatNameSP", 0, g_IniPath) ? 1 : 0;
+    ce_ImeFsMode = GetPrivateProfileIntA(MSG_SECTION, "ImeFullscreen", -1, g_IniPath);
+    if (ce_ImeFsMode < 0) ce_ImeFsMode = -1;
+    if (ce_ImeFsMode > 1) ce_ImeFsMode = 1;
     MsgText_CampStyle(&ce_Face, &ce_Px, &ce_Bold);
     {
         char sb[128], t1[16];
@@ -668,14 +673,93 @@ static int CE_CompLineH(HIMC himc, int lineH, int ch, int surfH)
     return h;
 }
 
-/* IME 定位: 组合窗指盒底上一行, 候选窗指盒底。 */
+/* ---------------- 呈现区测量 (surface → 呈现区换算基准, 详见 notes/ChatBox参考.md) ----------------
+ * IMM 坐标是主窗客户区坐标, 盒子画在渲染面上, 按呈现区/渲染面比例换算。
+ * 全屏上采样时呈现区=显示器, 窗口化时=客户区; 模式问包装层 DDIsWindowed,
+ * 查不到按窗口化, 仍偏则用 ImeFullscreen 手动指定。
+ */
+
+typedef int (__cdecl *CE_DDIsWindowedFn)(void);
+static CE_DDIsWindowedFn ce_DDIsWin = NULL;
+static int ce_DDIsWinTried = 0;
+
+/* 包装层是不是窗口化呈现: 1=是, 0=全屏, -1=查不到 (不是 cnc-ddraw)。 */
+static int CE_DrawIsWindowed(void)
+{
+    HMODULE m;
+    if (!ce_DDIsWin && !ce_DDIsWinTried)
+    {
+        ce_DDIsWinTried = 1;
+        m = GetModuleHandleA("ddraw.dll");
+        if (m)
+            ce_DDIsWin = (CE_DDIsWindowedFn)(size_t)
+                         GetProcAddress(m, "DDIsWindowed");
+    }
+    if (ce_DDIsWin) return ce_DDIsWin() ? 1 : 0;
+    return -1;
+}
+
+static int ce_ViewW = 0, ce_ViewH = 0;   /* 呈现区尺寸 (0=还没量到) */
+/* IMM 上次推的位置; 基准变了要作废重推, 见 CE_MeasureView。 */
+static int ce_ImeX = -1, ce_ImeY = -1, ce_ImeYC = -1;
+
+/* 每次开框重量: 全屏按显示器呈现区 (要求客户区原点在屏幕 (0,0), 此时客户区
+ * 坐标就是屏幕坐标), 窗口化按主窗客户区 (候选窗要落在窗口里)。量不到
+ * (窗口刚建/正在切模式) 沿用上次。 */
+static void CE_MeasureView(void)
+{
+    HWND h = CE_GameHwnd();
+    RECT cr;
+    HMONITOR mon;
+    MONITORINFO mi;
+    POINT org;
+    int cw, ch, mw = 0, mh = 0, win, w, ht;
+    if (!h || !IsWindow(h)) return;
+    if (!GetClientRect(h, &cr)) return;
+    cw = cr.right - cr.left;
+    ch = cr.bottom - cr.top;
+    if (cw < 100 || ch < 100) return;
+    mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+    mi.cbSize = sizeof(MONITORINFO);
+    if (mon && GetMonitorInfo(mon, &mi))
+    {
+        mw = mi.rcMonitor.right - mi.rcMonitor.left;
+        mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    }
+    org.x = 0; org.y = 0;
+    ClientToScreen(h, &org);
+    win = CE_DrawIsWindowed();
+    if (ce_ImeFsMode == 0) win = 1;         /* 强制按客户区 */
+    else if (ce_ImeFsMode == 1) win = 0;    /* 强制按显示器 */
+    else if (win < 0) win = 1;              /* 不是 cnc-ddraw: 退回窗口化 */
+    w = cw; ht = ch;
+    if (!win && org.x == 0 && org.y == 0 && mw > cw && mh > ch)
+    { w = mw; ht = mh; }
+    if (w == ce_ViewW && ht == ce_ViewH) return;
+    ce_ViewW = w; ce_ViewH = ht;
+    ce_ImeX = ce_ImeY = ce_ImeYC = -1;
+    {
+        char b[128], t1[16], t2[16], t3[16], t4[16];
+        unsigned q = 0;
+        q = AppendCStr(b, q, "chatedit: view=", sizeof(b));
+        UtoA((unsigned)w, t1); q = AppendCStr(b, q, t1, sizeof(b));
+        q = AppendCh(b, q, 'x', sizeof(b));
+        UtoA((unsigned)ht, t2); q = AppendCStr(b, q, t2, sizeof(b));
+        q = AppendCStr(b, q, " client=", sizeof(b));
+        UtoA((unsigned)cw, t3); q = AppendCStr(b, q, t3, sizeof(b));
+        q = AppendCh(b, q, 'x', sizeof(b));
+        UtoA((unsigned)ch, t4); q = AppendCStr(b, q, t4, sizeof(b));
+        q = AppendCStr(b, q, " ", sizeof(b));
+        AppendCStr(b, q, (w == mw && ht == mh) ? "mon" : "win", sizeof(b));
+        LogLine(b);
+    }
+}
+
+/* IME 定位: 组合窗指盒底上一行, 候选窗指盒底。基准 = 呈现区 (CE_MeasureView)。 */
 static void CE_PositionIME(int imeX, int boxY, int bh,
                            int lineH, int surfW, int surfH)
 {
-    /* 位置不变则跳过: IMM 调用贵, 光标/盒大多时间不动。 */
-    static int s_cx = -1, s_cy = -1, s_cyc = -1;
     HWND h = CE_GameHwnd();
-    RECT rc;
     COMPOSITIONFORM cfc = { 0 };
     CANDIDATEFORM cdc = { 0 };
     HIMC himc;
@@ -683,9 +767,8 @@ static void CE_PositionIME(int imeX, int boxY, int bh,
     int cw, ch, cx, cy, cyc;
     if (!h || !IsWindow(h)) return;
     if (GetForegroundWindow() != h) return;
-    if (!GetClientRect(h, &rc)) return;
-    cw = rc.right - rc.left;
-    ch = rc.bottom - rc.top;
+    if (surfW < 1 || surfH < 1) return;
+    cw = ce_ViewW; ch = ce_ViewH;   /* 还没量到就不推, 免得候选窗乱飞 */
     if (cw < 100 || ch < 100) return;
     cx = imeX * cw / surfW;
     cy = (boxY + bh) * ch / surfH;
@@ -703,12 +786,12 @@ static void CE_PositionIME(int imeX, int boxY, int bh,
     }
     cyc = cy - CE_CompLineH(himc, lineH, ch, surfH);
     if (cyc < 0) cyc = 0;
-    if (cx == s_cx && cy == s_cy && cyc == s_cyc)
+    if (cx == ce_ImeX && cy == ce_ImeY && cyc == ce_ImeYC)
     {
         if (own) ImmReleaseContext(h, himc);
         return;
     }
-    s_cx = cx; s_cy = cy; s_cyc = cyc;
+    ce_ImeX = cx; ce_ImeY = cy; ce_ImeYC = cyc;
     CE_SubclassEnsure(h);
     cfc.dwStyle = CFS_FORCE_POSITION;
     cfc.ptCurrentPos.x = cx;
@@ -871,6 +954,7 @@ static void CE_Activate(void)
             ce_LastCur = *(unsigned*)((char*)ln + CE_LINECUR_OFF);
     }
     CE_CharPostInstall();   /* 懒安装 (Ares 系钩子早下完, 此时下最稳) */
+    CE_MeasureView();       /* 呈现模式/分辨率随时可能变, 每次开框重量 */
     ce_Active = 1;
     CE_BlinkReset();
 }

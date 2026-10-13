@@ -19,6 +19,9 @@
 /* 一次性初始化 (读配置 + 解析字体); 幂等, 各钩子入口都先调它。 */
 void MsgText_EnsureInit(void);
 
+/* 是否接管 (与 MsgText_DrawFrame 同一开关, 协调层无条件抑制原版用)。 */
+int MsgText_Enabled(void);
+
 /* 渲染期: 画绿框触发条 + 战役框 + 提示框。
  * 返回 1=画出, 0=无内容, -1=GDI失败, -2=Lock失败。 */
 int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,

@@ -1096,7 +1096,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     unsigned tick;
     int surfW, surfH, surfPitch;
     int bitLineH = 0, screenW = 0;
-    int drew = 0, msgDrew = 0;
+    int drew = 0;
     static int s_firstDraw = 1;
 
     (void)regs;
@@ -1143,7 +1143,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     if (SB_In()) SB_CompositeMagnify();
     else if (SB_Out() && !g_AfterMapTramp) { SB_PaintVoid(); SB_CompositeDemagnify(); }
 
-    drew = MOE_DrawUILayers(surf, surfW, surfH, surfPitch, &bitLineH, &screenW, &msgDrew);
+    drew = MOE_DrawUILayers(surf, surfW, surfH, surfPitch, &bitLineH, &screenW, NULL);
 
     /* 聊天输入框 (顶层)。ce_Active/CE_NoteSent 只由它驱动, 不接则颜色丢失。 */
     {
@@ -1189,9 +1189,10 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
         p = AppendCStr(buf, p, b2, sizeof(buf));
         LogLine(buf);
     }
-    /* 原版消息只看消息层: 它没画 (关/无内容/失败) 就放行原版, 其它层画了也不跳过。 */
-    if (!msgDrew) return 0;
-    return ADDR_AFTER_MSGLIST_DRAW;
+    /* 接管开即恒跳过原版, 不看本帧画没画出 (否则空帧原版闪一帧)。
+     * 未接管才放行原版。 */
+    if (MsgText_Enabled()) return ADDR_AFTER_MSGLIST_DRAW;
+    return 0;
 }
 
 /* 消息帧兜底入口: 链表空时 0x5D4A94 走不到, 这里代跑整条链路。 */

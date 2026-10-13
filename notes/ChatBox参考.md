@@ -80,10 +80,18 @@
 
 ## 输入法（定案）
 
-- 组合窗 `CFS_FORCE_POSITION` 指盒底上一行（隐藏了，只做堆叠锚点）+ 候选窗 `CFS_CANDIDATEPOS` 指盒底（surface→客户区换算）；组合窗用 `CFS_FORCE_POSITION`（`CFS_POINT` 允许 IME 调整位置）。组字前候选听 `CANDIDATEPOS`（贴底）；组字后 IME 按“组合窗下再空出一行”自己重排（覆盖候选窗设置），组合窗抬过一行后正好落回盒底。`CFS_EXCLUDE` 试过：组字开始后按不住，被 IME 重排覆盖，不用。组合行高读 `ImmGetCompositionFont` 实测（失败回退自家字高换算，一局内缓存）。
+- 组合窗 `CFS_FORCE_POSITION` 指盒底上一行（隐藏了，只做堆叠锚点）+ 候选窗 `CFS_CANDIDATEPOS` 指盒底（surface→**呈现区**换算，见下“IME 坐标基准”）；组合窗用 `CFS_FORCE_POSITION`（`CFS_POINT` 允许 IME 调整位置）。组字前候选听 `CANDIDATEPOS`（贴底）；组字后 IME 按“组合窗下再空出一行”自己重排（覆盖候选窗设置），组合窗抬过一行后正好落回盒底。`CFS_EXCLUDE` 试过：组字开始后按不住，被 IME 重排覆盖，不用。组合行高读 `ImmGetCompositionFont` 实测（失败回退自家字高换算，一局内缓存）。
 - 系统组合窗由主窗子类化隐藏：截 `WM_IME_SETCONTEXT` 清 `ISC_SHOWUICOMPOSITIONWINDOW`，吃掉 `WM_IME_STARTCOMPOSITION`（不转交）；候选窗（`WM_IME_NOTIFY`）与输入（`COMPOSITION/CHAR`）原样转交。
 - 结论：压组合字高 / `CFS_HIDDEN(0x2000)` 依赖输入法配合，不可靠，不用。
 - 组字串游戏内自画（黄色+下划线），`Imm` 轮询 `GCS_COMPSTR`。
+
+### IME 坐标基准：呈现区 ≠ 客户区（`CE_MeasureView`）
+
+- IMM 位置是主窗客户区坐标，盒子画在渲染面上，按呈现区/渲染面比例换算；全屏上采样时呈现区=显示器，窗口化=客户区。
+- 模式只能问包装层 `DDIsWindowed`（1=窗口化/0=全屏），每次开框重查；窗口几何、样式、引擎旗标区分不出两种模式。查不到时按窗口化。
+- 分母：窗口化=客户区；全屏=所在显示器（要求客户区原点在屏幕原点，否则仍按客户区）。
+- 仍偏则用 `[MsgText] ImeFullscreen` 手动指定（0=客户区，1=显示器；旧版 cnc-ddraw 无此导出时用 1）。
+- 基准变化才作废位置缓存并记一行 `chatedit: view=WxH client=WxH mon|win`；量不到沿用上次。`CE_CompLineH` 回退换算共用同一呈现区高。
 
 ## 导航键
 
@@ -105,7 +113,7 @@
 
 结论：体感时间一律现实时钟（游戏 tick 是帧计数）；淡出的是内容不是透明度（无活消息时 `DrawBox` 返回 0，须锁存展开）；展开无需防抖（斜坡已保证无硬闪）。
 
-配置（`[MsgText]`，改后重启）：`Enable/FontFace/FontHeight/Bold`（输入框同套字），`ChatEdit/ChatBoxSP/ChatNameSP`，`CampBottom/CampBottomMargin`（输入框落位），`HoverMinOpacity=5`（悬停最低透明度，0=沿用渐隐）。
+配置（`[MsgText]`，改后重启）：`Enable/FontFace/FontHeight/Bold`（输入框同套字），`ChatEdit/ChatBoxSP/ChatNameSP/ImeFullscreen`（输入法定位基准，见上），`CampBottom/CampBottomMargin`（输入框落位），`HoverMinOpacity=5`（悬停最低透明度，0=沿用渐隐）。
 
 ## 性能 (开输入框掉帧)
 

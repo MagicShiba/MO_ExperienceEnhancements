@@ -1223,3 +1223,9 @@ int MsgText_OverCamp(int mx, int my)
     if (!MouseInCampRect(mx, my)) return 0;
     return 1;
 }
+
+/* 是否接管 (供 MOExperience.cpp): 与 MsgText_DrawFrame 同一开关。 */
+int MsgText_Enabled(void)
+{
+    return g_Cfg.Enable ? 1 : 0;
+}

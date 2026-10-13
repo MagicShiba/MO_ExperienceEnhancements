@@ -1,15 +1,14 @@
 /* MOExperience.h - DLL 协调层: 把各功能模块挂到引擎时序点上 (见 .cpp)。 */
 #pragma once
 
-#define MOE_VERSION "0.2.236"
+#define MOE_VERSION "0.2.243"
 
 /* 一次性初始化: 建日志路径 + 各模块首次载入配置。幂等, 各入口都先调它。 */
 void MOE_EnsureInit(void);
 
 /* UI 层链路: 放大呈现后在 Primary 上重画一遍 (Composite 里那份已被盖掉)。
  * 返回 1 = 至少画了一层。
- * pMsgDrew (可空): 1 = 消息层本帧画出、接管了原版消息绘制; 0 = 没画,
- * 调用方不得因此跳过原版。其它层只进返回值, 不进此位。 */
+ * pMsgDrew (可空): 1 = 消息层本帧画出; 是否跳过原版只看 MsgText 是否接管。 */
 int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch,
                        int* bitLineH, int* screenW, int* pMsgDrew);
 
@@ -89,7 +88,7 @@ int  MOE_MousePosPending(void);   /* 1 = 还没装上 (prepare 每循环重试) 
 void MOExperience_WndMouseEntry(void);
 extern void* g_WndMouseTramp;
 
-/* 消息框 Draw 内部钩: 各模块 *_Draw 唯一出口, 消息层画出才跳过原版。 */
+/* 消息框 Draw 内部钩: 各模块 *_Draw 唯一出口, 接管开即恒跳过原版消息绘制。 */
 extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void* regs);
 
 /* 消息框 Draw 入口钩 (0x5D49A0, 6B): 每帧必跑; 引擎消息链表为空时
