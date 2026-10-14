@@ -1,13 +1,15 @@
-/* MsgText.h - 消息文本显示 (战役框 + 提示框), 见 MsgText.cpp。
+/* MsgText.h - 消息文本显示 (战役框 + 操作与战斗提示), 见 MsgText.cpp。
  *
  * 接管引擎 MessageListClass 的消息队列, 自绘 GDI 矢量文本:
  *   战役框 (sp=0, 战役/聊天/系统): 长留历史, 悬停展开, 滚轮翻看。
- *   提示框 (sp=1, 快捷键/路径点): 按引擎超时自然消失。
+ *   操作与战斗提示 (sp=1): 操作提示 (快捷键/路径点) + 雷达事件,
+ *     按引擎超时自然消失。雷达事件行可点击, 点一下视口跳到事件发生地
+ *     (走引擎自己的 SetTacticalPosition, 只动本地摄像机)。
  * 配置节 [MsgText]。
  *
  * 钩子 (Syringe, 见 dist/MOExperience.dll.inj):
  *   0x5D3BA0 AddMessage 捕获; 0x777998 滚轮翻历史;
- *   0x533F50 悬停时跳过侧栏滚动。
+ *   0x533F50 悬停时跳过侧栏滚动; 0x69234B 雷达事件行点击门。
  * 渲染本身挂 0x5D4A94 (引擎链表非空时才跑) 与 0x5D49A0 兜底入口,
  * 两者都在 MOExperience.cpp 的协调层, 见 MOExperience_MsgListEntry。
  * 任何一步失败 (Lock 不上、GDI 未就绪) 都返回 0 走原版绘制, 绝不花屏。
@@ -34,6 +36,12 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgText_AddMessageHook(void* regs
 int MsgText_WheelIn(int mx, int my, int dirUp);
 /* 侧栏滚动让位 (0x533F50, 5B): 命中战役框时返回非 0, 调用方跳到让位点。 */
 int MsgText_OverCamp(int mx, int my);
+
+/* 雷达事件行点击门 (0x69234B, 5B): 落在操作与战斗提示的雷达事件行上就
+ * 完成视口跳转并吞掉这次地图点击 (0x6925FC = 原函数"未处理"出口)。
+ * 返回 0 = 不属于雷达事件行, 原版自己处理。
+ * 联机安全: 只动本地摄像机 (引擎空格跳转同款), 不写模拟对象、不发事件。 */
+extern "C" __declspec(dllexport) unsigned __cdecl MsgText_RadarClickGate(void* regs);
 
 /* 聊天输入框锚点 (供 ChatEdit.cpp): 贴战役框下沿, 1=有锚点 (px/py 写出),
  * 0=无 (调用方留在原生位置)。只在底部模式成立。 */

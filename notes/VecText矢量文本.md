@@ -40,10 +40,26 @@ Print 0x434B90 / Simple 0x4A5EB0 / GetDim 0x433CF0。
   +0x10 pitch（WORD 数），+0x24 默认色，+0x30..+0x3C 裁剪 LTRB。
 - InternalData + 0x0C = Lines（当前 fnt 为 19）。
 
-- 摆位：整体居中 dy = y + (h - 窗高)/2；字间相对位置保留 GDI，不逐字居中。
+- 摆位：垂直按基线 `dy = y + (h-tmHeight)/2 + tmAscent - e->asc`；字间相对位置保留 GDI，不逐字居中。
 - 横向全墨水不压缩，溢出由面界收尾；只认面界不认引擎裁剪；步进按 GDI 步进只加宽不收窄（无则墨水右缘），简报盒内保持原笔位（数字除外）。
 - FontPx > 格高必溢出裁剪；字号按格高选（0=自动）。
 - 键 = (idata, 字体名, 粗体)。
+
+### 垂直：逐字测量 + 基线摆位
+
+每个字量**自己**的墨水盒（整幅 DIB 扫本字 T..B），`outh` 就是本字墨水高，
+缓存里带 `asc`（墨水顶到基线）/ `cell`（tmHeight）/ `ascd`（tmAscent），
+绘制时 `dy = y + (h-cell)/2 + ascd - asc`。行内中/西/数共用一条基线。
+
+行高下限取字体自己的 `tmHeight`（`GdiSlot.cell`），不由字号或点阵格高反推。
+度量来源 `GetTextMetricsW`，存 `GdiSlot.asc/cell`。
+三字墨水并集定垂直窗的方案已废：样本不等于全集，会丢笔画且中西不对齐。
+
+### 字身左出边 abcA 可能是负数
+
+`VecGlyphOff()` 自然模式 `off = abcA`，CJK 的 abcA 可能为负（字身左出边）。
+不钳制会导致墨水越界写入上一行，且该行整行不画（`rowLo` 记成 255）。
+`VecGlyphOff()` 末尾统一 `off>=0`，`VecGlyph`/`VecMenuGlyph` 拷贝处双边界检查，不可删。
 
 ## 超武列表整体接管（Simple_ 入口隐藏 + [SWPanel] 重绘）
 
@@ -73,10 +89,14 @@ Print 0x434B90 / Simple 0x4A5EB0 / GetDim 0x433CF0。
 
 - 正文 = 一次 DrawText (0x621144 → 0x434CD0)，盒 (652,313,453,432)。引擎排版绑死 fnt，只能整块自绘：行高跟 BriefLine，字距跟 BriefTrack，换行按墨水宽。
 - 引擎照跑（绑面/Lock/裁剪），Blit 抢首字整块画掉并抑制后续逐字。面须借引擎的（进钩时 font+0x0C 尚空）。
+- **行高 = max(点阵格高 origH, px×BriefLine%, 字体 tmHeight)**，小于字高两行会重叠。
+- **排版不管引擎盒高**：字号照 `[VecText] FontPx`，不为塞进盒高(a7)降号；
+  行数超盒只是排得高，不算被裁，以 `BriefMark` 方框验裁剪（方框完整即没被裁）。
 - 逐字格宽 = 字体前进宽 + 字距；摆位 = abcA (`g_VecNat`)。
-- 裁剪四边临时放开、画完还原；盒宽按 BriefWidth，行数只受屏高限。
+- 裁剪四边临时放开、画完还原（方框在框外 20px，靠放开才画得全）。
 - `BriefMark`：深灰双线 + 内缘 20px；裁剪比框外放 4px。
 - 颜色 font+0x24；不可靠返回 -1 走引擎。
+- 自绘块须挂 `g_VT.Render &&` 门，否则 Render=0 时简报与他处字体混排。
 
 ## 配置（[VecText]，改后重启）
 
@@ -96,7 +116,10 @@ Print 0x434B90 / Simple 0x4A5EB0 / GetDim 0x433CF0。
 
 ## 日志
 
-`vtext:` 钩子成败、`brief: own draw/w/skip why=`、`perf:`、`gdi:` (LogDetail=1)。`brief: dt` 普查默认不记 (LogDetail=1 才记)。探针定案即删。
+`vtext:` 钩子成败、`brief: own draw/skip why=`、`perf:`、`gdi:` (LogDetail=1)。
+
+`brief: own draw` 只留一条（盒/行高/字宽/行数/cell），核对版式用；`skip why=` 只在自绘失败时记。
+抽查类探针已删。
 
 ## 右侧提示与超武区分
 

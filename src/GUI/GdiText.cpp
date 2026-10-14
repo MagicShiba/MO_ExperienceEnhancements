@@ -792,6 +792,7 @@ static void GdiFreeSlot(GdiSlot* s)
     }
     s->dc = NULL; s->dib = NULL; s->oldBmp = NULL; s->font = NULL;
     s->bits = NULL; s->pitch = 0; s->px = -1; s->bold = -1; s->adv = 0;
+    s->asc = 0; s->cell = 0;
     s->face[0] = 0;
     /* ABC 记忆表随槽作废, 键值一起清。 */
     for (i = 0; i < ABC_MEMO_N; i++) { s->abcM[i] = -1; s->abcK[i] = 0; }
@@ -852,6 +853,8 @@ int GdiEnsure(int fontPx, int bold, int slot, const wchar_t* face)
     s->px   = fontPx;
     s->bold = wantBold;
     s->adv  = tm.tmHeight + 2;
+    s->asc  = tm.tmAscent;
+    s->cell = tm.tmHeight;
     CopyFace(s->face, face);
     g_G = s;
 

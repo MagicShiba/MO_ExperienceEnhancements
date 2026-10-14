@@ -57,3 +57,8 @@
 ; 暂停且无步进时跑迷你循环后跳 0x55DEDB (ret) 出本轮;
 ; 步进帧入口扣数放行一轮原循环。Logic/帧存/限速整轮不跑。
 0x55D360 = PV_MainGate, 5
+; 雷达事件行点击门 (DisplayClass::ProcessClickCoords 内 0x69234B, 5 字节 =
+; mov eax,[ebp] / test eax,eax, 都是无副作用的读, 门落点 0x6925FC 栈形对齐)。
+; 落在"操作与战斗提示"里的雷达事件行上就跳视口到该事件格并吞掉这次地图点击;
+; 否则返回 0 跑原指令 (下面 0x692350 的 jl 出界判据一点没动)。见 MsgText.cpp
+0x69234B = MsgText_RadarClickGate, 5

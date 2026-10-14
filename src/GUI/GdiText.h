@@ -193,6 +193,9 @@ typedef struct {
     int px;     /* -1 = 空槽 */
     int bold;
     int adv;
+    /* 字体自己的垂直度量 (GetTextMetrics): 逐字按基线摆位, 行高按 cell。 */
+    int asc;    /* tmAscent: 行顶到基线 */
+    int cell;   /* tmHeight: 一行的自然高度 */
     int sidx;               /* 槽序号 (行缓存按槽代号作废) */
     wchar_t face[FONT_FACE_MAX];  /* 缓存键 */
     /* 单字 ABC 记忆表: 槽重建时键值一起清。 */

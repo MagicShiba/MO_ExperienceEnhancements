@@ -1,12 +1,13 @@
 /*
- * MsgText.cpp - 消息文本显示 (战役框 + 提示框), 配置节 [MsgText]。
+ * MsgText.cpp - 消息文本显示 (战役框 + 操作与战斗提示), 配置节 [MsgText]。
  *
  * 钩子 (Syringe, 见 dist/MOExperience.dll.inj):
  *   消息: 0x5D3BA0 AddMessage 捕获; 0x5D49A0 Draw 入口绿框;
  *         0x5D4A94 Draw 内部 (自制消息框画完回 0x5D4A9B, 由 MOExperience.cpp
  *         的消息帧统一出口, 故本模块只提供 MsgText_DrawFrame)。
  *   交互: 0x777998 滚轮翻历史; 0x533F50 悬停时跳过侧栏滚动;
- *         0x55E477/62F/693/746 单人聊天框 (跳过 session 检查)。
+ *         0x55E477/62F/693/746 单人聊天框 (跳过 session 检查);
+ *         0x69234B 雷达事件行点击门 (点文本 = 视口跳到事件发生地)。
  * 任何一步失败 (Lock 不上、GDI 未就绪) 都返回 0 走原版绘制, 绝不花屏。
  *
  * 渲染: Microsoft YaHei 经 GDI 光栅化到 32 位内存 DIB (灰度抗锯齿取覆盖率),
@@ -28,6 +29,25 @@
 #define ADDR_SESSION             0x00A8B238u /* SessionClass::Instance, 首成员即 GameMode */
 #define ADDR_AFTER_MSGLIST_DRAW  0x005D4A9Bu
 
+/* 雷达事件 (RadarEventClass) 活对象表: 引擎 Create 成功才往里挂。
+ * 反汇编实证 (Create 0x65FA70 → ctor 0x65FB80 尾部 0x65FCD5 起):
+ *   0xB04DAC = 指针数组基址, 0xB04DB8 = 在用个数 (追加时 count++, 退场时前移压缩)。
+ * 每个对象: +0x00 = RadarEventType, +0x20 = MapCoords (CellStruct: X 低16/Y 高16)。
+ * ★ 这套活对象表只收走完"同型同格抑制"的事件 (0x65FA70 里的距离去重),
+ *   所以扫到的每一项都是真能在雷达上看到、也真能用空格跳过去的那个事件。 */
+#define ADDR_RE_ITEMS            0x00B04DACu
+#define ADDR_RE_COUNT            0x00B04DB8u
+#define RE_OFF_TYPE              0x00u
+#define RE_OFF_CELL              0x20u
+#define RE_MAX_SCAN              48          /* 一帧最多扫几个 (引擎容量 10 起, 会长) */
+
+/* 视口跳转: 见下面 MsgText_JumpToCell。 */
+#define ADDR_TACTICAL            0x00887324u  /* TacticalClass::Instance */
+#define ADDR_SET_TACTICAL_POS    0x006D6070u  /* TacticalClass::SetTacticalPosition(CoordStruct*) */
+
+/* 点击门落点: ProcessClickCoords (0x692300) 的"未处理"出口, 栈形对齐。 */
+#define ADDR_CLICKGATE_SKIP      0x006925FCu
+
 #define OFF_REG_ESP              0x14
 #define OFF_REG_ECX              0x20
 #define STK_ARG_NAME             0x04
@@ -39,6 +59,14 @@
 #define OFF_CSCHEME_ITEMS        0x04
 #define OFF_CSCHEME_COUNT        0x10
 #define OFF_CSCHEME_BASECOLOR    0x308
+
+/* ---------------- 雷达事件 ----------------
+ * 事件名走配置节 [MsgRadar] 的 Name0..Name16 (下标 = RadarEventType),
+ * 用户想改文案只动 ini, 不必重编。ini 是 UTF-8, 这里是手写的 UTF-8→UTF-16
+ * (无 CRT, 也不走 MultiByteToWideChar —— 那按 ACP 解码, 会把 UTF-8 中文吃坏)。*/
+#define RADAR_SEC      "MsgRadar"
+#define RADAR_NAME_N   17
+#define RADAR_NAME_CAP 40
 
 /* ---------------- 配置 ---------------- */
 
@@ -67,17 +95,25 @@ typedef struct {
     int LogMessages;
     int ShowHotZone;   /* 1 = 画出悬停生效范围 (调试悬停用) */
     int ScrollStep;    /* 滚轮步长(行) */
-    int HintShow;      /* 1 = 左下显示操作提示框 (sp=1) */
+    int HintShow;      /* 1 = 左下显示操作与战斗提示 (sp=1) */
     int HintPosX;
     int HintBottom;    /* 距底边像素 */
     int HintFontHeight;/* 0 = 跟 BitFont 字高 */
     int HintBold;
     char HintFontFace[64]; /* 同上 (提示框用), 缺省 msyh.ttc */
     int HintColorFollow;/* 1 = 追随玩家实际颜色 (原版色), 0 = 白字 */
-    int HintMaxLines;
+    int HintMaxLines;  /* 操作与战斗提示总行数 (雷达事件占剩下的) */
+    int HintOpMaxLines;/* 其中"操作提示"最多占几行 (剩下的行数留给雷达事件) */
+    int HintRadarShow; /* 1 = 把雷达事件写进操作与战斗提示 */
+    int HintRadarClick;/* 1 = 雷达事件行可点击, 点一下视口跳过去 */
+    int HintRadarHold; /* 雷达事件行显示时长 (引擎时钟刻, 1刻≈16ms) */
     int HintMaxWidth;  /* 0 = 自动 */
     int HintOpacity;   /* 底板不透明度 0~100; 0=不画底板但文字阴影照画 */
-    int HintTimeoutMul;/* 提示显示时长倍率 (1=原版速度) */
+    int HintTimeoutMul;/* 操作提示显示时长倍率 (1=原版速度) */
+    char RadarName[RADAR_NAME_N][RADAR_NAME_CAP];   /* [MsgRadar] Name0..16 */
+    char RadarNameOther[RADAR_NAME_CAP];            /* [MsgRadar] NameOther */
+    wchar_t RadarNameW[RADAR_NAME_N][FONT_FACE_MAX];
+    wchar_t RadarNameOtherW[FONT_FACE_MAX];
 } MsgTextConfig;
 
 static MsgTextConfig g_Cfg;
@@ -141,8 +177,16 @@ typedef struct {
     int      color;
     unsigned expire;   /* 引擎式过期戳 (毫秒/16 时钟); 0 = 永不过期 */
     unsigned born;     /* 入队时时钟 (提示框倍率延长用) */
-    int      sp;        /* 1 = 操作提示类 (快捷键/路径点), 0 = 战役/聊天/系统 */
+    int      sp;        /* 1 = 提示类 (操作提示/雷达事件), 0 = 战役/聊天/系统 */
+    int      kind;      /* 0 = 操作提示, 1 = 雷达事件 (可点击跳转) */
+    short    cellX;     /* kind=1 的目标格 (点击跳转用) */
+    short    cellY;
 } ChatMsg;
+
+/* 操作与战斗提示内部再分两路: 操作提示行有行数上限, 雷达事件行吃剩下的,
+ * 行内区分靠 kind。 */
+#define KIND_OP    0
+#define KIND_RADAR 1
 
 #define MAX_CAMP_MSGS 200
 #define MAX_HINT_MSGS 64
@@ -185,8 +229,130 @@ static void RingPush(MsgRing* r, const wchar_t* name, const wchar_t* text,
     m->expire = expire;
     m->born   = born;
     m->sp     = sp ? 1 : 0;
+    m->kind   = KIND_OP;
+    m->cellX  = 0;
+    m->cellY  = 0;
     r->head = (r->head + 1) % r->cap;
     if (r->count < r->cap) r->count++;
+}
+
+/* 雷达事件入提示环: 文案就是 [MsgRadar] 里配的类型名 (不带坐标)。
+ * 按 HintRadarHold 正常过期消失 (不永久驻留); 收起时只留最近几行,
+ * 悬停末行触发区可展开看到同一段时间里的其余几条。 */
+static void RingPushRadar(int type, short cx, short cy)
+{
+    ChatMsg* m = &g_HintBuf[g_HintRing.head];
+    const wchar_t* nm = (type >= 0 && type < RADAR_NAME_N)
+                      ? g_Cfg.RadarNameW[type] : g_Cfg.RadarNameOtherW;
+    wchar_t* p = m->text;
+    unsigned now = GtClockNow();
+
+    if (!nm || !nm[0]) nm = g_Cfg.RadarNameOtherW;
+    while (*nm && p < m->text + MAX_TEXT_W - 1) *p++ = *nm++;
+    *p = 0;
+
+    m->name[0] = 0;
+    m->color  = 0;
+    m->born   = now;
+    m->expire = now + (unsigned)g_Cfg.HintRadarHold;
+    m->sp     = 1;
+    m->kind   = KIND_RADAR;
+    m->cellX  = cx;
+    m->cellY  = cy;
+
+    g_HintRing.head = (g_HintRing.head + 1) % g_HintRing.cap;
+    if (g_HintRing.count < g_HintRing.cap) g_HintRing.count++;
+}
+
+/* 已报过的雷达事件, 跨帧保留: 扫到刷时间戳, 未扫到即引擎已删;
+ * 同地址复用时以 (类型,格) 签名区分。 */
+#define RE_SEEN_MAX 64
+static void*    s_ReSeenP[RE_SEEN_MAX];
+static int      s_ReSeenT[RE_SEEN_MAX];
+static int      s_ReSeenX[RE_SEEN_MAX];
+static int      s_ReSeenY[RE_SEEN_MAX];
+static int      s_ReSeenF[RE_SEEN_MAX];
+static int      s_ReSeenN = 0;
+
+static void MsgText_PollRadar(void)
+{
+    static int s_lastFrame = -1;
+    void* arr;                  /* 指针数组基址 */
+    int cnt, i, j, k, fr, keep;
+
+    if (!g_Cfg.Enable || !g_Cfg.HintShow || !g_Cfg.HintRadarShow)
+    {
+        s_ReSeenN = 0;
+        return;
+    }
+    /* 一帧能被调好几次, 必须自门控帧号 (同 RepairAll/SWSBar 的做法)。 */
+    fr = *(int*)0x00A8ED84u;
+    if (fr == s_lastFrame) return;
+    s_lastFrame = fr;
+
+    arr = *(void**)ADDR_RE_ITEMS;
+    cnt = IsPlausiblePtr(arr) ? *(int*)ADDR_RE_COUNT : 0;
+    if (cnt < 0) cnt = 0;
+    if (cnt > RE_MAX_SCAN) cnt = RE_MAX_SCAN;
+
+    for (i = 0; i < cnt; i++)
+    {
+        void* obj = *(void**)((char*)arr + i * 4);
+        unsigned char* ev = (unsigned char*)obj;
+        int t, cell, sx, sy;
+        if (!IsPlausiblePtr(ev)) continue;
+        if (!IsPlausiblePtr((char*)ev + RE_OFF_CELL + 4)) continue;
+        t = *(int*)(ev + RE_OFF_TYPE);
+        cell = *(int*)(ev + RE_OFF_CELL);
+        sx = (int)(short)(cell & 0xFFFF);
+        sy = (int)(short)((cell >> 16) & 0xFFFF);
+
+        for (j = 0; j < s_ReSeenN; j++) if (s_ReSeenP[j] == obj) break;
+        if (j < s_ReSeenN)
+        {
+            int same = (s_ReSeenT[j] == t && s_ReSeenX[j] == sx && s_ReSeenY[j] == sy);
+            s_ReSeenT[j] = t; s_ReSeenX[j] = sx; s_ReSeenY[j] = sy;
+            s_ReSeenF[j] = fr;
+            if (same) continue;          /* 还在表里 = 已经报过了 */
+        }
+        else
+        {
+            if (s_ReSeenN >= RE_SEEN_MAX)
+            {
+                /* 表满: 挤掉最老的一条 (帧号最小) */
+                int old = 0;
+                for (k = 1; k < s_ReSeenN; k++)
+                    if ((int)(s_ReSeenF[k] - s_ReSeenF[old]) < 0) old = k;
+                for (k = old; k < s_ReSeenN - 1; k++)
+                {
+                    s_ReSeenP[k] = s_ReSeenP[k + 1]; s_ReSeenT[k] = s_ReSeenT[k + 1];
+                    s_ReSeenX[k] = s_ReSeenX[k + 1]; s_ReSeenY[k] = s_ReSeenY[k + 1];
+                    s_ReSeenF[k] = s_ReSeenF[k + 1];
+                }
+                s_ReSeenN--;
+            }
+            j = s_ReSeenN++;
+            s_ReSeenP[j] = obj;
+            s_ReSeenT[j] = t; s_ReSeenX[j] = sx; s_ReSeenY[j] = sy;
+            s_ReSeenF[j] = fr;
+        }
+        RingPushRadar(t, (short)sx, (short)sy);
+    }
+
+    /* 出表: 本帧没扫到的就是引擎那边已经删掉了 (对象活着就一直在表里) */
+    keep = 0;
+    for (i = 0; i < s_ReSeenN; i++)
+    {
+        if (s_ReSeenF[i] != fr) continue;
+        if (keep != i)
+        {
+            s_ReSeenP[keep] = s_ReSeenP[i]; s_ReSeenT[keep] = s_ReSeenT[i];
+            s_ReSeenX[keep] = s_ReSeenX[i]; s_ReSeenY[keep] = s_ReSeenY[i];
+            s_ReSeenF[keep] = s_ReSeenF[i];
+        }
+        keep++;
+    }
+    s_ReSeenN = keep;
 }
 
 static unsigned ExpireStamp(int timeout)
@@ -198,7 +364,8 @@ static unsigned ExpireStamp(int timeout)
 static int MsgVisibleMul(ChatMsg* m, unsigned mul)
 {
     unsigned span;
-    if (m->expire == 0) return 1;
+    if (m->expire == 0) return 1;   /* 永不过期 */
+    if (m->kind == KIND_RADAR) mul = 1;
     if (mul < 1) mul = 1;
     span = (m->expire - m->born) * mul;
     return (int)(GtClockNow() - m->born) <= (int)span;
@@ -327,7 +494,11 @@ static void MsgText_LoadConfig(void)
     OU_ReadString(MSG_SECTION, "HintFontFace", "msyh.ttc",
                   g_Cfg.HintFontFace, sizeof(g_Cfg.HintFontFace));
     g_Cfg.HintColorFollow = GetPrivateProfileIntA(MSG_SECTION, "HintColorFollow", 0, g_IniPath);
-    g_Cfg.HintMaxLines= GetPrivateProfileIntA(MSG_SECTION, "HintMaxLines", 3, g_IniPath);
+    g_Cfg.HintMaxLines= GetPrivateProfileIntA(MSG_SECTION, "HintMaxLines", 8, g_IniPath);
+    g_Cfg.HintOpMaxLines = GetPrivateProfileIntA(MSG_SECTION, "HintOpMaxLines", 4, g_IniPath);
+    g_Cfg.HintRadarShow = GetPrivateProfileIntA(MSG_SECTION, "HintRadarShow", 1, g_IniPath);
+    g_Cfg.HintRadarClick = GetPrivateProfileIntA(MSG_SECTION, "HintRadarClick", 1, g_IniPath);
+    g_Cfg.HintRadarHold = GetPrivateProfileIntA(MSG_SECTION, "HintRadarHold", 900, g_IniPath);
     g_Cfg.HintMaxWidth= GetPrivateProfileIntA(MSG_SECTION, "HintMaxWidth", 320, g_IniPath);
     g_Cfg.HintOpacity = GetPrivateProfileIntA(MSG_SECTION, "HintOpacity", 45, g_IniPath);
     g_Cfg.HintTimeoutMul = GetPrivateProfileIntA(MSG_SECTION, "HintTimeoutMul", 2, g_IniPath);
@@ -371,12 +542,98 @@ static void MsgText_LoadConfig(void)
     g_Cfg.HintBold = g_Cfg.HintBold ? 1 : 0;
     g_Cfg.HintColorFollow = g_Cfg.HintColorFollow ? 1 : 0;
     if (g_Cfg.HintMaxLines < 1) g_Cfg.HintMaxLines = 1;
-    if (g_Cfg.HintMaxLines > 10) g_Cfg.HintMaxLines = 10;
+    if (g_Cfg.HintMaxLines > 40) g_Cfg.HintMaxLines = 40;
+    /* 操作提示行预算必须留在总行数之内, 且至少给雷达事件留一行 */
+    if (g_Cfg.HintOpMaxLines < 0) g_Cfg.HintOpMaxLines = 0;
+    if (g_Cfg.HintOpMaxLines > g_Cfg.HintMaxLines - 1) g_Cfg.HintOpMaxLines = g_Cfg.HintMaxLines - 1;
+    if (g_Cfg.HintOpMaxLines < 0) g_Cfg.HintOpMaxLines = 0;
+    g_Cfg.HintRadarShow = g_Cfg.HintRadarShow ? 1 : 0;
+    g_Cfg.HintRadarClick = g_Cfg.HintRadarClick ? 1 : 0;
+    if (g_Cfg.HintRadarHold < 1) g_Cfg.HintRadarHold = 1;
+    if (g_Cfg.HintRadarHold > 100000) g_Cfg.HintRadarHold = 100000;
     if (g_Cfg.HintMaxWidth < 0) g_Cfg.HintMaxWidth = 0;
     if (g_Cfg.HintOpacity < 0) g_Cfg.HintOpacity = 0;
     if (g_Cfg.HintOpacity > 100) g_Cfg.HintOpacity = 100;
     if (g_Cfg.HintTimeoutMul < 1) g_Cfg.HintTimeoutMul = 1;
     if (g_Cfg.HintTimeoutMul > 10) g_Cfg.HintTimeoutMul = 10;
+}
+
+static const char* const kRadarNameDef[RADAR_NAME_N] =
+{
+    "战斗",       "非战斗",     "空投区",     "基地遭袭",
+    "矿车遭袭",   "发现敌军",   "单位出厂",   "单位损失",
+    "单位修复",   "建筑被渗透", "建筑被占领", "信标已放置",
+    "探测到超武", "超武已发动", "桥梁修复",   "驻军撤离",
+    "盟友基地遭袭"
+};
+
+/* UTF-8 → UTF-16, 返回写完的尾指针。带 BOM 会被吃掉, 坏字节按替换字符。 */
+static wchar_t* Utf8ToWide(wchar_t* dst, wchar_t* end, const unsigned char* s)
+{
+    unsigned c, c2;
+    if (s[0] == 0xEF && s[1] == 0xBB && s[2] == 0xBF) s += 3;
+    while (*s)
+    {
+        if (*s < 0x80)                       c = *s++;
+        else if ((*s & 0xE0) == 0xC0)        { c = *s++ & 0x1Fu; c = (c << 6) | (*s++ & 0x3Fu); }
+        else if ((*s & 0xF0) == 0xE0)
+        {
+            c = *s++ & 0x0Fu;
+            c = (c << 6) | (*s++ & 0x3Fu);
+            c = (c << 6) | (*s++ & 0x3Fu);
+        }
+        else if ((*s & 0xF8) == 0xF0)
+        {
+            c  = *s++ & 0x07u;
+            c2 = *s++ & 0x3Fu;
+            c  = (c << 6) | c2;
+            c  = (c << 6) | (*s++ & 0x3Fu);
+            c2 = *s++ & 0x3Fu;
+            c  = (c << 6) | c2;
+            c -= 0x10000u;
+            if (dst + 1 < end) *dst++ = (wchar_t)(0xD800u + ((c >> 10) & 0x3FFu));
+            if (dst < end)     *dst++ = (wchar_t)(0xDC00u + (c & 0x3FFu));
+            continue;
+        }
+        else { s++; c = 0xFFFDu; }
+        if (dst >= end) break;
+        *dst++ = (wchar_t)c;
+    }
+    if (dst < end) *dst = 0;
+    else if (end > dst) end[-1] = 0;
+    return dst;
+}
+
+static void MsgText_LoadRadarNames(void)
+{
+    char key[16], kb[8];
+    unsigned q;
+    int i;
+    for (i = 0; i < RADAR_NAME_N; i++)
+    {
+        q = 0;
+        q = AppendCStr(key, q, "Name", sizeof(key));
+        UtoA((unsigned)i, kb);
+        q = AppendCStr(key, q, kb, sizeof(key));
+        OU_ReadString(RADAR_SEC, key, kRadarNameDef[i],
+                      g_Cfg.RadarName[i], sizeof(g_Cfg.RadarName[i]));
+    }
+    OU_ReadString(RADAR_SEC, "NameOther", "雷达事件",
+                  g_Cfg.RadarNameOther, sizeof(g_Cfg.RadarNameOther));
+    /* 顺手转成宽字符 (每帧不转, 只在载入时一次) */
+    for (i = 0; i < RADAR_NAME_N; i++)
+        Utf8ToWide(g_Cfg.RadarNameW[i], g_Cfg.RadarNameW[i] + FONT_FACE_MAX,
+                   (const unsigned char*)g_Cfg.RadarName[i]);
+    Utf8ToWide(g_Cfg.RadarNameOtherW, g_Cfg.RadarNameOtherW + FONT_FACE_MAX,
+               (const unsigned char*)g_Cfg.RadarNameOther);
+    /* 配成空串就退回默认, 不让用户一条空行把整个提示搞没 */
+    for (i = 0; i < RADAR_NAME_N; i++)
+        if (!g_Cfg.RadarNameW[i][0])
+            Utf8ToWide(g_Cfg.RadarNameW[i], g_Cfg.RadarNameW[i] + FONT_FACE_MAX,
+                       (const unsigned char*)kRadarNameDef[i]);
+    if (!g_Cfg.RadarNameOtherW[0])
+        Utf8ToWide(g_Cfg.RadarNameOtherW, g_Cfg.RadarNameOtherW + FONT_FACE_MAX,
+                   (const unsigned char*)"雷达事件");
 }
 
 static int g_InitDone = 0;
@@ -390,6 +647,7 @@ void MsgText_EnsureInit(void)
     GtEnsureLog();
     if (!g_Log) return;
     MsgText_LoadConfig();
+    MsgText_LoadRadarNames();
     LogLine("msgtext: start");
     p = 0;
     p = AppendCStr(buf, p, "config: MaxLines=", sizeof(buf));
@@ -420,6 +678,19 @@ void MsgText_EnsureInit(void)
     p += UtoA((unsigned)g_Cfg.ShadowOpacity, buf + p);
     p = AppendCStr(buf, p, " HovMinOp=", sizeof(buf));
     p += UtoA((unsigned)g_Cfg.HoverMinOpacity, buf + p);
+    LogLine(buf);
+    /* 操作与战斗提示的行预算 (总行 / 操作行 / 雷达事件行) */
+    p = 0;
+    p = AppendCStr(buf, p, "hint: MaxLines=", sizeof(buf));
+    p += UtoA((unsigned)g_Cfg.HintMaxLines, buf + p);
+    p = AppendCStr(buf, p, " OpMax=", sizeof(buf));
+    p += UtoA((unsigned)g_Cfg.HintOpMaxLines, buf + p);
+    p = AppendCStr(buf, p, " RadarShow=", sizeof(buf));
+    p += UtoA((unsigned)g_Cfg.HintRadarShow, buf + p);
+    p = AppendCStr(buf, p, " RadarClick=", sizeof(buf));
+    p += UtoA((unsigned)g_Cfg.HintRadarClick, buf + p);
+    p = AppendCStr(buf, p, " RadarHold=", sizeof(buf));
+    p += UtoA((unsigned)g_Cfg.HintRadarHold, buf + p);
     LogLine(buf);
     /* 字体解析放日志打开之后, 解析结果才能记入日志 */
     ResolveFontFace(g_Cfg.FontFace, "camp", g_CampFace, L"Microsoft YaHei");
@@ -514,8 +785,9 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgText_AddMessageHook(void* regs
     return 0;
 }
 
-/* ---------------- 双框: 战役长留 + 提示短命 ----------------
- * sp=1 (操作提示: 快捷键/路径点) 进左下提示框, 按引擎超时自然消失;
+/* ---------------- 双框: 战役长留 + 操作与战斗提示短命 ----------------
+ * sp=1 (操作提示: 快捷键/路径点; 雷达事件) 进左下操作与战斗提示框,
+ *   按引擎超时自然消失;
  * sp=0 (战役/聊天/系统) 进左上战役框, 忽略超时长留历史, 可翻看。 */
 
 typedef struct {
@@ -531,20 +803,25 @@ typedef struct {
     int maxWPm;      /* >0 = 按屏宽千分比 (1~1000) */
     int limit;       /* 显示行数 */
     int rowBudget;   /* 挑选行预算 (战役长留给大, 提示给小) */
+    int opRowCap;    /* >0: "操作提示"路的行数上限 (雷达事件吃剩下的) */
     int opacity;
     int fade;        /* 0-100, DrawBox 内缩放底板/阴影/文字/滚动条透明度 */
     int shadowNoBoard; /* 1 = 底板透明度为 0 时仍画文字阴影 (提示框用) */
     int fontPx;      /* 0 = 跟随 BitFont */
     int bold;
-    int* pSkip;      /* 战役滚动 (NULL=不滚动) */
+    int* pSkip;      /* 战役框专用: 写聊天输入框锚点 (提示框不碰) */
+    int* pScroll;   /* 非 NULL = 该框可滚轮翻历史 (内部维护的 skip 行数) */
+    int* pPrevTotal;/* pScroll 配套: 上一帧总行数 (保持 skip 锚定) */
     int bar;         /* 滚动条 */
     int schemeColor; /* 1 = 用颜色方案 (原版色), 0 = 白字 */
-    unsigned tmoMul; /* 超时倍率 (提示框延长用, 战役=1) */
+    unsigned tmoMul; /* 超时倍率 (操作提示延长用, 战役=1; 雷达事件不吃) */
     int slot;        /* GDI 槽位 (战役=0, 提示=1) */
+    int pickHits;    /* 1 = 记下雷达事件行的屏上矩形 + 悬停区 (点击门/展开用) */
     const wchar_t* face; /* 字体名 (g_CampFace/g_HintFace) */
     MsgRing* ring;   /* 专属消息环 (双流分离存储) */
     int fullBoard;   /* 1=整块底板 (悬停/展开, Phobos hover 态), 0=包裹文本 */
     int anim;        /* 1=打字机逐字 (只战役框), 0=整行即时 */
+    int expanded;    /* 1 = 展开态 (把过期但仍留环里的也算进来, 于是总数能超窗口) */
 } BoxSpec;
 
 static int g_Skip = 0;          /* 0 = 跟随最新 */
@@ -553,6 +830,16 @@ static int s_prevCampTotal = 0;
 /* 战役框上一帧矩形 (滚轮命中 + 悬停判定用) */
 static RectangleStruct g_CampRect;
 static int g_CampValid = 0;
+/* 操作与战斗提示的悬停区。只有提示框 (pickHits=1) 写。
+ *   box     = 整框 (本帧画出来才有, 供"展开后框内任意位置都算悬停")
+ *   trigger = 末行那一行高, **跟有没有内容无关**, 独立算 (见 HintTriggerGeom)。
+ * 收起时只认 trigger 才展开; 展开后框内任意位置都留着, 鼠标才能移上去点
+ * 历史条目 —— 早先只认 trigger, 一往上移就收起, 历史根本点不到。 */
+static RectangleStruct g_HintBox;
+static int g_HintZonesOk = 0;
+static int s_hintExpand = 0;
+static int g_HintSkip = 0;
+static int s_prevHintTotal = 0;
 /* 聊天输入框锚点缓存: DrawBox 画战役框时顺手写下 (提前返回之前), 输入框直接读,
  * 不自己重算 —— 两边各算各的就会出现"首次不对齐、之后才对齐"。*/
 static int g_AnchorX = 0, g_AnchorY = 0, g_AnchorValid = 0;
@@ -611,7 +898,7 @@ static int HasLiveCamp(void)
     return 0;
 }
 
-/* 提示框显隐跳变日志 (newestExpIn = 最新提示距引擎过期还剩多少 tick, 62.5 tick≈1秒;
+/* 操作与战斗提示框显隐跳变日志 (newestExpIn = 最新提示距引擎过期还剩多少 tick, 62.5 tick≈1秒;
      * 若 hide 时它还很大, 就是提前强制消失的实证)
      * 与 MsgVisibleMul 同口径 (span=(expire-born)*mul), 否则 hide 行的
      * 剩余数对不上真实判定。*/
@@ -641,22 +928,69 @@ static void LogHintWhy(int on)
     LogLine(sb);
 }
 
+/* 雷达事件行的屏上命中区 (DrawBox 每帧重写, 点击门当帧直接查表)。
+ * 只有行首两三个字的宽度才算可点 —— 整行铺开的话, 框压在地图上, 想点框
+ * 底下的地图就总被抢走。 */
+#define MAX_RE_HIT 40
+#define RE_HIT_GLYPHS 3
+typedef struct { int x, y, w, h; short cx, cy; } ReHit;
+static ReHit g_ReHit[MAX_RE_HIT];
+static int   g_ReHitN = 0;
+
+/* 行首 N 个字的像素宽 (可点区宽度)。取不到字宽就退回 3 倍行高。 */
+static int ReHitWidth(const wchar_t* s, int vis, int adv, int maxW)
+{
+    int i, w = 0, a;
+    for (i = 0; i < RE_HIT_GLYPHS && i < vis && s[i]; i++)
+    {
+        a = GtCharAdv(s[i]);
+        if (a > 0) w += a;
+    }
+    if (w <= 0) w = adv * RE_HIT_GLYPHS;
+    if (w > maxW) w = maxW;
+    return w;
+}
+
 /* 挑选+折行 (用当前 GDI 字体度量), 结果进 g_LineBuf/g_Picked;
- * picked 条数写 *pPicked, 返回总行数。 */
+ * picked 条数写 *pPicked, 返回总行数。
+ * 行预算三道闸 (操作与战斗提示):
+ *   - rowBudget  = 总行数上限 (HintMaxLines);
+ *   - opRowCap   = "操作提示"路的行数上限 (HintOpMaxLines);
+ *   - radarCap   = "雷达事件"路的行数上限 (rowBudget - opRowCap)。
+ * 三道闸各自独立 ⇒ 一波战斗事件顶不掉操作提示那几行, 反过来也一样。
+ * 某一路的预算满了就整条跳过 (不折半显示), 免得单条长消息把预算吃光。 */
 static int PickLines(MsgRing* R, int wantSp, int ignoreTimeout, unsigned tmoMul,
-                     int textW, int rowBudget, int* pPicked)
+                     int textW, int rowBudget, int opRowCap, int* pPicked)
 {
     int picked = 0, rows = 0, i, k, total = 0;
+    int opRows = 0, radarRows = 0;
+    int radarCap = rowBudget - opRowCap;
     /* 名字前缀: 联机恒显示 (要区分发言者), 单机默认不显示 (只有自己一个名字, 是噪音)。 */
     int showName = GameIsMultiplayer() || ChatEdit_ShowNameSP();
+
+    if (radarCap < 0) radarCap = 0;
     for (i = R->count - 1; i >= 0 && picked < MAX_PICKED && rows < rowBudget; i--)
     {
         ChatMsg* m = MsgAt(R, i);
         const wchar_t* body;
         const wchar_t* seg;
         int cnt = 0, off = 0;
+        int cap;                       /* 这一条所属路的行数上限 */
         if (m->sp != wantSp) continue;
-        if (!ignoreTimeout && !MsgVisibleMul(m, tmoMul)) continue;
+        /* ignoreTimeout (展开态) 只冻住雷达事件历史 —— 操作提示照常按引擎
+         * 超时消失, 免得展开时框里堆着一堆早就该走的操作提示。 */
+        if (m->kind == KIND_RADAR)
+        {
+            if (!ignoreTimeout && !MsgVisibleMul(m, 1)) continue;
+            cap = radarCap;
+            if (radarRows >= cap) continue;
+        }
+        else
+        {
+            if (!ignoreTimeout && !MsgVisibleMul(m, tmoMul)) continue;
+            cap = opRowCap;
+            if (opRows >= cap) continue;
+        }
         if (m->name[0] && showName)
         {
             wchar_t* comp = g_Compose[picked];
@@ -693,6 +1027,8 @@ static int PickLines(MsgRing* R, int wantSp, int ignoreTimeout, unsigned tmoMul,
             if (*seg == L'\n') { seg++; off++; }
         }
         if (cnt <= 0) continue;
+        if (m->kind == KIND_RADAR) radarRows += cnt;
+        else opRows += cnt;
         g_LineCnt[picked] = cnt;
         g_Picked[picked] = i;
         picked++;
@@ -723,6 +1059,7 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
 {
     int fontPx, adv, maxW, textW, x, y;
     int picked = 0, totalAll, k, r, rowCursor, rowBegin, rowEnd, limit, totalRows, skip = 0;
+    int rowBudget = 0;
     int drawn = 0, boardOp = 0;
     RectangleStruct rect;
     ColorStruct board;
@@ -732,9 +1069,20 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
     if (!GdiEnsure(fontPx, B->bold, B->slot, B->face)) return -1;
     adv = g_G->adv > 0 ? g_G->adv : bitLineH;
 
+    /* 雷达事件行的命中区与悬停区本框独占, 每帧先清空 (放在所有提前返回之前):
+     * 框空掉/画不出时表也必须是空的, 否则上一帧的行还能点。 */
+    if (B->pickHits) { g_ReHitN = 0; g_HintZonesOk = 0; }
+
     maxW = MsgBoxGeom(screenW, B->maxW, B->maxWPm, B->centered, B->x, &x);
     textW = maxW;
     if (textW < 40) textW = 40;
+
+    /* 可见窗口恒为 B->limit (= HintMaxLines), 不另设行数。
+     * 展开态改的是**挑选预算**: 收起只挑还活着的 (≤ limit), 展开把过期但
+     * 仍留环里的历史也挑进来 (预算放到 MAX_PICKED) —— totalAll 于是能超过
+     * limit, 滚动条/滚轮才有东西可翻。窗口大小始终不变。 */
+    limit = B->limit;
+    rowBudget = B->expanded ? MAX_PICKED : B->rowBudget;
 
     /* 输入框锚点缓存: 必须在下面所有提前返回之前写。
      * 底部取底边, 顶部取顶边, 均与行数无关、不随条数抖。 */
@@ -747,7 +1095,8 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
         g_AnchorValid = 1;
     }
 
-    totalAll = PickLines(B->ring, B->wantSp, B->ignoreTimeout, B->tmoMul, textW, B->rowBudget, &picked);
+    totalAll = PickLines(B->ring, B->wantSp, B->ignoreTimeout, B->tmoMul, textW,
+                        rowBudget, B->opRowCap, &picked);
     if (picked <= 0 || totalAll <= 0) return 0;
     /* 打字机揭示位: 原版速率 1 字/16ms (AnimPos += (time-timing)>>4) 与首帧 1 字;
      * 时钟与 born 同系 (游戏时钟, 暂停即停); 关 anim 整串即时 (提示框/原版 sp=1 同)。 */
@@ -765,16 +1114,19 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
             }
         }
     }
-    limit = B->limit;
     if (limit > totalAll) limit = totalAll;
 
-    if (B->pSkip)
+    if (B->pScroll)
     {
-        if (g_Skip > 0 && totalAll > s_prevCampTotal) g_Skip += totalAll - s_prevCampTotal;
-        s_prevCampTotal = totalAll;
-        if (g_Skip > totalAll - limit) g_Skip = totalAll - limit;
-        if (g_Skip < 0) g_Skip = 0;
-        skip = g_Skip;
+        int* ps = B->pScroll;
+        if (B->pPrevTotal)
+        {
+            if (*ps > 0 && totalAll > *B->pPrevTotal) *ps += totalAll - *B->pPrevTotal;
+            *B->pPrevTotal = totalAll;
+        }
+        if (*ps > totalAll - limit) *ps = totalAll - limit;
+        if (*ps < 0) *ps = 0;
+        skip = *ps;
     }
 
     rowCursor = totalAll;
@@ -810,6 +1162,7 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
         ChatMsg* m = MsgAt(B->ring, g_Picked[k]);
         ColorStruct fg;
         void* scheme = NULL;
+        int isRadar = (m->kind == KIND_RADAR);
         if (B->schemeColor)
         {
             /* 消息自带色 (自己的话已在 AddMessageHook 入口改过栈上参数,
@@ -843,6 +1196,31 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
                 wr.Height = adv + (vi == 0 ? 2 : 0) + (vi == totalRows - 1 ? 2 : 0);
                 GtFillRectTrans(surf, &wr, &board, boardOp);
             }
+            /* 雷达事件行: 记命中区 (只有行首几个字宽) + 悬停提亮做"可点"示意。
+             * 命中区在 Blit 之前写, 免得覆盖到还没解完的字。 */
+            if (isRadar && B->pickHits)
+            {
+                int hx = x - 3;
+                int hw = ReHitWidth(g_LineBuf[k][r].start, vis, adv, maxW + 3);
+                if (g_ReHitN < MAX_RE_HIT)
+                {
+                    ReHit* hit = &g_ReHit[g_ReHitN++];
+                    hit->x = hx; hit->y = ly - 2; hit->w = hw; hit->h = adv + 4;
+                    hit->cx = m->cellX; hit->cy = m->cellY;
+                }
+                if (g_Cfg.HintRadarClick)
+                {
+                    int mx = -1, my = -1;
+                    if (GtMouseGameXY(&mx, &my) &&
+                        mx >= hx && mx < hx + hw && my >= ly - 2 && my < ly - 2 + adv + 4)
+                    {
+                        RectangleStruct mk;
+                        mk.X = hx; mk.Y = ly - 2; mk.Width = 2; mk.Height = adv + 4;
+                        GtFillRectTrans(surf, &mk, &fg, 90 * B->fade / 100);
+                        fg.R = 255; fg.G = 240; fg.B = 160;
+                    }
+                }
+            }
             /* 阴影 (战役框底板透明度 0 时跳过; 提示框 0 也画; ShadowSize>1 加厚) */
             if (g_Cfg.Shadow && g_Cfg.ShadowOpacity > 0 &&
                 (boardOp > 0 || B->shadowNoBoard))
@@ -862,6 +1240,15 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
 
     /* 记下战役框矩形 (滚轮命中 + 悬停用) */
     if (B->pSkip) { g_CampRect = rect; g_CampValid = 1; }
+
+    /* 悬停区: 整框 + 末行那一行高的触发区。底边锚定 ⇒ 末行位置与总行数无关,
+     * 展开/收起都不会抖。收起时只认 trigger 才展开; 展开后框内任意位置
+     * 都留着, 鼠标才能移上去点历史条目。 */
+    if (B->pickHits)
+    {
+        g_HintBox = rect;
+        g_HintZonesOk = 1;
+    }
 
     if (B->bar && totalAll > limit)
     {
@@ -894,6 +1281,63 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
     return 1;
 }
 
+/* ---------------- 雷达事件行点击 → 视口跳转 ----------------
+ * 格 (X,Y) → 格心 lepton 后调 TacticalClass::SetTacticalPosition。
+ * 不经 MapClass::GetTargetCell 查格高: 点击门时机 Cells 表可能在重建,
+ * 查表会崩, 省掉只差半个格高。SetTacticalPosition 只读 ViewBounds, 不碰 Cells。
+ * 联机安全: 只动本地摄像机, 不写模拟对象、不发事件。 */
+typedef struct { int X, Y, Z; } Crd;
+typedef void (__attribute__((thiscall)) *FnSetTacticalPos)(void*, const Crd*);
+
+static void MsgText_JumpToCell(short cx, short cy)
+{
+    void* tac = *(void**)ADDR_TACTICAL;
+    Crd c;
+
+    if (!IsPlausiblePtr(tac)) return;
+    c.X = ((int)cx << 8) + 0x80;
+    c.Y = ((int)cy << 8) + 0x80;
+    c.Z = 0;
+    ((FnSetTacticalPos)(size_t)ADDR_SET_TACTICAL_POS)(tac, &c);
+}
+
+/* 落点是不是某条雷达事件行。命中返回 1 并写出目标格。 */
+static int MsgText_HitRadarRow(int mx, int my, short* pcx, short* pcy)
+{
+    int i;
+    for (i = 0; i < g_ReHitN; i++)
+    {
+        ReHit* h = &g_ReHit[i];
+        if (mx < h->x || mx >= h->x + h->w) continue;
+        if (my < h->y || my >= h->y + h->h) continue;
+        *pcx = h->cx; *pcy = h->cy;
+        return 1;
+    }
+    return 0;
+}
+
+/* 点击门 (0x69234B): 落在雷达事件行上跳视口并吞掉这次地图点击,
+ * 否则返回 0 走原版。门内读按键加已处理标记, 保证一次按下只处理一次。 */
+extern "C" __declspec(dllexport) unsigned __cdecl MsgText_RadarClickGate(void* regs)
+{
+    static int s_LbPress = 0;
+    int mx, my, lb;
+    short cx = 0, cy = 0;
+    (void)regs;
+
+    if (!g_Cfg.Enable || !g_Cfg.HintShow || !g_Cfg.HintRadarClick ||
+        !g_Cfg.HintRadarShow || g_ReHitN <= 0)
+        return 0;
+    lb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
+    if (!lb) { s_LbPress = 0; return 0; }   /* 松开: 下一次按下重新允许处理 */
+    if (s_LbPress) return 0;                /* 本次按下已处理过 (按住拖动不重复) */
+    s_LbPress = 1;
+    if (!GtMouseGameXY(&mx, &my)) return 0;
+    if (!MsgText_HitRadarRow(mx, my, &cx, &cy)) return 0;
+    MsgText_JumpToCell(cx, cy);
+    return ADDR_CLICKGATE_SKIP;
+}
+
 /* 触发条几何: 与战役文本框同 x / 同宽、1 行高, 底部时底边固定向上增长。
  * 返回战役字体行高 adv (GDI 未就绪时回退估算)。 */
 static int CampTriggerRect(int bitLineH, int screenW, int surfH, RectangleStruct* out)
@@ -916,6 +1360,34 @@ static int CampTriggerRect(int bitLineH, int screenW, int surfH, RectangleStruct
     out->Width = maxW + 6;
     out->Height = adv + 4;
     return adv;
+}
+
+/* 末行触发区的几何: **不依赖本帧画没画出内容**, 和战役框的 CampTriggerRect
+ * 一个路子。底边锚定 ⇒ 末行位置与总行数无关, 展开/收起都不抖。
+ * 所以"一条信息都不剩"时触发区照样在那儿, 悬停它照样能把历史拉出来。 */
+static void HintTriggerGeom(int bitLineH, int screenW, int surfH,
+                           RectangleStruct* out)
+{
+    int fontPx, adv, maxW, x;
+    fontPx = g_Cfg.HintFontHeight > 0 ? g_Cfg.HintFontHeight : bitLineH;
+    if (fontPx <= 0) fontPx = bitLineH;
+    if (GdiEnsure(fontPx, g_Cfg.HintBold, 1, g_HintFace))
+        adv = (g_G->adv > 0 ? g_G->adv : fontPx + 2);
+    else
+        adv = fontPx + 2;
+    maxW = MsgBoxGeom(screenW, g_Cfg.HintMaxWidth, 0, 0, g_Cfg.HintPosX, &x);
+    out->X = x - 3;
+    out->Width = maxW + 6;
+    /* 与 DrawBox 的末行命中带同一口径 (ly-2, 高 adv+4):
+     * 末行 ly = surfH - bottomMargin - adv - 2 */
+    out->Y = surfH - g_Cfg.HintBottom - adv - 4;
+    out->Height = adv + 4;
+}
+
+static int InRectXY(int mx, int my, RectangleStruct* r)
+{
+    return (mx >= r->X && mx < r->X + r->Width &&
+            my >= r->Y && my < r->Y + r->Height);
 }
 
 /* 输入框锚点 (供 ChatEdit.cpp): 底部贴战役框下沿+6px, 顶部贴战役框顶边。
@@ -962,7 +1434,7 @@ static int MouseInTriggerRect(int mx, int my, int bitLineH, int screenW, int sur
             my >= tr.Y - 4 && my < tr.Y + tr.Height + 4);
 }
 
-/* 渲染期主体: 战役框可见性/淡入淡出 + 触发条绿框 + 战役框 + 提示框。
+/* 渲染期主体: 战役框可见性/淡入淡出 + 触发条绿框 + 战役框 + 操作与战斗提示。
  * 返回 1=画出, 0=无内容, -1=GDI失败, -2=Lock失败。 */
 int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
                       int surfW, int surfH, int surfPitch)
@@ -1031,6 +1503,10 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
         }
         s_lastClock = nowC;
     }
+
+    /* 雷达事件: 扫引擎的活对象表, 把新冒出来的事件写进提示环。
+     * 放在排版之前 —— 本帧排版就能看见刚发生的事件。 */
+    if (g_Cfg.HintShow && g_Cfg.HintRadarShow) MsgText_PollRadar();
 
     /* 战役框可见性: 有活消息, 或鼠标悬停 (已画出的框区/触发条);
      * 超时隐藏后, 鼠标移到触发条 (与顶部文本左右对齐的 1 行高绿框)
@@ -1119,34 +1595,77 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
     camp.autoBottom = g_Cfg.CampBottom; camp.bottomMargin = g_Cfg.CampBottomMargin;
     camp.centered = g_Cfg.CampCentered;
     camp.maxW = g_Cfg.MaxWidth; camp.maxWPm = g_Cfg.MaxWidthPm;
-    camp.limit = g_Cfg.MaxLines; camp.rowBudget = 400;
+    camp.limit = g_Cfg.MaxLines; camp.rowBudget = 400; camp.opRowCap = 400;
     camp.opacity = g_Cfg.BoardOpacity; camp.shadowNoBoard = 0;
     camp.fontPx = g_Cfg.FontHeight; camp.bold = g_Cfg.Bold;
     camp.pSkip = &g_Skip;
+    camp.pScroll = &g_Skip; camp.pPrevTotal = &s_prevCampTotal;
     camp.anim = g_Cfg.CampAnim;
     camp.ring = &g_CampRing;
     camp.schemeColor = 1;
     camp.tmoMul = 1;
     camp.slot = 0;
+    camp.pickHits = 0;
+    camp.expanded = 0;
     camp.face = g_CampFace;
 
-    /* 提示框: 左下, sp=1 自然消失 */
-    hint.wantSp = 1; hint.ignoreTimeout = 0;
+    /* 操作与战斗提示的展开态。触发区几何独立算 (HintTriggerGeom), 不看本帧
+     * 有没有内容 —— 所以一条信息都不剩时, 悬停末行照样能把历史拉出来。
+     * 收起时只认末行触发区; 一旦展开, 框内任意位置都算悬停, 鼠标才能往上
+     * 移去点历史条目。 */
+    if (g_Cfg.HintShow && g_Cfg.HintRadarShow)
+    {
+        int hmx = -1, hmy = -1;
+        if (GtMouseGameXY(&hmx, &hmy))
+        {
+            RectangleStruct tr;
+            HintTriggerGeom(bitLineH, screenW, surfH, &tr);
+            if (InRectXY(hmx, hmy, &tr) || (s_hintExpand && g_HintZonesOk &&
+                                            InRectXY(hmx, hmy, &g_HintBox)))
+                s_hintExpand = 1;
+            else
+                s_hintExpand = 0;
+        }
+        else s_hintExpand = 0;
+    }
+    else s_hintExpand = 0;
+    /* 展开/收起切换时把滚动位置归零 (同战役框 hover 变化时清 g_Skip)。 */
+    {
+        static int s_lastExpand = -1;
+        if (s_lastExpand != s_hintExpand) { s_lastExpand = s_hintExpand; g_HintSkip = 0; }
+    }
+
+    /* 操作与战斗提示: 左下, sp=1 自然消失。
+     * HintMaxLines = 框里最多同时显示几行; 其中操作提示最多占 HintOpMaxLines,
+     * 剩下的行数给雷达事件 (见 PickLines 的三道闸)。
+     * 雷达事件到 HintRadarHold 就过期; 悬停末行触发区展开后, 过期但仍留环
+     * 里的也算进来 —— 窗口还是 HintMaxLines 行, 多的用滚轮翻。 */
+    hint.wantSp = 1;
+    hint.ignoreTimeout = 0;   /* 真正生效的那个在下面 (展开态才置 1) */
     hint.x = g_Cfg.HintPosX; hint.yBase = 0; hint.topGap = 0;
     hint.autoBottom = 1; hint.bottomMargin = g_Cfg.HintBottom;
     hint.centered = 0;
     hint.maxW = g_Cfg.HintMaxWidth; hint.maxWPm = 0;
     hint.limit = g_Cfg.HintMaxLines;
     hint.rowBudget = g_Cfg.HintMaxLines;
+    hint.opRowCap = g_Cfg.HintRadarShow ? g_Cfg.HintOpMaxLines : g_Cfg.HintMaxLines;
     hint.opacity = g_Cfg.HintOpacity; hint.shadowNoBoard = 1;  /* 0=无底但阴影照画 */
     hint.fade = 100;   /* 提示框不渐隐, 行为不变 */
     hint.fontPx = g_Cfg.HintFontHeight; hint.bold = g_Cfg.HintBold;
-    hint.pSkip = NULL; hint.bar = 0;
+    hint.pSkip = NULL;   /* 聊天输入框锚点只归战役框 */
+    hint.pScroll = &g_HintSkip; hint.pPrevTotal = &s_prevHintTotal;
+    /* 滚动条: 收起时 totalAll<=limit 天然不画, 展开看到更多行才出来 */
+    hint.bar = 1;
     hint.fullBoard = 1; hint.anim = 0;   /* 提示框行为不变: 整块底板+整行即时 */
     hint.ring = &g_HintRing;
     hint.schemeColor = g_Cfg.HintColorFollow;
     hint.tmoMul = (unsigned)g_Cfg.HintTimeoutMul;
     hint.slot = 1;
+    hint.pickHits = g_Cfg.HintRadarShow;
+    hint.expanded = s_hintExpand;
+    /* 展开时冻住雷达事件历史 (免得看着看着行就过期没了, 点不中);
+     * 操作提示不吃这个 ignoreTimeout, 照常按引擎超时走 (见 PickLines)。*/
+    hint.ignoreTimeout = s_hintExpand;
     hint.face = g_HintFace;
 
     /* 触发条绿框 (测试可视化, 不带文本): 与战役文本框同 x / 同宽、1 行高
@@ -1175,11 +1694,20 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
     {
         static int s_lastHint = -1;
         int on;
+        RectangleStruct tr;
         rc = DrawBox(surf, &hint, bitLineH, screenW, surfW, surfH, surfPitch);
         on = (rc == 1);
         if (on != s_lastHint) { s_lastHint = on; LogHintWhy(on); }
         if (rc < 0) return rc;
         if (rc == 1) drew = 1;
+        /* 框空的时候把末行触发区画出来 (ShowHotZone 调试用): 免得"一条信息都
+         * 不剩"时那块地方看着什么都没有, 用户不知道那儿能悬停翻历史。 */
+        if (!on && g_Cfg.ShowHotZone)
+        {
+            HintTriggerGeom(bitLineH, screenW, surfH, &tr);
+            GtDrawOutline(surf, tr.X, tr.Y, tr.Width, tr.Height, 0, 255, 0, 90);
+            drew = 1;
+        }
     }
 
     /* 显示态悬停范围可视化 (调试): 有框才描白框 */
@@ -1191,11 +1719,25 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
 }
 
 /* 滚轮接管: 命中战役框则翻历史并吞掉滚轮, 返回 1=已吞。
- * dirUp: 1=上滚 (往更新的看), 0=下滚 (翻历史)。 */
+ * 操作与战斗提示只在**展开态**才接滚轮 (收起时只有 HintMaxLines 行, 本来
+ * 就没得滚)。两框语义一致: 最新的一行在**下**底, 所以上滚=往新的看。 */
 int MsgText_WheelIn(int mx, int my, int dirUp)
 {
     static unsigned s_wheelN = 0;
-    if (!g_Cfg.Enable || !g_CampValid) return 0;
+    if (!g_Cfg.Enable) return 0;
+
+    if (s_hintExpand && g_HintZonesOk && InRectXY(mx, my, &g_HintBox))
+    {
+        /* 与战役框同语义: 最新的一行在**下**底, 上滚=往新的看。 */
+        if (dirUp)
+        {
+            g_HintSkip -= g_Cfg.ScrollStep;
+            if (g_HintSkip < 0) g_HintSkip = 0;
+        }
+        else g_HintSkip += g_Cfg.ScrollStep;
+        return 1;
+    }
+    if (!g_CampValid) return 0;
     if (!MouseInCampRect(mx, my)) return 0;
     if (dirUp)
     {

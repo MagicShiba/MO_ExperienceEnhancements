@@ -175,19 +175,27 @@ static int g_DTBody = 0;
 
 /* ---------------- 简报正文自绘 ---------------- */
 #define BRIEF_BOTTOM_MAX 1000
+/* 字形光栅原点 (DIB 内), 左右留边距, 纵轴用 TA_TOP。 */
+#define GL_M 8
+#define GL_Y0 8
 
-/* fnt 格高, 行距下限 */
+/* 点阵字格高, 行距下限的兜底。 */
 static int g_BriefOrigH = 0;
+/* 字体自然行高 (GdiSlot.cell), 行距下限用 */
+static int VecRefTextH(void);
 
-/* 行距 = 字号 × BriefLine%, 下限格高。 */
+/* 行距 = max(点阵格高, 字号 x BriefLine%, 字体自然行高 tmHeight)。
+ * 最后一项兜底: 行高小于一行字的高度, 相邻两行就会咬在一起。 */
 static int VecBriefLineH(int px)
 {
     int h = (g_BriefOrigH > 0) ? g_BriefOrigH : px;
+    int cell = VecRefTextH();
     if (g_VT.BriefLine > 0)
     {
         int v = (px * g_VT.BriefLine + 50) / 100;
         if (v > h) h = v;
     }
+    if (cell > h) h = cell;
     if (h > VC_MAXH) h = VC_MAXH;
     if (h < 8) h = 8;
     return h;
@@ -197,22 +205,20 @@ static int VecBriefLineH(int px)
  * Blit 抢首字整块自绘, 之后逐字抑制。
  * state: 0=未定 1=已接管 2=不可用。 */
 static wchar_t* g_BriefStr = NULL;
-static int g_BriefX = 0, g_BriefY = 0, g_BriefW = 0, g_BriefH = 0;
+static int g_BriefX = 0, g_BriefY = 0, g_BriefW = 0;
 static int g_BriefState = 0;
 static int g_BriefOwnLogged = 0;
 static int g_BriefWhyLogged = 0;
 
 static int VecPickPx(void* t);
 static int VecMeasure(void* t, wchar_t wch, int* ph);
-static void VecBriefProbeW(wchar_t wch, int oa, int cw, int full);
 /* 简报单字格宽 = 字体前进宽 + 字距 */
 static int VecBriefCellW(void* font, wchar_t ch, int px, int tr);
 static int VecGdiSlot(int px);
 static int VecRender(void* t, wchar_t wch, int adv, int h, int x, int y,
                      int colorW, int px, int yOff);
 
-/* ---------------- 简报正文自绘 ----------------
- * 引擎排版绑死 fnt 度量, 行高/字宽/换行互相牵制, 故整块自绘:
+/* 简报整块自绘: 引擎排版绑死 fnt 度量, 行高/字宽/换行互相牵制, 故整块自绘:
  * 行高跟 BriefLine, 字距跟 BriefTrack, 换行按墨水宽。
  * 面与颜色与引擎同源 (font+0x0C/+0x10/+0x30/+0x24)。
  * 返回 0=已接管, -1=走引擎。 */
@@ -297,12 +303,8 @@ static void VecBriefWhy(int why, int v)
     LogLine(buf);
 }
 
-/* 单字格宽 = 字体自己的前进宽 (ABC 全宽) + 字距。
- * 这才是一切正常排版的做法 (GDI DrawText / DirectWrite / 浏览器都是
- * 逐字取 advance 再加 letter-spacing):
- *   汉字/CJK 标点 = 1 em (18px), 拉丁按字形比例, 空格窄。
- * 用统一格宽 (或引擎 fnt 宽度表) 排 CJK 混排, 宽窄不一的字就会
- * 间距忽大忽小 —— fnt 那张表是 16x16 点阵时代的产物, 逐字不同。 */
+/* 单字格宽 = 字体前进宽 (ABC 全宽) + 字距, 与 GDI/DirectWrite 同规则。
+ * 不用统一格宽或引擎 fnt 宽度表, 否则 CJK 混排间距不均。 */
 static int VecBriefCellW(void* font, wchar_t ch, int px, int tr)
 {
     int ga;
@@ -317,10 +319,11 @@ static int VecBriefCellW(void* font, wchar_t ch, int px, int tr)
     return ga + tr;
 }
 
-static int VecBriefBody(void* font, const wchar_t* s,
-                       int x, int y, int w)
+/* 简报正文整块自绘: 行高跟 BriefLine, 字距跟 BriefTrack, 换行按墨水宽。
+ * 返回 0=已接管, -1=走引擎。 */
+static int VecBriefBody(void* font, const wchar_t* s, int x, int y, int w)
 {
-    int px, lh, tr, adv, color, cx, cy, lines, seg, per, want, oldB, n, oa;
+    int px, lh, cell, tr, adv, color, cx, cy, lines, seg, per, want, oldB, n, oa;
     int pitchW, maxCx, maxY, oldL, oldT, oldR;
     int* LTRB;
     const wchar_t* p;
@@ -335,18 +338,19 @@ static int VecBriefBody(void* font, const wchar_t* s,
         w = g_VT.BriefWidth;
     px = VecPickPx(font);
     if (px < 8 || px > 40) { VecBriefWhy(6, px); return -1; }
-    lh = VecBriefLineH(px);
+    /* GDI 面先备好, 与字形光栅同槽 (行高下限要读它的 tmHeight)。 */
+    if (!GdiEnsure(px, g_VT.Bold, VecGdiSlot(px), g_VTFace)) { VecBriefWhy(9, 0); return -1; }
     tr = g_VT.BriefTrack;
     if (tr < 0) tr = 0;
     if (tr > VC_MAXW - px) tr = VC_MAXW - px;
     adv = px + tr;                       /* 全角格宽 = 字号 + 字距 */
-    color = (int)(*(unsigned short*)((char*)font + 0x24));
-    maxY = VecBriefMaxY();
-    if (maxY < 0) { VecBriefWhy(7, 0); return -1; }
     per = w / adv;
     if (per < 1) { VecBriefWhy(8, per); return -1; }
-    /* GDI 面先备好, 与字形光栅同槽 */
-    if (!GdiEnsure(px, g_VT.Bold, VecGdiSlot(px), g_VTFace)) { VecBriefWhy(9, 0); return -1; }
+    maxY = VecBriefMaxY();
+    if (maxY < 0) { VecBriefWhy(7, 0); return -1; }
+    cell = VecRefTextH();
+    lh = VecBriefLineH(px);
+    color = (int)(*(unsigned short*)((char*)font + 0x24));
 
     /* 行数预估: 与折行同规则跑一遍。 */
     lines = 1;
@@ -397,7 +401,6 @@ static int VecBriefBody(void* font, const wchar_t* s,
         else
             cw = adv;
         if (cw > VC_MAXW) cw = VC_MAXW;
-        VecBriefProbeW(*p, oa, cw, adv);
         if (cx + cw > x + w) { cx = x; cy += lh; }
         if (cy + lh > y + lines * lh + lh) break;
         /* 摆位格去掉字距, 字距由笔位加。 */
@@ -429,6 +432,8 @@ static int VecBriefBody(void* font, const wchar_t* s,
         UtoA((unsigned)adv, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         q = AppendCStr(buf, q, " lines=", sizeof(buf));
         UtoA((unsigned)lines, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
+        q = AppendCStr(buf, q, " cell=", sizeof(buf));
+        UtoA((unsigned)cell, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         q = AppendCStr(buf, q, " pitch=", sizeof(buf));
         UtoA((unsigned)pitchW, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         q = AppendCStr(buf, q, " maxY=", sizeof(buf));
@@ -438,77 +443,6 @@ static int VecBriefBody(void* font, const wchar_t* s,
     return 0;
 }
 
-/* 字宽抽查: 前 8 个不同字各记一条。 */
-static void VecBriefProbeW(wchar_t wch, int oa, int cw, int full)
-{
-    static unsigned seen[8];
-    static int seenN = 0;
-    static const char* hexd = "0123456789ABCDEF";
-    char b1[16], buf[96];
-    unsigned q;
-    int i, k;
-    unsigned wc = (unsigned)wch & 0xFFFFu;
-    for (i = 0; i < seenN; i++) if (seen[i] == wc) return;
-    if (seenN >= 8) return;
-    seen[seenN++] = wc;
-    q = AppendCStr(buf, q = 0, "brief: w U+", sizeof(buf));
-    for (k = 0; k < 4; k++)
-        q = AppendCh(buf, q, hexd[(wc >> (12 - 4 * k)) & 15u], sizeof(buf));
-    q = AppendCStr(buf, q, " gdi=", sizeof(buf));
-    UtoA((unsigned)(oa > 0 ? oa : 0), b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCStr(buf, q, " cell=", sizeof(buf));
-    UtoA((unsigned)cw, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCStr(buf, q, " full=", sizeof(buf));
-    UtoA((unsigned)full, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    LogLine(buf);
-}
-
-/* 简报 DrawText 普查: 每个 (调用者,x,y,w,h) 只记一条。
- * 纯诊断 (LogDetail=1 才记, 默认不记): 普查定案后即噪音, 16 槽一满未命中全漏记。 */
-static void VecBriefProbe(unsigned caller, int x, int y, int w, int h,
-                             int txt, const char* tag)
-{
-    static unsigned seen[16][5];
-    static int seenN = 0;
-    char b1[16], buf[160];
-    unsigned q;
-    int i, len = 0;
-    const wchar_t* p = 0;
-    if (!g_LogDetail) return;
-    for (i = 0; i < seenN; i++)
-        if (seen[i][0] == caller && seen[i][1] == (unsigned)x &&
-            seen[i][2] == (unsigned)y && seen[i][3] == (unsigned)w &&
-            seen[i][4] == (unsigned)h)
-            return;
-    if (seenN < 16)
-    {
-        seen[seenN][0] = caller; seen[seenN][1] = (unsigned)x;
-        seen[seenN][2] = (unsigned)y; seen[seenN][3] = (unsigned)w;
-        seen[seenN][4] = (unsigned)h;
-        seenN++;
-    }
-    p = (const wchar_t*)(size_t)txt;
-    if (p && IsPlausiblePtr((void*)p))
-        while (len < 9999 && p[len]) len++;
-    else
-        p = 0;
-    q = 0;
-    q = AppendCStr(buf, q, "brief: dt ", sizeof(buf));
-    UtoA(caller, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCh(buf, q, ' ', sizeof(buf));
-    UtoA((unsigned)x, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCh(buf, q, ',', sizeof(buf));
-    UtoA((unsigned)y, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCh(buf, q, ' ', sizeof(buf));
-    UtoA((unsigned)w, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCh(buf, q, 'x', sizeof(buf));
-    UtoA((unsigned)h, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCh(buf, q, ' ', sizeof(buf));
-    UtoA((unsigned)len, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCh(buf, q, ' ', sizeof(buf));
-    q = AppendCStr(buf, q, tag, sizeof(buf));
-    LogLine(buf);
-}
 
 /* 原版格高 */
 static int g_FontOrigH = 19;
@@ -775,14 +709,8 @@ int __fastcall VecDrawTextEntry(void* t, void* e,
     if (brief && caller == 0x621144u && a6 >= 400 && a7 >= 100)
     {
         g_BriefStr = (wchar_t*)(size_t)a3;
-        g_BriefX = a4; g_BriefY = a5; g_BriefW = a6; g_BriefH = a7;
+        g_BriefX = a4; g_BriefY = a5; g_BriefW = a6;
         g_BriefState = 0;
-        VecBriefProbe(caller, a4, a5, a6, a7, a3,
-                      g_VT.BriefOwn ? "own" : "eng");
-    }
-    else if (brief)
-    {
-        VecBriefProbe(caller, a4, a5, a6, a7, a3, "eng");
     }
     if (brief)
     {
@@ -1405,6 +1333,10 @@ typedef struct {
     int adv;
     int h;
     int outh;
+    /* 逐字测量: 本字墨水高 + 墨水顶到基线的距离 + 光栅时的字体行度量。 */
+    int asc;       /* 墨水顶 -> 基线 */
+    int cell;      /* 字体自然行高 (tmHeight) */
+    int ascd;      /* 行格内基线偏移 (tmAscent) */
     int fullW;
     int gdiW;
     int off, inkW;
@@ -1416,53 +1348,11 @@ typedef struct {
 
 static VCEnt g_VC[VC_MASK + 1];
 
-/* ---------------- 基准窗校准 ----------------
- * 首用时取 永/g 并集为垂直窗, 之后共用 1:1 输出。 */
-#define GL_M 8
-#define GL_Y0 8
-
-static int g_RefValid = 0;
-static int g_RefPx = -1, g_RefBold = -1, g_RefT = 0, g_RefB = 0;
-/* 字体键存指针 (g_VTFace 初始化后不变, 逐字判等省循环)。 */
-static const wchar_t* g_RefFace = NULL;
-
-static void VecRefScan(wchar_t ch, int* pT, int* pB)
+/* 字体自然行高 (tmHeight); 0 = GDI 未就绪。 */
+static int VecRefTextH(void)
 {
-    int y, x, gw, scanW;
-    unsigned char* bits;
-    int pitch;
-    if (GtRenderGlyphAt(ch, GL_M, GL_Y0, NULL) <= 0) return;
-    gw = 0;
-    {
-        SIZE sz;
-        if (g_G && g_G->dc && GetTextExtentPoint32W(g_G->dc, &ch, 1, &sz))
-            gw = sz.cx;
-    }
-    scanW = GL_M + gw + GL_M;
-    if (scanW > DIB_W) scanW = DIB_W;
-    bits = g_G->bits;
-    pitch = g_G->pitch;
-    for (y = 0; y < DIB_H; y++)
-    {
-        unsigned char* row = bits + y * pitch;
-        for (x = 0; x < scanW; x++)
-            if (row[x * 4 + 2]) { if (y < *pT) *pT = y; if (y > *pB) *pB = y; }
-    }
-}
-
-static void VecRefCalibrate(int px)
-{
-    int T, B;
-    if (g_RefValid && g_RefPx == px && g_RefBold == g_VT.Bold &&
-        g_RefFace == g_VTFace) return;
-    T = DIB_H; B = -1;
-    VecRefScan(0x6C38, &T, &B);   /* 永 */
-    VecRefScan(0x0067, &T, &B);   /* g */
-    VecRefScan(0x006A, &T, &B);   /* j */
-    if (B < T) { T = GL_Y0; B = GL_Y0 + px - 1; }   /* 量不到就退化为等同 */
-    g_RefValid = 1; g_RefPx = px; g_RefBold = g_VT.Bold;
-    g_RefT = T; g_RefB = B;
-    g_RefFace = g_VTFace;
+    if (g_G && g_G->cell >= 8 && g_G->cell <= VC_MAXH) return g_G->cell;
+    return 0;
 }
 
 /* 原版每字格内垂直居中, 墨水盒不照抄改版 fnt。 */
@@ -1559,6 +1449,9 @@ static int VecGlyphOff(wchar_t wch, int adv, int inkW, int* pg)
             if (off > adv - 1) off = adv - 1;
         }
     }
+    /* CJK 的 abcA 可能为负 (字身左出边), 须钳制 off >= 0,
+     * 否则墨水越界写入上一行且该行整行不画。 */
+    if (off < 0) off = 0;
     if (pg) *pg = gdiW;
     return off;
 }
@@ -1569,51 +1462,68 @@ static VCEnt* VecGlyph(void* t, wchar_t wch, int adv, int h, int px)
     VCEnt* e = &g_VC[idx];
     void* idata = *(void**)((char*)t + 4);
     int gw, dx, y, L, R, inkW, x, off, gdiW;
-    /* 边距: 墨水可超 extent, 顶边不顶着画。垂直用基准窗 1:1。 */
-    int scanW;
+    /* 逐字测量: 扫本字自己的墨水盒, 并记它到基线的距离。 */
+    int scanW, T, B, base, outH;
     unsigned char* bits;
     int pitch;
-    int winTop, outH;
     if (!t || !IsPlausiblePtr(t)) { g_VecWhy = 10; return NULL; }
     if (px < 8 || px > 40) { g_VecWhy = 11; return NULL; }
     if (e->used && e->wch == wch && e->idata == idata && e->px == px &&
         e->adv == adv && e->h == h && e->nat == g_VecNat)
         return e;
     if (g_PfOn) g_PfMiss++;   /* 未命中 = 一次 GDI 光栅 + DIB 清 + ABC 填充 */
-    /* 未命中: GDI 单字光栅 (带边距), 掃出真实墨水盒再摆进格子 */
+    /* 未命中: GDI 单字光栅 (带边距), 扫出本字真实墨水盒 */
     if (!GdiEnsure(px, g_VT.Bold, VecGdiSlot(px), g_VTFace)) { g_VecWhy = 12; return NULL; }
-    VecRefCalibrate(px);
     gw = GtRenderGlyphAt(wch, GL_M, GL_Y0, NULL);
     if (gw <= 0 || h > VC_MAXH) { g_VecWhy = 13; return NULL; }
     bits = g_G->bits;
     pitch = g_G->pitch;
     scanW = GL_M + gw + GL_M;
     if (scanW > DIB_W) scanW = DIB_W;
-    /* 自然高度 1:1, 不压缩。 */
-    winTop = g_RefT;
-    outH = g_RefB - g_RefT + 1;
-    if (outH < 1) outH = h;
-    if (outH > VC_MAXH) { g_VecWhy = 14; return NULL; }
-    if (winTop < 0 || winTop + outH > DIB_H) { g_VecWhy = 15; return NULL; }
-    /* 墨水盒只定左右。 */
-    L = scanW; R = -1;
-    for (y = 0; y < outH; y++)
+    /* 基线行: GL_Y0 是 TA_TOP (行顶), 基线在其下 tmAscent 处。 */
+    base = GL_Y0 + (g_G->asc > 0 ? g_G->asc : px);
+    /* 本字自己的墨水盒 (整幅 DIB, 不截)。 */
+    T = DIB_H; B = -1;
+    for (y = 0; y < DIB_H; y++)
     {
-        unsigned char* row = bits + (winTop + y) * pitch;
+        unsigned char* row = bits + y * pitch;
+        for (x = 0; x < scanW; x++)
+            if (row[x * 4 + 2]) { if (y < T) T = y; if (y > B) B = y; }
+    }
+    if (B < T)
+    {
+        /* 空白字 (空格/控制符): 留一个空行, 基线偏移按字体给。 */
+        for (y = 0; y < VC_MAXH; y++) { e->rowLo[y] = 1; e->rowHi[y] = 0; }
+        for (dx = 0; dx < VC_MAXW * VC_MAXH; dx++) e->cov[dx] = 0;
+        e->used = 1; e->wch = wch; e->idata = idata; e->px = px;
+        e->adv = adv; e->h = h; e->nat = g_VecNat;
+        e->outh = 1; e->asc = g_G->asc > 0 ? g_G->asc : px;
+        e->cell = g_G->cell > 0 ? g_G->cell : h;
+        e->ascd = g_G->asc > 0 ? g_G->asc : px;
+        e->fullW = 0; e->gdiW = 0; e->off = 0; e->inkW = 0;
+        return e;
+    }
+    outH = B - T + 1;
+    if (outH > VC_MAXH) { g_VecWhy = 14; return NULL; }
+    /* 横向墨水盒只在本字墨水行内找。 */
+    L = scanW; R = -1;
+    for (y = T; y <= B; y++)
+    {
+        unsigned char* row = bits + y * pitch;
         for (x = 0; x < scanW; x++)
             if (row[x * 4 + 2]) { if (x < L) L = x; if (x > R) R = x; }
     }
     /* 全墨水不压缩, 溢出由面界收尾。 */
     inkW = (R >= L) ? R - L + 1 : 0;
     off = VecGlyphOff(wch, adv, inkW, &gdiW);
-    if (off + inkW > VC_MAXW) { g_VecWhy = 16; return NULL; }
+    if (inkW < 0 || inkW > VC_MAXW || off < 0 ||
+        off + inkW > VC_MAXW) { g_VecWhy = 16; return NULL; }
     for (y = 0; y < outH; y++)
     {
-        unsigned char* row = bits + (winTop + y) * pitch;
+        unsigned char* row = bits + (T + y) * pitch;
         unsigned char* dst = e->cov + y * VC_MAXW;
         int lo = VC_MAXW, hi = -1;
         for (dx = 0; dx < VC_MAXW; dx++) dst[dx] = 0;
-        if (!inkW) { e->rowLo[y] = 1; e->rowHi[y] = 0; continue; }  /* 空白字 */
         for (dx = 0; dx < inkW; dx++)
         {
             unsigned char a = row[(L + dx) * 4 + 2];
@@ -1626,6 +1536,9 @@ static VCEnt* VecGlyph(void* t, wchar_t wch, int adv, int h, int px)
     e->used = 1; e->wch = wch; e->idata = idata; e->px = px; e->adv = adv; e->h = h;
     e->nat = g_VecNat;
     e->outh = outH;
+    e->asc = base - T;                       /* 墨水顶 -> 基线 */
+    e->cell = g_G->cell > 0 ? g_G->cell : h;
+    e->ascd = g_G->asc > 0 ? g_G->asc : px;
     e->fullW = off + inkW;
     e->gdiW = gdiW;
     e->off = off; e->inkW = inkW;
@@ -1666,8 +1579,12 @@ static int VecRender(void* t, wchar_t wch, int adv, int h, int x, int y,
     e = VecGlyph(t, wch, adv, h, px);
     if (!e) { if (g_VecWhy == 0) g_VecWhy = 6; return VC_FAIL; }
     GtUnpack16((unsigned short)(colorW & 0xFFFF), &fr, &fg, &fb);
-    /* 整体垂直居中, 字间相对位置不动。小矩形紧裁剪时贴上沿。 */
-    dy = y + (h - e->outh) / 2;
+    /* 垂直按基线对齐: 格内居中基线, 本字贴回 dy = 基线 - asc。 */
+    {
+        int cell = e->cell > 0 ? e->cell : h;
+        int by = y + (h - cell) / 2 + e->ascd;
+        dy = by - e->asc;
+    }
     {
         int lo = Tp, hi = B - e->outh + 1;
         if (hi >= lo)
@@ -1717,61 +1634,73 @@ typedef struct {
     void* idata;
     int px, adv, h;
     int off, inkW, outh;
+    int asc, cell, ascd;
     int gdiW;
     unsigned char cov[VC_MAXW * VC_MAXH];
 } MVEnt;
 static MVEnt g_MV[MV_MASK + 1];
 
+/* 与 VecGlyph 同一套: 逐字量本字墨水盒 + 记到基线的距离。 */
 static MVEnt* VecMenuGlyph(void* t, wchar_t wch, int adv, int h, int px)
 {
     unsigned idx = ((unsigned)wch) & MV_MASK;
     MVEnt* e = &g_MV[idx];
     void* idata = *(void**)((char*)t + 4);
     int gw, dx, y, L, R, inkW, x, off, gdiW;
-    int scanW;
+    int scanW, T, B, base, outH;
     unsigned char* bits;
     int pitch;
-    int winTop, outH;
     if (!t || !IsPlausiblePtr(t)) return NULL;
     if (px < 8 || px > 40) return NULL;
     if (e->used && e->wch == wch && e->idata == idata && e->px == px &&
         e->adv == adv && e->h == h)
         return e;
     if (!GdiEnsure(px, g_VT.Bold, VecGdiSlot(px), g_VTFace)) return NULL;
-    VecRefCalibrate(px);
     gw = GtRenderGlyphAt(wch, GL_M, GL_Y0, NULL);
     if (gw <= 0 || h > VC_MAXH) return NULL;
     bits = g_G->bits;
     pitch = g_G->pitch;
     scanW = GL_M + gw + GL_M;
     if (scanW > DIB_W) scanW = DIB_W;
-    winTop = g_RefT;
-    outH = g_RefB - g_RefT + 1;
-    if (outH < 1) outH = h;
-    if (outH > VC_MAXH) return NULL;
-    if (winTop < 0 || winTop + outH > DIB_H) return NULL;
-    L = scanW; R = -1;
-    for (y = 0; y < outH; y++)
+    base = GL_Y0 + (g_G->asc > 0 ? g_G->asc : px);
+    T = DIB_H; B = -1;
+    for (y = 0; y < DIB_H; y++)
     {
-        unsigned char* row = bits + (winTop + y) * pitch;
+        unsigned char* row = bits + y * pitch;
         for (x = 0; x < scanW; x++)
-            if (row[x * 4 + 2]) { if (x < L) L = x; if (x > R) R = x; }
+            if (row[x * 4 + 2]) { if (y < T) T = y; if (y > B) B = y; }
     }
-    inkW = (R >= L) ? R - L + 1 : 0;
-    off = VecGlyphOff(wch, adv, inkW, &gdiW);
-    if (off + inkW > VC_MAXW) return NULL;
+    if (B < T) { outH = 1; T = base; inkW = 0; off = 0; }
+    else
+    {
+        outH = B - T + 1;
+        if (outH > VC_MAXH) return NULL;
+        L = scanW; R = -1;
+        for (y = T; y <= B; y++)
+        {
+            unsigned char* row = bits + y * pitch;
+            for (x = 0; x < scanW; x++)
+                if (row[x * 4 + 2]) { if (x < L) L = x; if (x > R) R = x; }
+        }
+        inkW = (R >= L) ? R - L + 1 : 0;
+        off = VecGlyphOff(wch, adv, inkW, &gdiW);
+        if (inkW < 0 || inkW > VC_MAXW || off < 0 ||
+            off + inkW > VC_MAXW) return NULL;
+    }
     for (y = 0; y < outH; y++)
     {
-        unsigned char* row = bits + (winTop + y) * pitch;
+        unsigned char* row = bits + (T + y) * pitch;
         unsigned char* dst = e->cov + y * VC_MAXW;
         for (dx = 0; dx < VC_MAXW; dx++) dst[dx] = 0;
-        if (!inkW) continue;   /* 空白字: 占宽, 不画 */
         for (dx = 0; dx < inkW; dx++)
             dst[off + dx] = row[(L + dx) * 4 + 2];
     }
     e->used = 1; e->wch = wch; e->idata = idata; e->px = px; e->adv = adv;
     e->h = h; e->off = off; e->inkW = inkW;
     e->outh = outH;
+    e->asc = base - T;
+    e->cell = g_G->cell > 0 ? g_G->cell : h;
+    e->ascd = g_G->asc > 0 ? g_G->asc : px;
     e->gdiW = gdiW;
     return e;
 }
@@ -1812,7 +1741,7 @@ static int VecMenuRender(void* t, wchar_t wch, int adv, int h, int x, int y,
     e = VecMenuGlyph(t, wch, adv, h, px);
     if (!e) return -1;
     GtUnpack16((unsigned short)(colorW & 0xFFFF), &fr, &fg, &fb);
-    dy = y + (h - e->outh) / 2;
+    dy = y + (h - e->cell) / 2 + e->ascd - e->asc;
     {
         int lo = Tp, hi = B - e->outh + 1;
         if (hi >= lo)
@@ -1878,8 +1807,10 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
         return g_OrigBlit(t, NULL, wch, x, y, color);
     /* 简报正文自绘 (BriefOwn=1): 面到这里已经绑好了 (引擎 0x4348F0 装的),
      * 借它的面把整块画掉, 并抑制这一次 DrawText 余下的逐字绘制。笔位照
-     * 原样还给引擎 (x+adv), 引擎版式照跑, 只是不再落墨。 */
-    if (g_DTBody && g_BriefState != 2)
+     * 原样还给引擎 (x+adv), 引擎版式照跑, 只是不再落墨。
+     * 必须跟 Render 一起关: 本块在下面的 if (g_VT.Render) 之前, 不挂门的话
+     * Render=0 时简报仍是矢量重绘, 而其余文本走原版点阵 (两种字混排)。 */
+    if (g_VT.Render && g_DTBody && g_BriefState != 2)
     {
         if (g_BriefState == 1) return x + adv;
         g_BriefState = 1;
