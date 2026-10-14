@@ -38,8 +38,8 @@
 - shift + p 单位过滤，只选中被心控单位
 - 简化建筑维修，Ctrl+维修或双击维修，也支持自动维修。
 - 简化移动攻击，允许自定义快捷键
-- 解除128操作限制
-- 解除单机路径点限制
+- 解除单机128操作限制
+- 解除单机路径点16/128限制限制
 
 **模糊下令 (也叫智能中键，但可修改快捷键)**
 - 中键点击移动，空军分散寻位，陆军聚团螺旋排列，便于铁幕之类使用
@@ -88,7 +88,7 @@ x最近信息跳转
 x实现回放功能和添加内部列表  
 
 ## 赞助 tokens
-### -> [赛博乞讨](docs/赛博乞讨.md)
+### -> [赛博乞讨](https://github.com/MagicShiba/MO_ExperienceEnhancements/blob/master/docs/赛博乞讨.md)
 ![alt text](docs/img_sbqt/h-凝视1.png)
 
 ## 笔记(notes)
@@ -98,3 +98,6 @@ x实现回放功能和添加内部列表
 ## 参考项目
 [phobos](https://github.com/Phobos-developers/Phobos) ：一个强大的扩展。  
 [yrpp](https://github.com/Ares-Developers/YRpp) ：提供与 C++ 引擎补丁/扩展中的 Yuri's Revenge 引擎交互的能力。
+
+## 相关项目
+[红警2字体编辑器](https://github.com/MagicShiba/Ra2FontEditor)
