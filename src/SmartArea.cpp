@@ -1013,7 +1013,7 @@ void SmartArea_Draw(void* surf, int w, int h, int pitch)
     }
     /* 规划线 (绿色细线, 单位中心→分到的目标中心, 含高度, 只在按住时存在)。 */
     if (showLines)
-        OU_PrevDraw(s_PrevBuf, s_PrevN, locked, w, h, pitch, 0, 255, 0, 255);
+        OU_PrevDraw(s_PrevBuf, s_PrevN, locked, w, h, pitch, 0, 255, 0, 255, 1);
     s_SaLocked = 0;
     unlockFn(surf, NULL);
 }

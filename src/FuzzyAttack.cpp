@@ -604,7 +604,7 @@ void FuzzyAttack_Draw(void* surf, int w, int h, int pitch)
     FA_Mark(x2, y2, 1, 230);
     FA_Mark(x3, y3, 1, 230);
     /* 规划线 (红色细线, 单位中心→分到的敌中心, 含高度, 只在按住时存在)。 */
-    OU_PrevDraw(s_FaPrevBuf, s_FaPrevN, locked, w, h, pitch, 255, 0, 0, 255);
+    OU_PrevDraw(s_FaPrevBuf, s_FaPrevN, locked, w, h, pitch, 255, 0, 0, 255, 1);
     s_FaLocked = 0;
     unlockFn(surf, NULL);
 }

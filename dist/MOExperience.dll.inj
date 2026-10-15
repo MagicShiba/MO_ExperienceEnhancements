@@ -62,3 +62,9 @@
 ; 落在"操作与战斗提示"里的雷达事件行上就跳视口到该事件格并吞掉这次地图点击;
 ; 否则返回 0 跑原指令 (下面 0x692350 的 jl 出界判据一点没动)。见 MsgText.cpp
 0x69234B = MsgText_RadarClickGate, 5
+; 聚集点多段路径 (Z + 折线), 见 src/RallyPath.cpp
+; 门: CellClickedAction 聚集点分支 (6B)。按住 Z 吞原生单点令改记折线, 余者放行。
+0x44377E = RallyPath_GateHook, 6
+; 出厂: BuildingClass::ExitObject (虚表第 64 项) 序言, WhatAmI 分派前, 载具/步兵/飞机全命中。
+; 13B 只读 EDI (被调用者保存), 无须还原寄存器; 首条禁读 EAX/ECX/EDX。
+0x443C7D = RallyPath_ExitHook, 13

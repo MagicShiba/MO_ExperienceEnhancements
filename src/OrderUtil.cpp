@@ -306,12 +306,15 @@ int OU_CellGroundZ(int cx, int cy, int* zOut)
 
 void OU_ThinLine(unsigned char* locked, int w, int h, int pitch,
                  int x0, int y0, int x1, int y1,
-                 unsigned r, unsigned g, unsigned b, unsigned a)
+                 unsigned r, unsigned g, unsigned b, unsigned a,
+                 int thick)
 {
-    int dx, dy, sx, sy, err, e2, x, y, n;
+    int dx, dy, sx, sy, err, e2, x, y, n, t;
     unsigned short* dstRow;
     if (!locked || !IsPlausiblePtr(locked)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;
+    if (thick < 1) thick = 1;
+    if (thick > 4) thick = 4;
     dx = x1 - x0; dy = y1 - y0;
     sx = (dx >= 0) ? 1 : -1;
     sy = (dy >= 0) ? 1 : -1;
@@ -324,6 +327,11 @@ void OU_ThinLine(unsigned char* locked, int w, int h, int pitch,
         {
             dstRow = (unsigned short*)(locked + y * pitch);
             dstRow[x] = Blend16(dstRow[x], r, g, b, a);
+            for (t = 1; t < thick; t++)       /* 加粗: 往下补 thick-1 行 */
+                if (y + t < h)
+                    ((unsigned short*)(locked + (y + t) * pitch))[x] =
+                        Blend16(((unsigned short*)(locked + (y + t) * pitch))[x],
+                                r, g, b, a);
         }
         if (x == x1 && y == y1) break;
         e2 = err * 2;
@@ -365,7 +373,7 @@ int OU_PrevPushCell(OU_PrevLine* buf, int* nio, void* u, int fly, int cx, int cy
 }
 
 void OU_PrevDraw(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, int pitch,
-                 unsigned r, unsigned g, unsigned b, unsigned a)
+                 unsigned r, unsigned g, unsigned b, unsigned a, int thick)
 {
     void* tac;
     int k;
@@ -378,7 +386,7 @@ void OU_PrevDraw(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, i
         int ux, uy, tx, ty;
         if (!OU_ProjWorld(buf[k].ulx, buf[k].uly, buf[k].ulz, &ux, &uy)) continue;
         if (!OU_ProjWorld(buf[k].tlx, buf[k].tly, buf[k].tlz, &tx, &ty)) continue;
-        OU_ThinLine(locked, w, h, pitch, ux, uy, tx, ty, r, g, b, a);
+        OU_ThinLine(locked, w, h, pitch, ux, uy, tx, ty, r, g, b, a, thick);
     }
 }
 

@@ -128,10 +128,12 @@ typedef struct { int ulx, uly, ulz, tlx, tly, tlz; } OU_PrevLine;
 int OU_ProjWorld(int lx, int ly, int lz, int* px, int* py);
 /* 格地面高度 (CellClass::GetFloorHeight 0x47B3A0, 只读)。 */
 int OU_CellGroundZ(int cx, int cy, int* zOut);
-/* 单像素细线 (Bresenham, 自带裁剪; locked=已锁定渲染面)。 */
+/* 单像素细线 (Bresenham, 自带裁剪; locked=已锁定渲染面)。
+ * thick<=1 = 1 像素; 2 = 两行 (每个像素再补 (x,y+1)), 视觉上 2 像素粗。 */
 void OU_ThinLine(unsigned char* locked, int w, int h, int pitch,
                  int x0, int y0, int x1, int y1,
-                 unsigned r, unsigned g, unsigned b, unsigned a);
+                 unsigned r, unsigned g, unsigned b, unsigned a,
+                 int thick);
 /* 存一对端点 (leptons 世界坐标; 满回 0)。 */
 int OU_PrevPush(OU_PrevLine* buf, int* nio,
                 int ulx, int uly, int ulz, int tlx, int tly, int tlz);
@@ -139,9 +141,9 @@ int OU_PrevPush(OU_PrevLine* buf, int* nio,
 int OU_PrevPushObjs(OU_PrevLine* buf, int* nio, void* u, void* t);
 /* 起点取单位中心, 终点取落点格心 (地面高度; fly!=0 用单位自身高度)。 */
 int OU_PrevPushCell(OU_PrevLine* buf, int* nio, void* u, int fly, int cx, int cy);
-/* 绘制全部预览线 (逐对引擎投影, 失败跳过)。 */
+/* 绘制全部预览线 (逐对引擎投影, 失败跳过)。thick = 线宽像素。 */
 void OU_PrevDraw(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, int pitch,
-                 unsigned r, unsigned g, unsigned b, unsigned a);
+                 unsigned r, unsigned g, unsigned b, unsigned a, int thick);
 /* 预览节流 (三家规划线共用): 换格/换key且距上次>minMs, 或超 refreshMs 刷一次。
  * 回 1=该刷 (已更新 *last*); 0=跳过。首轮恒刷。 */
 int OU_PrevThrottle(unsigned* lastMs, int* lastCx, int* lastCy, int* lastKey,

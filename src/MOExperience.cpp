@@ -23,6 +23,7 @@
 #include "PatrolCircle.h"
 #include "PlaceScatter.h"
 #include "PowerDisplay.h"
+#include "RallyPath.h"
 #include "RepairAll.h"
 #include "SideScroll.h"
 #include "SmartArea.h"
@@ -239,6 +240,8 @@ static void PowerDrawBoth(void)
     BuildQueue_Poll();
     PatrolCircle_Poll();
     SmartOrder_Poll();
+    /* 兵营/重工聚集点折线 (Z 点多段, 出厂追单排空)。 */
+    RallyPath_Poll();
     TreeChop_Poll();
     FuzzyAttack_Poll();
     AttackMove_Poll();
@@ -1072,6 +1075,7 @@ int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch,
     SWS_Draw(surf, surfW, surfH, surfPitch);
     SmartOrder_Draw(surf, surfW, surfH, surfPitch);
     PatrolCircle_Draw(surf, surfW, surfH, surfPitch);
+    RallyPath_Draw(surf, surfW, surfH, surfPitch);
     FuzzyAttack_Draw(surf, surfW, surfH, surfPitch);
     SmartArea_Draw(surf, surfW, surfH, surfPitch);
     TreeChop_Draw(surf, surfW, surfH, surfPitch);

@@ -1105,7 +1105,7 @@ void SmartOrder_Draw(void* surf, int w, int h, int pitch)
         SO_Mark(x1, y1, 2, 255); /* 当前 5x5 */
     }
     /* 绿线预览 (单位中心→预估落点/目标中心, 含高度, 只在按住时存在)。 */
-    OU_PrevDraw(s_SoPrevBuf, s_SoPrevN, locked, w, h, pitch, 0, 255, 0, 255);
+    OU_PrevDraw(s_SoPrevBuf, s_SoPrevN, locked, w, h, pitch, 0, 255, 0, 255, 1);
     s_AsLocked = 0;
     unlockFn(surf, NULL);
 }
