@@ -9,42 +9,33 @@
   （原生 AbandonAll=`0x2E`/Abandon=`0x10` 清模拟）；本地有本型则弹掉最后
   一个本地后跳原生出口 `0x6AB28F`（=IsQueued==0 的退出，EDI=类型、
   ESP=入口值，其余覆写后用，逐寄存器一致）；本地无本型跑原指令。
-- E8 事件构造点（`0x6AB1B0/0x6AB231/0x6AB1FF/0x6AA7E7/0x6AAFDC`）一律不碰：
-  仿调用造畸形事件致执行侧崩是教训。
-- R1 镜像清已删：放置完成与取消在 `Object==null` 上不可区分，
-  R1 会在放置瞬间清掉整个队列；“复活”问题已由本钩结构解决——模拟侧取消
-  只可能在本地无本型时发出（有本地则被本钩弹出并压住原生），无需镜像。
-钩子共九个（`0x6AA7BC` 左键切换门/`0x6AA884` 切换清产/`0x6AB689` 忙时记入/
-`0x6AB6CE` 闲时Shift记入/`0x6AB0C1` 暂停检查/`0x6AB0C7` 暂停块剥离/`0x6AB197`
-右键剥离/`0x6A9C86` 图标数字/`0x6A9C6C` 空工厂绘制）：Jcc 点永远跳转
+- E8 事件构造点（`0x6AB1B0/0x6AB231/0x6AB1FF/0x6AA7E7/0x6AAFDC`）一律不碰，
+  不仿造事件构造。
+- 无需镜像清理：模拟侧取消只可能在本地无本型时发出
+  （有本地则被本钩弹出并压住原生）。
+钩子共八个（`0x6AB689` 忙时记入/`0x6AB6CE` 闲时Shift记入/`0x6AB0C1` 暂停检查/
+`0x6AB197` 右键剥离/`0x6AAE44` 暗分发/`0x6AAFE1` 暗暂停哨兵/
+`0x6A9C86` 图标数字/`0x6A9C6C` 空工厂绘制）：Jcc 点永远跳转
 不 return 0，跳转只跳前向原生目标。
-Ares 同流钩子（查 `Ares.dll.inj` 实证，同函数内）：`0x6AB0B0` LoadCameo2
-及一串 FixOffset（`0x6AB49D/4E8/577/620/741/802/825/920/92F` 等）；
-`0x6AB0B0` 在 H0 上游，可能直跳暂停块/取消分支绕过 H0，故暂停块入口
-另埋剥离钩（H0P），两条路都堵。其余无 rel（return 0 安全），
-跳转只跳前向原生目标。
+Ares 同流钩子（查 `Ares.dll.inj`）：`0x6AB0B0` LoadCameo2
+在 H0 上游，可能直跳暂停块/取消分支绕过 H0，故暂停块入口
+另埋剥离钩，两条路都堵。
 右键规则（用户定稿，Shift 在此忽略）：
-总数 N>1 时每次右键只减数不动在产（`0x6AB0C1` 处 state==1 且本地有本型
-则弹一跳出口，不暂停；state!=1 由 `0x6AB197` 弹一跳出口）；N==1 时走
-原生暂停取消。由来：日志实证用户排队时 Shift 常驻手上，Shift+右键清
-全部会把“减一”变成“清零+杀在产”，故本地有本型时永远只弹一（c=shift
-只记录不参与决策），只有本地无本型才放行原生。
-左键切换清产压制（反汇编实证 `0x6AA7B6-0x6AA931`）：
+总数 N>1 时每次右键只减数不动在产；N==1 时走
+原生暂停取消。本地有本型时永远只弹一，
+只有本地无本型才放行原生。
+左键切换清产压制（`0x6AA7B6-0x6AA931`）：
 左键点建筑图标，原生先按 `[[esp+0x2c]]` 发 ABANDON（`0x6AA7E7`，`0x10`）
-+AbandonAll（`0x6AA8CD`，`0x2E`）切掉在产（进度作废即“从头开始”），再进
-`0x6ABxxx` 下新单。单位式排队必须压住这两处，E8 点一律不碰：
++AbandonAll（`0x6AA8CD`，`0x2E`）切掉在产，再进
+`0x6ABxxx` 下新单。单位式排队必须压住这两处，E8 点一律不碰。
 H1 只跳原生地址并摆出与原生一致的寄存器（EDI=0/ESI=`[esp+0x10]`），
 H2 只在开关开时跳原生跳过处；Shift+右键清模拟仍走 `0x6ABxxx` 原生分支。
 
 钩子（`dist/MOExperience.dll.inj`，永远跳转，**禁止在含 rel 字节上 return 0**）：
-铁律（Syringe `HandleException` 源码实证：跳板原样拷贝被偷字节，
-`E8/Jcc` 的 rel 不修正；Phobos 全库同样从不在 rel 字节上 return 0）：
-偷了 rel 的钩子永远跳转；E8 构造调用一律亲调 `EventCtor`（返回值回填
-EAX）后跳构造后下一条；条件跳转按 EAX 真值仿判跳原生目标，永不跳回自身。
-R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈，`0x6A9C86` 的 `[ESP+0x34]`
-取数实证）：E8 点五个 push 之后 `[ESP+0]`=houseIdx、`+4`=evt、`+8`=rtti、
-`+0xC`=heap、`+0x10`=naval；缓冲取 ECX（前一条 lea 已跑，四处皆如此）。
-本地匹配不用栈，只用寄存器类型（EDI/EBX）+ WhatAmI 守卫。
+铁律：偷了 rel 的钩子永远跳转；条件跳转永不跳回自身。
+R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈）：E8 点五个 push 之后
+`[ESP+0]`=houseIdx、`+4`=evt、`+8`=rtti、`+0xC`=heap、`+0x10`=naval；
+缓冲取 ECX。本地匹配不用栈，只用寄存器类型（EDI/EBX）+ WhatAmI 守卫。
 
 - `0x6AB689`（5 字节，`push -1 + or edx,-1`，无 rel）→ 记入本地队列后跳
   `0x6AB95A`（与原版拒绝同尾，多路到达 esp 一致，只跳过播音）。
@@ -59,27 +50,18 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈，`0x6A9C86` 的 `[ESP+0x3
 - `0x6AB197`（8 字节，`push eax + push ecx + mov ecx,[0xa83d4c]`，无 rel）
   → 右键取消分支入口，见上（Shift 清本地后直通 / 有本地弹一跳 `0x6AB28F`
   / 无本地直通）。regs：EBP=abs，EDI=图标类型。到此的都是右键。
-  （`0x6AB191` 6 字节，含义相同，换 8 字节避开生僻长度。）
-- （历史：`0x6AB1B5` 的 8 字节 Jcc 仿判思路由 `0x6AB191` 继承，
-  但不再读 IsQueued/EAX、不做条件仿判，只跳无条件出口。）
-- 右键语义（原版反汇编实证，`0x6AB0AC-0x6AB0A7`）：cameo state==1 则置 2、
+- 右键语义（`0x6AB0AC-0x6AB0A7`）：cameo state==1 则置 2、
   发 SUSPEND、跳 `0x6AB28f`（暂停）；state!=1 才进 `0x6AB18d` 取消分支
-  （IsQueued→`0x2E`/`0x10`）。匹配用户规格：单个（第一次暂停第二次取消）、
-  多个（第一次暂停第二次减一、无数字时取消）、非当前直接减数、
-  Shift+右键清空本型。
-- Shift 检测：`0x53EC70`（ecx=`0x10`，`test ah,0x80`；与 `0x54F25B` 原版
-  用法逐字节一致，含 `GetKeyState` 后备）。另有 32 帧闩锁（Poll 每帧采样）：
+  （IsQueued→`0x2E`/`0x10`）。
+- Shift 检测：`0x53EC70`（ecx=`0x10`，`test ah,0x80`，含 `GetKeyState` 后备）。另有 32 帧闩锁（Poll 每帧采样）：
   左键记数用“当前或近期按下”（防单帧竞态/提前松开），右键清空只认当前。
 - 建筑页/防御页天然分开：条目按 house+heap 匹配（heap=ArrayIndex 类型唯一，
   同型必同 BuildCat/同工厂），清空只清本家本型。
-- 日志只剩启动两行（`bqueue: local building queue ON` + `bqueue: modbase=`）；
-  逐事件 trace（`bq: qd/qf/qn/h0/hd/cp/sh/cs/pw/ev`、`bqueue: queued/fire/unqueued/onboard`、
-  `pev:` 抓包）已全删，模块定案不再需要。
+- 日志：仅启动两行（`bqueue: local building queue ON` + `bqueue: modbase=`）。
 - 绘制空工厂钩：`0x6A9C6C`（6 字节 test+mov，无 rel）。
   绘制按 buildcat=0 取槽工厂，建筑页没下过单则槽空，原生直接跳过计数，
   防御页连带没数字。工厂空但本地有本型→EAX/EBX=本地数跳绘制块；
-  工厂空且本地无→跳原生跳过处。`[esp+0x18]` 在两目标后无人读
-  （`0x6A9CC9-0x6AA01C` 全段实证），绘制跳跃无需处理。
+  工厂空且本地无→跳原生跳过处。
 - 待发事件窗守卫：Poll 挂渲染可快于逻辑帧，连发两单则第二单
   在执行侧被拒（`0x4FA520` 首部 busy+building 直接返 3），静默丢单；
   故发单后同线 45 轮内不再发（执行后 Object 非空本来就会停）。
@@ -105,20 +87,17 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈，`0x6A9C86` 的 `[ESP+0x3
   （House.ArrayIndex）。`Factory.Object=+0x58`，`Owner=+0x6C`；
   `FactoryClass::Array` 基 `0xA83E30`，Items=+4，Count=+0x10；
   `CurrentPlayer=*(0xA83D4C)`；`EventType::Produce=0xE/Abandon=0x10`。
-  （MSVC+Yrpp 头 `offsetof` 探针求值，原版反汇编交叉验证。）
 
-轮询（`BuildQueue_Poll`，挂 `PowerDrawBoth` 每循环，无对账无丢单）：
+轮询（`BuildQueue_Poll`，挂 `PowerDrawBoth` 每循环）：
 条目不存工厂指针（只存 house/type/naval/cat，cat 取自点击帧 `[esp+0x24]`
 与原生 GPF 入参同值），每轮按 `(house,naval,cat)` 现解析槽位工厂
 （槽位即权威，无 stale）；工厂不存在/非本家→留着等（卖了重建/具现后
 自动续上）；`Object==null` 才下单；同一工厂每轮只喂一项（事件下帧才
-执行）。教训：存工厂指针+R0 存活校验，开工后日志实证整
-队列被 drop（`fire` 后连串 `drop` 到 depth=0），遂删除整个 R0/drop path。
-菜单/读档/换 CurrentPlayer 即清空（未下单=未扣费）。上限 50。
+执行）。菜单/读档/换 CurrentPlayer 即清空（未下单=未扣费）。上限 50。
 
 限造（`rules.ini BuildLimit`，本 mod 大量建筑限 1/2/3）：
 
-- 达上限原版拒收，本地须按同口径算余量，否则条目等不到认领、pend 窗一过就重发，队列卡死。忙工厂路径原生不查上限，须在钩子里自己查。
+- 达上限原版拒收，本地须按同口径算余量。忙工厂路径原生不查上限，须在钩子里自己查。
 - 口径（只读）：`BuildLimit=[type+0x3B8]`（正=总数上限，负=历史上限，0=不限）；
   正限判 `OwnedBuildingTypes=[house+0x5500][ArrayIndex]`（含在产），
   负限判 `FactoryProducedBuildingTypes=[house+0x55A0][同]`；
@@ -127,6 +106,14 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈，`0x6A9C86` 的 `[ESP+0x3
 - 用法 `BQ_RoomLeft(house,type,others)` = 还能再排几条（`others` 是同型其余本地数）：
   记入时只记余量内的条数，闲时 Shift 给原生那 1 个留位；每轮喂单前排不进的直接丢（=原版“点不下”，队列自愈）。
 - Poll 认领删除条目后须 `continue`，否则会用上一条的工厂喂下一条。
+
+权限复查（失去建造资格，如前置被卖/毁）：
+
+- 原版 cameo 校验（`0x6AA781`）调 `HouseClass::CanBuild`(`0x4F7870`)：
+  `==0` 永久不可造，`>0`（`1` 可造 / `-1` 临时灰化，如工厂断电）放行。
+  本地复刻事件绕过了它，条目失去资格后永不认领，重发还会压住整条产线。
+- 修法：Poll 每条目喂单前调 `FN_CANBUILD(house,type,0,1)`，
+  `==0` 则 `BQ_RemoveAt`+`continue`；`>0` 不动。只读，联机安全。
 
 结论：
 
