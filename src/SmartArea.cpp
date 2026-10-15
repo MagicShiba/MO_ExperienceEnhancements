@@ -16,7 +16,9 @@
  * 可处理目标加入 (全员有事做); 进驻不进这轮, 按建筑轮转均分 (不管 SquadSize)。
  * 只下 攻击/进入/进驻/占领 四类令 (本功能不下移动令, 分不到目标的原地待命)。
  * 下令走标准 0x04 MegaMission (攻击 Target=对象, 进入类 Destination=对象,
- * IsPlanningEvent=0, 与手点同形), OutList 满 drip 跨帧续发。
+ * 与手点同形; 物理 Z 按住时 IsPlanningEvent=1 排队, 按序追加路径点不覆盖 ——
+ * 点 B 再点 A 再点 C 得 B→A→C; 不按 Z 则直接下令 IsPlanningEvent=0)。
+ * OutList 满 drip 跨帧续发。
  * 规划线 (按住时): 预览=快照+分配, 与终判同一套输入同一套规则 (终判松手
  * 重扫一次); 预览截断前 64 单位/前 96 目标 (终判全量), 限 128 线, 换格、
  * 节点数变或 400ms 刷一次, 80ms 节流, 松手即消。端点存 leptons 世界坐标
@@ -343,7 +345,7 @@ static int SA_Fallback(void* u, void* t, int act, void* house)
     return SA_IsEngineer(u) ? MISSION_CAPTURE : -1;
 }
 
-/* ---------------- 下令 (与 SmartOrder/FuzzyAttack 同形) ---------------- */
+/* ---------------- 下令 (MegaMission 形状同 SmartOrder/FuzzyAttack; 唯一区别是排队) ---------------- */
 
 static int SA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
                          int tgtID, unsigned char tgtRtti,
@@ -354,7 +356,8 @@ static int SA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
     for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
             tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
-    ev[OFF_PLANFLAG] = 0;
+    /* 按住 Z = 路径点(排队, 按序追加不覆盖); 不按 Z 直接下令 (与手点同形)。 */
+    ev[OFF_PLANFLAG] = OU_KeyDown('Z') ? 1 : 0;
     return OT_Fire(ev, unit, uid, idxOk);
 }
 
@@ -367,7 +370,8 @@ static int SA_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
     for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, mission,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
-    ev[OFF_PLANFLAG] = 0;
+    /* 按住 Z = 路径点(排队, 按序追加不覆盖); 不按 Z 直接下令 (与手点同形)。 */
+    ev[OFF_PLANFLAG] = OU_KeyDown('Z') ? 1 : 0;
     return OT_Fire(ev, unit, uid, idxOk);
 }
 

@@ -1,8 +1,8 @@
 /* TreeChop.cpp - Ctrl+Z+中键快速砍树。
  * 按住显示 Range x Range 菱形框, 松开在当前鼠标格执行。
  * 框内树用地形扫描找 (TREE / TIBTRE 前缀, 见 TC_IsTreeID),
- * 按单位全覆盖分配 (unit u -> tree[u % nt], IsPlanningEvent=1 排队),
- * 树少时多个单位集火同一棵。
+ * 单位/树按 max 轮转全覆盖分配 (k % nu / k % nt, IsPlanningEvent=1 排队):
+ * 树多一单位规划多棵且覆盖选区内全部树, 树少多单位集火同一棵。
  * 画框走引擎 CoordsToClient 投影格线角点, 与扫描同格。
  * 只读查询 + 标准事件, 不写模拟内存。 */
 
@@ -451,17 +451,23 @@ static void TC_Press(void)
     q = AppendCStr(buf, q, b2, sizeof(buf));
     (void)q;
     LogLine(buf);
-    /* 按单位全覆盖 (unit u -> tree[u % nt]): 树少时多单位集火同一棵。 */
+    /* 单位/树按 max 轮转全覆盖 (k % nu / k % nt, IsPlanningEvent=1 排队):
+     * 树多 (nt>nu): 覆盖选区内全部树, 每单位规划多棵;
+     * 树少 (nu>nt): 全部单位参战, 每棵树被多单位集火。 */
     g_TcPendCount = 0;
-    for (i = 0; i < nu; i++)
     {
-        int t = i % nt;
-        if (g_TcPendCount >= TC_PEND_CAP) break;
-        g_TcPend[g_TcPendCount].unit = s_units[i];
-        g_TcPend[g_TcPendCount].uid = s_uids[i];
-        g_TcPend[g_TcPendCount].tree = s_trees[t];
-        g_TcPend[g_TcPendCount].tid = s_tids[t];
-        g_TcPendCount++;
+        int total = (nt > nu) ? nt : nu;
+        for (i = 0; i < total; i++)
+        {
+            int u = i % nu;
+            int t = i % nt;
+            if (g_TcPendCount >= TC_PEND_CAP) break;
+            g_TcPend[g_TcPendCount].unit = s_units[u];
+            g_TcPend[g_TcPendCount].uid = s_uids[u];
+            g_TcPend[g_TcPendCount].tree = s_trees[t];
+            g_TcPend[g_TcPendCount].tid = s_tids[t];
+            g_TcPendCount++;
+        }
     }
     g_TcHouse = cur;
     g_TcHouseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
