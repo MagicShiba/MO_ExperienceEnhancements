@@ -3147,25 +3147,31 @@ static int SwsCacheAlloc(int w, int h)
  * 每次先 ClearDib 1024x64x4)。换名字/换字号才重光栅化。
  * 宽度取 DIB_W (RenderLine 行宽夹在 DIB_W-8, 缓冲永远装得下)。 */
 #define SWS_TIP_COV_W 1024
-#define SWS_TIP_COV_H 48
+#define SWS_TIP_COV_H 128
+#define SWS_TIP_MAXLN 4      /* 名字按 \n 切行上限 */
 static struct {
     int fontPx, bold, sw, adv, ok;
+    int nl;                        /* 行数 1..MAXLN */
+    int wl[SWS_TIP_MAXLN];         /* 每行宽 (盒按最宽行, 短行左对齐) */
     wchar_t nm[24];
     unsigned char cov[SWS_TIP_COV_W * SWS_TIP_COV_H];
-} s_Tip = { 0, 0, 0, 0, 0, { 0 }, { 0 } };
+} s_Tip = { 0 };
 
-/* 备好悬停提示字形; 0 = 无提示/备不成。须在分配缓存之前调
- * (提示框可能探出侧栏块, 缓存矩形须把它算进去)。 */
+/* 备好悬停提示字形; 返回最宽行宽, 0 = 无提示/备不成。须在分配缓存之前调
+ * (提示框可能探出侧栏块, 缓存矩形须把它算进去)。
+ * 名字里的 \n 保留换行: 按行光栅化后上下叠放 (行高 adv, 短行左对齐)。 */
 static int SwsTipPrepare(const wchar_t* nm)
 {
-    int gpx, adv, sw, sl = 0, yy, xx;
+    int gpx, adv, sw, sl = 0, k, yy, xx;
+    int ls[SWS_TIP_MAXLN];   /* 每行起始下标 */
+    int nl;
     if (!nm || !nm[0]) return 0;
     gpx = VecText_FontPx();
     if (gpx <= 0) gpx = 18;
     if (s_Tip.ok && gpx == s_Tip.fontPx && VecText_Bold() == s_Tip.bold &&
         FaceSame(nm, s_Tip.nm))
         return s_Tip.sw;
-    s_Tip.ok = 0; s_Tip.sw = 0;
+    s_Tip.ok = 0; s_Tip.sw = 0; s_Tip.nl = 0;
     s_Tip.fontPx = gpx; s_Tip.bold = VecText_Bold();
     SwsCopyName(s_Tip.nm, nm, 24);
     /* 提示框用 GDI 槽 6 (充能百分比用槽 5): 字号来源不同, 共用会让 GdiEnsure
@@ -3173,42 +3179,72 @@ static int SwsTipPrepare(const wchar_t* nm)
     if (!GdiEnsure(gpx, s_Tip.bold, 6, VecText_FontFace())) return 0;
     adv = g_G->adv > 0 ? g_G->adv : gpx + 2;
     while (sl < 23 && nm[sl]) sl++;
-    sw = sl ? RenderLine(nm, sl) : 0;
-    if (sw <= 0 || sw + 2 > SWS_TIP_COV_W || adv > SWS_TIP_COV_H) return 0;
-    for (yy = 0; yy < adv; yy++)
+    /* 按 \n 切行 (空行留空行高); 行数超限整个不画。 */
+    nl = 0;
+    ls[nl++] = 0;
+    for (k = 0; k < sl; k++)
     {
-        const unsigned char* srow = g_G->bits + (size_t)yy * g_G->pitch;
-        for (xx = 0; xx < sw + 2; xx++)
-            s_Tip.cov[yy * SWS_TIP_COV_W + xx] = srow[xx * 4 + 2];
+        if (nm[k] != L'\n') continue;
+        if (nl >= SWS_TIP_MAXLN) return 0;
+        ls[nl++] = k + 1;
     }
-    s_Tip.sw = sw; s_Tip.adv = adv; s_Tip.ok = 1;
+    if (nl * adv > SWS_TIP_COV_H) return 0;
+    sw = 0;
+    for (k = 0; k < nl; k++)
+    {
+        int s = ls[k], e = (k + 1 < nl) ? ls[k + 1] - 1 : sl;
+        int lw = 0;
+        while (e > s && nm[e - 1] == L'\r') e--;
+        if (e > s)
+        {
+            lw = RenderLine(nm + s, e - s);
+            for (yy = 0; yy < adv; yy++)
+            {
+                const unsigned char* srow = g_G->bits + (size_t)yy * g_G->pitch;
+                unsigned char* drow =
+                    s_Tip.cov + (size_t)(k * adv + yy) * SWS_TIP_COV_W;
+                for (xx = 0; xx < lw + 2; xx++)
+                    drow[xx] = srow[xx * 4 + 2];
+            }
+        }
+        s_Tip.wl[k] = lw;
+        if (lw > sw) sw = lw;
+    }
+    if (sw <= 0) return 0;   /* 全空行: 无内容可显示 */
+    s_Tip.sw = sw; s_Tip.adv = adv; s_Tip.nl = nl; s_Tip.ok = 1;
     return sw;
 }
 
-/* 提示框矩形 (屏幕坐标)。ax = 图标水平中心锚点, ayTop = 图标下边。
- * 默认挂图标下面 (块顶上方只有按钮一行 18px, 挂上去会被缓存边界削掉);
- * 底下放不下翻上去。水平按框夹, 不跑出画面。 */
-static void SwsTipRect(int w, int h, int ax, int ayTop,
+/* 提示框矩形 (屏幕坐标)。ax = 图标水平中心锚点, ayTop = 图标下边,
+ * panelRight = 侧栏块右缘 (xStart + totW)。
+ * 默认挂图标下面居中; 居中盒会探出块左右缘时盒右缘贴块右缘
+ * (右侧图标的长名否则会被裁掉半边)。底下放不下翻上去。
+ * 名字含 \n 时多行叠放: 盒宽按最宽行, 盒高 = 行数×adv + 2。 */
+static void SwsTipRect(int w, int h, int panelRight, int ax, int ayTop,
                        int* rx, int* ry, int* rw, int* rh)
 {
-    int sw = s_Tip.ok ? s_Tip.sw : 0, adv = s_Tip.adv, sx, ny;
+    int sw = s_Tip.ok ? s_Tip.sw : 0, adv = s_Tip.adv, sx, ny, th;
     *rw = 0; *rh = 0;
     if (sw <= 0) return;
+    th = s_Tip.nl * adv;
     sx = ax - sw / 2;
     ny = ayTop + 2;
-    if (ny - 2 + adv + 4 > h) ny = ayTop - adv - 4;   /* 底下放不下就翻上去 */
+    if (ny + th + 1 > h) ny = ayTop - th - 2;   /* 底下放不下就翻上去 */
+    if (sx + sw + 4 > panelRight)
+        sx = panelRight - sw - 4;   /* 盒右缘贴面板右缘 */
     if (sx < 4) sx = 4;
     /* 夹取按框算, 否则右边跑出屏幕。 */
     if (sx + sw + 6 > w - 2) sx = (w - sw - 8 > 4) ? w - sw - 8 : 4;
-    *rx = sx - 2; *ry = ny - 2; *rw = sw + 6; *rh = adv + 4;
+    *rx = sx - 2; *ry = ny - 1; *rw = sw + 6; *rh = th + 2;
 }
 
-/* 提示框: 半透明黑底 + 主题色边框 + 白字。不吃侧栏整体透明度。 */
-static void SwsDrawTip(int w, int h, int ax, int ayTop)
+/* 提示框: 半透明黑底 + 主题色边框 + 白字。不吃侧栏整体透明度。
+ * 多行按 \n 上下叠放 (短行左对齐), 整块在盒内垂直居中。 */
+static void SwsDrawTip(int w, int h, int panelRight, int ax, int ayTop)
 {
-    int bx, by, bw, bh, sx;
+    int bx, by, bw, bh, sx, k;
     if (!s_Tip.ok) return;
-    SwsTipRect(w, h, ax, ayTop, &bx, &by, &bw, &bh);
+    SwsTipRect(w, h, panelRight, ax, ayTop, &bx, &by, &bw, &bh);
     if (bw <= 0) return;
     SwsCFillR(bx, by, bw, bh, 0, 0, 0, 150);
     SwsCFillR(bx, by, bw, 1, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
@@ -3216,10 +3252,13 @@ static void SwsDrawTip(int w, int h, int ax, int ayTop)
     SwsCFillR(bx, by, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
     SwsCFillR(bx + bw - 1, by, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
     sx = bx + 2;
-    SwsCCov(s_Tip.cov, SWS_TIP_COV_W, 1, sx + 1, by + 1, s_Tip.sw, s_Tip.adv,
-            0, 0, 0, 85);
-    SwsCCov(s_Tip.cov, SWS_TIP_COV_W, 1, sx, by, s_Tip.sw, s_Tip.adv,
-            255, 255, 255, 100);
+    for (k = 0; k < s_Tip.nl; k++)
+    {
+        if (s_Tip.wl[k] <= 0) continue;   /* 空行留空 */
+        SwsCCov(s_Tip.cov + (size_t)k * s_Tip.adv * SWS_TIP_COV_W,
+                SWS_TIP_COV_W, 1, sx, by + 1 + k * s_Tip.adv,
+                s_Tip.wl[k], s_Tip.adv, 255, 255, 255, 100);
+    }
 }
 
 /* ---- 显隐按钮: 圆角底板 + 边框 + 实心三角 (三层由外到内)。
@@ -3619,8 +3658,8 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
         /* hover 是排序后下标, 经 s_Order 取 (见 SwsHitItem)。 */
         SwsItem* it = &s_Items[s_Order[hover]];
         if (SwsTipPrepare(it->name))
-            SwsTipRect(w, h, it->x + SWS_ICON_W / 2, it->y + SWS_ICON_H,
-                       &tipX, &tipY, &tipW, &tipH);
+            SwsTipRect(w, h, xStart + totW, it->x + SWS_ICON_W / 2,
+                       it->y + SWS_ICON_H, &tipX, &tipY, &tipW, &tipH);
     }
     /* 6) 缓存矩形 = 按钮行 ∪ 超武块 ∪ 滚动条 ∪ 提示框。 */
     right = s_ColMaxX + SWS_ICON_W;
@@ -3843,7 +3882,8 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
     if (hover >= 0)
     {
         SwsItem* it = &s_Items[s_Order[hover]];
-        SwsDrawTip(w, h, it->x + SWS_ICON_W / 2, it->y + SWS_ICON_H);
+        SwsDrawTip(w, h, xStart + totW, it->x + SWS_ICON_W / 2,
+                   it->y + SWS_ICON_H);
     }
 
     s_CchOK = 1;
