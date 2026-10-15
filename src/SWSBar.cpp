@@ -18,8 +18,9 @@
  *     `[SWSidebar] Alpha` 可调; 自有离屏缓存, 15 个游戏逻辑帧重建一次
  *     (交互时当帧重建), 每渲染帧只做一次带 alpha 的合成。
  *   - 交互: ToggleKey 切换显隐 (隐藏即不占空间: 不画+不吞点击); 左键图标=
- *     选中打靶 (只写 CurrentSWTypeIndex, 非模拟), 右键栏内=取消; 点击吞没
- *     经 0x692419 门防误下单。
+ *     选中打靶 (照抄引擎侧栏上膛序列: 清放置模式 + `MapClass::UnselectAll`,
+ *     再写 CurrentSWTypeIndex; 全是本地 UI 态, 非模拟), 右键栏内=取消;
+ *     点击吞没经 0x692419 门防误下单。
  *   - 防御支援页去重: 侧栏有的超武不在引擎自带的防御页 (页签 1) 重复出现,
  *     显隐箭头左边的按钮切换。搬出**只能少删**: 判据是"侧栏此刻真的在画它"的
  *     真子集 (类型门 ∧ 实例门 ∧ 扫描快照门), 搬出单向, 多删一条就是永久丢失。
@@ -82,7 +83,23 @@ static void** SwsVecItems(unsigned base, int* pCount)
 #define ADDR_FRAME       0xA8ED84u
 #define ADDR_SCENARIO    0xA8B230u
 #define OFF_SCEN_SIDE    0x34B8u
-#define ADDR_CURSW       0x8809A0u   /* Display(0x87F7E8)+0x11B8 */
+/* Display 对象即 0x87F7E8 本身, 不可解引用。偏移与 YRpp DisplayClass.h 对应。 */
+#define ADDR_CURSW       0x8809A0u   /* Display+0x11B8 CurrentSWTypeIndex */
+/* 上膛时清掉的放置/模式字段 (gamemd 0x6AAF46..0x6AAF9D 那一段写的几个)。 */
+#define OFF_DISP_CURBLD      0x11A4u  /* ObjectClass*    CurrentBuilding */
+#define OFF_DISP_CURBLDTYPE  0x11A8u  /* ObjectTypeClass* CurrentBuildingType */
+#define OFF_DISP_CURBLDOWNER 0x11ACu  /* int             CurrentBuildingOwnerArrayIndex */
+#define OFF_DISP_POWERMODE   0x11B2u  /* bool PowerToggleMode */
+#define OFF_DISP_PLANNING    0x11B3u  /* bool PlanningMode */
+#define OFF_DISP_BEACON      0x11B4u  /* bool PlaceBeaconMode */
+/* Display::SetActiveFoundation / Map::SetRepairMode / SetSellMode,
+ * Map::UnselectAll (static __fastcall, 无栈参)。 */
+typedef void (__thiscall *SwsModeFn)(void*, int);
+typedef void (__fastcall *SwsUnselectFn)(void);
+#define FN_SET_FOUNDATION ((SwsModeFn)(void*)0x4A8BF0u)
+#define FN_SET_REPAIR     ((SwsModeFn)(void*)0x4AC8C0u)
+#define FN_SET_SELL       ((SwsModeFn)(void*)0x4AC660u)
+#define FN_UNSELECT_ALL   ((SwsUnselectFn)(void*)0x48DC90u)
 
 /* Super 字段 (括号里是 YRpp 头文件值, 实际 = 头文件 + 0x0C) */
 #define OFF_SUP_TYPE     0x28u   /* (0x1C) */
@@ -401,8 +418,10 @@ static int s_HoldSkip = 0;
  * 无条目/收起时清零。 */
 static int s_BoundsKnown = 0;
 
-/* 即时超武: 走 SpecialPlace 事件 (定义在下方)。 */
+/* 即时超武: 走 SpecialPlace 事件 (定义在下方)。
+ * 手动打靶类: 走 SwsArmSW —— 引擎上膛序列 (含 UnselectAll), 定义在下方。 */
 static int SwsPushSpecialPlace(int swIdx);
+static void SwsArmSW(int swIdx);
 static int s_ForceScan = 0;   /* 点击时置 1: 强制立刻重扫, 不等 15 帧 */
 static int s_ScrollStep = 1;  /* [SWSidebar] ScrollStep */
 /* `sws: act` 日志配额 (换 ini/换剧本由 SwsCacheEpoch 重给满)。 */
@@ -1785,7 +1804,7 @@ s_Items[n].remain = remain;
 
 /* SidebarClass 侧栏几何 (gamemd 反汇编; 与 YRpp 头文件差 4 字节, 以 Ares 代码为准):
  * Tabs[0] +0x1544, CameoCount +0x54。 */
-#define ADDR_SIDEBAR          0x0087F7E8u   /* 侧栏对象就在这个地址上 */
+#define ADDR_SIDEBAR          ADDR_DISPLAY   /* 侧栏对象就在这个地址上 */
 #define ADDR_ADDCAMEO         0x006A6300u   /* SidebarClass::AddCameo 本体 */
 #define ADDR_REPAINTSIDEBAR   0x006A60A0u   /* SidebarClass::RepaintSidebar */
 #define ADDR_UPDSCROLLBTN     0x006A6610u   /* SidebarClass::UpdateScrollButtons */
@@ -2517,7 +2536,9 @@ void SWS_Poll(void)
     {
         int v = s_PendSel;
         s_PendSel = -2;
-        *(int*)ADDR_CURSW = v;
+        /* 走引擎上膛序列 (含 UnselectAll), 不是裸写 CurrentSWTypeIndex:
+         * 选中着单位时裸写会"点了地图放不出去", 见 SwsArmSW 上方注释。 */
+        SwsArmSW(v);
         LogLine(v >= 0 ? "sws: armed" : "sws: cancel");
     }
     {
@@ -2636,7 +2657,7 @@ void SWS_Poll(void)
                     if (mx >= s_BoundX && mx < s_BoundX + s_BoundW &&
                         my >= s_BoundY && my < s_BoundY + s_BoundH)
                     {
-                        *(int*)ADDR_CURSW = -1;
+                        SwsArmSW(-1);
                         LogLine("sws: cancel");
                     }
                 }
@@ -2731,6 +2752,31 @@ extern "C" __declspec(dllexport) unsigned __cdecl SWS_ClickGate(void* regs)
     else if (!GtMouseGameXY(&mx, &my)) r = 0;
     else if (SwsMouseOnIcon(mx, my)) r = ADDR_CLICKGATE_SKIP;
     return (unsigned)r;
+}
+
+/* 手动打靶类上膛: 照抄引擎侧栏 0x6AAF46..0x6AAF9D (Action != None 分支)。
+ * swIdx >= 0 为选中, < 0 为取消。UnselectAll 是打得出去的前提: 有选中时
+ * DecideAction (0x692610) 会提前返回, 到不了超武判据 0x692B06, 详见 notes。
+ * 全是本地 UI 态, 与引擎侧栏同一条路, 联机安全。 */
+static void SwsArmSW(int swIdx)
+{
+    char* disp = (char*)ADDR_DISPLAY;
+    if (swIdx < 0)
+    {
+        *(int*)ADDR_CURSW = -1;
+        return;
+    }
+    *(int*)(disp + OFF_DISP_CURBLD)      = 0;
+    *(int*)(disp + OFF_DISP_CURBLDTYPE)  = 0;
+    *(int*)(disp + OFF_DISP_CURBLDOWNER) = -1;
+    FN_SET_FOUNDATION((void*)ADDR_DISPLAY, 0);
+    FN_SET_REPAIR((void*)ADDR_DISPLAY, 0);
+    FN_SET_SELL((void*)ADDR_DISPLAY, 0);
+    *(unsigned char*)(disp + OFF_DISP_POWERMODE) = 0;
+    *(unsigned char*)(disp + OFF_DISP_PLANNING)  = 0;
+    *(unsigned char*)(disp + OFF_DISP_BEACON)    = 0;
+    *(int*)ADDR_CURSW = swIdx;
+    FN_UNSELECT_ALL();
 }
 
 /* ---------------- 即时超武: SpecialPlace 事件 (联机安全) ----------------

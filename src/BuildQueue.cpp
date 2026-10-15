@@ -40,6 +40,9 @@
  *     点击下单; 同一工厂每轮只喂一项 (事件下帧才执行, 当轮再喂会被原版拒绝,
  *     故用 fed 限流)。每帧另采样 Shift 进 32 帧闩锁 (左键记数用"当前或近期
  *     按下", 防单帧竞态/提前松开)。
+  *   - 限造 (rules.ini BuildLimit, 本 mod 大量建筑限 1/2/3): 原版达上限拒收,
+  *     本地队列须按同口径算余量 BQ_RoomLeft, 记入时只记还造得出的条数,
+  *     每轮喂单前排不进的直接丢 (=原版"点不下"语义, 队列自愈)。
  *   - 右键规则 (Shift=清全部): 点一次暂停, 再点取消; 取消时优先减数 (N>1 弹尾,
  *     在产/暂停不动), 最后剩在产单个走原生真取消。Shift+右键=取消全部: 清空本地
  *     后跑原生 0x2E (在产亦清, 显示归零); 未暂停的按住 Shift 点只先暂停
@@ -80,6 +83,9 @@
  *   houseIndex=[house+0x30] (House.ArrayIndex, 原版事件构造同取);
  *   Factory.Object=+0x58, Factory.Owner=+0x6C (SetObject 写入证实);
  *   CurrentPlayer=*(0xA83D4C)。
+ * 限造字段: BuildLimit=[type+0x3B8]; OwnedBuildingTypes=[house+0x5500],
+ *   FactoryProducedBuildingTypes=[house+0x55A0] (CounterClass 取值走 0x49FAE0,
+ *   参数=类型 ArrayIndex); 在产判定=Factory.Object→vtable+0x84。
  * 点击钩子寄存器 (0x6AB689/0x6AB6CE): EBP=abs (原版 cmp ebp,7 紧邻在前),
  * EDI=图标类型 (0x6AB602 取自 [esp+0x28], 原版 0x6AB6CE 处 [edi+0xCCE]),
  * ESI=工厂 (0x6AB602 处 GetPrimaryFactory 结果, 0x6AB61E mov esi,eax)。
@@ -109,9 +115,15 @@
 #define ADDR_CURPLAYER 0xA83D4Cu
 #define OFF_HOUSE_INDEX 0x30u
 #define OFF_TT_NAVAL 0xCCEu
+#define OFF_TT_BUILDLIMIT 0x3B8u
 #define OFF_BT_ARRAYINDEX 0xDF8u
 #define OFF_FAC_OBJECT 0x58u
 #define OFF_FAC_OWNER 0x6Cu
+/* HouseClass 限造计数 (CounterClass, 取值走 0x49FAE0)。
+ * 0x5500=OwnedBuildingTypes (现拥有, 含在产, 正限判它),
+ * 0x55A0=FactoryProducedBuildingTypes (历史造出, 负限判它)。 */
+#define OFF_HOUSE_OWNEDBLD 0x5500u
+#define OFF_HOUSE_PRODBLD 0x55A0u
 
 #define ADDR_OUT_COUNT 0xA802C8u
 #define ADDR_OUT_NEXT 0xA802D0u
@@ -338,6 +350,12 @@ typedef void* __attribute__((thiscall)) (*Fn_GetPrimaryFactory)(void* house, uns
  * 栈参=类型指针。0x4CA670 经原生绘制调用点实证。 */
 typedef int __attribute__((thiscall)) (*Fn_CountTotal)(void* factory, void* type);
 #define FN_COUNTTOTAL ((Fn_CountTotal)(void*)0x4CA670u)
+/* VectorClass::GetItemCount (0x49FAE0): 取限造计数器, 只读。 */
+typedef int __attribute__((thiscall)) (*Fn_CounterGet)(void* counter, int index);
+#define FN_COUNTERGET ((Fn_CounterGet)(void*)0x49FAE0u)
+/* ObjectClass::GetType (vtable+0x84): 判某工厂是否正在造本型。 */
+typedef void* __attribute__((thiscall)) (*Fn_ObjGetType)(void* obj);
+#define OFF_VT_GETTYPE (0x84 / 4)
 
 #define FN_EVENTCTOR ((Fn_EventCtor)(void*)0x4C6970u)
 #define FN_GETPRIMARYFACTORY ((Fn_GetPrimaryFactory)(void*)0x500510u)
@@ -377,6 +395,8 @@ static int BQ_ShiftDown(void)
 static void BQ_RemoveAt(int idx);
 static int BQ_ClearType(void* house, int heap);
 static int BQ_SimCount(void* house, void* type);
+static int BQ_LimitOf(void* type);
+static int BQ_RoomLeft(void* house, void* type, int others);
 
 /* 本家本型本地数 (取消钩用, heap 匹配)。 */
 static int BQ_LocalCount(void* house, int heap)
@@ -509,20 +529,28 @@ void BuildQueue_Poll(void)
     {
         BQEntry* e = &g_BQList[i];
         void* factory;
-        int k;
         if (e->house != cur) continue;
+        /* 限造余量不足的直接丢 (=原版"点不下"语义, 队列自愈)。 */
+        if (BQ_LimitOf(e->type) &&
+            BQ_RoomLeft(cur, e->type,
+                        BQ_LocalCount(cur, BQ_HeapOf(e->type)) - 1) <= 0)
+        {
+            BQ_RemoveAt(i);
+            i--;
+            continue;
+        }
         factory = BQ_Resolve(cur, e->naval, e->buildcat);
         if (!factory) continue; /* 工厂不存在: 留着等具现/重建, 不丢单 */
         if (e->flying)
         {
             if (BQ_SimCount(cur, e->type) > 0)
             {
-                for (k = i; k + 1 < g_BQCount; k++)
-                    g_BQList[k] = g_BQList[k + 1];
-                g_BQCount--;
+                /* 模拟已认领则删条目并继续 (删后下标顶上, 不可再用旧工厂)。 */
+                BQ_RemoveAt(i);
                 i--;
+                continue;
             }
-            else if (BQ_Pending(cur, e->naval, e->buildcat))
+            if (BQ_Pending(cur, e->naval, e->buildcat))
                 continue; /* 等执行 */
             /* 否则 pend 过期未认领: 下沉重发 (经 owner/object 门) */
         }
@@ -538,6 +566,22 @@ void BuildQueue_Poll(void)
     }
 }
 
+/* 记入 N 条本地 (槽位复用须清 flying, 否则残留 1 会被误认领)。 */
+static void BQ_PushN(void* house, void* type, unsigned naval, unsigned cat,
+                     int n)
+{
+    int i;
+    for (i = 0; i < n; i++)
+    {
+        g_BQList[g_BQCount].house = house;
+        g_BQList[g_BQCount].type = type;
+        g_BQList[g_BQCount].naval = naval;
+        g_BQList[g_BQCount].buildcat = cat;
+        g_BQList[g_BQCount].flying = 0;
+        g_BQCount++;
+    }
+}
+
 /* 0x6AB689 (5): 工厂忙时点建筑图标, 吞掉点击记入本地队列, 跳拒绝同尾。
  * regs: EBP=abs, EDI=图标类型, ESI=工厂。
  * Shift+左键一次记 5 个 (槽不够记到满, 满则走原版拒绝)。 */
@@ -549,7 +593,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_QueueClick(void* regs)
     void* house;
     int want;
     int free;
-    int i;
 
     BQ_EnsureInit();
     if (!g_BQEnable) return 0;
@@ -567,18 +610,15 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_QueueClick(void* regs)
     if (want > free) want = free;
     if (!g_BQHouse) g_BQHouse = house;
     if (house != g_BQHouse) return 0;
-    for (i = 0; i < want; i++)
+    /* 限造: 只记余量内的条数 (余量 0 则不记, 交回原版拒绝路径)。 */
     {
-        g_BQList[g_BQCount].house = house;
-        g_BQList[g_BQCount].type = pType;
-        g_BQList[g_BQCount].naval =
-            *(unsigned char*)((char*)pType + OFF_TT_NAVAL) ? 1u : 0u;
-        g_BQList[g_BQCount].buildcat =
-            *(unsigned*)(BQ_Reg(regs, R_ESP) + 0x24u);
-        g_BQList[g_BQCount].flying = 0; /* 槽位复用必须清:
-            残留 flying=1 会在模拟有同型时被误认领移除 */
-        g_BQCount++;
+        int room = BQ_RoomLeft(house, pType, 0);
+        if (want > room) want = room;
     }
+    if (want <= 0) return 0;
+    BQ_PushN(house, pType,
+             *(unsigned char*)((char*)pType + OFF_TT_NAVAL) ? 1u : 0u,
+             *(unsigned*)(BQ_Reg(regs, R_ESP) + 0x24u), want);
     return TO_CLICK_EXIT;
 }
 
@@ -592,7 +632,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_FreeShift(void* regs)
     void* house;
     int want;
     int free;
-    int i;
 
     BQ_EnsureInit();
     if (!g_BQEnable) return 0;
@@ -611,17 +650,14 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_FreeShift(void* regs)
     if (want > free) want = free;
     if (!g_BQHouse) g_BQHouse = house;
     if (house != g_BQHouse) return 0;
-    for (i = 0; i < want; i++)
+    /* 限造: 给原生即将下的 1 个留位, 余下只记余量内的条数。 */
     {
-        g_BQList[g_BQCount].house = house;
-        g_BQList[g_BQCount].type = pType;
-        g_BQList[g_BQCount].naval =
-            *(unsigned char*)((char*)pType + OFF_TT_NAVAL) ? 1u : 0u;
-        g_BQList[g_BQCount].buildcat =
-            *(unsigned*)(BQ_Reg(regs, R_ESP) + 0x24u);
-        g_BQList[g_BQCount].flying = 0; /* 槽位复用必须清, 同上 */
-        g_BQCount++;
+        int room = BQ_RoomLeft(house, pType, 1);
+        if (want > room) want = room;
     }
+    BQ_PushN(house, pType,
+             *(unsigned char*)((char*)pType + OFF_TT_NAVAL) ? 1u : 0u,
+             *(unsigned*)(BQ_Reg(regs, R_ESP) + 0x24u), want);
     return 0;
 }
 
@@ -887,27 +923,74 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_DrawNullFac(void* regs)
     return TO_DRAWNUM;
 }
 
-/* 本家各工厂中该型的模拟数之和。绘制只认一个槽位工厂 (buildcat=0),
- * 跨页在产会被漏计 (防御页 5 显示 4 即此因); 全扫才对。地址全经反汇编
- * 实证, 只读不写。 */
-static int BQ_SimCount(void* house, void* type)
+/* 本家各工厂中该型的模拟数之和。绘制只认单槽工厂会跨页漏计, 全扫才对。 */
+static void BQ_CountSimDup(void* house, void* type, int* pSim, int* pDup)
 {
     void** items;
     int count;
     int i;
     int sim = 0;
-    if (!house || !type) return 0;
+    int dup = 0;
+    if (pSim) *pSim = 0;
+    if (pDup) *pDup = 0;
+    if (!house || !type) return;
     items = *(void***)ADDR_FACARR_ITEMS;
     count = *(int*)ADDR_FACARR_COUNT;
-    if (!items || count <= 0) return 0;
+    if (!items || count <= 0) return;
     for (i = 0; i < count; i++)
     {
         void* fac = items[i];
+        void* obj;
+        void** vt;
         if (!fac) continue;
         if (*(void**)((char*)fac + OFF_FAC_OWNER) != house) continue;
         sim += FN_COUNTTOTAL(fac, type);
+        obj = *(void**)((char*)fac + OFF_FAC_OBJECT);
+        if (!obj) continue;
+        vt = *(void***)obj;
+        if (!vt || !vt[OFF_VT_GETTYPE]) continue;
+        if (((Fn_ObjGetType)vt[OFF_VT_GETTYPE])(obj) == type) dup++;
     }
+    if (dup > sim) dup = sim;
+    if (pSim) *pSim = sim;
+    if (pDup) *pDup = dup;
+}
+
+static int BQ_SimCount(void* house, void* type)
+{
+    int sim = 0;
+    BQ_CountSimDup(house, type, &sim, 0);
     return sim;
+}
+
+/* 本型的 rules.ini BuildLimit (0=不限, 正=总数上限, 负=历史上限)。 */
+static int BQ_LimitOf(void* type)
+{
+    if (!type) return 0;
+    return *(int*)((char*)type + OFF_TT_BUILDLIMIT);
+}
+
+/* 本家本型还能再排几条 (无限制返 BQ_CAP, 不足截 0)。
+ * others=同型其余本地条目数 (含已发单未认领的)。正限扣 Owned, 负限扣历史;
+ * 在排=各厂 CountTotal 之和再扣掉正在造本型的厂数 (在产已计入计数器)。
+ * 全只读, 不碰模拟。 */
+static int BQ_RoomLeft(void* house, void* type, int others)
+{
+    int limit = BQ_LimitOf(type);
+    int idx;
+    int room;
+    int sim = 0;
+    int dup = 0;
+
+    if (!limit || !house || !type) return BQ_CAP;
+    idx = BQ_HeapOf(type);
+    room = (limit > 0) ? limit - FN_COUNTERGET((char*)house + OFF_HOUSE_OWNEDBLD,
+                                               idx)
+                       : -limit - FN_COUNTERGET((char*)house + OFF_HOUSE_PRODBLD,
+                                                idx);
+    BQ_CountSimDup(house, type, &sim, &dup);
+    room -= sim - dup + others;
+    return room > 0 ? room : 0;
 }
 
 /* 0x6A9C86 (5): DrawStrip 的 CountTotal 取数点 (mov ebx,eax + cmp ebx,1)。
