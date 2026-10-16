@@ -340,6 +340,42 @@ void OU_ThinLine(unsigned char* locked, int w, int h, int pitch,
     }
 }
 
+/* 虚线: 沿线段每 (dash+gap) 像素画 dash 段实线, 其余留空 (风格贴近引擎聚集点线)。 */
+void OU_ThinLineDash(unsigned char* locked, int w, int h, int pitch,
+                     int x0, int y0, int x1, int y1,
+                     unsigned r, unsigned g, unsigned b, unsigned a,
+                     int thick, int dash, int gap)
+{
+    int dx, dy, adx, ady, n, i, period;
+    if (!locked || !IsPlausiblePtr(locked)) return;
+    if (w <= 0 || h <= 0 || pitch <= 0) return;
+    if (thick < 1) thick = 1;
+    if (thick > 4) thick = 4;
+    if (dash < 1) dash = 6;
+    if (gap < 1) gap = 4;
+    period = dash + gap;
+    dx = x1 - x0; dy = y1 - y0;
+    adx = dx >= 0 ? dx : -dx; ady = dy >= 0 ? dy : -dy;
+    n = adx > ady ? adx : ady;
+    if (n <= 0) n = 1;
+    for (i = 0; i <= n; i++)
+    {
+        int px, py, k;
+        if ((i % period) >= dash) continue;
+        px = x0 + (int)(((long long)dx * i) / n);
+        py = y0 + (int)(((long long)dy * i) / n);
+        if (px < 0 || py < 0 || px >= w || py >= h) continue;
+        for (k = 0; k < thick; k++)
+        {
+            unsigned short* row;
+            int yy = py + k;
+            if (yy >= h) break;
+            row = (unsigned short*)(locked + yy * pitch);
+            row[px] = Blend16(row[px], r, g, b, a);
+        }
+    }
+}
+
 int OU_PrevPush(OU_PrevLine* buf, int* nio,
                 int ulx, int uly, int ulz, int tlx, int tly, int tlz)
 {
@@ -387,6 +423,26 @@ void OU_PrevDraw(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, i
         if (!OU_ProjWorld(buf[k].ulx, buf[k].uly, buf[k].ulz, &ux, &uy)) continue;
         if (!OU_ProjWorld(buf[k].tlx, buf[k].tly, buf[k].tlz, &tx, &ty)) continue;
         OU_ThinLine(locked, w, h, pitch, ux, uy, tx, ty, r, g, b, a, thick);
+    }
+}
+
+/* 同 OU_PrevDraw, 但画虚线 (dash 实 / gap 空 像素)。 */
+void OU_PrevDrawDash(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, int pitch,
+                     unsigned r, unsigned g, unsigned b, unsigned a,
+                     int thick, int dash, int gap)
+{
+    void* tac;
+    int k;
+    if (!buf || n <= 0) return;
+    if (n > OU_PREV_CAP) n = OU_PREV_CAP;
+    tac = *(void**)OU_TAC_INSTANCE;
+    if (!tac || !IsPlausiblePtr(tac)) return;
+    for (k = 0; k < n; k++)
+    {
+        int ux, uy, tx, ty;
+        if (!OU_ProjWorld(buf[k].ulx, buf[k].uly, buf[k].ulz, &ux, &uy)) continue;
+        if (!OU_ProjWorld(buf[k].tlx, buf[k].tly, buf[k].tlz, &tx, &ty)) continue;
+        OU_ThinLineDash(locked, w, h, pitch, ux, uy, tx, ty, r, g, b, a, thick, dash, gap);
     }
 }
 

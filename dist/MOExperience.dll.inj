@@ -68,3 +68,9 @@
 ; 出厂: BuildingClass::ExitObject (虚表第 64 项) 序言, WhatAmI 分派前, 载具/步兵/飞机全命中。
 ; 13B 只读 EDI (被调用者保存), 无须还原寄存器; 首条禁读 EAX/ECX/EDX。
 0x443C7D = RallyPath_ExitHook, 13
+
+; 无法攻击的单位不再冲向目标: FootClass::ObjectClickedAction 的
+; NoMove(action==2) 处理器入口 0x4D77BD (6B = mov edx,[ebx] + lea eax,[esp+0x74], 无 rel)。
+; ESI=this, EBX=pTarget; 目标非本家非盟友就跳 epilogue 0x4D7CC0 (停原地)。
+; 见 src/NoApproach.cpp
+0x4D77BD = NoApproach_Hook, 6

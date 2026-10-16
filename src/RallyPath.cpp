@@ -1,7 +1,9 @@
 /* RallyPath.cpp - 工厂聚集点多段路径。
  *
- * 选中工厂后左键点空地设聚集点 (第一段起点, 引擎自己画线), 按住 Z 继续点则
- * 追加尾巴; 之后出厂的单位先到聚集点再沿尾巴走, 左键重设聚集点时旧尾巴作废。
+ * 选中工厂后左键点空地设聚集点 (引擎自己画那条线), 按住 Z 继续点则追加尾巴。
+ * 折线起点就是玩家设的聚集点格, 尾巴接着引擎那条线续画;
+ * 按 S 清掉聚集点时 (引擎 ArchiveTarget 变空) 尾巴一并作废。尾巴用虚线, 与引擎风格一致。
+ * 之后出厂的单位先到聚集点再沿尾巴走。左键重设聚集点时旧尾巴作废。
  *
  * 出厂瞬间只登记, 等 DelayFrames 逻辑帧后把整条折线当规划点一次下发, 节点挂上
  * token 后发一次 PlanCommit, 发完即释放追单槽位。
@@ -38,6 +40,8 @@ extern int g_Calibrated;
 #define OFF_TYP_UNDEPLOY  0x16B9u  /* BuildingTypeClass::UndeploysInto */
 #define VT_ISUNITFACTORY  0x284u   /* TechnoClass::IsUnitFactory() */
 #define OFF_INLIMBO       0x81u    /* ObjectClass::InLimbo */
+#define OFF_BLD_ARCHIVE   0x218u   /* TechnoClass::ArchiveTarget: 引擎画聚集点线读的目标
+                                    * 指针, 无聚集点 = NULL。只判空, 绝不解引用 (脏值会崩) */
 
 /* 规划点 token (与 PatrolCircle 同): Techno+0x514 = PlanningToken,
  * token+0x08 = 节点数组, token+0x14 = 节点数。 */
@@ -46,9 +50,10 @@ extern int g_Calibrated;
 #define OFF_TOK_NCOUNT 0x14u
 #define OFF_TOK_FLAG   0x1Cu  /* 提交中标记, 非 0 时提交空转 */
 #define OFF_TOK_CURSOR 0x8Cu  /* 规划游标, 提交只推游标 == 0 的 token */
-/* PlanningTokenClass::Array (items@+0x4 / count@+0x8)。 */
+/* PlanningTokenClass::Array (DynamicVectorClass<PlanningTokenClass*> @0xAC4C78)。
+ * Items@+0x4 / Capacity@+0x8 / Count@+0x10, 与 token+0x14 节点数同布局。 */
 #define ADDR_TOKEN_ARRAY_ITEMS 0xAC4C7Cu
-#define ADDR_TOKEN_ARRAY_COUNT 0xAC4C80u
+#define ADDR_TOKEN_ARRAY_COUNT 0xAC4C88u   /* Count, 不是 +0x8 的 Capacity */
 #define ADDR_PLANNING_MODE    0xAC4CF4u /* PlanningNodeClass::PlanningModeActive */
 
 /* 私有引擎入口 (只读 + 标准事件, 不直接改模拟状态)。 */
@@ -93,7 +98,8 @@ typedef struct
     short x[RP_NODE_MAX];
     short y[RP_NODE_MAX];
     int   n;                     /* 尾巴段数 (0 = 只有起点, 没有尾巴) */
-    short sx, sy;                /* 玩家左键设的聚集点 (第一段起点), -1 = 没设过 */
+    short sx, sy;                /* 第一段起点 = 玩家左键设的聚集点格, -1 = 没设过 */
+    int   had;                   /* 上一帧引擎聚集点是否存在 (由有到无 = 被清, 线作废) */
 } RPPath;
 
 static RPPath g_RpTab[RP_TAB_CAP];
@@ -122,7 +128,9 @@ static RPWalk g_RpWalk[RP_WALK_CAP];
 static int    g_RpWalkCount = 0;
 static void*  g_RpHouse = NULL; /* 入队瞬间 CurrentPlayer (换房清空) */
 static int    g_RpLastFrame = -1; /* 上次处理过的逻辑帧 (一帧只跑一遍) */
-static int    g_RpZRecent = 0;    /* Z 宽限剩余帧数: 画线期间为正, 钩子漏读 Z 也不误清 */
+static int    g_RpSyncFrame = -1; /* 上次同步聚集点的逻辑帧 (调引擎虚表, 一帧一次) */
+static int    g_RpZRecent = 0;    /* Z 宽限剩余逻辑帧数: 画线期间为正, 钩子漏读 Z 也不误清 */
+static int    g_RpZLastFrame = -1; /* Z 宽限计时的帧门 (Poll 一帧被调上百次) */
 
 /* ---------------- 小工具 ---------------- */
 
@@ -214,8 +222,17 @@ static int RP_IsFactory(void* b)
     return RP_TypeAllowed((const char*)type + OFF_TYP_ID);
 }
 
-/* 第一段起点 = 玩家左键设的聚集点, 本模块自己记 (sx/sy), 不读写引擎聚集点字段。
- * 本模块只改本机内存, 联机安全。 */
+/* 引擎当前有没有聚集点: 只读 ArchiveTarget 是否为 NULL, 不解引用。 */
+static int RP_HasRally(void* bld)
+{
+    void* t;
+    if (!bld || !IsPlausiblePtr(bld)) return 0;
+    if (OU_WhatAmI(bld) != ABS_BUILDING) return 0;
+    t = *(void**)((char*)bld + OFF_BLD_ARCHIVE);
+    return (t && IsPlausiblePtr(t)) ? 1 : 0;
+}
+
+/* ArchiveTarget 失效时可能是脏指针, 只判空、不解引用。聚集点线仍由引擎自己画。 */
 
 /* 建筑还活着吗: 首选 Fetch_ID, 抓不到则比虚表指针。
  * 皆无时当活着 (fail-open), 宁可条目多活也不误删正在画的折线。 */
@@ -252,6 +269,7 @@ static void RP_ClearAll(void)
     g_RpWalkCount = 0;
     g_RpHouse = 0;
     g_RpLastFrame = -1;
+    g_RpSyncFrame = -1;
 }
 
 /* 每轮清掉建筑已没的表项 (卖/摧毁/被占领后地址可能被复用)。 */
@@ -262,6 +280,33 @@ static void RP_DropDead(void)
     {
         if (RP_AliveAt(&g_RpTab[i])) { i++; continue; }
         RP_ShiftTabDown(i);
+    }
+}
+
+/* 每逻辑帧同步一次引擎聚集点有无 (一帧一次)。
+ * 只读 ArchiveTarget 是否为 NULL, 不解引用。
+ * 有则记 had=1; 由有变无 (按 S 清聚集点 / 点建筑自身取消) 则折线作废。 */
+static void RP_SyncRally(void)
+{
+    int fr, i = 0;
+    if (g_RpTabCount <= 0) return;
+    fr = *(int*)ADDR_FRAME;
+    if (fr == g_RpSyncFrame) return;
+    g_RpSyncFrame = fr;
+    while (i < g_RpTabCount)
+    {
+        RPPath* p = &g_RpTab[i];
+        if (!RP_AliveAt(p)) { RP_ShiftTabDown(i); continue; }
+        if (RP_HasRally(p->bld))
+        {
+            p->had = 1;
+        }
+        else if (p->had)
+        {
+            RP_ShiftTabDown(i);            /* 聚集点没了 -> 折线清掉 */
+            continue;
+        }
+        i++;
     }
 }
 
@@ -300,6 +345,7 @@ static RPPath* RP_NewPath(void* bld)
     p->n = 0;
     p->sx = -1;
     p->sy = -1;
+    p->had = 0;
     return p;
 }
 
@@ -638,8 +684,11 @@ static void RP_WalkPoll(void)
         w->age = (unsigned)(fr - w->fr0);
         if (((unsigned char*)w->unit)[OFF_INLIMBO])
         {
-            /* 还在厂里 (载具须慢慢挪出): 等, 不丢。 */
+            /* 还在厂里 (载具须慢慢挪出): 等, 不丢。
+             * 延迟从真正离厂起算: 在厂期间把计时基准推到当前帧,
+             * 否则载具仍压在出口格, 首点不可达会整条作废。 */
             w->limbo++;
+            w->fr0 = fr;
             if (w->limbo > RP_LIMBO_MAX) { RP_WalkShiftDown(i); continue; }
             i++;
             continue;
@@ -698,11 +747,20 @@ void RallyPath_Poll(void)
     }
     if (!g_RpEnable) { s_RpPrevLmb = 0; return; }
     RP_DropDead();
+    RP_SyncRally();
     RP_WalkPoll();
-    /* Z 宽限期: 按住 Z 期间保持 15 帧, 钩子漏读一次也不会误清尾巴。 */
+    /* Z 宽限: 按住 Z 期间保持 15 逻辑帧, 钩子漏读一次也不误清尾巴。
+     * Poll 一帧被调多次, 宽限按逻辑帧递减。 */
     zDown = OU_KeyDown('Z');
-    if (zDown) g_RpZRecent = 15;
-    else if (g_RpZRecent > 0) g_RpZRecent--;
+    {
+        int fr = *(int*)ADDR_FRAME;
+        if (fr != g_RpZLastFrame)
+        {
+            g_RpZLastFrame = fr;
+            if (zDown) g_RpZRecent = 15;
+            else if (g_RpZRecent > 0) g_RpZRecent--;
+        }
+    }
     /* Z + 左键按下沿 = 记一段 (原生派发被规划门吞掉时靠这条路)。 */
     lmb = OU_KeyDown(VK_LBUTTON);
     if (zDown && lmb && !s_RpPrevLmb) RP_CaptureClick();
@@ -716,8 +774,6 @@ typedef int (__fastcall *RP_UnlockFn)(void*, void*);
 
 #define VT_RP_LOCK   0x5C
 #define VT_RP_UNLOCK 0x60
-
-#define RP_DRAW_MAX (RP_NODE_MAX + 2)   /* 折线段数上限 + 橡皮尾 + 余量 */
 
 /* 格 → 世界坐标 (格心 + 地面高度)。 */
 static int RP_CellWorld(int cx, int cy, int* lx, int* ly, int* lz)
@@ -737,7 +793,7 @@ void RallyPath_Draw(void* surf, int w, int h, int pitch)
     RP_UnlockFn unlockFn;
     unsigned char* locked;
     void** items;
-    OU_PrevLine buf[RP_DRAW_MAX];
+    OU_PrevLine buf[OU_PREV_CAP]; /* 多选工厂每家一条线, 按全表上限给 */
     int selN, i, k, n;
     int zDown;
 
@@ -762,15 +818,24 @@ void RallyPath_Draw(void* surf, int w, int h, int pitch)
     for (i = 0; i < selN; i++)
     {
         RPPath* p;
+        CoordStruct bc;
+        void* bld = items[i];
         int px = 0, py = 0, pz = 0, ax, ay, haveStart = 0;
-        if (!RP_IsFactory(items[i])) continue;
-        p = RP_Find(items[i]);
+        if (!RP_IsFactory(bld)) continue;
+        p = RP_Find(bld);
         if (!p || p->n <= 0) continue;
-        /* 从聚集点起笔 (建筑→聚集点由引擎画); 未记过则从尾巴首点起画。 */
+        /* 起点: 设过聚集点就从它起笔 (建筑→聚集点由引擎自己画);
+         * 没设过则从建筑本体起笔, 补上"建筑→首段"这一段 —— 否则整条线像从
+         * 半空起笔, 多选时看上去就与建筑/其他线断开。 */
         if (p->sx >= 0 && OU_CellValid(p->sx, p->sy) &&
             RP_CellWorld(p->sx, p->sy, &px, &py, &pz))
             haveStart = 1;
-        for (k = 0; k < p->n && n < RP_DRAW_MAX - 1; k++)
+        else if (OU_GetCoords(bld, &bc))
+        {
+            px = bc.X; py = bc.Y; pz = bc.Z;
+            haveStart = 1;
+        }
+        for (k = 0; k < p->n && n < OU_PREV_CAP; k++)
         {
             int lz = 0;
             if (!RP_CellWorld(p->x[k], p->y[k], &ax, &ay, &lz)) break;
@@ -779,7 +844,7 @@ void RallyPath_Draw(void* surf, int w, int h, int pitch)
             OU_PrevPush(buf, &n, px, py, pz, ax, ay, lz);
             px = ax; py = ay; pz = lz;
         }
-        if (zDown && haveStart && n < RP_DRAW_MAX)
+        if (zDown && haveStart && n < OU_PREV_CAP)
         {
             int mx, my, lx, ly, lz = 0;
             if (OU_MouseCell(&mx, &my) && RP_CellWorld(mx, my, &lx, &ly, &lz))
@@ -790,7 +855,7 @@ void RallyPath_Draw(void* surf, int w, int h, int pitch)
     {
         int cr, cg, cb;
         if (!RP_HouseColor(&cr, &cg, &cb)) { cr = 255; cg = 255; cb = 0; }
-        OU_PrevDraw(buf, n, locked, w, h, pitch, cr, cg, cb, 220, 2);
+        OU_PrevDrawDash(buf, n, locked, w, h, pitch, cr, cg, cb, 220, 2, 6, 4);
     }
     unlockFn(surf, NULL);
 }

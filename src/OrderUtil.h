@@ -144,6 +144,15 @@ int OU_PrevPushCell(OU_PrevLine* buf, int* nio, void* u, int fly, int cx, int cy
 /* 绘制全部预览线 (逐对引擎投影, 失败跳过)。thick = 线宽像素。 */
 void OU_PrevDraw(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, int pitch,
                  unsigned r, unsigned g, unsigned b, unsigned a, int thick);
+/* 同 OU_PrevDraw, 画虚线 (每 dash 像素实 / 后 gap 像素空)。 */
+void OU_PrevDrawDash(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, int pitch,
+                     unsigned r, unsigned g, unsigned b, unsigned a,
+                     int thick, int dash, int gap);
+/* 单像素细虚线 (逐像素插值, 自带裁剪)。 */
+void OU_ThinLineDash(unsigned char* locked, int w, int h, int pitch,
+                     int x0, int y0, int x1, int y1,
+                     unsigned r, unsigned g, unsigned b, unsigned a,
+                     int thick, int dash, int gap);
 /* 预览节流 (三家规划线共用): 换格/换key且距上次>minMs, 或超 refreshMs 刷一次。
  * 回 1=该刷 (已更新 *last*); 0=跳过。首轮恒刷。 */
 int OU_PrevThrottle(unsigned* lastMs, int* lastCx, int* lastCy, int* lastKey,
