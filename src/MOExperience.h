@@ -1,7 +1,7 @@
 /* MOExperience.h - DLL 协调层: 把各功能模块挂到引擎时序点上 (见 .cpp)。 */
 #pragma once
 
-#define MOE_VERSION "0.2.298"
+#define MOE_VERSION "0.2.316"
 
 /* 一次性初始化: 建日志路径 + 各模块首次载入配置。幂等, 各入口都先调它。 */
 void MOE_EnsureInit(void);

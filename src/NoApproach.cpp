@@ -40,7 +40,6 @@ typedef unsigned char __attribute__((thiscall)) (*Fn_IsAlliedWith)(void* self, v
 
 static int g_NaInit = 0;
 static int g_NaEnable = 1;
-static int g_NaLogged = 0;
 
 static void NA_EnsureInit(void)
 {
@@ -92,11 +91,5 @@ extern "C" __declspec(dllexport) unsigned __cdecl NoApproach_Hook(void* regs)
     toh = *(void**)((char*)pTarget + OFF_TECHNO_OWNER);
     if (toh && !IsPlausiblePtr(toh)) return 0;
     if (((Fn_IsAlliedWith)FN_ALLIED)(own, toh)) return 0;
-
-    if (!g_NaLogged)
-    {
-        g_NaLogged = 1;
-        LogLine("noapproach: skip NoMove approach (enemy target)");
-    }
     return ADDR_NOMOVE_TRUE;
 }

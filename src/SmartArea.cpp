@@ -1,34 +1,34 @@
-/* SmartArea.cpp - 组合中键范围智能下令 (Ctrl+中键模糊攻击的自适应版)。
+/* SmartArea.cpp - 组合中键范围智能下令。
  *
- * 触发: Hotkey (默认 Shift+Middle, 主键须是 Middle, 可配单键如 X1)
- * 点按/划线, 松开即执行 (与模糊同手势)。按住显示生效块菱形框。
- * 点按=单块, 划线=沿轨迹各节点逐块由近及远挑目标 (上限 64 节点),
- * 松开格直接点中的对象排首位。
- * 决策口径与裸中键同一套 (DecideAction/MouseOver 同函数), 差的是输入:
- * Shift 按住时部分目标回 ToggleSelect(8, 加选语义), 真光标被盖住 —— 不管
- * Hotkey 配没配 Shift, 物理 Shift 按住都盖光标, 故待命看物理脏键
- * (SA_DirtyHeld: 配置修饰/附加键, 或物理 Shift, 任一按住即脏)。
- * 无令时走 fallback 规则表 (细节见 SA_Fallback): 本家目标只允许步兵进自家
- * 运输机, 其余跳过 (绝不误击本家); 非本家 (盟友视同模糊) 载具/飞机一律攻击,
- * 步兵对非建筑攻击, 对建筑只由工程师 (ENGINEER/S/Y/F) 占领, 非工程师留待命,
- * 脏键松开后按真光标重判 (无修饰单键不脏即不等)。
- * 分组 (SquadSize, 默认 4, 与模糊同义): 每目标先分 Squad 个, 剩下的找最近
- * 可处理目标加入 (全员有事做); 进驻不进这轮, 按建筑轮转均分 (不管 SquadSize)。
- * 只下 攻击/进入/进驻/占领 四类令 (本功能不下移动令, 分不到目标的原地待命)。
- * 下令走标准 0x04 MegaMission (攻击 Target=对象, 进入类 Destination=对象,
- * 与手点同形; 物理 Z 按住时 IsPlanningEvent=1 排队, 按序追加路径点不覆盖 ——
- * 点 B 再点 A 再点 C 得 B→A→C; 不按 Z 则直接下令 IsPlanningEvent=0)。
- * OutList 满 drip 跨帧续发。
- * 规划线 (按住时): 预览=快照+分配, 与终判同一套输入同一套规则 (终判松手
- * 重扫一次); 预览截断前 64 单位/前 96 目标 (终判全量), 限 128 线, 换格、
- * 节点数变或 400ms 刷一次, 80ms 节流, 松手即消。端点存 leptons 世界坐标
- * (单位中心含高度, 见 OrderUtil.h OU_PrevLine), 绘制期经引擎投影。
- * 仲裁: 须无 Ctrl (含 Ctrl 归模糊); Z 不禁 (Z+裸中键仍归巡逻圈)。
- * 原生 Shift (多选/排路点) 只在左/右键上, 中键无原生功能, 无冲突。
- * 关或热键坏则不认领, 组合中键回落裸中键; 待命框超 300 轮丢弃。
- *
- * 联机: 只发标准事件, 本地只读 + 标准事件入队, 不写模拟内存。
- * 构建见 build-fast.bat (同一 DLL)。轮询挂 PowerDrawBoth (见 MOExperience.cpp)。
+ * 触发: Hotkey (默认 Shift+Middle, 可配单键如 X1), 点按/划线, 松开即执行。
+ * 点按=单块, 划线=沿轨迹各节点逐块环扫 (去重, 松开格点中排首, 上限 64 节点)。
+ * 决策: 攻击/进入/进驻/占领才下单, 移动/未知跳过 (不下移动令)。
+ * 光标查询走 OU_MouseOverObjectNative (ignoreForce=1): 本功能热键含 Shift,
+ * 用 0 会被物理 Shift 污染成 ToggleSelect(8) 使主判定全废, 必须取固有光标
+ * (与裸中键同语义, 但无视当前修饰键)。仍有待命机制 (见 SA_DirtyHeld):
+ * 分不到活的单位留旗, 脏键 (配置修饰/附加键或物理 Shift) 松开后重判。
+ * 光标无令走 fallback 规则表 (见 SA_Fallback): 本家只允许步兵进自家运输机,
+ * 其余跳过; 非本家载具/飞机/步兵对非建筑强攻; 步兵对建筑仅工程师占领。
+ * 分组 (SquadSize, 默认 4): 每目标首轮 Squad 个, 剩下找最近可处理目标加入。
+ * 进楼单按归属与类别限数:
+ * 自家楼: 工程师修掉血楼只派 1 人 (CAPTURE 进驻即修, 人消耗), 满血跳过;
+ *   士兵进驻不限数不查血。
+ * 非自家楼: 工程师占无主/中立科技 (TL≠-1) 按楼限 1;
+ *   工程师对中立民房 (TL=-1, 不可夺无归属变更) 只做维修 (掉血 1 人/满血跳过);
+ *   士兵进驻中立民房轮转均分; 敌楼强占与拆除 Squad。
+ * 非自家载具 Enter (占空车) 按目标限 1, 偷车 Capture 不分归属限 1;
+ * 进自家运输机装人不限。
+ * 工程师判定: InfantryType+0xEC3 (Engineer=yes 本体) 或 GRepair/Repair(29/11)
+ * 光标; Capture(9) 不能自证 (士兵对空房同样拿 9, 占领与进驻按单位区分)。
+ * 中立判定: House->Type->MultiplayPassive (+0x34/+0x1A6, 只读);
+ * 民房判定: TechnoType->TechLevel (+0x634, TL=-1, 只读); 皆有启动自检,
+ * 失败回退旧行为。
+ * 只下标准 0x04 MegaMission (攻击 Target=对象, 进入类 Destination=对象);
+ * 物理 Z 按住 IsPlanningEvent=1 排队追加, 否则直接下令。OutList 满跨帧续发。
+ * 预览=快照+分配与终判同一套 (双 sink, 终判松手重扫一次); 预览截断
+ * 64 单位/96 目标/128 线, 换格或 400ms 刷, 80ms 节流, 松手即消。
+ * 仲裁: 须无 Ctrl (归模糊); Z 不禁。关或热键坏不认领, 回落裸中键。
+ * 联机: 只发标准事件, 本地只读不写模拟内存。
  * 日志: 仅启动行。
  */
 
@@ -78,7 +78,19 @@ static void SA_EnsureInit(void)
     if (g_SaRange > 16) g_SaRange = 16;
     if (g_SaSquad < 1) g_SaSquad = 1;
     if (g_SaSquad > 16) g_SaSquad = 16;
-    LogLine("smartarea: ON (shift+middle)");
+    /* 报实际生效热键 (vk=5 是 X1 侧键/4 是中键; mods bit0=Ctrl,bit1=Shift,bit2=Alt)。 */
+    {
+        char buf[80], b1[16];
+        unsigned q = 0;
+        q = AppendCStr(buf, q, "smartarea: ON hk-vk=", sizeof(buf));
+        UtoA((unsigned)g_SaHk.vk, b1);
+        q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = AppendCStr(buf, q, " mods=", sizeof(buf));
+        UtoA((unsigned)g_SaHk.mods, b1);
+        q = AppendCStr(buf, q, b1, sizeof(buf));
+    (void)q;
+    LogLine(buf);
+    }
     if (!g_SaEnable) LogLine("smartarea: OFF");
 }
 
@@ -274,13 +286,25 @@ static int SA_IsEngineer(void* u)
     return 0;
 }
 
+/* 工程师判定 (读 InfantryType+0xEC3, 即 Engineer=yes 本体; ID 表保留作交叉)。
+ * 类型指针走 SA_TypeOf 步兵槽。 */
+static int SA_IsEngUnit(void* u)
+{
+    void* tp;
+    if (!u || !IsPlausiblePtr(u)) return 0;
+    if (OU_WhatAmI(u) != ABS_INFANTRY) return 0;
+    if (SA_IsEngineer(u)) return 1;
+    tp = SA_TypeOf(u, ABS_INFANTRY);
+    if (!tp || !IsPlausiblePtr(tp)) return 0;
+    return (*(unsigned char*)((char*)tp + 0xEC3u)) ? 1 : 0;
+}
+
 /* Action(光标) → Mission: 与 SmartOrder 同表 (攻击1/进入7/占领8/进驻17);
  * 移动/未知回 -1 (本功能不下移动令)。
  * 选择类 (Select7/ToggleSelect8, 如坦克悬停自家建筑) 无对应订单, 跳过:
  * 左键等价动作是选中, 下令侧只能待命。 */
 /* 敌意类光标 (左键点上去就是打, 含 Damage28/Eaten10/Detonate55/56):
- * 一律按攻击 (Damage28 实测: 悬停某类建筑回 28, 不映射则跳过)。
- * 例外见 AssignOne 工程师修正 (工程师对非本家建筑转占领, 没枪佯攻无用)。 */
+ * 一律按攻击。例外见 AssignOne 工程师修正 (工程师对非本家建筑转占领)。 */
 static int SA_MissionFor(int targetWhat, int action)
 {
     if (action == ACTION_ATTACK || action == 62 || action == 63 ||
@@ -289,6 +313,11 @@ static int SA_MissionFor(int targetWhat, int action)
         return MISSION_ATTACK;
     if (action == ACTION_ENTER)
         return (targetWhat == ABS_BUILDING) ? MISSION_SABOTAGE : MISSION_ENTER;
+    /* Repair(11)/GRepair(29) 点建筑 = 进驻修/占 (与手点进楼同形,
+     * 步兵分发转成 Capture 动作再发 Capture(8) 任务)。
+     * 碾磨机回收是对载具, 这里只管建筑。 */
+    if ((action == 11 || action == 29) && targetWhat == ABS_BUILDING)
+        return MISSION_CAPTURE;
     if (action == ACTION_SABOTAGE)
         return MISSION_SABOTAGE;
     if (action == ACTION_GUARDAREA && targetWhat == ABS_BUILDING)
@@ -299,13 +328,17 @@ static int SA_MissionFor(int targetWhat, int action)
 }
 
 /* 单位 u 对目标 t 的任务: 只读 MouseOver, 非对象令回 -1。
- * actOut 透出原始光标 (fallback 判定用, 可空)。 */
+ * actOut 透出原始光标 (fallback 判定用, 可空)。
+ * 必须走 Native (ignoreForce=1): 本功能热键含 Shift (默认 Shift+Middle),
+ * 用 0 会被物理 Shift 污染成 ToggleSelect(8) (Ctrl 污染成强攻),
+ * 真光标失真 → 主判定路径全废, 只剩 fallback, 表现就是"没反应"。
+ * 用 1 取单位固有光标 (与裸中键同形), 修饰键不再影响判定。 */
 static int SA_UnitMission(void* u, void* t, int* actOut)
 {
     int act, ms;
     if (actOut) *actOut = -1;
     if (!SA_IsAttacker(u) || !SA_IsTargetType(t)) return -1;
-    act = OU_MouseOverObject(u, t);
+    act = OU_MouseOverObjectNative(u, t);
     if (actOut) *actOut = act;
     if (act < 0) return -1;
     ms = SA_MissionFor(OU_WhatAmI(t), act);
@@ -315,14 +348,13 @@ static int SA_UnitMission(void* u, void* t, int* actOut)
     return ms;
 }
 
-/* fallback 规则表 (光标无令时, 与裸中键左键语义对齐, Shift 下直接可用):
- * 本家目标: 步兵对自家载具按进入 (运输机收人; 非运输忽略, 安全),
- * 其余跳过 (绝不误击本家)。
- * 非本家目标 (Owner 双单位自校准, 盟友视同模糊一并处理, 下手前看清):
- * 载具/飞机一律攻击; 步兵对非建筑攻击;
- * 步兵对建筑: 工程师按占领 (敌建筑占领/中立进驻, 步兵进民房原生即此),
- * 非工程师跳过留待命 (等真光标, 防大兵拆错该驻的楼)。
+/* fallback 规则表 (主判定无令时, act<0 才进; 正常走 Native 光标):
+ * 本家目标: 步兵对自家载具按进入 (运输机收人); 其余跳过 (绝不误击本家)。
+ * 非本家目标: 载具/飞机一律攻击; 步兵对非建筑攻击;
+ * 步兵对建筑: 工程师按占领, 非工程师跳过留待命。
+ * 强制攻击须有肯定攻击光标 (OU_CanAttack); 调用失败时不猜, 留待命重判。
  * 回 mission, 无规则回 -1。 */
+static int SA_IsEngUnit(void* u);   /* 前置声明 (定义在类型自校准后) */
 static int SA_Fallback(void* u, void* t, int act, void* house)
 {
     int uw, tw;
@@ -339,10 +371,21 @@ static int SA_Fallback(void* u, void* t, int act, void* house)
     oh = *(void**)((char*)t + (unsigned)g_SaOwnerOff);
     if (!oh || !IsPlausiblePtr(oh)) return -1;
     if (oh == house)
-        return (uw == ABS_INFANTRY && tw == ABS_UNIT) ? MISSION_ENTER : -1;
-    if (uw == ABS_UNIT || uw == ABS_AIRCRAFT) return MISSION_ATTACK;
-    if (tw != ABS_BUILDING) return MISSION_ATTACK;
-    return SA_IsEngineer(u) ? MISSION_CAPTURE : -1;
+    {
+        if (uw == ABS_INFANTRY && tw == ABS_UNIT) return MISSION_ENTER;
+        /* 自家建筑: 工程师进驻即修 (人消耗)。Shift 盖住光标时用
+         * OU_CanEnter/OU_CanGRepair (ignoreForce=1) 复核。任务发 CAPTURE,
+         * 掉血与按楼限 1 人由 AssignOne 把关。 */
+        if (tw == ABS_BUILDING && uw == ABS_INFANTRY &&
+            (OU_CanEnter(u, t) || OU_CanGRepair(u, t)))
+            return MISSION_CAPTURE;
+        return -1;
+    }
+    if (uw == ABS_UNIT || uw == ABS_AIRCRAFT)
+        return OU_CanAttack(u, t) ? MISSION_ATTACK : -1;
+    if (tw != ABS_BUILDING)
+        return OU_CanAttack(u, t) ? MISSION_ATTACK : -1;
+    return SA_IsEngUnit(u) ? MISSION_CAPTURE : -1;
 }
 
 /* ---------------- 下令 (MegaMission 形状同 SmartOrder/FuzzyAttack; 唯一区别是排队) ---------------- */
@@ -438,9 +481,45 @@ static void SA_Drain(void)
     }
 }
 
-/* ---------------- 找目标 (环扫 + 链走, 不分敌我) ---------------- */
+/* ---------------- 工程师修自家建筑 (进驻即修, 按楼限 1 人) ----------------
+ * 只修掉血的 (满血不浪费人)。工程师判定见 SA_IsEngUnit。 */
 
 #define SA_TGT_CAP 256
+#define SA_UNIT_CAP 1024   /* 快照单位上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */
+
+/* 快照: 单位 + 目标存静态 (找目标与修饰键无关, 决策见 DecideFire)。
+ * 返回 1=有可处理快照。 */
+static void* s_SnapUnits[SA_UNIT_CAP];
+static int s_SnapUids[SA_UNIT_CAP];
+static int s_SnapBusy[SA_UNIT_CAP];
+static int s_SnapNu = 0;
+static void* s_SnapTgts[SA_TGT_CAP];
+static int s_SnapTids[SA_TGT_CAP];
+static int s_SnapNt = 0;
+static unsigned char s_SnapEnterTaken[SA_TGT_CAP]; /* 占车已派标记 (按目标限1个) */
+static unsigned char s_SnapRepairSent[SA_TGT_CAP]; /* 按目标单派标记 (修楼/中立科技/民房预轮) */
+
+#define SA_OFF_HEALTH        0x6Cu   /* ObjectClass::Health */
+#define SA_OFF_BLD_TYPE      0x520u  /* BuildingClass::Type */
+#define SA_OFF_TYPE_STRENGTH 0xA0u   /* ObjectTypeClass::Strength */
+
+/* 建筑是否掉血 (0<hp<max; 指针/类型有一项读不到按没掉血处理, 绝不浪费工程师)。 */
+static int SA_BuildingDamaged(void* b)
+{
+    void* type;
+    int hp, str;
+    if (!b || !IsPlausiblePtr(b)) return 0;
+    if (OU_WhatAmI(b) != ABS_BUILDING) return 0;
+    hp = *(int*)((char*)b + SA_OFF_HEALTH);
+    if (hp <= 0) return 0;
+    type = *(void**)((char*)b + SA_OFF_BLD_TYPE);
+    if (!type || !IsPlausiblePtr(type)) return 0;
+    str = *(int*)((char*)type + SA_OFF_TYPE_STRENGTH);
+    if (str <= 0 || str > 1000000) return 0;
+    return (hp < str) ? 1 : 0;
+}
+
+/* ---------------- 找目标 (环扫 + 链走, 不分敌我) ---------------- */
 
 static void* SA_CellPtr(int cx, int cy)
 {
@@ -538,19 +617,7 @@ static void SA_NodePush(int cx, int cy)
 
 /* ---------------- 执行 ---------------- */
 
-#define SA_UNIT_CAP 1024   /* 快照单位上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */
-
 static void SA_BoxReset(void);
-
-/* 快照: 单位 + 目标存静态 (找目标与修饰键无关, 决策见 DecideFire)。
- * 返回 1=有可处理快照。 */
-static void* s_SnapUnits[SA_UNIT_CAP];
-static int s_SnapUids[SA_UNIT_CAP];
-static int s_SnapBusy[SA_UNIT_CAP];
-static int s_SnapNu = 0;
-static void* s_SnapTgts[SA_TGT_CAP];
-static int s_SnapTids[SA_TGT_CAP];
-static int s_SnapNt = 0;
 
 /* 规划线绘制见末尾 SmartArea_Draw (细线, 按住画松手消)。 */
 static int g_SaShiftSeen = 0;     /* 本轮按住途中组合成立过 (防裸中键误入) */
@@ -646,20 +713,6 @@ static int SA_Snapshot(void)
     return 1;
 }
 
-/* 最终任务 (光标优先, 无令走 fallback 规则表; actOut 透光标, 可空)。 */
-static int SA_MissionFinal(void* u, void* t, void* house, int* actOut)
-{
-    int act = -1, ms, fb;
-    ms = SA_UnitMission(u, t, &act);
-    if (actOut) *actOut = act;
-    if (ms < 0)
-    {
-        fb = SA_Fallback(u, t, act, house);
-        if (fb >= 0) ms = fb;
-    }
-    return ms;
-}
-
 /* 双 sink: 0=发令队列 (终判), 1=预览线对 (预览, 只记线不下令)。 */
 static int s_SaSinkPairs = 0;
 
@@ -697,60 +750,281 @@ static int SA_QueueOne(int i, int j, int ms, int* takeOrNull)
     return 1;
 }
 
-/* 装令 (首/次轮通用): 最终任务入队。回 1=装上。 */
+/* 目标是否归本家 (Owner 自校准偏移; 读不到按非本家处理)。 */
+static int SA_OwnedByMe(void* t, void* house)
+{
+    void* oh;
+    if (!t || !IsPlausiblePtr(t) || !house || g_SaOwnerOff < 0) return 0;
+    oh = *(void**)((char*)t + (unsigned)g_SaOwnerOff);
+    if (!oh || !IsPlausiblePtr(oh)) return 0;
+    return (oh == house) ? 1 : 0;
+}
+
+/* 科技等级 (只读 TechnoType->TechLevel +0x634)。
+ * 用途: 区分中立科技 (TL=11) 与平民楼房 (TL=-1), 是规则属性非白名单。
+ * 自检: 类型数组里 GAPOWR 读出 1 且 CANEWY08 读出 -1 才启用,
+ * 失败则民房规则停用 (中立一律按楼限 1)。全程只读。 */
+#define SA_OFF_TL_TECHLEVEL 0x634u
+static int g_SaTlOk = 0;
+static int g_SaTlBad = 0;
+static int SA_TechLevelOf(void* type)
+{
+    if (!type || !IsPlausiblePtr(type)) return 9999;
+    return *(int*)((char*)type + SA_OFF_TL_TECHLEVEL);
+}
+static void* SA_FindTypeById(const char* want)
+{
+    void** items = 0;
+    int cnt, i;
+    char id[24];
+    cnt = SA_TypeCount(&items);
+    if (cnt <= 0 || !items) return 0;
+    for (i = 0; i < cnt; i++)
+    {
+        int c;
+        if (!items[i] || !IsPlausiblePtr(items[i])) continue;
+        for (c = 0; c < 24; c++) id[c] = 0;
+        if (!SA_TypeID(items[i], id) || !id[0]) continue;
+        if (SA_Streq(id, want)) return items[i];
+    }
+    return 0;
+}
+static void SA_TechLevelSelfCheck(void)
+{
+    void* p1;
+    void* p2;
+    if (g_SaTlOk || g_SaTlBad) return;
+    p1 = SA_FindTypeById("GAPOWR");
+    p2 = SA_FindTypeById("CANEWY08");
+    if (!p1 || !p2)
+    {
+        /* 数组就绪但找不到则判坏 (防每轮空扫); 否则下次事件再试。 */
+        void** items = 0;
+        if (SA_TypeCount(&items) > 0 && items) g_SaTlBad = 1;
+        return;
+    }
+    if (SA_TechLevelOf(p1) == 1 && SA_TechLevelOf(p2) == -1) g_SaTlOk = 1;
+    else g_SaTlBad = 1;
+}
+/* 平民楼房 (TL=-1 的建筑类型; 科技类 TL=11)。
+ * 实例→类型用 SA_OFF_BLD_TYPE (+0x520)。 */
+static int SA_IsCivHouse(void* t)
+{
+    void* tp;
+    if (!g_SaTlOk || g_SaTlBad) return 0;
+    if (!t || !IsPlausiblePtr(t)) return 0;
+    tp = *(void**)((char*)t + SA_OFF_BLD_TYPE);
+    if (!tp || !IsPlausiblePtr(tp)) return 0;
+    return (SA_TechLevelOf(tp) == -1) ? 1 : 0;
+}
+
+/* 中立阵营判定 (只读 House->Type(+0x34)->MultiplayPassive(+0x1A6))。
+ * 自检: 本家不可能是被动中立, 读出 1 则永久停用 (回敌方 Squad 路径)。
+ * 无主不算中立; 读不到按非中立。全程只读。 */
+static int g_SaNeutOk = 0;
+static int g_SaNeutBad = 0;
+static int SA_HouseNeutralRaw(void* h)
+{
+    void* t;
+    if (!h || !IsPlausiblePtr(h)) return 0;
+    t = *(void**)((char*)h + 0x34u);
+    if (!IsPlausiblePtr(t)) return 0;
+    return (*(unsigned char*)((char*)t + 0x1A6u)) ? 1 : 0;
+}
+/* 本家自检一次 (Distribute 入口调, house 即本家)。 */
+static void SA_NeutSelfCheck(void* house)
+{
+    if (g_SaNeutOk || g_SaNeutBad) return;
+    if (SA_HouseNeutralRaw(house)) g_SaNeutBad = 1;
+    else g_SaNeutOk = 1;
+}
+/* 目标归中立阵营。 */
+static int SA_TargetNeutral(void* t)
+{
+    void* oh;
+    if (!g_SaNeutOk || g_SaNeutBad) return 0;
+    if (!t || !IsPlausiblePtr(t) || g_SaOwnerOff < 0) return 0;
+    oh = *(void**)((char*)t + (unsigned)g_SaOwnerOff);
+    if (!oh || !IsPlausiblePtr(oh)) return 0;
+    return SA_HouseNeutralRaw(oh);
+}
+
+/* 分配期缓存 (一次 Distribute 内有效): AssignOne 逐对必问 MouseOver,
+ * 归属/类别/掉血/工程师标记一次算好, 不逐对重复读。 */
+static unsigned char s_SnapUnitEng[SA_UNIT_CAP];
+static unsigned char s_SnapTgtOwn[SA_TGT_CAP];
+static unsigned char s_SnapTgtNull[SA_TGT_CAP];
+static unsigned char s_SnapTgtNeut[SA_TGT_CAP];
+static unsigned char s_SnapTgtHouse[SA_TGT_CAP];
+static unsigned char s_SnapTgtDmg[SA_TGT_CAP];
+static void SA_CachePrep(void* house)
+{
+    int i, j;
+    for (i = 0; i < s_SnapNu; i++)
+        s_SnapUnitEng[i] = SA_IsEngUnit(s_SnapUnits[i]) ? 1 : 0;
+    for (j = 0; j < s_SnapNt; j++)
+    {
+        void* t = s_SnapTgts[j];
+        void* oh = 0;
+        int own = SA_OwnedByMe(t, house);
+        if (g_SaOwnerOff >= 0 && t && IsPlausiblePtr(t))
+            oh = *(void**)((char*)t + (unsigned)g_SaOwnerOff);
+        s_SnapTgtOwn[j] = own ? 1 : 0;
+        s_SnapTgtNull[j] = (g_SaOwnerOff >= 0 && oh == 0) ? 1 : 0;
+        s_SnapTgtNeut[j] = (!own && SA_TargetNeutral(t)) ? 1 : 0;
+        s_SnapTgtHouse[j] = SA_IsCivHouse(t) ? 1 : 0;
+        s_SnapTgtDmg[j] = SA_BuildingDamaged(t) ? 1 : 0;
+    }
+}
+
+/* 按楼限 1: 该目标已派过则跳过, 否则装令并标记。回装令结果。 */
+static int SA_RepairCap(int i, int j, int ms, int* takeOrNull)
+{
+    int r;
+    if (s_SnapRepairSent[j]) return 0;
+    r = SA_QueueOne(i, j, ms, takeOrNull);
+    if (!r) return 0;
+    s_SnapRepairSent[j] = 1;
+    return 1;
+}
+
+/* 装令 (首/次轮通用): 最终任务入队。回 1=装上。
+ * 归属/类别/掉血/工程师标记走 Distribute 头缓存, 这里只读缓存
+ * (MouseOver 仍逐对问, 是真开销)。 */
 static int SA_AssignOne(int i, int j, void* house, int* takeOrNull)
 {
     int act = -1, ms;
+    int isEng;
     ms = SA_UnitMission(s_SnapUnits[i], s_SnapTgts[j], &act);
     if (ms < 0)
     {
         ms = SA_Fallback(s_SnapUnits[i], s_SnapTgts[j], act, house);
         if (ms < 0) return 0;
     }
-    /* 工程师修正: Damage28 光标映射是攻击, 但工程师没枪, 佯攻等于哑火;
-     * 工程师对非本家建筑应占领。其它单位/目标不动。 */
+    isEng = (act == 29 || act == 11) ? 1 : s_SnapUnitEng[i];
+    /* 工程师修正: Damage28 映射是攻击, 但工程师没枪, 非本家转占领。 */
     if (ms == MISSION_ATTACK && act == 28 &&
-        OU_WhatAmI(s_SnapUnits[i]) == ABS_INFANTRY &&
         OU_WhatAmI(s_SnapTgts[j]) == ABS_BUILDING &&
-        house && g_SaOwnerOff >= 0 && SA_IsEngineer(s_SnapUnits[i]))
+        house && g_SaOwnerOff >= 0 && isEng &&
+        !s_SnapTgtOwn[j] && !s_SnapTgtNull[j])
+        ms = MISSION_CAPTURE;
+    /* 自家楼分两路: 工程师修掉血楼只派 1 人 (CAPTURE 进驻即修, 人消耗),
+     * 满血跳过; 士兵进驻不限数不查血。敌楼占领不管。 */
+    if ((ms == MISSION_SABOTAGE || ms == MISSION_ENTER || ms == MISSION_CAPTURE) &&
+        OU_WhatAmI(s_SnapTgts[j]) == ABS_BUILDING &&
+        s_SnapTgtOwn[j])
     {
-        void* oh = *(void**)((char*)s_SnapTgts[j] + (unsigned)g_SaOwnerOff);
-        if (oh && IsPlausiblePtr(oh) && oh != house)
+        if (isEng)
+        {
             ms = MISSION_CAPTURE;
+            if (!s_SnapTgtDmg[j]) return 0;
+            return SA_RepairCap(i, j, ms, takeOrNull);
+        }
+        return SA_QueueOne(i, j, ms, takeOrNull);
+    }
+    /* 非自家建筑进入占领类, 按归属与类别限数:
+     * 工程师 + 无主/中立科技 → 按楼限 1;
+     * 工程师 + 无主/中立民房 (不可夺无归属变更) → 按修楼限数
+     *   (掉血 1 人, 满血跳过);
+     * 工程师 + 敌方 → Squad; 士兵进驻 → 均分预轮处理, 这里跳过;
+     * 士兵攻击拆除 → 不管。读不到按敌方路径。 */
+    if ((ms == MISSION_SABOTAGE || ms == MISSION_ENTER || ms == MISSION_CAPTURE) &&
+        OU_WhatAmI(s_SnapTgts[j]) == ABS_BUILDING &&
+        !s_SnapTgtOwn[j])
+    {
+        int isNull = s_SnapTgtNull[j];
+        if (isEng && (isNull || s_SnapTgtNeut[j]))
+        {
+            if (!isNull && s_SnapTgtHouse[j])
+            {
+                ms = MISSION_CAPTURE;
+                if (!s_SnapTgtDmg[j]) return 0;
+            }
+            return SA_RepairCap(i, j, ms, takeOrNull);
+        }
+        if (!isEng && !isNull && s_SnapTgtNeut[j] && s_SnapTgtHouse[j] &&
+            (ms == MISSION_CAPTURE || ms == MISSION_SABOTAGE))
+            return 0;
+    }
+    /* 占车/偷车按目标限 1 个 (进自家运输机装人不限)。 */
+    if (OU_WhatAmI(s_SnapTgts[j]) == ABS_UNIT &&
+        (ms == MISSION_CAPTURE ||
+         (ms == MISSION_ENTER && !s_SnapTgtOwn[j])))
+    {
+        int r;
+        if (s_SnapEnterTaken[j]) return 0;
+        r = SA_QueueOne(i, j, ms, takeOrNull);
+        if (!r) return 0;
+        s_SnapEnterTaken[j] = 1;
+        return 1;
     }
     return SA_QueueOne(i, j, ms, takeOrNull);
 }
 
-/* 三轮分配 (终判与预览共用, sink 见 s_SaSinkPairs):
- * 第0轮进驻均分 (步兵×建筑→Capture/Sabotage, 轮转建筑均分, 不管 Squad);
+/* 士兵进驻口径 (民房均分预轮用): 非工程师 + 真进驻光标
+ * (Capture/Sabotage), 回 mission; 其它回 -1。归属走缓存。 */
+static int SA_SolGarrMs(int i, int j, void* house)
+{
+    int act = -1, ms;
+    if (!house) return -1;
+    if (OU_WhatAmI(s_SnapTgts[j]) != ABS_BUILDING) return -1;
+    if (s_SnapTgtOwn[j]) return -1;
+    ms = SA_UnitMission(s_SnapUnits[i], s_SnapTgts[j], &act);
+    if (ms != MISSION_CAPTURE && ms != MISSION_SABOTAGE) return -1;
+    if (act == 29 || act == 11 || s_SnapUnitEng[i]) return -1;
+    return ms;
+}
+
+/* 预轮+两轮分配 (终判与预览共用):
+ * 预轮士兵进驻中立民房均分 (轮转, 人用完为止);
  * 首轮每目标取 Squad 个; 次轮剩下找最近可处理目标加入。 */
 static void SA_Distribute(void* house)
 {
     int i, j, nu, nt;
     nu = s_SnapNu;
     nt = s_SnapNt;
-    /* 第0轮: 进驻均分 (步兵×建筑→Capture/Sabotage, 轮转建筑均分)。 */
+    SA_NeutSelfCheck(house);
+    SA_TechLevelSelfCheck();
+    SA_CachePrep(house);
+    for (j = 0; j < SA_TGT_CAP; j++) s_SnapEnterTaken[j] = 0;
+    for (j = 0; j < SA_TGT_CAP; j++) s_SnapRepairSent[j] = 0;
+    /* 预轮: 士兵进驻中立民房轮转均分 (人用完为止)。
+     * 首轮跳单靠 AssignOne 条件判定 (中立民房进驻类直接跳过), 不另标记。 */
+    if (g_SaTlOk && !g_SaTlBad && nu > 0 && nt > 0)
     {
-        static int bidx[SA_TGT_CAP];
-        int nb = 0, rot = 0;
-        for (j = 0; j < nt && nb < SA_TGT_CAP; j++)
-            if (OU_WhatAmI(s_SnapTgts[j]) == ABS_BUILDING) bidx[nb++] = j;
-        if (nb > 0)
+        static int hidx[SA_TGT_CAP];
+        int nh = 0, k, ei = 0, progress;
+        for (j = 0; j < nt && nh < SA_TGT_CAP; j++)
         {
-            for (i = 0; i < nu; i++)
-            {
-                int k, ms;
-                if (s_SnapBusy[i]) continue;
-                if (OU_WhatAmI(s_SnapUnits[i]) != ABS_INFANTRY) continue;
-                if (!OU_PtrAlive(s_SnapUnits[i], s_SnapUids[i], g_SaIdxOk)) continue;
-                for (k = 0; k < nb; k++)
+            if (OU_WhatAmI(s_SnapTgts[j]) != ABS_BUILDING) continue;
+            if (s_SnapTgtOwn[j]) continue;
+            if (!s_SnapTgtNeut[j]) continue;
+            if (!s_SnapTgtHouse[j]) continue;
+            hidx[nh++] = j;
+        }
+        if (nh > 0)
+        {
+            do {
+                int n;
+                progress = 0;
+                for (k = 0; k < nh; k++)
                 {
-                    j = bidx[(rot + k) % nb];
-                    ms = SA_MissionFinal(s_SnapUnits[i], s_SnapTgts[j], house, 0);
-                    if (ms != MISSION_CAPTURE && ms != MISSION_SABOTAGE) continue;
-                    if (SA_QueueOne(i, j, ms, 0)) { rot++; break; }
+                    int ms;
+                    j = hidx[k];
+                    for (n = 0; n < nu; n++)
+                    {
+                        i = (ei + n) % nu;
+                        if (s_SnapBusy[i]) continue;
+                        if (!OU_PtrAlive(s_SnapUnits[i], s_SnapUids[i], g_SaIdxOk)) continue;
+                        ms = SA_SolGarrMs(i, j, house);
+                        if (ms < 0) continue;
+                        if (!SA_QueueOne(i, j, ms, 0)) continue;
+                        ei = (i + 1) % nu;
+                        progress = 1;
+                        break;
+                    }
                 }
-            }
+            } while (progress);
         }
     }
     /* 首轮: 每目标取 Squad 个可处理单位 (满分流下个目标)。 */
@@ -908,8 +1182,6 @@ void SmartArea_Poll(void)
 
 static int g_SaBRx = 0, g_SaBRy = 0, g_SaBRcx = 0, g_SaBRcy = 0;
 static int g_SaBHas = 0;
-
-/* 命中标记静态量见快照区 (DecideFire 先用, 定义在前)。 */
 
 static void SA_BoxReset(void)
 {

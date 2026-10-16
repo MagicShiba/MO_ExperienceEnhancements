@@ -108,6 +108,26 @@ int OU_MouseCellTarget(int* cx, int* cy, void** tgtOut, int* px, int* py);
 /* 光标自适应查询 (只读): 问选中单位 self 点 target 的光标,
  * 经 vtbl+0x74 调用, 与 DecideAction 内部同入口。失败回 -1。 */
 int OU_MouseOverObject(void* self, void* target);
+/* 同上, 但 ignoreForce=1: 无视当前按住的 Ctrl/Shift/Alt 取单位固有能力。
+ * 组合键热键 (如 SmartArea 的 Shift+Middle) 必须用这个: 0 会被物理修饰键
+ * 污染 (Shift→ToggleSelect=8, Ctrl→强制攻击), 使真光标失真。只读, 失败回 -1。 */
+int OU_MouseOverObjectNative(void* self, void* target);
+/* 该单位对该目标是否有攻击类光标 (会下 Mission::Attack)。
+ * 只读 MouseOver (ignoreForce=1, 无视 Ctrl/Shift/Alt 取固有能力);
+ * 动作集合与 SmartOrder/SmartArea 的攻击映射一致
+ * (Attack5/62/63/64/71/53/10/28/55/56)。维修/无武器对敌回 NoMove 等,
+ * 这里回 0。失败/非 Techno 回 0。FuzzyAttack/SmartArea/AttackMove 共用。 */
+int OU_CanAttack(void* unit, void* target);
+/* 该单位对该目标是否有进入类光标 (Action::Enter, 会下 Mission::Enter/
+ * Mission::Sabotage)。只读 MouseOver (ignoreForce=1, 无视修饰键取固有能力)。
+ * 只有真工程师才拿得到对建筑的 Enter (Engineer=yes 新单位自动生效,
+ * 不靠 ID 表)。失败/非 Techno 回 0。SmartArea 占车/修楼复核用。 */
+int OU_CanEnter(void* unit, void* target);
+/* 该单位对该建筑是否有维修类光标 (Action::GRepair, 会下进驻修楼令)。
+ * 只读 MouseOver (ignoreForce=1, 无视修饰键取固有能力)。
+ * 实测: 工程师对自家掉血楼回 GRepair(29)。失败/非建筑回 0。
+ * SmartArea 修楼复核用。 */
+int OU_CanGRepair(void* unit, void* target);
 /* 对象中心坐标 (只读, leptons, 1 格=256)。成功回 1, 失败回 0。 */
 int OU_GetCoords(void* p, CoordStruct* out);
 /* 全局自适应决策 (只读): DisplayClass::DecideAction (0x692610),

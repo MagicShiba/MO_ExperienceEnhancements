@@ -182,8 +182,12 @@ int OU_MouseCellTarget(int* cx, int* cy, void** tgtOut, int* px, int* py)
 
 typedef int __attribute__((thiscall)) (*Fn_MouseOverObj)(void* self, void* target, int ignoreForce);
 
-/* vtbl+0x74 = MouseOverObject (DecideAction 内部同入口, 只读不下单)。 */
-int OU_MouseOverObject(void* self, void* target)
+/* vtbl+0x74 直调, ignoreForce 透传。
+ * ignoreForce=1 时无视 Ctrl/Shift/Alt 修饰键, 取单位固有动作
+ * (反汇编实证: 步兵 0x51E3B0 开头读该参数, 非零即跳过两处按键检查)。
+ * 能力判定必须用 1 (FuzzyAttack 按住 Ctrl / SmartArea 按住 Shift 时
+ * 0 会被污染成强制攻击/ToggleSelect)。 */
+static int OU_MouseOverRaw(void* self, void* target, int ignoreForce)
 {
     void** vt;
     Fn_MouseOverObj fn;
@@ -193,7 +197,68 @@ int OU_MouseOverObject(void* self, void* target)
     if (!vt || !IsPlausiblePtr(vt)) return -1;
     fn = (Fn_MouseOverObj)vt[0x74 / 4];
     if (!fn || !IsPlausiblePtr((const void*)fn)) return -1;
-    return fn(self, target, 0);
+    return fn(self, target, ignoreForce);
+}
+
+/* vtbl+0x74 = MouseOverObject (DecideAction 内部同入口, 只读不下单)。 */
+int OU_MouseOverObject(void* self, void* target)
+{
+    return OU_MouseOverRaw(self, target, 0);
+}
+
+/* 同上, ignoreForce=1: 无视物理修饰键取固有能力
+ * (组合键热键必须用这个, 见 .h)。 */
+int OU_MouseOverObjectNative(void* self, void* target)
+{
+    return OU_MouseOverRaw(self, target, 1);
+}
+
+/* 该单位对该目标是否有攻击类光标 (会下 Mission::Attack)。
+ * 只读 MouseOver (ignoreForce=1, 无视修饰键取固有能力);
+ * 动作集合与 SmartOrder/SmartArea 的攻击映射一致。 */
+int OU_CanAttack(void* unit, void* target)
+{
+    int uw, tw, act;
+    if (!unit || !IsPlausiblePtr(unit)) return 0;
+    if (!target || !IsPlausiblePtr(target)) return 0;
+    uw = OU_WhatAmI(unit);
+    if (uw != ABS_UNIT && uw != ABS_INFANTRY && uw != ABS_AIRCRAFT) return 0;
+    tw = OU_WhatAmI(target);
+    if (tw != ABS_UNIT && tw != ABS_INFANTRY &&
+        tw != ABS_AIRCRAFT && tw != ABS_BUILDING) return 0;
+    act = OU_MouseOverRaw(unit, target, 1);
+    if (act == ACTION_ATTACK || act == 62 || act == 63 ||
+        act == 64 || act == 71 || act == 53 ||
+        act == 10 || act == 28 || act == 55 || act == 56)
+        return 1;
+    return 0;
+}
+
+/* 该单位对该目标是否有进入类光标 (Action::Enter)。
+ * 只读 MouseOver (ignoreForce=1, 无视修饰键取固有能力)。 */
+int OU_CanEnter(void* unit, void* target)
+{
+    int tw, act;
+    if (!unit || !IsPlausiblePtr(unit)) return 0;
+    if (!target || !IsPlausiblePtr(target)) return 0;
+    tw = OU_WhatAmI(target);
+    if (tw != ABS_UNIT && tw != ABS_INFANTRY &&
+        tw != ABS_AIRCRAFT && tw != ABS_BUILDING) return 0;
+    act = OU_MouseOverRaw(unit, target, 1);
+    return (act == ACTION_ENTER) ? 1 : 0;
+}
+
+/* 该单位对该建筑是否有维修类光标 (Action::GRepair)。
+ * 只读 MouseOver (ignoreForce=1, 无视修饰键取固有能力)。 */
+int OU_CanGRepair(void* unit, void* target)
+{
+    int tw, act;
+    if (!unit || !IsPlausiblePtr(unit)) return 0;
+    if (!target || !IsPlausiblePtr(target)) return 0;
+    tw = OU_WhatAmI(target);
+    if (tw != ABS_BUILDING) return 0;
+    act = OU_MouseOverRaw(unit, target, 1);
+    return (act == 29) ? 1 : 0;
 }
 
 typedef CoordStruct* __attribute__((thiscall)) (*Fn_GetCoords)(void* self, CoordStruct* out);

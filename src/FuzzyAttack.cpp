@@ -261,8 +261,6 @@ static void FA_Drain(void)
     void* cur = *(void**)ADDR_CURPLAYER;
     int houseIdx;
     int sent = 0;
-    char buf[64], b1[16];
-    unsigned q;
     if (!cur || cur != g_FaHouse) { g_FaPendCount = 0; return; }
     houseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
     if (houseIdx != g_FaHouseIdx) { g_FaPendCount = 0; return; }
@@ -278,6 +276,8 @@ static void FA_Drain(void)
         if (!OU_PtrAlive(e->unit, e->uid, g_FaIdxOk)) { FA_ShiftDown(); continue; }
         if (!FA_IsAttacker(e->unit)) { FA_ShiftDown(); continue; }
         if (!OU_PtrAlive(e->foe, e->fid, g_FaIdxOk)) { FA_ShiftDown(); continue; }
+        /* 发令前重验攻击能力 (目标移动/状态变化也只读复核, 不猜着下单) */
+        if (!OU_CanAttack(e->unit, e->foe)) { FA_ShiftDown(); continue; }
         if (!FN_TGT_OBJ(tgtB, e->foe)) { FA_ShiftDown(); continue; }
         if (!FN_TGT_OBJ(srcB, e->unit)) { FA_ShiftDown(); continue; }
         srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
@@ -287,15 +287,6 @@ static void FA_Drain(void)
             return; /* 满: 下轮继续 */
         FA_ShiftDown();
         sent++;
-    }
-    if (g_FaPendCount <= 0)
-    {
-        q = 0;
-        q = AppendCStr(buf, q, "fa: drained sent=", sizeof(buf));
-        UtoA((unsigned)sent, b1);
-        q = AppendCStr(buf, q, b1, sizeof(buf));
-        (void)q;
-        LogLine(buf);
     }
 }
 
@@ -351,7 +342,11 @@ static void FA_Preview(void)
             int take = base + (j < rem ? 1 : 0);
             int k;
             for (k = 0; k < take && pos < nu; k++, pos++)
+            {
+                /* 预览与执行同规则: 只画真能打的对, 不能打的不画线 */
+                if (!OU_CanAttack(s_pu[pos], s_pf[j])) continue;
                 OU_PrevPushObjs(s_FaPrevBuf, &s_FaPrevN, s_pu[pos], s_pf[j]);
+            }
         }
     }
 }
@@ -365,8 +360,6 @@ static void FA_Press(void)
     int selN, i, nu = 0, ne = 0;
     int cx, cy;
     int nUsed, pos;
-    char buf[96], b1[16], b2[16], b3[16];
-    unsigned q;
     static void* s_units[FA_UNIT_CAP];
     static int s_uids[FA_UNIT_CAP];
     static void* s_foes[FA_ENEMY_CAP];
@@ -376,18 +369,16 @@ static void FA_Press(void)
     if (!cur || !IsPlausiblePtr(cur)) return;
     selN = *(int*)ADDR_SELOBJ_COUNT;
     items = *(void***)ADDR_SELOBJ_ITEMS;
-    if (selN <= 0 || !items || !IsPlausiblePtr(items))
-    { LogLine("fa: no selection"); return; }
+    if (selN <= 0 || !items || !IsPlausiblePtr(items)) return;
     for (i = 0; i < selN && nu < FA_UNIT_CAP; i++)
     {
         void* o = items[i];
         if (FA_IsAttacker(o)) s_units[nu++] = o;
     }
-    if (nu <= 0) { LogLine("fa: no attackers"); return; }
+    if (nu <= 0) return;
     /* Owner 自校准 (双确认; 失败直接放弃, 绝不误击友军)。 */
-    if (!FA_CalOwner(s_units[0], nu > 1 ? s_units[1] : 0, cur))
-    { LogLine("fa: noowner"); return; }
-    if (!OU_MouseCell(&cx, &cy)) { LogLine("fa: off map"); return; }
+    if (!FA_CalOwner(s_units[0], nu > 1 ? s_units[1] : 0, cur)) return;
+    if (!OU_MouseCell(&cx, &cy)) return;
     /* 快照单位 Fetch_ID (存活校验用; 选中单位必活, 此处 vcall 安全) */
     for (i = 0; i < nu; i++)
     {
@@ -407,7 +398,7 @@ static void FA_Press(void)
             g_FaIdxOk = 1;
     }
     ne = FA_FindEnemies(cx, cy, cur, s_foes, s_fids);
-    if (ne <= 0) { LogLine("fa: no enemies"); return; }
+    if (ne <= 0) return;
     /* 分组: 单位<=Squad 则全员集火首敌 (最近);
      * 否则 nUsed=clamp(nU/Squad,1,nE), 前 nUsed 敌均衡分, 其余没单。 */
     if (nu <= g_FaSquad)
@@ -418,18 +409,6 @@ static void FA_Press(void)
         if (nUsed < 1) nUsed = 1;
         if (nUsed > ne) nUsed = ne;
     }
-    q = 0;
-    q = AppendCStr(buf, q, "fa: atk foes=", sizeof(buf));
-    UtoA((unsigned)ne, b1);
-    q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCStr(buf, q, " units=", sizeof(buf));
-    UtoA((unsigned)nu, b2);
-    q = AppendCStr(buf, q, b2, sizeof(buf));
-    q = AppendCStr(buf, q, " squads=", sizeof(buf));
-    UtoA((unsigned)nUsed, b3);
-    q = AppendCStr(buf, q, b3, sizeof(buf));
-    (void)q;
-    LogLine(buf);
     g_FaPendCount = 0;
     pos = 0;
     {
@@ -441,6 +420,9 @@ static void FA_Press(void)
             for (k = 0; k < take && pos < nu; k++, pos++)
             {
                 if (g_FaPendCount >= FA_PEND_CAP) break;
+                /* 按分配到的敌人逐对复核攻击能力 (只读 MouseOver):
+                 * 不能打的 (如维修无人机对敌回 NoMove) 不排单, 原地待命。 */
+                if (!OU_CanAttack(s_units[pos], s_foes[j])) continue;
                 g_FaPend[g_FaPendCount].unit = s_units[pos];
                 g_FaPend[g_FaPendCount].uid = s_uids[pos];
                 g_FaPend[g_FaPendCount].foe = s_foes[j];

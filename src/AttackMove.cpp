@@ -10,6 +10,13 @@
  * Net-safe: read-only queries + OutList enqueue, no sim memory writes.
  * Direct order uses IsPlanningEvent=0; holding Z queues (plan=1), same as
  * vanilla Z+Ctrl+Shift waypoint engage.
+ *
+ * Attacker filter: type pre-filter (Unit/Infantry/Aircraft) + object-target
+ * capability re-check (OU_CanAttack). When hovering an object that someone
+ * can attack, only capable units get Mission 29; the rest hold position
+ * (same rule as NoApproach/SmartOrder). When nobody can attack it
+ * (friendly object / pure move semantics) everyone keeps Mission 29 as a
+ * move; pure-cell (no object) is a move for all type-attackers.
  */
 
 #include <windows.h>
@@ -127,8 +134,6 @@ static void AM_Press(void)
     int cx, cy;
     void* tgt = 0;
     int tid = 0;
-    char buf[96], b1[16], b2[16];
-    unsigned q;
     static void* s_units[AM_UNIT_CAP];
     static int s_uids[AM_UNIT_CAP];
 
@@ -136,7 +141,7 @@ static void AM_Press(void)
     if (!cur || !IsPlausiblePtr(cur)) return;
     selN = *(int*)ADDR_SELOBJ_COUNT;
     items = *(void***)ADDR_SELOBJ_ITEMS;
-    if (selN <= 0 || !items || !IsPlausiblePtr(items)) { LogLine("am: no selection"); return; }
+    if (selN <= 0 || !items || !IsPlausiblePtr(items)) return;
     for (i = 0; i < selN && nu < AM_UNIT_CAP; i++)
     {
         void* o = items[i];
@@ -148,7 +153,7 @@ static void AM_Press(void)
         s_uids[nu] = FN_TGT_OBJ(tb, o) ? *(int*)(tb + 0) : 0;
         nu++;
     }
-    if (nu <= 0) { LogLine("am: no attackers"); return; }
+    if (nu <= 0) return;
     g_AmIdxOk = 0;
     {
         void* base = *(void**)ADDR_IDBASE;
@@ -157,7 +162,7 @@ static void AM_Press(void)
             s_uids[0] > 0 && OU_PtrAliveRaw(s_units[0], s_uids[0]))
             g_AmIdxOk = 1;
     }
-    if (!OU_MouseCellTarget(&cx, &cy, &tgt, 0, 0)) { LogLine("am: off map"); return; }
+    if (!OU_MouseCellTarget(&cx, &cy, &tgt, 0, 0)) return;
     if (tgt)
     {
         char tb[8];
@@ -175,14 +180,27 @@ static void AM_Press(void)
                 tgt = 0;
         }
     }
-    q = 0;
-    q = AppendCStr(buf, q, "am: attackmove units=", sizeof(buf));
-    UtoA((unsigned)nu, b1);
-    q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCStr(buf, q, tgt ? " tgt=1" : " tgt=0", sizeof(buf));
-    UtoA(0, b2);
-    (void)q; (void)b2;
-    LogLine(buf);
+    /* 有对象目标且有人真能打时, 只留下能打的 (只读 MouseOver 复核):
+     * 不能打的 (如维修无人机对敌) 不发 AttackMove, 原地待命。
+     * 任一都打不了 (友军目标/纯移动语义) 则全留, 当移动令走。 */
+    if (tgt)
+    {
+        int any = 0, nw = 0;
+        for (i = 0; i < nu; i++)
+            if (OU_CanAttack(s_units[i], tgt)) { any = 1; break; }
+        if (any)
+        {
+            for (i = 0; i < nu; i++)
+            {
+                if (!OU_CanAttack(s_units[i], tgt)) continue;
+                s_units[nw] = s_units[i];
+                s_uids[nw] = s_uids[i];
+                nw++;
+            }
+            nu = nw;
+        }
+    }
+    if (nu <= 0) return;
     g_AmPendCount = 0;
     for (i = 0; i < nu && g_AmPendCount < AM_PEND_CAP; i++)
     {
