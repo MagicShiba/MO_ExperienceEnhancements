@@ -50,15 +50,23 @@
 static int g_InitDone = 0;
 static int g_MouseHookDone = 0;   /* 鼠标虚表钩装上置 1 (只 0->1) */
 
-/* 宿主守卫: 非 gamemd.exe 不装钩 (引擎地址在别进程是别的数据)。 */
+/* 宿主守卫: 非游戏 exe 不装钩 (引擎地址在别进程是别的数据)。
+ * 只按 basename 判别, 不校验 exeCRC —— 换壳/重打包变体 (经典 gamemd.exe 与
+ * CnCNet 的 gamemd-spawn.exe) CRC 不同但引擎映像一致、功能相同, 名字判别足够
+ * (与 AutoLoadDev 同策略, 见其 notes/HANDBOOK.md §1)。 */
 static int g_HostChecked = 0;
 static int g_HostOk = 0;
 
 static int MOE_HostIsGame(void)
 {
+    /* 名字 + 长度 (不用 strlen 习语: -nostdlib 下 GCC 会把它变成 strlen 调用)。 */
+    static const struct { const char* name; DWORD len; } kWant[] =
+    {
+        { "gamemd.exe",       10 },
+        { "gamemd-spawn.exe", 16 },
+    };
     char pb[260];
-    DWORD n, i, base, blen, k;
-    static const char kWant[] = "gamemd.exe";
+    DWORD n, i, base, blen, k, w;
     if (g_HostChecked) return g_HostOk;
     g_HostChecked = 1;
     g_HostOk = 0;
@@ -69,15 +77,18 @@ static int MOE_HostIsGame(void)
     while (i > 0 && pb[i - 1] != '\\' && pb[i - 1] != '/' && pb[i - 1] != ':') i--;
     base = i;
     blen = n - base;
-    if (blen != 10) return 0;
-    for (k = 0; k < 10; k++)
+    for (w = 0; w < (DWORD)(sizeof(kWant) / sizeof(kWant[0])); w++)
     {
-        char a = pb[base + k], b = kWant[k];
-        if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
-        if (a != b) return 0;
+        if (blen != kWant[w].len) continue;
+        for (k = 0; k < kWant[w].len; k++)
+        {
+            char a = pb[base + k];
+            if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
+            if (a != kWant[w].name[k]) break;
+        }
+        if (k == kWant[w].len) { g_HostOk = 1; return 1; }
     }
-    g_HostOk = 1;
-    return 1;
+    return 0;
 }
 
 /* host 一行 (start 之前打, 双进程各留一行, 下次直接按 pid 区分):

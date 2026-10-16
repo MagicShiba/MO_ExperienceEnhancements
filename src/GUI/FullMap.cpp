@@ -488,7 +488,8 @@ static int s_ViewPatched = -1;   /* -1=未探测, -2=字节不符不碰, 0=原�
 static RectangleStruct* __fastcall Fm_ViewRectStub(RectangleStruct* out);
 
 /* 宿主映像在不在 (DllMain 调用时 gamemd 可能还没映射, 那就一个字节都不写)。
- * 判据: 0x400000 已提交且是 PE 头, 且模块文件名是 gamemd.exe / ra2md.exe。 */
+ * 判据: 0x400000 已提交且是 PE 头, 且模块文件名是
+ * gamemd.exe / gamemd-spawn.exe / ra2md.exe。 */
 static int Fm_HostImageOk(void)
 {
     HMODULE h = NULL;
@@ -509,7 +510,9 @@ static int Fm_HostImageOk(void)
     if (n == 0 || n >= sizeof(path)) return 0;
     base = path;
     for (n = 0; path[n]; n++) if (path[n] == '\\' || path[n] == '/') base = path + n + 1;
-    ok = (lstrcmpiA(base, "gamemd.exe") == 0) || (lstrcmpiA(base, "ra2md.exe") == 0);
+    ok = (lstrcmpiA(base, "gamemd.exe") == 0) ||
+         (lstrcmpiA(base, "gamemd-spawn.exe") == 0) ||
+         (lstrcmpiA(base, "ra2md.exe") == 0);
     return ok;
 }
 
