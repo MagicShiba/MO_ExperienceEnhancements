@@ -11,6 +11,7 @@
 #include "OrderUtil.h"
 #include "VecText.h"
 #include "AirWay.h"
+#include "Aggressive.h"
 #include "BuildQueue.h"
 #include "ChatEdit.h"
 #include "DeployPreview.h"
@@ -266,6 +267,8 @@ static void PowerDrawBoth(void)
     RepairAll_Poll();
     /* 侧栏放建筑时驱散地基上的自家单位 (只读+标准 Move 事件)。 */
     PlaceScatter_Poll();
+    /* 侵略模式: Alt+A 切换标记, 闲置单位自动打警戒范围内的敌方建筑。 */
+    Aggressive_Poll();
     /* 多观战修复 + 观战面板排序 (联机安全, 见 Observer.cpp)。 */
     Observer_Poll();
     if (!g_InitDone) MOE_EnsureInit();
@@ -1092,6 +1095,7 @@ int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch,
     TreeChop_Draw(surf, surfW, surfH, surfPitch);
     DeployPreview_Draw(surf, surfW, surfH, surfPitch);
     WeaponRange_Draw(surf, surfW, surfH, surfPitch);
+    Aggressive_Draw(surf, surfW, surfH, surfPitch);
     if (FM_DrawRadarTo(surf)) drew = 1;
     return drew;
 }
