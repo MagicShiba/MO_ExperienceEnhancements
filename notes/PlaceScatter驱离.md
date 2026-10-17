@@ -29,6 +29,7 @@
 * 水/岩 (LandType 2/3) 挡; 内容链 (First+0xE4/Alt+0xE8, 后继+0x30) 里有建筑/地形挡; 单位与飞机不挡。
 * 覆盖物墙不在对象链里: 认 WallOwnerIndex (+0x50), 非 -1 即有墙。
 * 格建筑位 (+0x12C & 0x2): 与对象链双保险。
+* footprint 内格并非真障碍: 放置幽灵时引擎给当前地基逐格打 0x12C&0x2 (SetActiveFoundation 0x4A8BF0 → MarkFoundation 0x4A95A0), 点下时又逐格清掉 (0x4ABC46 SetActiveFoundation(null)) 再算落点。故点下扫描看到的地基可走, 自动扫描却因地基带 0x2 被围死 (BFS 只能穿可走格 → nopath)。0x2 只被 CellClass 画格函数读 (渲染), 寻路读的是 OccupationFlags(0x124)/AltOccupationFlags(0x128); 直接摘 0x2 会让该格渲染闪一下 (实测 Mode=2 预览格闪)。做法: **只在本模块 BFS 判定里对本次 footprint 内格豁免 0x2** (PS_BlockedEx 的 skipFnd + PS_PassBfs, 落点/外推仍用 PS_Pass 不豁免), 与点下同一视野, 不碰引擎位。这样自动与点下一致且无闪烁。
 * 对角步禁切角: 两正交邻格须都可走。
 
 ## 哨兵 (OutList, BuildQueue 同式)

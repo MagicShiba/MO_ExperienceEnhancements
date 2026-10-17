@@ -38,7 +38,7 @@
 #define PS_OFF_OBJ_NEXT 0x30u
 #define PS_OFF_CELL_LAND 0xECu
 #define PS_OFF_CELL_WALLOWN 0x50u     /* WallOwnerIndex (-1=无覆盖物墙) */
-#define PS_OFF_CELL_ALTFLAGS 0x12Cu /* AltFlags (0x2=格内有建筑) */
+#define PS_OFF_CELL_ALTFLAGS 0x12Cu   /* AltFlags (0x2=格内有建筑; 幽灵地基占位也用此位) */
 #define LAND_WATER 2
 #define LAND_ROCK 3
 #define PS_ABS_TERRAIN 36
@@ -101,9 +101,9 @@ static int PS_ReadGhost(int cells[][2])
     short cx, cy, ox, oy;
     void* data;
     int bx, by, n = 0, k;
-    cx = *(short*)(ADDR_DISPLAY + PS_OFF_CENTER + 0);
+    cx = *(short*)(ADDR_DISPLAY + PS_OFF_CENTER);
     cy = *(short*)(ADDR_DISPLAY + PS_OFF_CENTER + 2);
-    ox = *(short*)(ADDR_DISPLAY + PS_OFF_TOPLEFT + 0);
+    ox = *(short*)(ADDR_DISPLAY + PS_OFF_TOPLEFT);
     oy = *(short*)(ADDR_DISPLAY + PS_OFF_TOPLEFT + 2);
     data = *(void**)(ADDR_DISPLAY + PS_OFF_DATA);
     if (!data) return 0;
@@ -112,7 +112,7 @@ static int PS_ReadGhost(int cells[][2])
     if (!IsPlausiblePtr(data)) return 0;
     bx = (int)cx + (int)ox;
     by = (int)cy + (int)oy;
-    for (k = 0; k < PS_DATA_CAP && n < PS_CELL_CAP; k++)
+    for (k = 0; k < PS_DATA_CAP; k++)
     {
         short dx, dy;
         int gx, gy;
@@ -138,6 +138,16 @@ static int PS_InSet(int cells[][2], int n, int cx, int cy)
     return 0;
 }
 
+/* 当前 footprint 包围盒 (PS_ClearFoot 每次设定): 供 PS_InFoot 先做 O(1) 排除。 */
+static int s_FootX0 = 0, s_FootY0 = 0, s_FootX1 = -1, s_FootY1 = -1;
+
+/* 格是否在当前 footprint 内: 先包围盒短路 (绝大多数是框外格) 再线性比对。 */
+static int PS_InFoot(int x, int y, int cells[][2], int n)
+{
+    if (x < s_FootX0 || x > s_FootX1 || y < s_FootY0 || y > s_FootY1) return 0;
+    return PS_InSet(cells, n, x, y);
+}
+
 /* 包围盒 (nCell>0 时恒有效)。 */
 static void PS_BBox(int cells[][2], int nCell, int* x0, int* y0, int* x1, int* y1)
 {
@@ -160,8 +170,14 @@ static int s_CacheFrame = -100000;
 
 /* ---------------- 落点判定 ---------------- */
 
-/* 走不通: 水岩/覆盖物墙/建筑占位/链内建筑地形; 单位飞机不挡。纯只读。 */
-static int PS_CellBlocked(int cx, int cy)
+/* 单格障碍 (不含 footprint): 水岩/覆盖物墙/建筑占位/链内建筑地形; 单位飞机不挡。只读。
+ * skipFnd: footprint 内格把幽灵地基占位 (AltFlags 0x2) 视为可走。放建筑悬停时引擎给
+ * 当前地基逐格打 0x2 (SetActiveFoundation 0x4A8BF0 → MarkFoundation 0x4A95A0), 点下时
+ * 先逐格清掉 (0x4ABC46 SetActiveFoundation(null)) 再算; 自动模式据活幽影得知 footprint,
+ * 靠该豁免与点下同视。0x2 只被 CellClass 画格函数读 (渲染), 寻路读的是 OccupationFlags
+ * (0x124)/AltOccupationFlags(0x128); 故这里不碰引擎位 (摘 0x2 会让该格渲染闪一下),
+ * 只改本模块判定。 */
+static int PS_BlockedEx(int cx, int cy, int skipFnd)
 {
     void** cells;
     int maxc, idx, k;
@@ -172,7 +188,7 @@ static int PS_CellBlocked(int cx, int cy)
     maxc = *(int*)(ADDR_DISPLAY + OFF_MAP_MAXC);
     if (!cells || !IsPlausiblePtr(cells) || maxc <= 0 || maxc > 512 * 512) return 1;
     idx = (cy << 9) + cx;
-    if (idx < 0 || idx >= maxc) return 1;
+    if (idx >= maxc) return 1;
     cell = cells[idx];
     if (!cell || !IsPlausiblePtr(cell)) return 1;
     land = *(int*)((char*)cell + PS_OFF_CELL_LAND);
@@ -180,7 +196,7 @@ static int PS_CellBlocked(int cx, int cy)
     /* 覆盖物墙不在对象链里, 认 WallOwnerIndex (-1=无墙)。 */
     if (*(int*)((char*)cell + PS_OFF_CELL_WALLOWN) != -1) return 1;
     /* 格内建筑占位标记, 与对象链双保险。 */
-    if (*(unsigned*)((char*)cell + PS_OFF_CELL_ALTFLAGS) & 0x2u) return 1;
+    if (!skipFnd && (*(unsigned*)((char*)cell + PS_OFF_CELL_ALTFLAGS) & 0x2u)) return 1;
     for (k = 0; k < 2; k++)
     {
         void* o = (k == 0) ? *(void**)((char*)cell + PS_OFF_CELL_FIRST)
@@ -199,19 +215,25 @@ static int PS_CellBlocked(int cx, int cy)
     return 0;
 }
 
-/* 单格可走 (地图有效且不被挡)。 */
+/* 单格可走 (地图有效且不被挡), footprint 内格不豁免 0x2 (落点/外推用)。
+ * 越界/未加载格由 PS_BlockedEx 内判 (回 1=挡), 不必再 OU_CellValid 查一遍地图。 */
 static int PS_Pass(int x, int y)
 {
-    if (!OU_CellValid(x, y)) return 0;
-    if (PS_CellBlocked(x, y)) return 0;
-    return 1;
+    return !PS_BlockedEx(x, y, 0);
+}
+
+/* BFS 展开用可走判定: 本次 footprint 内格豁免幽灵地基占位 0x2, 与点下同视。 */
+static int PS_PassBfs(int x, int y, int cells[][2], int nCell)
+{
+    return !PS_BlockedEx(x, y, PS_InFoot(x, y, cells, nCell));
 }
 
 /* 对角步禁切角: 两正交邻格须都可走。 */
-static int PS_DiagFree(int ux, int uy, int qx, int qy)
+static int PS_DiagFree(int ux, int uy, int qx, int qy,
+                       int cells[][2], int nCell)
 {
-    if (!PS_Pass(ux + qx, uy)) return 0;
-    if (!PS_Pass(ux, uy + qy)) return 0;
+    if (!PS_PassBfs(ux + qx, uy, cells, nCell)) return 0;
+    if (!PS_PassBfs(ux, uy + qy, cells, nCell)) return 0;
     return 1;
 }
 
@@ -268,17 +290,36 @@ static int PS_ScreenIdx(int qx, int qy)
 static int s_BfsX[PS_BFS_CAP];
 static int s_BfsY[PS_BFS_CAP];
 
+/* 访问位图: 窗口 (2R+1)² 每格 1 bit (56B), 替代每次邻居线性扫全表 (原 O(N²))。
+ * 记"已处理过"(含被挡): 只读世界内同一格结果稳定, 去重安全。 */
+#define PS_BFS_W (PS_BFS_R * 2 + 1)
+static unsigned char s_BfsSeen[(PS_BFS_W * PS_BFS_W + 7) / 8];
+
+/* 首次遇到 (x,y) 置位回 0, 已见过回 1 (窗外也回 1)。 */
+static int PS_BfsSeen(int ux, int uy, int x, int y)
+{
+    int ix = x - ux + PS_BFS_R, iy = y - uy + PS_BFS_R;
+    unsigned b;
+    if (ix < 0 || iy < 0 || ix >= PS_BFS_W || iy >= PS_BFS_W) return 1;
+    b = (unsigned)(iy * PS_BFS_W + ix);
+    if (s_BfsSeen[b >> 3] & (unsigned char)(1u << (b & 7))) return 1;
+    s_BfsSeen[b >> 3] = (unsigned char)(s_BfsSeen[b >> 3] | (unsigned char)(1u << (b & 7)));
+    return 0;
+}
+
 static int PS_BFS(int cells[][2], int nCell, int ux, int uy, int base,
                   int* ox, int* oy)
 {
     int head = 0, tail = 1, i, d, order[8];
+    for (i = 0; i < (int)sizeof(s_BfsSeen); i++) s_BfsSeen[i] = 0;
     s_BfsX[0] = ux; s_BfsY[0] = uy;
+    PS_BfsSeen(ux, uy, ux, uy);
     for (i = 0; i < 8; i++) order[i] = (base + PS_ROT[i]) & 7;
     while (head < tail)
     {
         int cx = s_BfsX[head], cy = s_BfsY[head];
         head++;
-        if (!(cx == ux && cy == uy) && !PS_InSet(cells, nCell, cx, cy))
+        if (!(cx == ux && cy == uy) && !PS_InFoot(cx, cy, cells, nCell))
         {
             *ox = cx; *oy = cy;
             return 1;
@@ -289,15 +330,13 @@ static int PS_BFS(int cells[][2], int nCell, int ux, int uy, int base,
             int nx = cx + qx, ny = cy + qy;
             int ax, ay, rr;
             if (nx < 0 || ny < 0 || nx >= 512 || ny >= 512) continue;
-            if (qx && qy && !PS_DiagFree(cx, cy, qx, qy)) continue;
             ax = nx - ux; if (ax < 0) ax = -ax;
             ay = ny - uy; if (ay < 0) ay = -ay;
             rr = (ax > ay) ? ax : ay;
-            if (rr > PS_BFS_R) continue;
-            for (i = 0; i < tail; i++)
-                if (s_BfsX[i] == nx && s_BfsY[i] == ny) break;
-            if (i < tail) continue;
-            if (!PS_Pass(nx, ny)) continue;
+            if (rr > PS_BFS_R) continue;   /* 窗外: 不标记不处理 */
+            if (qx && qy && !PS_DiagFree(cx, cy, qx, qy, cells, nCell)) continue;
+            if (PS_BfsSeen(ux, uy, nx, ny)) continue;   /* 首次遇到即置位 (含被挡) */
+            if (!PS_PassBfs(nx, ny, cells, nCell)) continue;
             if (tail >= PS_BFS_CAP) return 0;
             s_BfsX[tail] = nx; s_BfsY[tail] = ny; tail++;
         }
@@ -335,8 +374,7 @@ static int PS_ObjID(void* o, int* id, unsigned char* rtti)
 static void PS_ScanArr(unsigned arrBase, void* cur, int cells[][2], int nCell)
 {
     void** items;
-    int count, i, id;
-    unsigned char rtti;
+    int count, i;
     items = ARR_ITEMS(arrBase);
     count = ARR_COUNT(arrBase);
     if (!items || !IsPlausiblePtr(items) || count <= 0 || count > 20000) return;
@@ -347,19 +385,18 @@ static void PS_ScanArr(unsigned arrBase, void* cur, int cells[][2], int nCell)
         CoordStruct cs;
         if (s_PsQTail >= PS_QCAP) return;
         if (!o || !IsPlausiblePtr(o)) continue;
-        w = OU_WhatAmI(o);
-        if (w != ABS_UNIT && w != ABS_INFANTRY) continue;
         if (*(void**)((char*)o + PS_OFF_OWNER) != cur) continue;
         if (!((unsigned char*)o)[PS_OFF_ISALIVE]) continue;
         if (((unsigned char*)o)[PS_OFF_INLIMBO]) continue;
         hp = *(int*)((char*)o + PS_OFF_HEALTH);
         if (hp <= 0) continue;
+        w = OU_WhatAmI(o);   /* 虚调用, 放最后 (前面几项已滤掉大半对象) */
+        if (w != ABS_UNIT && w != ABS_INFANTRY) continue;
         if (!OU_GetCoords(o, &cs)) continue;
         cx = cs.X / 256;
         cy = cs.Y / 256;
         if (cx < 0 || cy < 0 || cx >= 512 || cy >= 512) continue;
-        if (!PS_InSet(cells, nCell, cx, cy)) continue;
-        if (!PS_ObjID(o, &id, &rtti)) continue;
+        if (!PS_InFoot(cx, cy, cells, nCell)) continue;
         PS_Push(o);
     }
 }
@@ -382,7 +419,8 @@ static int PS_Drain(void* cur, int houseIdx,
         if (*(void**)((char*)o + PS_OFF_OWNER) != cur) continue;
         if (!OU_GetCoords(o, &cs)) continue;
         ux = cs.X / 256; uy = cs.Y / 256;
-        if (!PS_InSet(cells, nCell, ux, uy)) continue;   /* 已在框外: 不用动 */
+        if (!PS_InFoot(ux, uy, cells, nCell))
+            continue;   /* 已在框外: 不用动 */
         /* 屏反方向 (偶数宽恒有定义, 2x2 四格屏对角散开)。 */
         {
             int ddx = (ux * 2 + 1) - cx2;
@@ -420,18 +458,17 @@ static int PS_Drain(void* cur, int houseIdx,
 static int PS_ClearFoot(void* cur, int houseIdx,
                         int cells[][2], int nCell)
 {
-    int sent, x0, y0, x1, y1, cx2, cy2;
+    int x0, y0, x1, y1, cx2, cy2;
     if (nCell <= 0) return 0;
     PS_BBox(cells, nCell, &x0, &y0, &x1, &y1);
+    s_FootX0 = x0; s_FootY0 = y0; s_FootX1 = x1; s_FootY1 = y1;
     cx2 = x0 + x1 + 1;   /* 包围盒 [x0,x1+1) 中心×2 */
     cy2 = y0 + y1 + 1;
     s_PsQHead = 0;
     s_PsQTail = 0;
     PS_ScanArr(PS_ARR_UNIT, cur, cells, nCell);
     PS_ScanArr(PS_ARR_INF, cur, cells, nCell);
-    if (s_PsQTail <= 0) return 0;
-    sent = PS_Drain(cur, houseIdx, cells, nCell, cx2, cy2);
-    return sent;
+    return PS_Drain(cur, houseIdx, cells, nCell, cx2, cy2);
 }
 
 /* ---------------- OutList 哨兵: 抓自家 Place 事件 (BuildQueue 同式) ---------------- */
@@ -469,7 +506,7 @@ static void PS_WatchPlace(void* cur, int houseIdx, int fr)
         {
             int d, fire = 0;
             short ex, ey;
-            int nCell = (s_CacheN < PS_CELL_CAP) ? s_CacheN : PS_CELL_CAP;
+            int nCell = s_CacheN;
             /* 用缓存还原点下时的 footprint (0~5 帧内有效, 防读档帧号回绕)。
              * 点下当帧引擎同步清幽影 (0x4ABC46 调 SetActiveFoundation(null)),
              * 到 Poll 时活幽影已不可读, 缓存是点下驱离的唯一依据。 */
@@ -526,8 +563,8 @@ void PlaceScatter_Poll(void)
     if (nCell > 0)
     {
         int k;
-        s_CacheN = (nCell < PS_CELL_CAP) ? nCell : PS_CELL_CAP;
-        for (k = 0; k < s_CacheN; k++)
+        s_CacheN = nCell;
+        for (k = 0; k < nCell; k++)
         {
             s_CacheCells[k][0] = cells[k][0];
             s_CacheCells[k][1] = cells[k][1];
