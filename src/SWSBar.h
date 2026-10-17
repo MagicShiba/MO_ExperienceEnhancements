@@ -7,7 +7,8 @@
 void SWS_Poll(void);
 
 /* 渲染期绘制 (挂 MOExperience_MessageDrawHook, Composite 面):
- * 右侧 4 列图标 (盟/苏/厄/焚风, 空列隐藏)。只读 + 自有绘制, 联机安全。 */
+ * 右侧最多 4 列图标 (默认每阵营一列, 空列隐藏; FillMode=1 则不分阵营、平衡填充)。
+ * 只读 + 自有绘制, 联机安全。 */
 void SWS_Draw(void* surf, int w, int h, int pitch);
 
 /* 点击吞没门 (0x692419, 7B, 见 dist/MOExperience.dll.inj):

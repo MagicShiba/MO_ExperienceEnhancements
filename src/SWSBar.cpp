@@ -14,13 +14,16 @@
  *     默认 (优先级 1000), 正数=优先级 (越小越靠前, 同值按 ArrayIndex)。
  *   - 图标: 走 PCX (`SidebarPCX=`)。**不用 SHP** —— `SidebarImage` 指向
  *     XXICON.SHP 占位引用, 画出来是紫球。
- *   - 绘制: 图标盒 60x48 + 阵营色边框 + 充能百分比 + 悬停名提示,
+ *   - 绘制: 图标盒 60x48 + 阵营色边框 + 充能百分比 + 悬停名提示 (名下有花费时
+ *     追加一行 `$金额`, 与原版侧栏的 Ares `Money.Amount` 提示同式),
  *     `[SWSidebar] Alpha` 可调; 自有离屏缓存, 15 个游戏逻辑帧重建一次
  *     (交互时当帧重建), 每渲染帧只做一次带 alpha 的合成。
  *   - 交互: ToggleKey 切换显隐 (隐藏即不占空间: 不画+不吞点击); 左键图标=
  *     选中打靶 (照抄引擎侧栏上膛序列: 清放置模式 + `MapClass::UnselectAll`,
  *     再写 CurrentSWTypeIndex; 全是本地 UI 态, 非模拟), 右键栏内=取消;
  *     点击吞没经 0x692419 门防误下单。
+ *   - 资金门 (Ares `Money.Amount`, 只读): 就绪但资金不足的超武压暗 (同引擎
+ *     `StripClass_Draw_SuperDarken`), 且点击不选中 (同 `ProcessCameoClick`)。
  *   - 防御支援页去重: 侧栏有的超武不在引擎自带的防御页 (页签 1) 重复出现,
  *     显隐箭头左边的按钮切换。搬出**只能少删**: 判据是"侧栏此刻真的在画它"的
  *     真子集 (类型门 ∧ 实例门 ∧ 扫描快照门), 搬出单向, 多删一条就是永久丢失。
@@ -150,7 +153,6 @@ typedef void (__fastcall *SwsUnselectFn)(void);
 #define ADDR_CLICKGATE_SKIP 0x006925FCu
 
 #define SWS_CAP 160
-#define SWS_INI_CAP 160
 /* 类型下标位图 (swIdx) 的尺寸。防御页 cameo 的 ItemIndex、Super 的
  * Type->ArrayIndex、SuperWeaponType::Array 下标三者同源
  * (HouseClass::Supers 按类型序建), 所以一张按 swIdx 取位的表就能同时表示
@@ -181,6 +183,7 @@ typedef void (__fastcall *SwsUnselectFn)(void);
  *   - `find()` = 紧邻 `call` 的落点。
  * ===================================================================== */
 #define ARES_EXT_OWNER     0x000u   /* AttachedToObject = SuperWeaponTypeClass* */
+#define ARES_EXT_MONEY     0x1A0u   /* Money.Amount (int; <0 = 发射花费) */
 #define ARES_EXT_MANUAL    0x1E2u   /* SW_ManualFire     (bool, 1 字节) */
 #define ARES_EXT_SHOW      0x1E5u   /* SW_ShowCameo      (bool, 1 字节) */
 #define ARES_EXT_AITGT     0x20Eu   /* SW_UseAITargeting (bool, 1 字节) */
@@ -203,6 +206,28 @@ static int SwsAresImage(unsigned char** ppLo, unsigned char** ppHi);
 static int SwsIdOk(const char* s);
 static void LogS(const char* tag, const char* s);
 static void LogI(const char* tag, int v);
+/* 多键日志拼装: 就地推进 AppendCStr 游标 q (buf 为 char 数组), 免掉每处重复写
+ * tmp[16] 与 sizeof(buf)。输出与手写逐段 AppendCStr 逐字节一致:
+ *   q = LOGP(buf, "sws: x ");      // 起头 (游标从 0 开始)
+ *   q = LOGS(buf, q, " key=");     // 追加字符串 / 键
+ *   q = LOGI(buf, q, val);         // 十进制值
+ *   q = LOGH(buf, q, val);         // 十六进制值 (无 "0x" 前缀, 同 HtoA) */
+static unsigned SwsLogU(char* buf, unsigned q, size_t cap, unsigned v)
+{
+    char n[16];
+    UtoA(v, n);
+    return AppendCStr(buf, q, n, cap);
+}
+static unsigned SwsLogH(char* buf, unsigned q, size_t cap, unsigned v)
+{
+    char n[16];
+    HtoA(v, n);
+    return AppendCStr(buf, q, n, cap);
+}
+#define LOGP(buf, s)     (AppendCStr((buf), 0, (s), sizeof(buf)))
+#define LOGS(buf, q, s)  ((q) = AppendCStr((buf), (q), (s), sizeof(buf)))
+#define LOGI(buf, q, v)  ((q) = SwsLogU((buf), (q), sizeof(buf), (unsigned)(v)))
+#define LOGH(buf, q, v)  ((q) = SwsLogH((buf), (q), sizeof(buf), (unsigned)(v)))
 static int SwsTabCameoOk(void);
 static int SwsEngineCleanList(void);
 static void SwsCleanStampCheck(void);
@@ -268,16 +293,13 @@ static int SwsAresLocateExt(void)
     /* 定位成功自证一行 (map/find/base 全打出), 方便区分"没定位到"与
      * "定位到了但 find() 查不到"。 */
     {
-        char b[16], buf[96];
-        unsigned q = AppendCStr(buf, 0, "sws: extmap map=", sizeof(buf));
-        HtoA((unsigned)(size_t)s_AresExtMap, b);
-        q = AppendCStr(buf, q, b, sizeof(buf));
-        q = AppendCStr(buf, q, " find=", sizeof(buf));
-        HtoA((unsigned)(size_t)s_AresFind, b);
-        q = AppendCStr(buf, q, b, sizeof(buf));
-        q = AppendCStr(buf, q, " base=", sizeof(buf));
-        HtoA((unsigned)(size_t)base, b);
-        AppendCStr(buf, q, b, sizeof(buf));
+        char buf[96];
+        unsigned q = LOGP(buf, "sws: extmap map=");
+        q = LOGH(buf, q, (size_t)s_AresExtMap);
+        q = LOGS(buf, q, " find=");
+        q = LOGH(buf, q, (size_t)s_AresFind);
+        q = LOGS(buf, q, " base=");
+        LOGH(buf, q, (size_t)base);
         LogLine(buf);
     }
     return 1;
@@ -320,16 +342,14 @@ miss:
             LogI(slot == 1 ? "sws: ext find() returned NULL, id="
                            : "sws: ext find() ptr implausible", s_AresExtTried);
             {
-                char b[40], buf[128];
-                unsigned q = AppendCStr(buf, 0, "sws: ext tried type=", sizeof(buf));
-                /* 接住 AppendCStr 的返回值, 否则下一段覆盖 ID。 */
-                q = AppendCStr(buf, q, (const char*)type + OFF_SWT_ID, sizeof(buf));
-                q = AppendCStr(buf, q, " type=", sizeof(buf));
-                HtoA((unsigned)(size_t)type, b);
-                q = AppendCStr(buf, q, b, sizeof(buf));
-                q = AppendCStr(buf, q, " map=", sizeof(buf));
-                HtoA((unsigned)(size_t)s_AresExtMap, b);
-                AppendCStr(buf, q, b, sizeof(buf));
+                char buf[128];
+                unsigned q = LOGP(buf, "sws: ext tried type=");
+                /* LOGS 返回新游标, 否则下一段覆盖 ID。 */
+                q = LOGS(buf, q, (const char*)type + OFF_SWT_ID);
+                q = LOGS(buf, q, " type=");
+                q = LOGH(buf, q, (size_t)type);
+                q = LOGS(buf, q, " map=");
+                LOGH(buf, q, (size_t)s_AresExtMap);
                 LogLine(buf);
             }
         }
@@ -449,7 +469,7 @@ static unsigned char* s_TabCam = NULL;  /* Ares RulesExt::TabCameos[4] 基址 */
 
 
 typedef struct { char id[32]; int prio; } SwsIniEnt;
-static SwsIniEnt s_Ini[SWS_INI_CAP];
+static SwsIniEnt s_Ini[SWS_CAP];
 static int s_IniN = 0;
 
 /* ---------------- 内建阵营表 (rulesmo.ini 离线推导, 见 notes/超武侧栏.md) ----------------
@@ -514,6 +534,8 @@ static const unsigned char kSideCol[4][3] = {
     { 70, 150, 255 }, { 255, 70, 70 },
     { 170, 80, 255 }, { 0, 110, 60 },
 };
+/* 填充模式的列边框统一用中性灰 (一列内混阵营, 阵营色不再有意义)。 */
+static const unsigned char kFillCol[3] = { 150, 150, 150 };
 
 /* 列的绘制顺序 (下标=side, 值=从左到右第几列): 盟军永远靠屏幕外缘。
  * 面板在右 (原版侧栏在右) → {3,2,1,0}; 面板在左 → {0,1,2,3}。
@@ -546,6 +568,7 @@ typedef struct {
     int rech;
     const char* pcxFile;  /* SidebarPCX= 文件名, 指向我们自己的表 */
     int instant;          /* 1 = 点击即生效 (Action=None 或 SW.UseAITargeting) */
+    int money;            /* Ares Money.Amount: <0 = 发射花费 (显示/选中的门控) */
     unsigned short* capPix;   /* 从引擎 cameo 抓下来的 60x48 像素 (优先于 pcxFile) */
     wchar_t name[24];     /* 悬停提示用; 每类型填一次 */
 } SwsItem;
@@ -558,6 +581,9 @@ static int s_ItemN = 0;
  * s_Items[s_Order[i]], 不可拿排序下标直接索引 s_Items。 */
 static int s_Order[SWS_CAP];
 static int s_OrderN = -1;           /* -1 = 还没排过 */
+/* 上次排序时的显示模式: 分阵营/填充两套排序键不同, 模式一变就作废重排
+ * (条目数没变时 s_OrderN 检测不到)。 */
+static int s_OrderFill = -1;
 static int s_OrderColCount[4];
 
 /* 侧栏主题色 (淡蓝): 箭头、箭头边框、文字描边统一用它, 方便一处改色。 */
@@ -570,6 +596,10 @@ static int s_BoundX = 0, s_BoundY = 0, s_BoundW = 0, s_BoundH = 0;
 static int s_Scroll = 0;
 static int s_MaxRows = 10;         /* [SWSidebar] MaxRows, 0 = 不限 */
 static int s_SideRight = 1;         /* [SWSidebar] Side=right(默认)|left */
+/* [SWSidebar] FillMode: 0=按阵营分列 (默认), 1=填充式 (排序不看阵营, 各列高度
+ * 尽量均衡: 先两列, 再依次加到三/四列, 满四列才滚动)。显隐箭头上右键切换
+ * (只改运行时状态, 不回写 ini; 初值由 ini 给)。 */
+static int s_FillMode = 0;
 static int s_BtnX = 0, s_BtnY = 0, s_BtnW = 0, s_BtnH = 0;  /* 显隐按钮 */
 /* 展开态记下的按钮坐标, 收起时原样沿用 (折叠/展开不跳位)。-1 = 还没展开过。 */
 static int s_BtnXKeep = -1, s_BtnYKeep = -1;
@@ -594,12 +624,6 @@ static int SwsStrEq(const char* a, const char* b)
         i++;
     }
     return a[i] == b[i];
-}
-
-/* 同上, 但返回"是否不同" (给"内容变了才记日志"用) */
-static int SwsStrDiff(const char* a, const char* b)
-{
-    return !SwsStrEq(a, b);
 }
 
 /* copy an ID string (bounded) */
@@ -637,6 +661,26 @@ static int SwsPlayerSide(void)
     side = *(int*)((char*)scen + OFF_SCEN_SIDE);
     if (side < 0 || side > 3) return 0;
     return side;
+}
+
+/* 本家现有资金 (HouseClass::Money)。偏移实证: gamemd 0x705DF3 =
+ * `mov eax,[ecx+0x30C]; ret` (Available_Money 就是它) + 0x4F9950 GiveMoney
+ * `add [ecx+0x30C]`。只读查询, 联机安全。 */
+#define OFF_HOUSE_MONEY 0x30Cu
+
+/* 资金够不够发射这个超武。moneyAmount = Ares Money.Amount (负 = 花费)。
+ * 判据同 HouseClass::CanTransactMoney: amount>=0 恒真, 否则 money >= -amount。
+ * 读不到资金/脏值时放行 (fail-open): 引擎/Ares 发射那一步自己会再拦一次。 */
+static int SwsAfford(int moneyAmount)
+{
+    void* cur;
+    int money;
+    if (moneyAmount >= 0) return 1;
+    cur = *(void**)ADDR_CURPLAYER;
+    if (!cur || !IsPlausiblePtr(cur)) return 1;
+    money = *(int*)((char*)cur + OFF_HOUSE_MONEY);
+    if (money < 0 || money > 1000000000) return 1;
+    return money + moneyAmount >= 0;
 }
 
 static int SwsSideOf(const char* id)
@@ -712,7 +756,7 @@ static void SwsLoadIniList(void)
     n = GetPrivateProfileStringA(SWS_SECTION, NULL, "", keys, sizeof(keys),
                                  g_IniPath);
     if (n <= 1) return;
-    while (pos < n && s_IniN < SWS_INI_CAP)
+    while (pos < n && s_IniN < SWS_CAP)
     {
         const char* k = keys + pos;
         unsigned L = SwsKeyLen(k);
@@ -728,6 +772,7 @@ static void SwsLoadIniList(void)
             SwsStrEq(k, "MaxRows") ||
             SwsStrEq(k, "ScrollStep") ||
             SwsStrEq(k, "Side") ||
+            SwsStrEq(k, "FillMode") ||
             SwsStrEq(k, "DedupDefensePage");
         /* 新增全局配置项必须同步加进这里, 否则会被当成超武 ID 收进 s_Ini
          * (一个永远不亮的空条目)。与 SwsEnsureInit 里真正读取的那份保持一致。 */
@@ -819,6 +864,8 @@ static void SwsEnsureInit(void)
         s_SideRight = !(sideKey[0] == 'l' || sideKey[0] == 'L');
         kColOrder = s_SideRight ? kColOrderRight : kColOrderLeft;
     }
+    /* 显示模式: 0=按阵营分列 (默认), 1=填充式。可在显隐箭头上右键实时切换。 */
+    s_FillMode = GetPrivateProfileIntA(SWS_SECTION, "FillMode", 0, g_IniPath) ? 1 : 0;
     if (s_ScrollStep > 10) s_ScrollStep = 10;
     if (s_MaxRows < 1) s_MaxRows = 1;
     if (s_MaxRows > 40) s_MaxRows = 40;
@@ -831,15 +878,16 @@ static void SwsEnsureInit(void)
     if (s_FontPx < 8) s_FontPx = 8;
     if (s_FontPx > 32) s_FontPx = 32;
     SwsLoadIniList();
-    p = 0;
-    p = AppendCStr(buf, p, "sws: en=", sizeof(buf));
-    p += UtoA((unsigned)s_Enable, buf + p);
-    p = AppendCStr(buf, p, " a=", sizeof(buf));
-    p += UtoA((unsigned)s_Alpha, buf + p);
-    p = AppendCStr(buf, p, " iniN=", sizeof(buf));
-    p += UtoA((unsigned)s_IniN, buf + p);
-    p = AppendCStr(buf, p, " rows=", sizeof(buf));
-    p += UtoA((unsigned)s_MaxRows, buf + p);
+    p = LOGP(buf, "sws: en=");
+    p = LOGI(buf, p, s_Enable);
+    p = LOGS(buf, p, " a=");
+    p = LOGI(buf, p, s_Alpha);
+    p = LOGS(buf, p, " iniN=");
+    p = LOGI(buf, p, s_IniN);
+    p = LOGS(buf, p, " rows=");
+    p = LOGI(buf, p, s_MaxRows);
+    p = LOGS(buf, p, " fill=");
+    p = LOGI(buf, p, s_FillMode);
     LogLine(buf);
 }
 
@@ -916,6 +964,7 @@ typedef struct {
     int   instant;   /* 1 = 点击即发射 */
     double ratio;     /* SW.ChargeToDrainRatio (火风暴类维持时长系数, 缺省 1.0);
                        * 只对 drain 类有意义, 别的类留 1.0 */
+    int   money;      /* Money.Amount (int; <0 = 发射花费, 缺省 0 = 免费) */
     const char* pcxFile;
     char pcxName[64];  /* pcxFile 指向的自有缓冲 (文件名很短, 内联省一次间接) */
     unsigned short* capPix;  /* 引擎 cameo 抓到的 60x48 像素 (优先于 pcxFile) */
@@ -941,6 +990,7 @@ static SwsTypeCache* SwsTypeEntry(void* type, const char* id)
     s_TC[i].drain = 0;
     s_TC[i].actionNone = 0;
     s_TC[i].instant = 0;
+    s_TC[i].money = 0;
     s_TC[i].pcxFile = NULL;
     s_TC[i].pcxName[0] = 0;
     s_TC[i].capPix = NULL;
@@ -1028,6 +1078,13 @@ static void SwsFillType(SwsTypeCache* tc, void* type, const char* id)
         if (!SwsAresExtBool(ext, ARES_EXT_MANUAL)) tc->manual = 0;
         /* 火风暴类的维持时长系数: 侧栏算"运作中百分比"的分母要用它。 */
         tc->ratio = SwsAresExtRatio(ext);
+        /* 发射所需资金 (Ares Money.Amount: 负 = 花费, 0/正 = 免费或返还)。
+         * 与引擎/Ares 同源 (SidebarClass_ProcessCameoClick 用同一个值拦发射,
+         * StripClass_Draw_SuperDarken 用同一个值压暗)。越界当 0 (免费)。 */
+        {
+            int m = *(const int*)((const char*)ext + ARES_EXT_MONEY);
+            if (m > -1000000000 && m < 1000000000) tc->money = m;
+        }
     }
     if (!tc->show)
     {
@@ -1093,28 +1150,23 @@ static void SwsFillType(SwsTypeCache* tc, void* type, const char* id)
     {
         if (s_DiagLeft > 0)
         {
-            char b[16], buf[160];
-            unsigned q = AppendCStr(buf, 0, "sws: act ", sizeof(buf));
-            q = AppendCStr(buf, q, id, sizeof(buf));
-            q = AppendCStr(buf, q, " v=", sizeof(buf));
-            HtoA((unsigned)*(int*)((char*)type + OFF_SWT_ACTION), b);
-            q = AppendCStr(buf, q, b, sizeof(buf));
-            q = AppendCStr(buf, q, " i", sizeof(buf));
-            UtoA((unsigned)tc->instant, b);
-            q = AppendCStr(buf, q, b, sizeof(buf));
-            q = AppendCStr(buf, q, " m", sizeof(buf));
-            UtoA((unsigned)tc->manual, b);
-            q = AppendCStr(buf, q, b, sizeof(buf));
-            q = AppendCStr(buf, q, " d", sizeof(buf));
-            UtoA((unsigned)tc->drain, b);
-            q = AppendCStr(buf, q, b, sizeof(buf));
-            q = AppendCStr(buf, q, " s", sizeof(buf));
-            UtoA((unsigned)tc->show, b);
-            q = AppendCStr(buf, q, b, sizeof(buf));
-            q = AppendCStr(buf, q, " p=", sizeof(buf));
-            q = AppendCStr(buf, q, tc->pcxFile ? tc->pcxFile : "-", sizeof(buf));
+            char buf[160];
+            unsigned q = LOGP(buf, "sws: act ");
+            q = LOGS(buf, q, id);
+            q = LOGS(buf, q, " v=");
+            q = LOGH(buf, q, *(int*)((char*)type + OFF_SWT_ACTION));
+            q = LOGS(buf, q, " i");
+            q = LOGI(buf, q, tc->instant);
+            q = LOGS(buf, q, " m");
+            q = LOGI(buf, q, tc->manual);
+            q = LOGS(buf, q, " d");
+            q = LOGI(buf, q, tc->drain);
+            q = LOGS(buf, q, " s");
+            q = LOGI(buf, q, tc->show);
+            q = LOGS(buf, q, " p=");
+            q = LOGS(buf, q, tc->pcxFile ? tc->pcxFile : "-");
             /* `x` = ExtData 取到没有 (x=0 回去查定位器/find)。 */
-            q = AppendCStr(buf, q, ext ? " x1" : " x0", sizeof(buf));
+            q = LOGS(buf, q, ext ? " x1" : " x0");
             LogLine(buf);
             s_DiagLeft--;
         }
@@ -1247,13 +1299,12 @@ extern "C" void Sws_CaptureCameo(void)
     if (slot == s_CapN) s_CapN++;
     if (s_CapN <= 8)
     {
-        char buf[64], b1[16];
+        char buf[64];
         unsigned q;
-        q = AppendCStr(buf, 0, "sws: cap ", sizeof(buf));
-        q = AppendCStr(buf, q, (const char*)type + OFF_SWT_ID, sizeof(buf));
-        q = AppendCStr(buf, q, " n=", sizeof(buf));
-        UtoA((unsigned)s_CapN, b1);
-        AppendCStr(buf, q, b1, sizeof(buf));
+        q = LOGP(buf, "sws: cap ");
+        q = LOGS(buf, q, (const char*)type + OFF_SWT_ID);
+        q = LOGS(buf, q, " n=");
+        LOGI(buf, q, s_CapN);
         LogLine(buf);
     }
 }
@@ -1297,7 +1348,7 @@ static int SwsEnsureCameoHook(void)
     unsigned char* st;
     unsigned char* site;
     DWORD old = 0;
-    char sb[128], b1[16], b2[16];
+    char sb[128];
     unsigned q;
     if (s_HookDone) return 1;
     if (!IsPlausiblePtr((void*)ADDR_CURPLAYER)) return 0;
@@ -1311,15 +1362,12 @@ static int SwsEnsureCameoHook(void)
     if (!fPcx || !fDraw || !vPcx ||
         (unsigned char*)vPcx < base || (unsigned char*)vPcx >= imgHi)
     {
-        q = AppendCStr(sb, 0, "sws: cameo getproc FAIL pcx=", sizeof(sb));
-        HtoA((unsigned)(size_t)fPcx, b1);
-        q = AppendCStr(sb, q, b1, sizeof(sb));
-        q = AppendCStr(sb, q, " draw=", sizeof(sb));
-        HtoA((unsigned)(size_t)fDraw, b2);
-        q = AppendCStr(sb, q, b2, sizeof(sb));
-        q = AppendCStr(sb, q, " base=", sizeof(sb));
-        HtoA((unsigned)(size_t)base, b1);
-        AppendCStr(sb, q, b1, sizeof(sb));
+        q = LOGP(sb, "sws: cameo getproc FAIL pcx=");
+        q = LOGH(sb, q, (size_t)fPcx);
+        q = LOGS(sb, q, " draw=");
+        q = LOGH(sb, q, (size_t)fDraw);
+        q = LOGS(sb, q, " base=");
+        LOGH(sb, q, (size_t)base);
         LogLine(sb);
         goto fail;
     }
@@ -1327,12 +1375,10 @@ static int SwsEnsureCameoHook(void)
     bPcx = SwsFindCameoPcxIn((void*)(size_t)fDraw, base, imgHi);
     if (!aPcx || !bPcx || bPcx != aPcx)
     {
-        q = AppendCStr(sb, 0, "sws: cameo pcx mismatch a=", sizeof(sb));
-        HtoA(aPcx, b1);
-        q = AppendCStr(sb, q, b1, sizeof(sb));
-        q = AppendCStr(sb, q, " b=", sizeof(sb));
-        HtoA(bPcx, b2);
-        AppendCStr(sb, q, b2, sizeof(sb));
+        q = LOGP(sb, "sws: cameo pcx mismatch a=");
+        q = LOGH(sb, q, aPcx);
+        q = LOGS(sb, q, " b=");
+        LOGH(sb, q, bPcx);
         LogLine(sb);
         goto fail;
     }
@@ -1363,12 +1409,10 @@ static int SwsEnsureCameoHook(void)
     VirtualProtect(site, ADDR_CAMEO_OBS_LEN, old, &old);
     FlushInstructionCache(GetCurrentProcess(), site, ADDR_CAMEO_OBS_LEN);
     s_HookDone = 1;
-    q = AppendCStr(sb, 0, "sws: cameo hook ON pcx=", sizeof(sb));
-    HtoA(aPcx, b1);
-    q = AppendCStr(sb, q, b1, sizeof(sb));
-    q = AppendCStr(sb, q, " base=", sizeof(sb));
-    HtoA((unsigned)(size_t)base, b2);
-    AppendCStr(sb, q, b2, sizeof(sb));
+    q = LOGP(sb, "sws: cameo hook ON pcx=");
+    q = LOGH(sb, q, aPcx);
+    q = LOGS(sb, q, " base=");
+    LOGH(sb, q, (size_t)base);
     LogLine(sb);
     return 1;
 fail:
@@ -1415,20 +1459,17 @@ static const char* const kScanTag[] = {
 
 static void SwsScanZero(int tag, int v1, int v2)
 {
-    char buf[96], n1[16], n2[16];
+    char buf[96];
     unsigned q;
     if (tag < 0 || tag >= SCAN_TAG_N) return;
     if (s_ScanZeroTag == tag + 1) return;   /* 同一个原因只记一次 */
     s_ScanZeroTag = tag + 1;
-    q = AppendCStr(buf, 0, "sws: scan0 ", sizeof(buf));
-    q = AppendCStr(buf, q, kScanTag[tag], sizeof(buf));
-    q = AppendCStr(buf, q, " a=", sizeof(buf));
-    UtoA((unsigned)v1, n1);
-    q = AppendCStr(buf, q, n1, sizeof(buf));
-    q = AppendCStr(buf, q, " b=", sizeof(buf));
-    UtoA((unsigned)v2, n2);
-    q = AppendCStr(buf, q, n2, sizeof(buf));
-    AppendCStr(buf, q, "", sizeof(buf));
+    q = LOGP(buf, "sws: scan0 ");
+    q = LOGS(buf, q, kScanTag[tag]);
+    q = LOGS(buf, q, " a=");
+    q = LOGI(buf, q, v1);
+    q = LOGS(buf, q, " b=");
+    q = LOGI(buf, q, v2);
     LogLine(buf);
 }
 
@@ -1438,7 +1479,7 @@ static void SwsDumpVec(unsigned base, int cnt)
 {
     static unsigned s_Last = 0xFFFFFFFFu;
     unsigned h;
-    char buf[128], t1[16], t2[16];
+    char buf[128];
     unsigned q;
     (void)cnt;
     h = (unsigned)*(unsigned*)(base + 4u) * 2654435761u
@@ -1447,25 +1488,18 @@ static void SwsDumpVec(unsigned base, int cnt)
       ^ (unsigned)*(int*)(base + 20u);
     if (h == s_Last) return;
     s_Last = h;
-    q = AppendCStr(buf, 0, "sws: vec ", sizeof(buf));
-    HtoA(base, t1);
-    q = AppendCStr(buf, q, t1, sizeof(buf));
-    q = AppendCStr(buf, q, " items=", sizeof(buf));
-    HtoA((unsigned)*(unsigned*)(base + 4u), t1);
-    q = AppendCStr(buf, q, t1, sizeof(buf));
-    q = AppendCStr(buf, q, " cap=", sizeof(buf));
-    UtoA((unsigned)*(int*)(base + 8u), t2);
-    q = AppendCStr(buf, q, t2, sizeof(buf));
-    q = AppendCStr(buf, q, " ini=", sizeof(buf));
-    UtoA((unsigned)*(unsigned char*)(base + 12u), t2);
-    q = AppendCStr(buf, q, t2, sizeof(buf));
-    q = AppendCStr(buf, q, " cnt=", sizeof(buf));
-    UtoA((unsigned)*(int*)(base + 16u), t2);
-    q = AppendCStr(buf, q, t2, sizeof(buf));
-    q = AppendCStr(buf, q, " inc=", sizeof(buf));
-    UtoA((unsigned)*(int*)(base + 20u), t2);
-    q = AppendCStr(buf, q, t2, sizeof(buf));
-    AppendCStr(buf, q, "", sizeof(buf));
+    q = LOGP(buf, "sws: vec ");
+    q = LOGH(buf, q, base);
+    q = LOGS(buf, q, " items=");
+    q = LOGH(buf, q, *(unsigned*)(base + 4u));
+    q = LOGS(buf, q, " cap=");
+    q = LOGI(buf, q, *(int*)(base + 8u));
+    q = LOGS(buf, q, " ini=");
+    q = LOGI(buf, q, *(unsigned char*)(base + 12u));
+    q = LOGS(buf, q, " cnt=");
+    q = LOGI(buf, q, *(int*)(base + 16u));
+    q = LOGS(buf, q, " inc=");
+    q = LOGI(buf, q, *(int*)(base + 20u));
     LogLine(buf);
 }
 
@@ -1634,34 +1668,30 @@ static void SwsScan(void)
             static int s_LastDs = -1;
             if (s_LastDs != s_Items[n].drainState)
             {
-                char lb[16], line[96];
+                char line[96];
                 unsigned w;
                 s_LastDs = s_Items[n].drainState;
-                w = AppendCStr(line, 0, "sws: drain ", sizeof(line));
-                w = AppendCStr(line, w, (const char*)type + OFF_SWT_ID, sizeof(line));
-                w = AppendCStr(line, w, " state=", sizeof(line));
-                UtoA((unsigned)s_Items[n].drainState, lb);
-                w = AppendCStr(line, w, lb, sizeof(line));
-                w = AppendCStr(line, w, " ready=", sizeof(line));
-                UtoA((unsigned)ready, lb);
-                w = AppendCStr(line, w, lb, sizeof(line));
+                w = LOGP(line, "sws: drain ");
+                w = LOGS(line, w, (const char*)type + OFF_SWT_ID);
+                w = LOGS(line, w, " state=");
+                w = LOGI(line, w, s_Items[n].drainState);
+                w = LOGS(line, w, " ready=");
+                w = LOGI(line, w, ready);
                 /* dt=分母(维持时长), left=分子。若 dt 退回等于 tot, 就是 ratio
                  * 没读到 (会从 ratio 起跳)。 */
-                w = AppendCStr(line, w, " tot=", sizeof(line));
-                UtoA((unsigned)total, lb);
-                w = AppendCStr(line, w, lb, sizeof(line));
-                w = AppendCStr(line, w, " dt=", sizeof(line));
-                UtoA((unsigned)s_Items[n].drainTotal, lb);
-                w = AppendCStr(line, w, lb, sizeof(line));
-                w = AppendCStr(line, w, " left=", sizeof(line));
-                UtoA((unsigned)remain, lb);
-                AppendCStr(line, w, lb, sizeof(line));
+                w = LOGS(line, w, " tot=");
+                w = LOGI(line, w, total);
+                w = LOGS(line, w, " dt=");
+                w = LOGI(line, w, s_Items[n].drainTotal);
+                w = LOGS(line, w, " left=");
+                LOGI(line, w, remain);
                 LogLine(line);
             }
         }
 s_Items[n].remain = remain;
     s_Items[n].total = total;
     s_Items[n].instant = instant;
+    s_Items[n].money = tc->money;
     s_Items[n].capPix = capPix;
     s_Items[n].rech = *(int*)((char*)type + OFF_SWT_RECH);
     n++;
@@ -1699,21 +1729,18 @@ s_Items[n].remain = remain;
                 }
             }
             cur[q] = 0;
-            if (!s_LastSetInit || SwsStrDiff(s_LastSet, cur))
+            if (!s_LastSetInit || !SwsStrEq(s_LastSet, cur))
             {
-                char line[600], t1[16];
-                unsigned w = AppendCStr(line, 0, "sws: list ", sizeof(line));
-                w = AppendCStr(line, w, cur, sizeof(line));
+                char line[600];
+                unsigned w = LOGP(line, "sws: list ");
+                w = LOGS(line, w, cur);
                 /* 带上当前规则集地址 (换图必变), 日志才能对上是哪局。 */
-                w = AppendCStr(line, w, "   [rules=", sizeof(line));
-                HtoA((unsigned)(size_t)*(void**)ADDR_INI_RULES, t1);
-                w = AppendCStr(line, w, t1, sizeof(line));
-                w = AppendCStr(line, w, " cameo=", sizeof(line));
-                UtoA((unsigned)SwsStripCameoCount(TAB_DEFENSE), t1);
-                w = AppendCStr(line, w, t1, sizeof(line));
-                w = AppendCStr(line, w, " snap=", sizeof(line));
-                UtoA((unsigned)s_CleanN, t1);
-                AppendCStr(line, w, t1, sizeof(line));
+                w = LOGS(line, w, "   [rules=");
+                w = LOGH(line, w, (size_t)*(void**)ADDR_INI_RULES);
+                w = LOGS(line, w, " cameo=");
+                w = LOGI(line, w, SwsStripCameoCount(TAB_DEFENSE));
+                w = LOGS(line, w, " snap=");
+                LOGI(line, w, s_CleanN);
                 LogLine(line);
                 {
                     unsigned j;
@@ -1730,7 +1757,7 @@ s_Items[n].remain = remain;
      * 等于 4 次/秒刷屏: 同签名只记一次, 计数变了再记。 */
     if (n <= 0)
     {
-        char buf[128], t1[16], t2[16];
+        char buf[128];
         unsigned sig;
         static unsigned s_LastN0 = 0xFFFFFFFFu;
         sig = (unsigned)count * 31u + (unsigned)rOwner;
@@ -1746,45 +1773,32 @@ s_Items[n].remain = remain;
         sig = sig * 31u + (unsigned)hCount;
         if (sig == s_LastN0) return;
         s_LastN0 = sig;
-        unsigned q = AppendCStr(buf, 0, "sws: scan0 n0 tot=", sizeof(buf));
-        UtoA((unsigned)count, t1);
-        q = AppendCStr(buf, q, t1, sizeof(buf));
-        q = AppendCStr(buf, q, " owner=", sizeof(buf));
-        UtoA((unsigned)rOwner, t1);
-        q = AppendCStr(buf, q, t1, sizeof(buf));
-        q = AppendCStr(buf, q, " present=", sizeof(buf));
-        UtoA((unsigned)rPresent, t1);
-        q = AppendCStr(buf, q, t1, sizeof(buf));
-        q = AppendCStr(buf, q, " type=", sizeof(buf));
-        UtoA((unsigned)rType, t1);
-        q = AppendCStr(buf, q, t1, sizeof(buf));
-        q = AppendCStr(buf, q, " flag=", sizeof(buf));
-        UtoA((unsigned)rFlag, t1);
-        q = AppendCStr(buf, q, t1, sizeof(buf));
-        q = AppendCStr(buf, q, " id=", sizeof(buf));
-        UtoA((unsigned)rId, t1);
-        q = AppendCStr(buf, q, t1, sizeof(buf));
-        q = AppendCStr(buf, q, " cache=", sizeof(buf));
-        UtoA((unsigned)rCache, t1);
-        q = AppendCStr(buf, q, t1, sizeof(buf));
-        q = AppendCStr(buf, q, " idx=", sizeof(buf));
-        UtoA((unsigned)rIdx, t1);
-        q = AppendCStr(buf, q, t1, sizeof(buf));
-        q = AppendCStr(buf, q, " hidden=", sizeof(buf));
-        UtoA((unsigned)rHidden, t2);
-        q = AppendCStr(buf, q, t2, sizeof(buf));
-        q = AppendCStr(buf, q, " nocameo=", sizeof(buf));
-        UtoA((unsigned)rShow, t2);
-        q = AppendCStr(buf, q, t2, sizeof(buf));
-        q = AppendCStr(buf, q, " notseen=", sizeof(buf));
-        UtoA((unsigned)rNotClean, t1);
-        q = AppendCStr(buf, q, t1, sizeof(buf));
-        q = AppendCStr(buf, q, " page=", sizeof(buf));
-        UtoA(1u, t2);
-        q = AppendCStr(buf, q, t2, sizeof(buf));
-        q = AppendCStr(buf, q, " hcnt=", sizeof(buf));
-        UtoA((unsigned)hCount, t2);
-        AppendCStr(buf, q, t2, sizeof(buf));
+        unsigned q = LOGP(buf, "sws: scan0 n0 tot=");
+        q = LOGI(buf, q, count);
+        q = LOGS(buf, q, " owner=");
+        q = LOGI(buf, q, rOwner);
+        q = LOGS(buf, q, " present=");
+        q = LOGI(buf, q, rPresent);
+        q = LOGS(buf, q, " type=");
+        q = LOGI(buf, q, rType);
+        q = LOGS(buf, q, " flag=");
+        q = LOGI(buf, q, rFlag);
+        q = LOGS(buf, q, " id=");
+        q = LOGI(buf, q, rId);
+        q = LOGS(buf, q, " cache=");
+        q = LOGI(buf, q, rCache);
+        q = LOGS(buf, q, " idx=");
+        q = LOGI(buf, q, rIdx);
+        q = LOGS(buf, q, " hidden=");
+        q = LOGI(buf, q, rHidden);
+        q = LOGS(buf, q, " nocameo=");
+        q = LOGI(buf, q, rShow);
+        q = LOGS(buf, q, " notseen=");
+        q = LOGI(buf, q, rNotClean);
+        q = LOGS(buf, q, " page=");
+        q = LOGI(buf, q, 1);
+        q = LOGS(buf, q, " hcnt=");
+        LOGI(buf, q, hCount);
         LogLine(buf);
     }
 }
@@ -2041,19 +2055,16 @@ static unsigned char* SwsAresFindTabCameos(void)
     }
     s_TabCam = found;
     {
-        char sb[96], b1[16];
-        unsigned q = AppendCStr(sb, 0, "sws: dd tabcameo=", sizeof(sb));
-        HtoA((unsigned)(size_t)found, b1);
-        q = AppendCStr(sb, q, b1, sizeof(sb));
-        q = AppendCStr(sb, q, " tc=", sizeof(sb));
+        char sb[96];
+        unsigned q = LOGP(sb, "sws: dd tabcameo=");
+        q = LOGH(sb, q, (size_t)found);
+        q = LOGS(sb, q, " tc=");
         for (t = 0; t < TABCAM_N; t++)
         {
-            UtoA((unsigned)*(int*)(found + (unsigned)t * DVEC_SIZE +
-                                   DVEC_OFF_COUNT), b1);
-            q = AppendCStr(sb, q, t ? "/" : "", sizeof(sb));
-            q = AppendCStr(sb, q, b1, sizeof(sb));
+            q = LOGS(sb, q, t ? "/" : "");
+            q = LOGI(sb, q, *(int*)(found + (unsigned)t * DVEC_SIZE +
+                                    DVEC_OFF_COUNT));
         }
-        AppendCStr(sb, q, "", sizeof(sb));
         LogLine(sb);
     }
     return s_TabCam;
@@ -2151,17 +2162,20 @@ static void SwsDefenseRepair(void)
  * 收起时 s_Items 为空, 快照门天然全挡, 不会误删。 */
 
 
-/* 本家"活的"超武 (IsPresent==1) 下标位图, 一趟建好供搬出逐条 O(1) 查。
- * 判据与 SwsDedupRestore 相同 (两方向对称)。返回个数, -1 = 容器不可用。 */
-static int SwsBuildLiveSet(unsigned char* live)
+/* 遍历本家、已就绪且未暂停的超武实例 (一趟, 只读)。每命中一个调 cb(sup,type,swIdx,ctx)。
+ * 返回命中数; 玩家/容器不可用返回 -1; 容器条目数经 pContainerN 带出 (可 NULL)。
+ * 判据 (owner==本家 ∧ IsPresent==1 ∧ IsReady<=1 ∧ IsSuspended<=1) 由下面三处共用。 */
+typedef void (*SwsSuperCb)(void* sup, void* type, int swIdx, void* ctx);
+static int SwsForEachReadySuper(SwsSuperCb cb, void* ctx, int* pContainerN)
 {
     void** items;
     int count = 0, i, n = 0;
     void* cur = *(void**)ADDR_CURPLAYER;
-    for (i = 0; i < SWS_LIVE_BYTES; i++) live[i] = 0;
+    if (pContainerN) *pContainerN = -1;
     if (!cur || !IsPlausiblePtr(cur)) return -1;
     items = SwsVecItems(ADDR_SUPER_ARR, &count);
     if (!items) return -1;
+    if (pContainerN) *pContainerN = count;
     for (i = 0; i < count; i++)
     {
         void* sup = items[i];
@@ -2177,13 +2191,33 @@ static int SwsBuildLiveSet(unsigned char* live)
         if (*(unsigned char*)((char*)sup + OFF_SUP_SUSPEND) > 1) continue;
         swIdx = *(int*)((char*)type + OFF_SWT_ARRIDX);
         if (swIdx < 0 || swIdx >= SWS_LIVE_BITS) continue;
-        if (!(live[swIdx >> 3] & (unsigned char)(1u << (swIdx & 7))))
-        {
-            live[swIdx >> 3] |= (unsigned char)(1u << (swIdx & 7));
-            n++;
-        }
+        if (cb) cb(sup, type, swIdx, ctx);
+        n++;
     }
     return n;
+}
+
+/* 本家"活的"超武 (IsPresent==1) 下标位图, 一趟建好供搬出逐条 O(1) 查。
+ * 判据与 SwsDedupRestore 相同 (两方向对称)。返回个数, -1 = 容器不可用。 */
+struct SwsLiveCtx { unsigned char* live; int n; };
+static void SwsLiveCb(void* sup, void* type, int swIdx, void* ctx)
+{
+    struct SwsLiveCtx* c = (struct SwsLiveCtx*)ctx;
+    (void)sup; (void)type;
+    if (!(c->live[swIdx >> 3] & (unsigned char)(1u << (swIdx & 7))))
+    {
+        c->live[swIdx >> 3] |= (unsigned char)(1u << (swIdx & 7));
+        c->n++;
+    }
+}
+static int SwsBuildLiveSet(unsigned char* live)
+{
+    struct SwsLiveCtx c;
+    int i;
+    for (i = 0; i < SWS_LIVE_BYTES; i++) live[i] = 0;
+    c.live = live; c.n = 0;
+    if (SwsForEachReadySuper(SwsLiveCb, &c, NULL) < 0) return -1;
+    return c.n;
 }
 
 static int SwsLiveHas(const unsigned char* live, int swIdx)
@@ -2269,39 +2303,34 @@ static int SwsDedupRemove(void)
 }
 
 /* 把"侧栏上有、但防御页没有"的超武 cameo 补回去 (走引擎自己的 AddCameo)。
- * 返回补上几条, -1 = 不可用。 */
+ * 返回补上几条; 玩家/容器不可用返回 -1 (与旧 SwsDedupRestore 判据一致:
+ * 容器 count<=0 也算不可用)。SwsDedupRestore 与 SwsNudgePaint 共用这一条路。 */
+struct SwsAddCtx { int added; };
+static void SwsAddCb(void* sup, void* type, int swIdx, void* ctx)
+{
+    struct SwsAddCtx* c = (struct SwsAddCtx*)ctx;
+    (void)sup; (void)type;
+    if (!SwsSidebarShows(swIdx)) return;
+    /* 不碰 Ares 容器: AddCameo 自带查重, 对已在页里的重复调用是无害空操作。 */
+    if (((int (__thiscall *)(void*, int, int))(void*)ADDR_ADDCAMEO)
+            ((void*)ADDR_SIDEBAR, ABS_SPECIAL, swIdx))
+        c->added++;
+}
+static int SwsAddMissingCameos(void)
+{
+    struct SwsAddCtx c;
+    int cn = 0, hits;
+    c.added = 0;
+    hits = SwsForEachReadySuper(SwsAddCb, &c, &cn);
+    if (hits < 0 || cn <= 0) return -1;
+    return c.added;
+}
+
+/* 把"侧栏上有、但防御页没有"的超武 cameo 补回去, 返回补上几条, -1 = 不可用。 */
 static int SwsDedupRestore(void)
 {
-    void* cur;
-    void** items;
-    int count, i, added = 0;
-    /* 不碰 Ares 容器: AddCameo 自带查重, 对已在页里的重复调用是无害空操作。
-     * "切回显示"不依赖反查地址, 不会因容器校验不过而静默失败。 */
-    cur = *(void**)ADDR_CURPLAYER;
-    if (!cur || !IsPlausiblePtr(cur)) return -1;
-    count = 0;
-    items = SwsVecItems(ADDR_SUPER_ARR, &count);
-    if (!items || count <= 0) return -1;
-    for (i = 0; i < count; i++)
-    {
-        void* sup = items[i];
-        void* type, *owner;
-        int swIdx;
-        if (!sup || !IsPlausiblePtr(sup)) continue;
-        type = *(void**)((char*)sup + OFF_SUP_TYPE);
-        owner = *(void**)((char*)sup + OFF_SUP_OWNER);
-        if (!type || !IsPlausiblePtr(type)) continue;
-        if (!owner || !IsPlausiblePtr(owner) || owner != cur) continue;
-        if (*(unsigned char*)((char*)sup + OFF_SUP_PRESENT) != 1) continue;
-        if (*(unsigned char*)((char*)sup + OFF_SUP_READY) > 1) continue;
-        if (*(unsigned char*)((char*)sup + OFF_SUP_SUSPEND) > 1) continue;
-        swIdx = *(int*)((char*)type + OFF_SWT_ARRIDX);
-        if (swIdx < 0 || swIdx >= SWS_LIVE_BITS) continue;
-        if (!SwsSidebarShows(swIdx)) continue;
-        if (((int (__thiscall *)(void*, int, int))(void*)ADDR_ADDCAMEO)
-                ((void*)ADDR_SIDEBAR, ABS_SPECIAL, swIdx))
-            added++;
-    }
+    int added = SwsAddMissingCameos();
+    if (added < 0) return -1;
     /* AddCameo 只在特定情况切页签; 这里补一次刷新, 保证刚补进来的画出来。 */
     if (added)
         ((void (__thiscall *)(void*, int))(void*)ADDR_REPAINTSIDEBAR)
@@ -2367,11 +2396,10 @@ static int SwsDedupSync(void)
     /* 真动了东西 / 目标态翻转才记一行 (复查不刷屏)。 */
     if (r > 0 || want != s_DedupDone)
     {
-        char sb[64], n[16];
-        unsigned q = AppendCStr(sb, 0, "sws: dd ", sizeof(sb));
-        q = AppendCStr(sb, q, want ? "hide n=" : "show n=", sizeof(sb));
-        UtoA((unsigned)r, n);
-        AppendCStr(sb, q, n, sizeof(sb));
+        char sb[64];
+        unsigned q = LOGP(sb, "sws: dd ");
+        q = LOGS(sb, q, want ? "hide n=" : "show n=");
+        LOGI(sb, q, r);
         LogLine(sb);
     }
     s_DedupDone = want;
@@ -2391,52 +2419,26 @@ static int s_NudgeLeft = SWS_NUDGE_MAX;
 
 static void SwsNudgePaint(void)
 {
-    int i, added = 0;
+    int i;
     if (s_ItemN <= 0 || s_NudgeLeft <= 0) return;
     for (i = 0; i < s_ItemN; i++)
         if (!s_Items[i].capPix && !s_Items[i].pcxFile) break;
     if (i >= s_ItemN) return;          /* 图标都齐了, 不用再催 */
     s_NudgeLeft--;
-    /* 与 SwsDedupRestore 同一条路 (AddCameo 自带查重): 只对本家、已就绪、
-     * 且侧栏显示的超武调用。 */
+    /* 与 SwsDedupRestore 同一条路: 补 cameo (自带查重) 后重画防御页。
+     * 玩家/容器不可用时静默返回 (与旧的早退一致)。 */
     {
-        void* cur = *(void**)ADDR_CURPLAYER;
-        void** items;
-        int count;
-        if (!cur || !IsPlausiblePtr(cur)) return;
-        count = 0;
-        items = SwsVecItems(ADDR_SUPER_ARR, &count);
-        if (!items || count <= 0) return;
-        for (i = 0; i < count; i++)
+        int added = SwsAddMissingCameos();
+        if (added < 0) return;
+        ((void (__thiscall *)(void*, int))(void*)ADDR_REPAINTSIDEBAR)
+            ((void*)ADDR_SIDEBAR, TAB_DEFENSE);
+        if (s_DiagLeft > 0 && s_NudgeLeft == 0)
         {
-            void* sup = items[i];
-            void* type, *owner;
-            int swIdx;
-            if (!sup || !IsPlausiblePtr(sup)) continue;
-            type = *(void**)((char*)sup + OFF_SUP_TYPE);
-            owner = *(void**)((char*)sup + OFF_SUP_OWNER);
-            if (!type || !IsPlausiblePtr(type)) continue;
-            if (!owner || !IsPlausiblePtr(owner) || owner != cur) continue;
-            if (*(unsigned char*)((char*)sup + OFF_SUP_PRESENT) != 1) continue;
-            if (*(unsigned char*)((char*)sup + OFF_SUP_READY) > 1) continue;
-            if (*(unsigned char*)((char*)sup + OFF_SUP_SUSPEND) > 1) continue;
-            swIdx = *(int*)((char*)type + OFF_SWT_ARRIDX);
-            if (swIdx < 0 || swIdx >= SWS_LIVE_BITS) continue;
-            if (!SwsSidebarShows(swIdx)) continue;
-            if (((int (__thiscall *)(void*, int, int))(void*)ADDR_ADDCAMEO)
-                    ((void*)ADDR_SIDEBAR, ABS_SPECIAL, swIdx))
-                added++;
+            char buf[64];
+            unsigned q = LOGP(buf, "sws: nudge done added=");
+            LOGI(buf, q, added);
+            LogLine(buf);
         }
-    }
-    ((void (__thiscall *)(void*, int))(void*)ADDR_REPAINTSIDEBAR)
-        ((void*)ADDR_SIDEBAR, TAB_DEFENSE);
-    if (s_DiagLeft > 0 && s_NudgeLeft == 0)
-    {
-        char b[16], buf[64];
-        unsigned q = AppendCStr(buf, 0, "sws: nudge done added=", sizeof(buf));
-        UtoA((unsigned)added, b);
-        AppendCStr(buf, q, b, sizeof(buf));
-        LogLine(buf);
     }
 }
 
@@ -2471,6 +2473,15 @@ extern "C" __declspec(dllexport) int __cdecl SWS_OverBar(int mx, int my)
     if (mx < s_ColMinX || mx > s_ColMaxX + SWS_ICON_W + 5) return 0;
     if (my < s_YStart || my >= s_YStart + (s_VisRows * s_RowH - s_Gap)) return 0;
     return 1;
+}
+
+/* 切显示模式: 分阵营 <-> 填充。排序键随之变 (填充不看阵营), 作废排序缓存;
+ * 模式进 SwsSig, 缓存下一帧自动重建。只改运行时状态, 不回写 ini。 */
+static void SwsToggleFill(void)
+{
+    s_FillMode = s_FillMode ? 0 : 1;
+    s_OrderN = -1;
+    LogLine(s_FillMode ? "sws: fillmode on" : "sws: fillmode off");
 }
 
 void SWS_Poll(void)
@@ -2517,6 +2528,15 @@ void SWS_Poll(void)
                     s_HoldSkip = 1;    /* 吞掉, 别让这次点击漏到地图 */
                     LogLine("sws: show");
                 }
+            }
+            else if (rb && !s_PrevRB)
+            {
+                /* 收起态右键显隐箭头 = 切换分阵营/填充 (不展开)。 */
+                int hx = -1, hy = -1;
+                if (GtMouseGameXY(&hx, &hy) &&
+                    hx >= s_BtnX && hx < s_BtnX + s_BtnW &&
+                    hy >= s_BtnY && hy < s_BtnY + s_BtnH)
+                    SwsToggleFill();
             }
             s_PrevLB = lb;
             s_PrevRB = rb;
@@ -2593,6 +2613,21 @@ void SWS_Poll(void)
                         return;
                     }
                 }
+                else if (rb && !s_PrevRB)
+                {
+                    /* 展开态右键显隐箭头 = 切换分阵营/填充。按钮在栏区判定框
+                     * 之上 (与上面左键同理), 须在此单独命中。 */
+                    if (mx >= s_BtnX && mx < s_BtnX + s_BtnW &&
+                        my >= s_BtnY && my < s_BtnY + s_BtnH)
+                    {
+                        SwsToggleFill();
+                        s_HoldSkip = 1;      /* 吞掉, 别漏到地图变取消 */
+                        s_PrevLB = lb;
+                        s_PrevRB = rb;
+                        SwsDedupSync();
+                        return;
+                    }
+                }
                 if (mx >= s_BoundX && mx < s_BoundX + s_BoundW &&
                     my >= s_BoundY && my < s_BoundY + s_BoundH)
                 {
@@ -2614,6 +2649,14 @@ void SWS_Poll(void)
                             {
                                 s_HoldSkip = 1;
                                 LogLine("sws: clk notready");
+                                break;
+                            }
+                            /* 资金不足不可选中 (与原版一致: 压暗 + 不响应点击)。
+                             * 即时类也拦 (点一下即发射, 引擎/Ares 也会拦)。 */
+                            if (!SwsAfford(s_Items[k].money))
+                            {
+                                s_HoldSkip = 1;
+                                LogLine("sws: clk nofunds");
                                 break;
                             }
                             if (s_Items[k].instant)
@@ -2732,11 +2775,6 @@ static int SwsHitItem(int mx, int my)
     return -1;
 }
 
-static int SwsMouseOnIcon(int mx, int my)
-{
-    return SwsHitItem(mx, my) >= 0;
-}
-
 extern "C" __declspec(dllexport) unsigned __cdecl SWS_ClickGate(void* regs)
 {
     int mx = -1, my = -1;
@@ -2750,7 +2788,7 @@ extern "C" __declspec(dllexport) unsigned __cdecl SWS_ClickGate(void* regs)
     if (s_HoldSkip) r = ADDR_CLICKGATE_SKIP;
     else if (!s_BoundsKnown) r = 0;
     else if (!GtMouseGameXY(&mx, &my)) r = 0;
-    else if (SwsMouseOnIcon(mx, my)) r = ADDR_CLICKGATE_SKIP;
+    else if (SwsHitItem(mx, my) >= 0) r = ADDR_CLICKGATE_SKIP;
     return (unsigned)r;
 }
 
@@ -2932,13 +2970,6 @@ static void SwsCFillA(int x, int y, int rw, int rh, unsigned char r,
     if (op > 100) op = 100;
     SwsCFill(x, y, rw, rh, r, g, b, (op * s_Alpha) / 100);
 }
-/* 不吃整体透明度: 只给悬停提示框 ("正在读"的信息须始终清晰)。 */
-static void SwsCFillR(int x, int y, int rw, int rh, unsigned char r,
-                      unsigned char g, unsigned char b, int op)
-{
-    SwsCFill(x, y, rw, rh, r, g, b, op);
-}
-
 /* ---- PCX 逐像素贴图进缓存 ----
  * BSurface 布局 (gamemd 0x6B9D00 构造):
  *   +0x00 vptr / +0x04 Width / +0x08 Height / +0x0C LockLevel /
@@ -3149,23 +3180,46 @@ static int SwsCacheAlloc(int w, int h)
 #define SWS_TIP_COV_W 1024
 #define SWS_TIP_COV_H 128
 #define SWS_TIP_MAXLN 4      /* 名字按 \n 切行上限 */
+/* 提示文本缓冲: UIName(<=23) + "\n$" + 花费(<=10 位) + 结尾。 */
+#define SWS_TIP_TEXT_CAP 48
 static struct {
     int fontPx, bold, sw, adv, ok;
     int nl;                        /* 行数 1..MAXLN */
     int wl[SWS_TIP_MAXLN];         /* 每行宽 (盒按最宽行, 短行左对齐) */
-    wchar_t nm[24];
+    wchar_t nm[SWS_TIP_TEXT_CAP];
     unsigned char cov[SWS_TIP_COV_W * SWS_TIP_COV_H];
 } s_Tip = { 0 };
 
 /* 备好悬停提示字形; 返回最宽行宽, 0 = 无提示/备不成。须在分配缓存之前调
  * (提示框可能探出侧栏块, 缓存矩形须把它算进去)。
- * 名字里的 \n 保留换行: 按行光栅化后上下叠放 (行高 adv, 短行左对齐)。 */
-static int SwsTipPrepare(const wchar_t* nm)
+ * 名字里的 \n 保留换行: 按行光栅化后上下叠放 (行高 adv, 短行左对齐)。
+ * money = Ares Money.Amount: <0 时另起一行显示 "$花费", 与原版侧栏提示
+ * (Ares `StripClass_GetTip_MoneySW` 用 TXT_MONEY_FORMAT_2 "%s $%d" 再换行) 同式。 */
+static int SwsTipPrepare(const wchar_t* nm, int money)
 {
+    static wchar_t txt[SWS_TIP_TEXT_CAP];
     int gpx, adv, sw, sl = 0, k, yy, xx;
     int ls[SWS_TIP_MAXLN];   /* 每行起始下标 */
     int nl;
     if (!nm || !nm[0]) return 0;
+    /* 拼"名字 + \n$花费" (花费是 -Money.Amount 的绝对值; 0/正不显示)。 */
+    {
+        int t = 0;
+        while (nm[t] && t < SWS_TIP_TEXT_CAP - 14) { txt[t] = nm[t]; t++; }
+        if (money < 0)
+        {
+            unsigned v = (unsigned)(-(long)money);
+            wchar_t dig[12];
+            int dn = 0, i;
+            if (v == 0) dig[dn++] = L'0';
+            while (v && dn < 11) { dig[dn++] = (wchar_t)(L'0' + v % 10); v /= 10; }
+            txt[t++] = L'\n';
+            txt[t++] = L'$';
+            for (i = dn - 1; i >= 0; i--) txt[t++] = dig[i];
+        }
+        txt[t] = 0;
+        nm = txt;
+    }
     gpx = VecText_FontPx();
     if (gpx <= 0) gpx = 18;
     if (s_Tip.ok && gpx == s_Tip.fontPx && VecText_Bold() == s_Tip.bold &&
@@ -3173,12 +3227,12 @@ static int SwsTipPrepare(const wchar_t* nm)
         return s_Tip.sw;
     s_Tip.ok = 0; s_Tip.sw = 0; s_Tip.nl = 0;
     s_Tip.fontPx = gpx; s_Tip.bold = VecText_Bold();
-    SwsCopyName(s_Tip.nm, nm, 24);
+    SwsCopyName(s_Tip.nm, nm, SWS_TIP_TEXT_CAP);
     /* 提示框用 GDI 槽 6 (充能百分比用槽 5): 字号来源不同, 共用会让 GdiEnsure
      * 每次拆了重建。 */
     if (!GdiEnsure(gpx, s_Tip.bold, 6, VecText_FontFace())) return 0;
     adv = g_G->adv > 0 ? g_G->adv : gpx + 2;
-    while (sl < 23 && nm[sl]) sl++;
+    while (sl < SWS_TIP_TEXT_CAP - 1 && nm[sl]) sl++;
     /* 按 \n 切行 (空行留空行高); 行数超限整个不画。 */
     nl = 0;
     ls[nl++] = 0;
@@ -3246,11 +3300,12 @@ static void SwsDrawTip(int w, int h, int panelRight, int ax, int ayTop)
     if (!s_Tip.ok) return;
     SwsTipRect(w, h, panelRight, ax, ayTop, &bx, &by, &bw, &bh);
     if (bw <= 0) return;
-    SwsCFillR(bx, by, bw, bh, 0, 0, 0, 150);
-    SwsCFillR(bx, by, bw, 1, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
-    SwsCFillR(bx, by + bh - 1, bw, 1, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
-    SwsCFillR(bx, by, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
-    SwsCFillR(bx + bw - 1, by, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
+    /* 提示框不吃整体 Alpha ("正在读"的信息须始终清晰), 直接用不带 s_Alpha 的 SwsCFill。 */
+    SwsCFill(bx, by, bw, bh, 0, 0, 0, 150);
+    SwsCFill(bx, by, bw, 1, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
+    SwsCFill(bx, by + bh - 1, bw, 1, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
+    SwsCFill(bx, by, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
+    SwsCFill(bx + bw - 1, by, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
     sx = bx + 2;
     for (k = 0; k < s_Tip.nl; k++)
     {
@@ -3420,6 +3475,8 @@ static unsigned SwsSig(int w, int h, int pitch)
     /* s_SideRight 也进 (切 Side 后列序/滚动条/命中全镜像, 缓存须失效)。 */
     s = s * 33u + (unsigned)s_SideRight;
     s = s * 33u + (unsigned)s_Visible;
+    /* 显示模式进签名: 箭头右键切换后列布局/排序全变, 缓存须失效。 */
+    s = s * 33u + (unsigned)s_FillMode;
     s = s * 33u + (unsigned)s_DedupHide;
     s = s * 33u + (unsigned)s_Scroll;
     s = s * 33u + (unsigned)s_ItemN;
@@ -3483,19 +3540,16 @@ static int SwsOrigAfter(const SwsItem* a, const SwsItem* b)
 static const char* s_DrawZeroTag = NULL;
 static void SwsDrawZero(const char* tag, int v1, int v2)
 {
-    char buf[96], t1[16], t2[16];
+    char buf[96];
     unsigned q;
     if (s_DrawZeroTag == tag) return;
     s_DrawZeroTag = tag;
-    q = AppendCStr(buf, 0, "sws: draw0 ", sizeof(buf));
-    q = AppendCStr(buf, q, tag, sizeof(buf));
-    q = AppendCStr(buf, q, " a=", sizeof(buf));
-    UtoA((unsigned)v1, t1);
-    q = AppendCStr(buf, q, t1, sizeof(buf));
-    q = AppendCStr(buf, q, " b=", sizeof(buf));
-    UtoA((unsigned)v2, t2);
-    q = AppendCStr(buf, q, t2, sizeof(buf));
-    AppendCStr(buf, q, "", sizeof(buf));
+    q = LOGP(buf, "sws: draw0 ");
+    q = LOGS(buf, q, tag);
+    q = LOGS(buf, q, " a=");
+    q = LOGI(buf, q, v1);
+    q = LOGS(buf, q, " b=");
+    q = LOGI(buf, q, v2);
     LogLine(buf);
 }
 
@@ -3506,6 +3560,7 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
     int n = s_ItemN;
     int colCount[4] = { 0, 0, 0, 0 };
     int colX[4] = { 0, 0, 0, 0 };
+    int fillCols = 1;                       /* 填充模式用到的物理列数 (1~4) */
     int rows[4];
     int i, f, totW, xStart, yStart, rowH, maxRows, blockH;
     int bar, barX, barW, firstX, right, bottom, top, ch, hover = -1, txtOk, anchor;
@@ -3515,8 +3570,9 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
 
     /* 1) 排序: 阵营 -> ini 自定义优先级 -> 原版顺序。
      *    自定义默认 1000 (=没写), 填正数 (<1000) 自然排前面, 不用额外分组。
-     *    s_Items 只有 SwsScan 会改, 顺序与帧无关, 条目数变了才真排一次。 */
-    if (s_OrderN != n)
+     *    填充模式不看阵营: 只按 ini 优先级 -> 原版顺序, 让各列高度尽量均衡。
+     *    s_Items 只有 SwsScan 会改, 顺序与帧无关, 条目数或显示模式变了才真排一次。 */
+    if (s_OrderN != n || s_OrderFill != s_FillMode)
     {
         for (f = 0; f < 4; f++) s_OrderColCount[f] = 0;
         for (i = 0; i < n; i++) s_Order[i] = i;
@@ -3528,7 +3584,7 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
                 SwsItem* a = &s_Items[s_Order[k]];
                 SwsItem* b = &s_Items[t];
                 int gt = 0;
-                if (a->side != b->side) gt = a->side > b->side;
+                if (!s_FillMode && a->side != b->side) gt = a->side > b->side;
                 else if (a->prio != b->prio) gt = a->prio > b->prio;
                 else gt = SwsOrigAfter(a, b);
                 if (!gt) break;
@@ -3539,12 +3595,28 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
         }
         for (i = 0; i < n; i++) s_OrderColCount[s_Items[s_Order[i]].side]++;
         s_OrderN = n;
+        s_OrderFill = s_FillMode;
     }
     for (f = 0; f < 4; f++) colCount[f] = s_OrderColCount[f];
-    /* 只有一个阵营有超武时默认拆两列 (一列排到底太空)。两物理列共用边框色,
-     * 条目按行奇偶分列, 每列 ceil(n/2) 条。只有 1 条不拆。 */
     s_SplitSide = -1;
+    if (s_FillMode)
     {
+        /* 填充模式: 不看阵营, 按容量定列数 (2~4), 行优先 (k%cols) 让各列高度
+         * 尽量均衡 (与单阵营拆两列的观感一致)。1 列装得下时仍用 2 列 (n>=2),
+         * 超 4 列容量才用满 4 列并滚动。s_OrderColCount (按阵营) 在此不用。 */
+        int cols, kk;
+        for (f = 0; f < 4; f++) colCount[f] = 0;
+        cols = (n + s_MaxRows - 1) / s_MaxRows;   /* 容量所需列数 */
+        if (n >= 2 && cols < 2) cols = 2;
+        if (cols < 1) cols = 1;
+        if (cols > 4) cols = 4;
+        fillCols = cols;
+        for (kk = 0; kk < n; kk++) colCount[kk % cols]++;
+    }
+    else
+    {
+        /* 只有一个阵营有超武时默认拆两列 (一列排到底太空)。两物理列共用边框色,
+         * 条目按行奇偶分列, 每列 ceil(n/2) 条。只有 1 条不拆。 */
         int nonEmpty = 0, only = -1;
         for (f = 0; f < 4; f++) if (colCount[f] > 0) { nonEmpty++; only = f; }
         if (nonEmpty == 1 && colCount[only] >= 2)
@@ -3628,14 +3700,17 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
     if (s_ColMaxX < 0) { s_ColMinX = 0; s_ColMaxX = -1; }
     /* 3) 每条目屏幕位置; 滚出可见范围的 x=-1 (不命中/不绘制)。
      *    拆列时按"该阵营内序号"奇偶分列 (此时 colCount 已是两物理列,
-     *    it->side 不再是列号)。 */
+     *    it->side 不再是列号); 填充模式按行优先下标 k%fillCols 分列。 */
     rows[0] = rows[1] = rows[2] = rows[3] = 0;
     {
         int k = 0;
         for (i = 0; i < n; i++)
         {
             SwsItem* it = &s_Items[s_Order[i]];
-            int c = (s_SplitSide >= 0) ? (k & 1) : it->side;
+            int c;
+            if (s_FillMode) c = k % fillCols;
+            else c = (s_SplitSide >= 0) ? (k & 1) : it->side;
+            if (c < 0) c = 0;
             int r = rows[c] - s_Scroll;
             it->x = colX[c];
             it->y = yStart + r * rowH;
@@ -3657,7 +3732,7 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
     {
         /* hover 是排序后下标, 经 s_Order 取 (见 SwsHitItem)。 */
         SwsItem* it = &s_Items[s_Order[hover]];
-        if (SwsTipPrepare(it->name))
+        if (SwsTipPrepare(it->name, it->money))
             SwsTipRect(w, h, xStart + totW, it->x + SWS_ICON_W / 2,
                        it->y + SWS_ICON_H, &tipX, &tipY, &tipW, &tipH);
     }
@@ -3733,8 +3808,10 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
         {
             /* 未满格 (充能中 / 火风暴运作中) 压暗, 悬停的不压 (看它时让提示框
              * 和白框说话)。判据与下面百分比门控一致 (`remain>0 || !ready`,
-             * 不单用 !ready: 火风暴的 IsReady 激活时不清, 单判永远不压暗)。 */
-            if ((it->remain > 0 || !it->ready) && !isHover)
+             * 不单用 !ready: 火风暴的 IsReady 激活时不清, 单判永远不压暗)。
+             * 就绪但资金不足同样压暗 (与引擎/Ares `StripClass_Draw_SuperDarken`
+             * 一致: Ready && !CanTransactMoney)。 */
+            if ((it->remain > 0 || !it->ready || !SwsAfford(it->money)) && !isHover)
                 SwsCFillA(it->x, it->y, SWS_ICON_W, SWS_ICON_H, 0, 0, 0, 45);
         }
         {
@@ -3824,8 +3901,10 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
         int ch2;
         const unsigned char* c;
         if (colCount[f] <= 0) continue;
-        /* 拆列时物理列 0/1 同一阵营, 边框色跟阵营走 (否则两列变两色)。 */
-        c = kSideCol[s_SplitSide >= 0 ? s_SplitSide : f];
+        /* 拆列时物理列 0/1 同一阵营, 边框色跟阵营走 (否则两列变两色)。
+         * 填充模式一列内混阵营, 边框统一用中性灰 (阵营色无意义)。 */
+        c = kSideCol[s_FillMode ? 0 : (s_SplitSide >= 0 ? s_SplitSide : f)];
+        if (s_FillMode) c = kFillCol;
         ch2 = (colCount[f] < maxRows ? colCount[f] : maxRows) * rowH - s_Gap;
         SwsCFillA(colX[f], yStart, SWS_ICON_W, 1, c[0], c[1], c[2], 150);
         SwsCFillA(colX[f], yStart + ch2 - 1, SWS_ICON_W, 1, c[0], c[1], c[2], 150);
