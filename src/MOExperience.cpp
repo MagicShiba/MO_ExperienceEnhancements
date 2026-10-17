@@ -1135,22 +1135,18 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     /* 喂给缩放模块: 窗口 Composite 的尺寸。VecText 的"这块面是不是主画布"判据
      * (超武列表收表/拦截) 要用它, 且必须在**缩放没开**时也有值。*/
     SB_NoteWindowSurface(surf, surfW, surfH);
-    {   /* 鼠标映射基准取整帧 Primary (见 GtGameW 注释); 读不到就清零,
-         * GtMouseGameXY 回退到原始坐标 (恒等, 不强行套 Composite 宽度)。
-         * 分辨率不变不重设 (每帧 2 次虚表调用省掉)。 */
-        static int s_PrimW = -1, s_PrimH = -1;
-        void* prim = *(void**)ADDR_SURF_PRIMARY;
-        int pw = GtSurfGet(prim, GtVT_GET_WIDTH);
-        int ph = GtSurfGet(prim, GtVT_GET_HEIGHT);
-        int cw = (pw > 100 && ph > 100) ? pw : 0;
-        int ch = (pw > 100 && ph > 100) ? ph : 0;
-        if (cw != s_PrimW || ch != s_PrimH)
+    {   /* 鼠标/底部 UI 的游戏坐标基准 = 渲染面 (窗口 Composite), 不是 Primary。
+         * 虚拟分辨率/全屏上采样下 Primary 会被换成显示器尺寸 (如 2560x1600),
+         * 那是上采样目标; 引擎的逻辑分辨率与所有面都是窗口尺寸 (如 1440x900)。
+         * 拿 Primary 当基准会把鼠标整体放大 (2560/1440), 刻度条/暂停按钮也会
+         * 锚到面外 (见 GtGameW 注释)。surf 已在上面校验过, 尺寸不变不重设。 */
+        static int s_GameW = -1, s_GameH = -1;
+        if (surfW != s_GameW || surfH != s_GameH)
         {
-            s_PrimW = cw; s_PrimH = ch;
-            GtSetGameSize(cw, ch);
+            s_GameW = surfW; s_GameH = surfH;
+            GtSetGameSize(surfW, surfH);
         }
     }
-    GtRefreshWinSize(tick);
 
     /* 缩放呈现 (UI 链之前): 改 Composite (它是上屏 blit 的源, 改 Primary 只闪一瞬)。
      * 缩小档的还原+铺图外+降采样在 AfterMap (0x4F451B) 做, 这样引擎 UI 不会落进大面;

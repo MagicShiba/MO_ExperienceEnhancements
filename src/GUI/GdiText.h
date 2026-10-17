@@ -27,10 +27,9 @@ extern char g_LogPath[MAX_PATH_LEN];
 void BuildPaths(void);
 void GtEnsureLog(void);   /* 定义在 MOExperience.cpp; 幂等: 建路径+打开日志, 失败则 g_Log=NULL */
 void LogLine(const char* body);
-/* ---------------- 鼠标游戏坐标 (WWMouse+窗口映射, 供 PatrolCircle 等输入模块用), 返回 1=有效 */
+/* ---------------- 鼠标游戏坐标 (WWMouse 原始客户区坐标, 供 PatrolCircle 等输入模块用), 返回 1=有效 */
 int GtMouseGameXY(int* x, int* y);
-/* 每帧刷新游戏客户区尺寸 (窗口化/拉伸呈现时鼠标要换算, 见实现) */
-void GtRefreshWinSize(unsigned tick);
+
 /* 详细日志总开关: 0=只记关键事件 (默认, 日志小); 1=逐字/逐帧普查 */
 extern int g_LogDetail;
 
@@ -66,7 +65,9 @@ void GtDrawOutline(void* surf, int x, int y, int w, int h,
                    unsigned char r, unsigned char g, unsigned char b, int op);
 /* 点阵字行高 (BitFont 实例), 读不到回退 14 */
 int GtBitLineHeight(void);
-/* 游戏坐标系整帧宽高 (Primary 面; 0=读不到, 鼠标映射退回原始坐标) */
+/* 游戏坐标系整帧宽高 (窗口 Composite 面 = 引擎逻辑分辨率; 0=读不到)。
+ * **不是 Primary**: 虚拟分辨率/上采样下 Primary 是显示器尺寸, 拿它当基准会把
+ * 底部 UI (刻度条/暂停按钮) 锚到面外。鼠标不再用它换算 (见 GtMouseGameXY)。 */
 int GtGameW(void);
 int GtGameH(void);
 void GtSetGameSize(int w, int h);

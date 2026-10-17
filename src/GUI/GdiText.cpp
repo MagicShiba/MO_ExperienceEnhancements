@@ -108,66 +108,32 @@ void BuildPaths(void)
 }
 
 /* ---------------- 游戏窗口与鼠标坐标 ----------------
- * WWMouse 给的是窗口/客户区像素; 窗口与游戏分辨率不一致 (拉伸呈现) 时
- * 必须换算, 否则命中判定整体偏移。
- * 基准必须用整帧宽度 (Primary), 不能用 Composite: 1920x1080 下
- * Composite 只有 1752 宽 (右侧 168 是独立侧栏面), 拿它当分母会把
- * 鼠标 x 整体缩小 1752/1920, 触发区看起来向右偏。 */
+ * WWMouse 的 +0x1C/+0x20 是窗口客户区像素; 引擎的命中/投影/UI 都在引擎逻辑
+ * 坐标系里 (窗口 Composite = GtGameW/H)。实测两者恒等 —— 引擎窗口就是按游戏
+ * 分辨率建的 (原生 1920=1920, 虚拟分辨率下客户区 1440=Composite 1440), 所以
+ * 不做窗口→游戏的换算, 直接返回原始坐标。
+ * (曾按 游戏面/客户区 比缩放: 游戏面取 Primary, 虚拟分辨率/全屏上采样下
+ *  Primary 是显示器尺寸 2560x1600, 会把鼠标整体放大 → 线与光标错位。)
+ *
+ * 游戏逻辑尺寸 GtGameW/H 由 MOE 消息帧每帧喂 (窗口 Composite 尺寸), 供
+ * ScaleBar/PauseView 等按屏幕宽高定位的 UI 用。 */
 
-static HWND g_GameWnd = NULL;
-static int g_WinW = 0, g_WinH = 0;
 static int g_GameW = 0, g_GameH = 0;
 
 int GtGameW(void) { return g_GameW; }
 int GtGameH(void) { return g_GameH; }
 void GtSetGameSize(int w, int h) { g_GameW = w; g_GameH = h; }
 
-static int __stdcall GtEnumGameWnd(HWND h, LPARAM lp)
-{
-    DWORD pid = 0;
-    RECT rc;
-    (void)lp;
-    if (!IsWindowVisible(h)) return 1;
-    GetWindowThreadProcessId(h, &pid);
-    if (pid != GetCurrentProcessId()) return 1;
-    if (!GetClientRect(h, &rc)) return 1;
-    if (rc.right < 100 || rc.bottom < 100) return 1;
-    *(HWND*)lp = h;
-    return 0;
-}
-
-void GtRefreshWinSize(unsigned tick)
-{
-    static unsigned s_last = 0;
-    RECT rc;
-    if (tick - s_last < 60) return;
-    s_last = tick;
-    if (!g_GameWnd || !IsWindow(g_GameWnd))
-    {
-        g_GameWnd = NULL;
-        EnumWindows((WNDENUMPROC)GtEnumGameWnd, (LPARAM)&g_GameWnd);
-    }
-    if (g_GameWnd && GetClientRect(g_GameWnd, &rc) && rc.right > 100 && rc.bottom > 100)
-    {
-        if (rc.right != g_WinW || rc.bottom != g_WinH)
-        {
-            char wb[128], w1[16], w2[16];
-            unsigned q = 0;
-            g_WinW = rc.right; g_WinH = rc.bottom;
-            q = AppendCStr(wb, q, "win: client=", sizeof(wb));
-            UtoA((unsigned)g_WinW, w1); q = AppendCStr(wb, q, w1, sizeof(wb));
-            q = AppendCh(wb, q, 'x', sizeof(wb));
-            UtoA((unsigned)g_WinH, w2); q = AppendCStr(wb, q, w2, sizeof(wb));
-            LogLine(wb);
-        }
-    }
-}
+#define GT_GAME_HWND_ADDR 0x00B73550u   /* 引擎存的主窗句柄 (同 ChatEdit/FullMap) */
 
 /* 前台判定: 窗口化切走时引擎停渲染, 焦点追踪日志靠它 (见 MsgText 悬停淡入) */
 int GtGameFocused(void)
 {
-    if (!g_GameWnd) return 0;
-    return (GetForegroundWindow() == g_GameWnd) ? 1 : 0;
+    HWND h;
+    if (!IsPlausiblePtr((void*)GT_GAME_HWND_ADDR)) return 0;
+    h = *(HWND*)GT_GAME_HWND_ADDR;
+    if (!h || !IsWindow(h)) return 0;
+    return (GetForegroundWindow() == h) ? 1 : 0;
 }
 
 int GtMouseGameXY(int* x, int* y)
@@ -178,28 +144,18 @@ int GtMouseGameXY(int* x, int* y)
     if (!m || !IsPlausiblePtr(m)) return 0;
     mx = *(int*)((char*)m + 0x1C);
     my = *(int*)((char*)m + 0x20);
-    if (g_WinW > 100 && g_WinH > 100 && g_GameW > 100 && g_GameH > 100)
+    if (!s_mapLogged)
     {
-        int sx = mx * g_GameW / g_WinW;
-        int sy = my * g_GameH / g_WinH;
-        if (!s_mapLogged)
-        {
-            char mb[160], m1[16], m2[16], m3[16], m4[16];
-            unsigned q = 0;
-            s_mapLogged = 1;
-            q = AppendCStr(mb, q, "mouse: raw=", sizeof(mb));
-            UtoA((unsigned)(mx < 0 ? 0 : mx), m1); q = AppendCStr(mb, q, m1, sizeof(mb));
-            q = AppendCh(mb, q, ',', sizeof(mb));
-            UtoA((unsigned)(my < 0 ? 0 : my), m2); q = AppendCStr(mb, q, m2, sizeof(mb));
-            q = AppendCStr(mb, q, " mapped=", sizeof(mb));
-            UtoA((unsigned)(sx < 0 ? 0 : sx), m3); q = AppendCStr(mb, q, m3, sizeof(mb));
-            q = AppendCh(mb, q, ',', sizeof(mb));
-            UtoA((unsigned)(sy < 0 ? 0 : sy), m4); q = AppendCStr(mb, q, m4, sizeof(mb));
-            LogLine(mb);
-        }
-        *x = sx; *y = sy;
+        char mb[128], m1[16], m2[16];
+        unsigned q = 0;
+        s_mapLogged = 1;
+        q = AppendCStr(mb, q, "mouse: raw=", sizeof(mb));
+        UtoA((unsigned)(mx < 0 ? 0 : mx), m1); q = AppendCStr(mb, q, m1, sizeof(mb));
+        q = AppendCh(mb, q, ',', sizeof(mb));
+        UtoA((unsigned)(my < 0 ? 0 : my), m2); q = AppendCStr(mb, q, m2, sizeof(mb));
+        LogLine(mb);
     }
-    else { *x = mx; *y = my; }
+    *x = mx; *y = my;
     return 1;
 }
 
