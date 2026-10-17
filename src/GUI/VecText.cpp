@@ -172,6 +172,10 @@ static int VecNormC(int v)
 /* DrawText 嵌套深度 + 正文盒标志 */
 static int g_DTDepth = 0;
 static int g_DTBody = 0;
+/* 结算界面打开期间 (>0): 遭遇战积分 0x108 / 任务积分 0x103 模态对话框。
+ * 这两屏用全局字体逐字排版、列宽很窄, 矢量字形会撑开/错位; 打开期间直接
+ * 整条回落原版 (Blit/GetDim 都放行), 关闭即恢复。由显示函数钩置旗。 */
+static int g_ScoreScreen = 0;
 
 /* ---------------- 简报正文自绘 ---------------- */
 #define BRIEF_BOTTOM_MAX 1000
@@ -677,12 +681,38 @@ static int VecGdiSlot(int px)
     return (g_VT.CreditPx > 0 && px == g_VT.CreditPx) ? 8 : 2;
 }
 
+/* ---------------- 结算界面显示钩 ----------------
+ * 展示函数是模态的: 0x5C9720 (遭遇战积分/多人积分, 对话框 0x108) 与
+ * 0x6C8E80 (任务积分, 对话框 0x103) 内部跑游戏帧循环, 直到窗口关闭才返回。
+ * 期间置 g_ScoreScreen, 关闭即清。 */
+typedef int (__fastcall *ShowDlgFn)(void* thisptr, void* edx);
+static ShowDlgFn g_OrigMPScoreShow = NULL;
+static ShowDlgFn g_OrigStandaloneShow = NULL;
+
+static void __fastcall VecMPScoreShowEntry(void* thisptr, void* edx)
+{
+    g_ScoreScreen++;
+    if (g_OrigMPScoreShow) g_OrigMPScoreShow(thisptr, edx);
+    g_ScoreScreen--;
+}
+
+static void __fastcall VecStandaloneShowEntry(void* thisptr, void* edx)
+{
+    g_ScoreScreen++;
+    if (g_OrigStandaloneShow) g_OrigStandaloneShow(thisptr, edx);
+    g_ScoreScreen--;
+}
+
 int __fastcall VecDrawTextEntry(void* t, void* e,
     int a1, int a2, int a3, int a4, int a5,
     int a6, int a7, int a8, int a9, int a10)
 {
     unsigned caller = (unsigned)__builtin_return_address(0);
     int brief, r, menuTake = 0;
+    /* 结算界面打开期间: 整条回落原版, 不记简报/菜单上下文。 */
+    if (g_ScoreScreen)
+        return g_OrigDrawText ? g_OrigDrawText(t, NULL, a1, a2, a3, a4, a5,
+                                                a6, a7, a8, a9, a10) : 0;
     brief = VecIsBriefCaller(caller);
     menuTake = VecMenuMatch(caller, a6, a7, a8);
     if (menuTake)
@@ -811,6 +841,8 @@ int __fastcall VecPrintEntry(void* t, void* e,
 {
     unsigned caller = (unsigned)__builtin_return_address(0);
     int r;
+    if (g_ScoreScreen)
+        return g_OrigPrint ? g_OrigPrint(t, NULL, a1, a2, a3, a4, a5, a6, a7) : 0;
     /* 只认世界悬浮 Print, 排除菜单/列表同字串。 */
     {
         const wchar_t* ps = (const wchar_t*)a3;
@@ -980,6 +1012,8 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
     int a1, int a2, int a3, int a4, int a5, int a6, int a7)
 {
     if (!g_OrigSimple) return 0;
+    if (g_ScoreScreen)
+        return g_OrigSimple(ecxIn, edxIn, a1, a2, a3, a4, a5, a6, a7);
     /* Ares FPS 计数器钉住: 收串并跳过原绘制, Render 尾固定位 1x 重画。
      * 只按内容认 ("FPS:" 前缀超武计时器永不用), 不认调用者:
      * Ares 经 Fancy 走 Simple_ (返回点 0x4A6345) 或直调 Simple_
@@ -1110,7 +1144,7 @@ int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
     void* idata;
     (void)e;
     if (!g_OrigGetDim) return 0;
-    if (g_GDDepth > 0 || !g_VT.Render)
+    if (g_GDDepth > 0 || g_ScoreScreen > 0 || !g_VT.Render)
         return g_OrigGetDim(t, e, s, w, h, maxW);
     if (!t || !IsPlausiblePtr(t) || !s || !IsPlausiblePtr((void*)s) ||
         !w)
@@ -1780,6 +1814,10 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
     int eff, adv, h = 0, r, px;
     (void)edxUnused;
     if (!g_OrigBlit) return 0;   /* 不该发生, 守一下不断原版链 */
+    /* 结算界面 (遭遇战积分/任务积分): 打开期间整条回落原版, 不做字形
+     * 替换, 笔位也照引擎原样走。 */
+    if (g_ScoreScreen > 0)
+        return g_OrigBlit(t, NULL, wch, x, y, color);
     /* TAB 走原版特殊公式, 缺字/度量失败也走原版 (保留 0x5555 兜底行为) */
     if (!t || !IsPlausiblePtr(t) || wc == 9)
         return g_OrigBlit(t, NULL, wch, x, y, color);
@@ -2345,6 +2383,27 @@ void VecText_Install(void)
         else { LogLine("vtext: getdim hook OFF"); g_OrigGetDim = NULL; }
     }
     else { LogLine("vtext: getdim bytes mismatch"); LogBytes((unsigned char*)ADDR_GETDIM); }
+    /* 结算界面显示钩: 打开期间 g_ScoreScreen>0, 整条回落原版。
+     * 两个函数开头同为 83 EC 10 A1 30 B2 A8 00 (sub esp,0x10; mov 0xa8b230,%eax),
+     * 完整指令 8 字节, 回跳 +8。 */
+    {
+        static const unsigned char kWantScoreShow[8] =
+            { 0x83, 0xEC, 0x10, 0xA1, 0x30, 0xB2, 0xA8, 0x00 };
+        if (BytesSame((unsigned char*)0x5C9720u, kWantScoreShow, 8))
+        {
+            g_OrigMPScoreShow = (ShowDlgFn)BuildTrampAt(0x5C9720u, 8, 0x5C9728u);
+            if (!g_OrigMPScoreShow ||
+                !PatchAt(0x5C9720u, (void*)(size_t)VecMPScoreShowEntry, 8))
+                g_OrigMPScoreShow = NULL;
+        }
+        if (BytesSame((unsigned char*)0x6C8E80u, kWantScoreShow, 8))
+        {
+            g_OrigStandaloneShow = (ShowDlgFn)BuildTrampAt(0x6C8E80u, 8, 0x6C8E88u);
+            if (!g_OrigStandaloneShow ||
+                !PatchAt(0x6C8E80u, (void*)(size_t)VecStandaloneShowEntry, 8))
+                g_OrigStandaloneShow = NULL;
+        }
+    }
     /* FPS 钉住钩 (0x4F4589, Render 尾 Ares 之后): 计数器固定位 1x。没装上就看原版。 */
     {
         static const unsigned char kWantFpsPin[5] = { 0xA1, 0x1C, 0x73, 0x88, 0x00 };
