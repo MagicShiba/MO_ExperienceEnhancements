@@ -285,6 +285,9 @@ static void PowerDrawBoth(void)
     /* 单机暂停/步进: F5 边沿 + 底栏两按钮点击 (暂停中经迷你循环的 Mark 钩
      * 照样跑到这里)。 */
     PV_Poll();
+    /* 运行期后装避让钩 (结算显示 0x5C9720/0x6C8E80 / FPS 钉住 0x4F4589):
+     * 这些地址可能与外部模块 Syringe 钩同址, 等对方就位后再装 (见 VecText.cpp)。 */
+    VecText_LateInstall();
     /* CCToolTip 选面/量宽用的矩形影子 = 满视图区 A (见 ScaleBar.cpp)。*/
     SB_PublishAView();
     /* 鼠标源头折算 (缩放): 注入可能早于 WWMouse 构造, 没装上就在这里每循环重试。*/

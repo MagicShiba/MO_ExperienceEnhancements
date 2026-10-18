@@ -65,9 +65,11 @@
 ; 聚集点多段路径 (Z + 折线), 见 src/RallyPath.cpp
 ; 门: CellClickedAction 聚集点分支 (6B)。按住 Z 吞原生单点令改记折线, 余者放行。
 0x44377E = RallyPath_GateHook, 6
-; 出厂: BuildingClass::ExitObject (虚表第 64 项) 序言, WhatAmI 分派前, 载具/步兵/飞机全命中。
-; 13B 只读 EDI (被调用者保存), 无须还原寄存器; 首条禁读 EAX/ECX/EDX。
-0x443C7D = RallyPath_ExitHook, 13
+; 出厂: BuildingClass::ExitObject (虚表第 64 项), WhatAmI 分派前, 载具/步兵/飞机全命中。
+; 落点 0x443C81/7B = mov byte [edi+3D5],1, 与 Phobos 的
+; BuildingClass_ExitObject_InitialClonedHealth 同址同长 —— Syringe 同址可链式共挂。
+; (不可用旧的 0x443C7D/13B: 其 5B 跳板会覆盖 0x443C81, 与 Phobos 该钩区间嵌套而互相破坏。)
+0x443C81 = RallyPath_ExitHook, 7
 
 ; 无法攻击的单位不再冲向目标: FootClass::ObjectClickedAction 的
 ; NoMove(action==2) 处理器入口 0x4D77BD (6B = mov edx,[ebx] + lea eax,[esp+0x74], 无 rel)。

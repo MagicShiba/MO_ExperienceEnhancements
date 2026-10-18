@@ -8,6 +8,9 @@
 void VecText_EnsureInit(void);
 /* 装运行时补丁 (Blit/DrawText/Print/帧准备/上屏/呈现), 只在 DllMain 调一次。 */
 void VecText_Install(void);
+/* 运行期后装避让钩 (结算显示 / FPS 钉住): 这些地址可能与外部模块 (CnCNet 等)
+ * 的 Syringe 钩同址, 必须等对方就位后再装; 由每帧 poll 调用一次 (幂等)。 */
+void VecText_LateInstall(void);
 
 /* 装在 MOExperience.cpp 里定义的几个裸钩入口 (本模块是它们的安装处, 声明跟着
  * MOExperience.h 走; 这里只补两个 MOExperience.h 没列的)。*/

@@ -70,7 +70,7 @@ static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(
     SYHOOK(0x55D360u, 5u, "PV_MainGate"),
     SYHOOK(0x69234Bu, 5u, "MsgText_RadarClickGate"),
     SYHOOK(0x44377Eu, 6u, "RallyPath_GateHook"),
-    SYHOOK(0x443C7Du, 13u, "RallyPath_ExitHook"),
+    SYHOOK(0x443C81u, 7u, "RallyPath_ExitHook"),
     SYHOOK(0x4D77BDu, 6u, "NoApproach_Hook"),
 };
 

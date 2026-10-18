@@ -483,9 +483,12 @@ static void RP_CaptureClick(void)
         if (RP_IsFactory(items[i])) RP_Push(items[i], cx, cy);
 }
 
-/* ---------------- 钩 2: 出厂 (0x443C7D) ----------------
+/* ---------------- 钩 2: 出厂 (0x443C81) ----------------
  * BuildingClass::ExitObject (0x443C60, 虚表第 64 项) 内 WhatAmI 分派前,
- * ESI = 建筑、EDI = 单位。出口格被占时引擎每帧重试, 登记须按单位去重。 */
+ * ESI = 建筑、EDI = 单位。出口格被占时引擎每帧重试, 登记须按单位去重。
+ * 落点 0x443C81/7B (mov byte [edi+3D5],1) 特意与 Phobos 的
+ * BuildingClass_ExitObject_InitialClonedHealth 同址同长, 以便 Syringe 同址链式共挂。
+ * 切勿改回 0x443C7D/13B: 其 5B 跳板会覆盖 0x443C81, 与 Phobos 该钩区间嵌套互毁。 */
 
 static void RP_Exit(void* bld, void* unit)
 {

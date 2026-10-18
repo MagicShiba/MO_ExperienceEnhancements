@@ -5,4 +5,4 @@
  * 现在只有 MOExperience.cpp / SyringeHooks.cpp 直接包含本头, 提版本只重编这 2 个。 */
 #pragma once
 
-#define MOE_VERSION "0.2.347"
+#define MOE_VERSION "0.2.349"

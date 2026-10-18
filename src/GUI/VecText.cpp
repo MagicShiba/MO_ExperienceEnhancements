@@ -2332,6 +2332,53 @@ __attribute__((naked)) void VecFpsPinEntry(void)
         : "memory", "cc");
 }
 
+/* ---------------- 运行期后装钩 (避让外部模块同址) ----------------
+ * 结算显示钩 (0x5C9720 遭遇战/多人, 0x6C8E80 任务) 与 FPS 钉住钩 (0x4F4589)
+ * 在本 exe 里可能被其它模块 (如 CnCNet-Spawner.dll) 以 Syringe 钩占用同址。
+ * Syringe 的 .syhks00 钩在本 DLL 的 DllMain 之后才写入: 若本模块在 DllMain
+ * 抢先装自建跳板, 对方随后会覆盖本模块的 E9, 并把本模块的 E9 当"原始指令"
+ * 拷进它的跳板 -> 链路错乱 (同类隐患, 见 notes/聚集点多段路径.md)。
+ * 故这些钩改到每帧、外部钩就位之后再装: 先验原版字节, 对不上 (已被外部钩占)
+ * 即放弃本钩并记录, 绝不同址争抢。deps 均已在此前定义。 */
+static int g_LateHooksDone = 0;
+
+void VecText_LateInstall(void)
+{
+    static const unsigned char kWantScoreShow[8] =
+        { 0x83, 0xEC, 0x10, 0xA1, 0x30, 0xB2, 0xA8, 0x00 };
+    static const unsigned char kWantFpsPin[5] = { 0xA1, 0x1C, 0x73, 0x88, 0x00 };
+    if (g_LateHooksDone) return;
+    if (!g_Log || !g_VT.Enable) return;
+    /* 结算界面显示钩: 打开期间 g_ScoreScreen>0, 文本钩整条回落原版。 */
+    if (BytesSame((unsigned char*)0x5C9720u, kWantScoreShow, 8))
+    {
+        g_OrigMPScoreShow = (ShowDlgFn)BuildTrampAt(0x5C9720u, 8, 0x5C9728u);
+        if (!g_OrigMPScoreShow ||
+            !PatchAt(0x5C9720u, (void*)(size_t)VecMPScoreShowEntry, 8))
+            g_OrigMPScoreShow = NULL;
+        else LogLine("vtext: mpscore show hook ON (late)");
+    }
+    else LogLine("vtext: mpscore show site not pristine - OFF (foreign hook?)");
+    if (BytesSame((unsigned char*)0x6C8E80u, kWantScoreShow, 8))
+    {
+        g_OrigStandaloneShow = (ShowDlgFn)BuildTrampAt(0x6C8E80u, 8, 0x6C8E88u);
+        if (!g_OrigStandaloneShow ||
+            !PatchAt(0x6C8E80u, (void*)(size_t)VecStandaloneShowEntry, 8))
+            g_OrigStandaloneShow = NULL;
+        else LogLine("vtext: standalone show hook ON (late)");
+    }
+    /* FPS 钉住钩 (0x4F4589, GScreenClass::Render 尾): 计数器固定位 1x。 */
+    if (BytesSame((unsigned char*)0x4F4589u, kWantFpsPin, 5))
+    {
+        g_FpsPinTramp = BuildTrampAt(0x4F4589u, 5, 0x4F458Eu);
+        if (!g_FpsPinTramp || !PatchAt(0x4F4589u, (void*)(size_t)VecFpsPinEntry, 5))
+            g_FpsPinTramp = NULL;
+        else LogLine("vtext: fpspin hook ON (late)");
+    }
+    else LogLine("vtext: fpspin site not pristine - OFF (foreign hook?)");
+    g_LateHooksDone = 1;
+}
+
 void VecText_Install(void)
 {
     VecText_EnsureInit();
@@ -2383,37 +2430,9 @@ void VecText_Install(void)
         else { LogLine("vtext: getdim hook OFF"); g_OrigGetDim = NULL; }
     }
     else { LogLine("vtext: getdim bytes mismatch"); LogBytes((unsigned char*)ADDR_GETDIM); }
-    /* 结算界面显示钩: 打开期间 g_ScoreScreen>0, 整条回落原版。
-     * 两个函数开头同为 83 EC 10 A1 30 B2 A8 00 (sub esp,0x10; mov 0xa8b230,%eax),
-     * 完整指令 8 字节, 回跳 +8。 */
-    {
-        static const unsigned char kWantScoreShow[8] =
-            { 0x83, 0xEC, 0x10, 0xA1, 0x30, 0xB2, 0xA8, 0x00 };
-        if (BytesSame((unsigned char*)0x5C9720u, kWantScoreShow, 8))
-        {
-            g_OrigMPScoreShow = (ShowDlgFn)BuildTrampAt(0x5C9720u, 8, 0x5C9728u);
-            if (!g_OrigMPScoreShow ||
-                !PatchAt(0x5C9720u, (void*)(size_t)VecMPScoreShowEntry, 8))
-                g_OrigMPScoreShow = NULL;
-        }
-        if (BytesSame((unsigned char*)0x6C8E80u, kWantScoreShow, 8))
-        {
-            g_OrigStandaloneShow = (ShowDlgFn)BuildTrampAt(0x6C8E80u, 8, 0x6C8E88u);
-            if (!g_OrigStandaloneShow ||
-                !PatchAt(0x6C8E80u, (void*)(size_t)VecStandaloneShowEntry, 8))
-                g_OrigStandaloneShow = NULL;
-        }
-    }
-    /* FPS 钉住钩 (0x4F4589, Render 尾 Ares 之后): 计数器固定位 1x。没装上就看原版。 */
-    {
-        static const unsigned char kWantFpsPin[5] = { 0xA1, 0x1C, 0x73, 0x88, 0x00 };
-        if (BytesSame((unsigned char*)0x4F4589u, kWantFpsPin, 5))
-        {
-            g_FpsPinTramp = BuildTrampAt(0x4F4589u, 5, 0x4F458Eu);
-            if (!g_FpsPinTramp || !PatchAt(0x4F4589u, (void*)(size_t)VecFpsPinEntry, 5))
-                g_FpsPinTramp = NULL;
-        }
-    }
+    /* 结算显示钩 / FPS 钉住钩改到运行期后装, 见 VecText_LateInstall():
+     * 这些地址可能与外部模块 (CnCNet-Spawner 等) 的 Syringe 钩同址, 必须
+     * 等对方就位后再装, 否则本模块自建跳板会与对方的同址钩互相破坏。 */
     }
     else LogLine("vtext: text hooks OFF (Enable=0)");
     /* 以下共用钩与 Enable 无关。 */
