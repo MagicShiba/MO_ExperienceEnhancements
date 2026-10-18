@@ -27,7 +27,6 @@
 #define ADDR_COLORSCHEME_ARRAY   0x00B054D0u
 #define ADDR_SCHEME_TO_COLOR     0x00517440u
 #define ADDR_SESSION             0x00A8B238u /* SessionClass::Instance, 首成员即 GameMode */
-#define ADDR_AFTER_MSGLIST_DRAW  0x005D4A9Bu
 
 /* 雷达事件 (RadarEventClass) 活对象表: 引擎 Create 成功才往里挂。
  * 反汇编实证 (Create 0x65FA70 → ctor 0x65FB80 尾部 0x65FCD5 起):
@@ -49,7 +48,6 @@
 #define ADDR_CLICKGATE_SKIP      0x006925FCu
 
 #define OFF_REG_ESP              0x14
-#define OFF_REG_ECX              0x20
 #define STK_ARG_NAME             0x04
 #define STK_ARG_MESSAGE          0x0C
 #define STK_ARG_CS               0x10
@@ -83,6 +81,7 @@ typedef struct {
     int MaxLines;
     int BoardOpacity;
     int HoverMinOpacity; /* 悬停最低透明度 0~100 (找触发区用, 默认5); 0=沿用渐隐 */
+    int ExpandDelayMs; /* 悬停停放多少毫秒后才展开历史 (0=立即) */
     int PosX;
     int PosY;
     int TopGapLines;
@@ -371,11 +370,6 @@ static int MsgVisibleMul(ChatMsg* m, unsigned mul)
     return (int)(GtClockNow() - m->born) <= (int)span;
 }
 
-static int MsgVisible(ChatMsg* m)
-{
-    return MsgVisibleMul(m, 1);
-}
-
 /* ---------------- 取色 (ColorScheme -> 显示色) ----------------
  * 与引擎 Fancy_Text_Print_Wide (0x4A61C0) 完全一致。
  * 引擎做法 (反汇编实证): ECX = scheme+0x308 (即 &BaseColor), 栈传 3 字节
@@ -469,6 +463,7 @@ static void MsgText_LoadConfig(void)
     g_Cfg.MaxLines    = GetPrivateProfileIntA(MSG_SECTION, "MaxLines", 8, g_IniPath);
     g_Cfg.BoardOpacity= GetPrivateProfileIntA(MSG_SECTION, "BoardOpacity", 45, g_IniPath);
     g_Cfg.HoverMinOpacity = GetPrivateProfileIntA(MSG_SECTION, "HoverMinOpacity", 5, g_IniPath);
+    g_Cfg.ExpandDelayMs = GetPrivateProfileIntA(MSG_SECTION, "ExpandDelayMs", 300, g_IniPath);
     g_Cfg.PosX        = GetPrivateProfileIntA(MSG_SECTION, "PosX", 8, g_IniPath);
     g_Cfg.PosY        = GetPrivateProfileIntA(MSG_SECTION, "PosY", 8, g_IniPath);
     g_Cfg.TopGapLines = GetPrivateProfileIntA(MSG_SECTION, "TopGapLines", 1, g_IniPath);
@@ -522,6 +517,8 @@ static void MsgText_LoadConfig(void)
     if (g_Cfg.BoardOpacity > 100) g_Cfg.BoardOpacity = 100;
     if (g_Cfg.HoverMinOpacity < 0) g_Cfg.HoverMinOpacity = 0;
     if (g_Cfg.HoverMinOpacity > 100) g_Cfg.HoverMinOpacity = 100;
+    if (g_Cfg.ExpandDelayMs < 0) g_Cfg.ExpandDelayMs = 0;
+    if (g_Cfg.ExpandDelayMs > 3000) g_Cfg.ExpandDelayMs = 3000;
     if (g_Cfg.MaxWidth < 0) g_Cfg.MaxWidth = 0;
     g_Cfg.CampBottom = g_Cfg.CampBottom ? 1 : 0;
     if (g_Cfg.CampBottomMargin < 0) g_Cfg.CampBottomMargin = 0;
@@ -844,8 +841,9 @@ static int s_prevHintTotal = 0;
  * 不自己重算 —— 两边各算各的就会出现"首次不对齐、之后才对齐"。*/
 static int g_AnchorX = 0, g_AnchorY = 0, g_AnchorValid = 0;
 
-/* 注: 悬停展开无需防抖——透明度斜坡已保证无硬闪, 历史随底板一起淡入。
- * 展开跟瞬时悬停 (原版语义), 划过即见淡影找区。 */
+/* 注: 悬停展开带停放延迟 (ExpandDelayMs), 鼠标只是划过不会立刻弹历史;
+ * 停放够时间才展开, 透明度斜坡保证无硬闪, 历史随底板一起淡入。
+ * 划过即见淡影 (HoverMinOpacity) 供找区。 */
 
 /* 触发条几何与顶部战役文本同源 (见 CampTriggerRect): 左右对齐、1 行高。
  * 悬停/滚轮命中沿用同一判定, 不再使用固定的 340x240 大热角。 */
@@ -893,7 +891,7 @@ static int HasLiveCamp(void)
         ChatMsg* m = MsgAt(&g_CampRing, i);
         /* 无内容消息不算存活: 否则一条永不过期的空消息会让盒子永远"活着",
          * 表现为"字都没了但绿框也不出" */
-        if (m->sp == 0 && MsgHasContent(m) && MsgVisible(m)) return 1;
+        if (m->sp == 0 && MsgHasContent(m) && MsgVisibleMul(m, 1)) return 1;
     }
     return 0;
 }
@@ -1046,7 +1044,6 @@ static int MsgBoxGeom(int screenW, int cfgW, int cfgWPm, int centered, int cfgX,
     else if (maxW <= 0) maxW = screenW / 2;
     if (maxW > screenW - 170) maxW = screenW - 170;
     x = centered ? (screenW - maxW) / 2 : cfgX;
-    if (maxW < 80) maxW = 80;
     if (maxW > screenW - x - 8) maxW = screenW - x - 8;
     if (maxW < 80) maxW = 80;
     if (px) *px = x;
@@ -1513,6 +1510,7 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
      * 即重现历史。触发条细长, 不再留边缘余量。 */
     {
         int mx = -1, my = -1;
+        int parkedExpand = 0;
         if (GtMouseGameXY(&mx, &my))
         {
             /* 并集防抖: 命中上帧框区, 或落在触发条上, 都算悬停。
@@ -1543,6 +1541,10 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
                 s_moveMs = nowMs;
             }
             parked = (hoverCamp && nowMs - s_moveMs >= 300);
+            /* 展开用独立延迟: 鼠标停放够 ExpandDelayMs 才展开历史, 免得划过/
+             * 操作那片区域时立刻弹出一整块历史。0 = 立即 (旧行为)。 */
+            parkedExpand = (hoverCamp &&
+                            (unsigned)(nowMs - s_moveMs) >= (unsigned)g_Cfg.ExpandDelayMs);
             if (liveCamp) target = 100;
             else if (parked) target = 100;
             else if (hoverCamp) target = g_Cfg.HoverMinOpacity;
@@ -1565,13 +1567,17 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
             camp.fade = s_fade;
         }
         {
-            /* 展开锁存: 悬停即展开; 淡出中保持上帧 (hover 离开后历史可见淡出,
-             * 否则淡出的是空盒、看起来像瞬灭); fade 到 0 才收回。活消息独占
-             * 时仍只看活的。注意: 锁存只保持、不新设——末条消息过期时上帧
-             * 是收拢态, 保持收拢直接消失 (原版行为); 若新设展开, 会闪出整块
-             * 历史再整体消失。 */
+            /* 展开: 悬停停放一会 (ExpandDelayMs) 才展开显示全部历史, 免得鼠标
+             * 只是划过/要操作那片区域时立刻弹出一整块历史。
+             * 一旦展开就锁存到鼠标离开 (区内移动不收起, 鼠标才能移上去点历史
+             * 条目); 淡出中保持上帧 (hover 离开后历史可见淡出, 否则淡出的是空盒、
+             * 看起来像瞬灭); fade 到 0 才收回。活消息独占时仍只看活的。 */
+            static int s_hoverExpand = 0;
             static int s_expand = 0;
-            if (hoverCamp) s_expand = 1;
+            if (!hoverCamp) s_hoverExpand = 0;
+            else if (parkedExpand) s_hoverExpand = 1;
+            /* else: 悬停但还没停放够 —— 保持上帧值, 不新设 */
+            if (s_hoverExpand) s_expand = 1;
             else if (liveCamp) s_expand = 0;
             else if (camp.fade == 0) s_expand = 0;
             else if (!HasCampHistory()) s_expand = 0;
@@ -1641,7 +1647,6 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
      * 雷达事件到 HintRadarHold 就过期; 悬停末行触发区展开后, 过期但仍留环
      * 里的也算进来 —— 窗口还是 HintMaxLines 行, 多的用滚轮翻。 */
     hint.wantSp = 1;
-    hint.ignoreTimeout = 0;   /* 真正生效的那个在下面 (展开态才置 1) */
     hint.x = g_Cfg.HintPosX; hint.yBase = 0; hint.topGap = 0;
     hint.autoBottom = 1; hint.bottomMargin = g_Cfg.HintBottom;
     hint.centered = 0;

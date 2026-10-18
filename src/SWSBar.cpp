@@ -12,8 +12,8 @@
  *     授予建筑 Owner/Prerequisite 链离线推导), 查不到落玩家阵营。
  *   - 排序/隐藏: `[SWSidebar]` 单节, 以超武 ID 为键: 负数=隐藏, 0/缺键=
  *     默认 (优先级 1000), 正数=优先级 (越小越靠前, 同值按 ArrayIndex)。
- *   - 图标: 走 PCX (`SidebarPCX=`)。**不用 SHP** —— `SidebarImage` 指向
- *     XXICON.SHP 占位引用, 画出来是紫球。
+ *   - 图标: 优先 PCX (`SidebarPCX=`, 引擎抓像素), 无则 SHP (`SidebarImage`,
+ *     扫描时用引擎 `CC_Draw_Shape` 渲进自有 BSurface, 见 SwsRenderShp)。
  *   - 绘制: 图标盒 60x48 + 阵营色边框 + 充能百分比 + 悬停名提示 (名下有花费时
  *     追加一行 `$金额`, 与原版侧栏的 Ares `Money.Amount` 提示同式),
  *     `[SWSidebar] Alpha` 可调; 自有离屏缓存, 15 个游戏逻辑帧重建一次
@@ -146,6 +146,7 @@ typedef void (__fastcall *SwsUnselectFn)(void);
 #define OFF_SWT_RECH     0xB0u   /* (0xA4) RechargeTime */
 #define OFF_SWT_DRAIN       0xE5u /* UseChargeDrain */
 #define OFF_SWT_MANUALCTRL  0xF5u /* ManualControl */
+#define OFF_SWT_SIDEBARIMAGE 0xB8u /* SHPStruct* SidebarImage (cameo SHP) */
 
 #define VT_LOCK            0x5C
 #define VT_UNLOCK          0x60
@@ -926,8 +927,9 @@ static int SwsArrayIndexOf(void* type, const char* id)
 
 
 /* ---------------- 超武图标: 全部走引擎现成设施 ----------------
- * 图标是 PCX (`SidebarPCX=`, 在 MIX 里, 磁盘上没有)。`SidebarImage` 指向
- * XXICON.SHP 时是引擎占位图 (紫球) —— 不写 SHP 兜底。
+ * 图标优先 PCX (`SidebarPCX=`, 在 MIX 里, 磁盘上没有), 由引擎 (Ares) 的
+ * `CameoPCX` 抓像素; 没写 `SidebarPCX=` 的走 SHP 兜底 (`SidebarImage`,
+ * 用 `CC_Draw_Shape` 渲进自有 BSurface, 见 SwsRenderShp)。
  *   读键: CCINIClass::INI_Rules (0x887048) -> INIClass::ReadString (0x528A10)
  *   载图: PCX::Instance (0xAC4848) -> GetSurface / ForceLoadFile
  * 两条命门: GetSurface 未加载给的是占位图 (必须先 ForceLoadFile);
@@ -1267,6 +1269,73 @@ static unsigned short* SwsCaptured(void* type)
     return NULL;
 }
 
+/* ---- SHP 图标: 用引擎 `CC_Draw_Shape` 把 `SidebarImage` 渲进自有 BSurface ----
+ * 没写 `SidebarPCX=` 的超武 (含地图内嵌 ini 新增的节) Ares 的 `CameoPCX` 为 NULL,
+ * 抓取钩拿不到像素, 且引擎要等防御页画过一次才有。这里直接复刻引擎那次调用 (调色板
+ * `FileSystem::CAMEO_PAL`, frame 0, flags 0x400, brightness 0x3e8), 目标是自有
+ * BSurface, 画完拷像素 —— 扫描时即时出图。只读类型字段 + 引擎现成调色板, 不碰
+ * 模拟状态, 联机安全。
+ *
+ * BSurface 布局 (对回 gamemd 0x411510 的 GetRect / 0x411630 BytesPerPixel /
+ * 0x411640 GetPitch): +0 虚表 / +4 W / +8 H / +0xC LockLevel / +0x10 字节数 /
+ * +0x14 缓冲指针 / +0x18 字节长 / +0x1C own。`CC_Draw_Shape` 只用 GetRect, 不锁面,
+ * 直接写 +0x14, 所以栈上拼一个 0x20 的假 BSurface 就够。 */
+#define ADDR_CAMEO_PAL   0x0087F6B0u   /* FileSystem::CAMEO_PAL (ConvertClass*) */
+#define BSHAPE_VTBL      0x007E2070u   /* gamemd BSurface 虚表 */
+typedef struct { int x, y, w, h; } SwsRect;
+typedef struct { int x, y; } SwsPt;
+/* gamemd 0x4Aed70 `CC_Draw_Shape` (__fastcall: ecx=Surface, edx=Palette, ret 0x38)。
+ * 栈参顺序与 YRpp `DrawSHP` 一致: SHP, Frame, Position, Bounds, Flags, Remap,
+ * ZAdjust, ZGradient, Brightness, Tint, ZShape, ZFrame, XOff, YOff。 */
+typedef void (__fastcall *SwsDrawShpFn)(void* surf, void* pal, void* shp,
+    int frame, SwsPt* pos, SwsRect* bounds, int flags, int remap, int zadjust,
+    int zgrad, int bright, int tint, void* zshape, int zframe, int xoff, int yoff);
+
+static int SwsRenderShp(void* shp, unsigned short* out)
+{
+    unsigned int surf[8];          /* 0x20 假 BSurface */
+    unsigned char* s = (unsigned char*)surf;
+    void* pal;
+    SwsRect bounds;
+    SwsPt pos;
+    int i;
+    if (!shp || !IsPlausiblePtr(shp)) return 0;
+    if (!IsPlausiblePtr((void*)ADDR_CAMEO_PAL)) return 0;
+    pal = *(void**)ADDR_CAMEO_PAL;
+    if (!pal || !IsPlausiblePtr(pal)) return 0;
+    for (i = 0; i < 0x20; i++) s[i] = 0;
+    *(void**)(s + 0x00) = (void*)BSHAPE_VTBL;
+    *(int*)(s + 0x04) = SWS_ICON_W;
+    *(int*)(s + 0x08) = SWS_ICON_H;
+    *(int*)(s + 0x0C) = 0;
+    *(int*)(s + 0x10) = 2;
+    *(void**)(s + 0x14) = (void*)out;
+    *(int*)(s + 0x18) = SWS_ICON_W * SWS_ICON_H * 2;
+    *(int*)(s + 0x1C) = 1;
+    /* 先铺色键 (紫), 让 SHP 的透明像素落成色键 (绘制层会跳过)。 */
+    for (i = 0; i < SWS_ICON_W * SWS_ICON_H; i++) out[i] = PCX_TRANS_PARENT;
+    pos.x = 0; pos.y = 0;
+    bounds.x = 0; bounds.y = 0; bounds.w = SWS_ICON_W; bounds.h = SWS_ICON_H;
+    ((SwsDrawShpFn)(void*)0x004AED70u)(surf, pal, shp, 0, &pos, &bounds, 0x400,
+        0, 0, 0, 0x3e8, 0, NULL, 0, 0, 0);
+    return 1;
+}
+
+/* 扫描时直接给某个类型渲染 SHP 图标 (不等引擎画过一次防御页才抓)。
+ * 只用于"无 SidebarPCX"的类型, 且**不**登记进 s_Cap[] —— 引擎抓取 (可能是
+ * 地图内嵌声明的 PCX) 仍优先覆盖 tc->capPix。返回 LocalAlloc 的像素或 NULL。 */
+static unsigned short* SwsRenderShpCap(void* type)
+{
+    void* shp = *(void**)((char*)type + OFF_SWT_SIDEBARIMAGE);
+    unsigned short* dst;
+    if (!shp || !IsPlausiblePtr(shp)) return NULL;
+    dst = (unsigned short*)LocalAlloc(LMEM_FIXED,
+                     (SIZE_T)(SWS_ICON_W * SWS_ICON_H) * sizeof(unsigned short));
+    if (!dst) return NULL;
+    if (!SwsRenderShp(shp, dst)) { LocalFree(dst); return NULL; }
+    return dst;
+}
+
 /* 壳里调的抓取函数。**必须**被 pushad/popad 包住 (调用方是机器码壳) —— 真实 call
  * 还会破坏 ebx/esi/edi/ebp, 编译器却以为只有 ecx/edx/memory 被破坏。 */
 extern "C" void Sws_CaptureCameo(void)
@@ -1276,10 +1345,11 @@ extern "C" void Sws_CaptureCameo(void)
     int slot, px, w, h, bpp;
     const unsigned short* src;
     if (!s_PswSlot || !s_CameoPcx) return;
-    cam = *(void**)s_CameoPcx;
     type = *(void**)s_PswSlot;
-    if (!cam || !type || !IsPlausiblePtr(cam) || !IsPlausiblePtr(type)) return;
+    if (!type || !IsPlausiblePtr(type)) return;
     if (SwsCaptured(type)) return;                  /* 已有, 不重复拷 */
+    cam = *(void**)s_CameoPcx;
+    if (!cam || !IsPlausiblePtr(cam)) return;       /* SHP 类无 CameoPCX, 交给扫描直渲 */
     w = *(int*)((char*)cam + 0x04);
     h = *(int*)((char*)cam + 0x08);
     bpp = *(int*)((char*)cam + 0x10);
@@ -1608,8 +1678,14 @@ static void SwsScan(void)
                 !(s_CleanBits[b >> 3] & (1u << (b & 7))))
             { rNotClean++; }
         }
-        /* 图标每次扫描重挂 (s_Cap[] 会随解锁/切战役重抓, 不认第一次)。 */
-        if (!tc->capPix) tc->capPix = SwsCaptured(type);
+        /* 图标每次扫描重挂 (s_Cap[] 会随解锁/切战役重抓, 不认第一次)。
+         * 引擎抓的一律优先 (PCX/地图内嵌声明); 无 SidebarPCX 的走 SHP 直渲,
+         * 不必等引擎画过一次防御页 (否则图标要切防御栏才出现)。 */
+        {
+            unsigned short* eng = SwsCaptured(type);
+            if (eng) tc->capPix = eng;
+            else if (!tc->capPix && !tc->pcxFile) tc->capPix = SwsRenderShpCap(type);
+        }
         /* 显示门 (与防御页一致): !hide && manual && show。
          * 不拿 ShowTimers 当清单 (那只是"正在计时"的子集)。 */
         if (tc->hide || !tc->manual) { rHidden++; continue; }
