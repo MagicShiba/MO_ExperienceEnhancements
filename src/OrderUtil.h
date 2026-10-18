@@ -82,6 +82,9 @@ void OU_CopyEvt(char* dst, const char* src);
 #define ACTION_CAPTURE 9
 #define ACTION_SABOTAGE 16
 #define ACTION_GUARDAREA 26
+#define ACTION_HEAL 27        /* Action::Heal */
+#define ACTION_GREPAIR 29     /* Action::GRepair (对自家建筑维修) */
+#define ACTION_F57 57         /* 步兵重映射表尾项 (含义未定, 照抄引擎) */
 
 #define ABS_UNIT 1
 #define ABS_AIRCRAFT 2
@@ -112,11 +115,24 @@ int OU_MouseOverObject(void* self, void* target);
  * 组合键热键 (如 SmartArea 的 Shift+Middle) 必须用这个: 0 会被物理修饰键
  * 污染 (Shift→ToggleSelect=8, Ctrl→强制攻击), 使真光标失真。只读, 失败回 -1。 */
 int OU_MouseOverObjectNative(void* self, void* target);
+/* 复刻引擎左键点击的真实派发链 (反汇编实证, 见 notes/侵略模式.md):
+ *   ① vtbl+0x74 = Class::GetActionOnObject 取固有光标 (OU_MouseOverObjectNative);
+ *   ② 各 Class::ObjectClickedAction 先做一层"类内重映射"再交基类 ——
+ *        InfantryClass @0x51F190 (表 0x51F20C): 28 Damage→Capture9, 29 GRepair→Capture9,
+ *          27 Heal→Attack5, 57→Attack5 (工程师对血厚敌楼的 28 就在这里变 9);
+ *        UnitClass @0x738890: 3 Enter→Move1, 9 Capture/16 Sabotage/27 Heal/29 GRepair→Attack5;
+ *        Aircraft/Building 无覆盖。
+ *   ③ FootClass::ObjectClickedAction @0x4D74E0 (表 0x4D7D04) Action→Mission。
+ * OU_RemapAction 复刻第 ② 层 (actWhat=OU_WhatAmI(下令单位); 未覆盖的类原样返回)。 */
+int OU_RemapAction(int actWhat, int action);
+/* 单位 unit 对 target 左键(裸, 无视修饰键)会下的 Mission; 无操作/失败回 -1。
+ * 攻击=1 / 移动=2 / 进入=7 / 占领=8 / 进驻破坏=17 (Destination=目标)。 */
+int OU_NativeMission(void* unit, void* target);
 /* 该单位对该目标是否有攻击类光标 (会下 Mission::Attack)。
- * 只读 MouseOver (ignoreForce=1, 无视 Ctrl/Shift/Alt 取固有能力);
- * 动作集合与 SmartOrder/SmartArea 的攻击映射一致
- * (Attack5/62/63/64/71/53/10/28/55/56)。维修/无武器对敌回 NoMove 等,
- * 这里回 0。失败/非 Techno 回 0。FuzzyAttack/SmartArea/AttackMove 共用。 */
+ * 只读 MouseOver (ignoreForce=1, 无视 Ctrl/Shift/Alt 取固有能力)。
+ * 复刻引擎: 光标先过"类内重映射"再判 (见 OU_RemapAction/OU_NativeMission),
+ * 所以工程师对血厚敌楼的 Damage(28) 不会误判成攻击。失败/非 Techno 回 0。
+ * FuzzyAttack/SmartArea/AttackMove 共用。 */
 int OU_CanAttack(void* unit, void* target);
 /* 该单位对该目标是否有进入类光标 (Action::Enter, 会下 Mission::Enter/
  * Mission::Sabotage)。只读 MouseOver (ignoreForce=1, 无视修饰键取固有能力)。

@@ -213,12 +213,56 @@ int OU_MouseOverObjectNative(void* self, void* target)
     return OU_MouseOverRaw(self, target, 1);
 }
 
-/* 该单位对该目标是否有攻击类光标 (会下 Mission::Attack)。
- * 只读 MouseOver (ignoreForce=1, 无视修饰键取固有能力);
- * 动作集合与 SmartOrder/SmartArea 的攻击映射一致。 */
+/* 复刻引擎 Class::ObjectClickedAction 的"类内重映射" (见 .h 与 notes/侵略模式.md)。
+ * actWhat=OU_WhatAmI(下令单位); 未覆盖的类原样返回 (无兵种特判)。 */
+int OU_RemapAction(int actWhat, int action)
+{
+    if (actWhat == ABS_INFANTRY)
+    {
+        /* 表 0x51F20C: val1→Capture9, val2→Attack5, 其余不变。 */
+        if (action == 28 || action == ACTION_GREPAIR) return ACTION_CAPTURE;
+        if (action == ACTION_HEAL || action == ACTION_F57) return ACTION_ATTACK;
+        return action;
+    }
+    if (actWhat == ABS_UNIT)
+    {
+        /* 0x738890: 3→Move1, 9/16/27/29→Attack5。 */
+        if (action == ACTION_ENTER) return ACTION_MOVE;
+        if (action == ACTION_CAPTURE || action == ACTION_SABOTAGE ||
+            action == ACTION_HEAL || action == ACTION_GREPAIR) return ACTION_ATTACK;
+        return action;
+    }
+    return action;   /* Aircraft/Building: 无类内重映射 */
+}
+
+/* 复刻引擎 ③: 重映射后的 Action → Mission (FootClass 0x4D74E0 表)。
+ * 只列本模块可安全重放且目标可达的类别; 其余回 -1 (引擎无操作/未知)。 */
+int OU_NativeMission(void* unit, void* target)
+{
+    int act;
+    if (!unit || !IsPlausiblePtr(unit)) return -1;
+    act = OU_MouseOverRaw(unit, target, 1);
+    if (act < 0) return -1;
+    act = OU_RemapAction(OU_WhatAmI(unit), act);
+    switch (act)
+    {
+    case ACTION_ATTACK:
+    case 53: case 63: case 64: case 71:   /* 引擎同归 Mission::Attack(1) */
+        return MISSION_ATTACK;
+    case ACTION_MOVE:     return MISSION_MOVE;       /* 1/62 → Mission 2 */
+    case ACTION_ENTER:    return MISSION_ENTER;      /* 3 → 7  (Destination) */
+    case ACTION_CAPTURE:  return MISSION_CAPTURE;    /* 9 → 8  (Destination) */
+    case ACTION_SABOTAGE: return MISSION_SABOTAGE;   /* 16 → 17 (Destination) */
+    default:              return -1;
+    }
+}
+
+/* 该类对目标是否有攻击类光标 (会下 Mission::Attack)。
+ * 只读 MouseOver (ignoreForce=1); 复刻引擎: 光标先过类内重映射再判,
+ * 工程师对血厚敌楼的 Damage(28) 重映射成 Capture(9), 不再误判成攻击。 */
 int OU_CanAttack(void* unit, void* target)
 {
-    int uw, tw, act;
+    int uw, tw;
     if (!unit || !IsPlausiblePtr(unit)) return 0;
     if (!target || !IsPlausiblePtr(target)) return 0;
     uw = OU_WhatAmI(unit);
@@ -226,12 +270,7 @@ int OU_CanAttack(void* unit, void* target)
     tw = OU_WhatAmI(target);
     if (tw != ABS_UNIT && tw != ABS_INFANTRY &&
         tw != ABS_AIRCRAFT && tw != ABS_BUILDING) return 0;
-    act = OU_MouseOverRaw(unit, target, 1);
-    if (act == ACTION_ATTACK || act == 62 || act == 63 ||
-        act == 64 || act == 71 || act == 53 ||
-        act == 10 || act == 28 || act == 55 || act == 56)
-        return 1;
-    return 0;
+    return (OU_NativeMission(unit, target) == MISSION_ATTACK) ? 1 : 0;
 }
 
 /* 该单位对该目标是否有进入类光标 (Action::Enter)。

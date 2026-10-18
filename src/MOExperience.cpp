@@ -38,6 +38,7 @@
 #include "ScaleBar.h"
 #include "PauseView.h"
 #include "MOExperience.h"
+#include "MOEVersion.h"
 
 /* ---------------- 地址 ---------------- */
 

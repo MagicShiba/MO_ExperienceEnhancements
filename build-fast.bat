@@ -28,7 +28,12 @@ if "%NEEDFULL%"=="1" (
   exit /b %errorlevel%
 )
 
-"%PWSH%" -NoProfile -Command "$src = @(Get-ChildItem src -Include *.cpp -Recurse) + @(Get-ChildItem icons\*.cpp); $hdr = @(Get-ChildItem src -Include *.h -Recurse); $stale = @(foreach ($f in $src) { $o = 'obj\' + $f.BaseName + '.o'; if (-not (Test-Path $o)) { $f; continue }; $ot = (Get-Item $o).LastWriteTime; if ($f.LastWriteTime -gt $ot) { $f } elseif ($hdr | Where-Object { $_.LastWriteTime -gt $ot }) { $f } }); if ($stale.Count -gt 0) { $stale | ForEach-Object { $_.FullName } | Set-Content -Encoding ascii obj\stale.txt } else { Set-Content -Encoding ascii -Value '' obj\stale.txt }"
+rem Rebuild a .cpp when it changed, or when a header IT ACTUALLY INCLUDES changed.
+rem (Old rule "any header in src changed" forced a full rebuild on every edit to
+rem  a widely-included header such as OrderUtil.h -- e.g. a MOE_VERSION bump.)
+rem g++ -MM yields the per-file include list; only run it for files whose .o is
+rem  older than the newest header, so the no-header-change path stays fast.
+"%PWSH%" -NoProfile -Command "$src = @(Get-ChildItem src -Include *.cpp -Recurse) + @(Get-ChildItem icons\*.cpp); $hdr = @(Get-ChildItem src -Include *.h -Recurse); $newest = ($hdr | Measure-Object LastWriteTime -Maximum).Maximum; $inc = @('-Isrc','-Isrc\GUI','-Iicons'); $stale = @(foreach ($f in $src) { $o = 'obj\' + $f.BaseName + '.o'; if (-not (Test-Path $o)) { $f; continue }; $ot = (Get-Item $o).LastWriteTime; if ($f.LastWriteTime -gt $ot) { $f; continue }; if ($ot -lt $newest) { $dep = (& g++ -MM -MG @inc $f.FullName 2>$null) -join ' '; $hit = $false; foreach ($t in ($dep -split '\s+')) { if ($t -match '\.h$' -and (Test-Path $t) -and (Get-Item $t).LastWriteTime -gt $ot) { $hit = $true; break } }; if ($hit) { $f } } }); if ($stale.Count -gt 0) { $stale | ForEach-Object { $_.FullName } | Set-Content -Encoding ascii obj\stale.txt } else { Set-Content -Encoding ascii -Value '' obj\stale.txt }"
 
 if exist obj\compiled.flag del obj\compiled.flag
 rem NOTE: keep obj\stale.txt existing even when empty. "for /f in" errors out

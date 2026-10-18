@@ -21,7 +21,7 @@
  */
 
 #include <windows.h>
-#include "MOExperience.h"   /* MOE_VERSION (握手提示串用) */
+#include "MOEVersion.h"   /* MOE_VERSION (握手提示串用) */
 
 /* ---------------- 内嵌钩子表 ---------------- */
 

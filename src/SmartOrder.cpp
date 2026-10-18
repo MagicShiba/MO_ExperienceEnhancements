@@ -401,14 +401,16 @@ static int SO_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
 /* Action(光标) → Mission(订单): gamemd 0x4D74E0 跳转表实证
  * (Enter3→7 载具, Capture9→8, Sabotage16→17;
  * 建筑上的 Enter/GuardArea 一律按进驻 17, 与原生驻军同形)。
- * 敌意类 (Eaten10/Damage28/Detonate55/56, 左键点上去就是打) 一律按攻击。
- * 未知/不可转发 (Select/Repair/Harvest/超武等) 回 -1 (调用方按无操作处理,
- * 绝不猜着下单); Move 回 MISSION_MOVE。 */
-static int SO_MissionFor(int targetWhat, int action)
+ * actWhat = OU_WhatAmI(下令单位): 先过类内重映射 (OU_RemapAction, 复刻
+ * InfantryClass 0x51F190 / UnitClass 0x738890) —— 工程师对血厚敌楼的
+ * Damage(28)→Capture(9), 不再误判成攻击 (否则会误发主武器攻击)。
+ * 未知/不可转发 (Select/Repair/超武等) 回 -1 (调用方按无操作处理,
+ * 绝不猜着下单); Move 回 MISSION_MOVE。actWhat=0 表示不重映射。 */
+static int SO_MissionFor(int actWhat, int targetWhat, int action)
 {
-    if (action == ACTION_ATTACK || action == 62 || action == 63 ||
-        action == 64 || action == 71 || action == 53 ||
-        action == 10 || action == 28 || action == 55 || action == 56)
+    action = OU_RemapAction(actWhat, action);
+    if (action == ACTION_ATTACK || action == 53 || action == 63 ||
+        action == 64 || action == 71)
         return MISSION_ATTACK;
     if (action == ACTION_ENTER)
         return (targetWhat == ABS_BUILDING) ? MISSION_SABOTAGE : MISSION_ENTER;
@@ -421,6 +423,24 @@ static int SO_MissionFor(int targetWhat, int action)
     if (action == ACTION_MOVE)
         return MISSION_MOVE;
     return -1;
+}
+
+/* 全局决策 (OU_DecideAction) 的代表单位类: 选中单位里固有光标 == gAct 的第一个的类,
+ * 供类内重映射用 (代表制: 混编按代表单位定)。找不到回 0 (不重映射),
+ * 此时工程师等少数动作会落到逐单位回落分支, 结果仍正确。 */
+static int SO_RepWhat(int gAct, void* tgt)
+{
+    int i;
+    for (i = 0; i < g_SoCount; i++)
+    {
+        SOUnit* u = &g_SoUnits[i];
+        if (u->fly != 1 && u->fly != 0) continue;
+        if (u->w != ABS_UNIT && u->w != ABS_AIRCRAFT && u->w != ABS_INFANTRY)
+            continue;
+        if (!OU_PtrAlive(u->unit, u->id, g_SoIdxOk)) continue;
+        if (OU_MouseOverObject(u->unit, tgt) == gAct) return u->w;
+    }
+    return 0;
 }
 
 static void SO_ShiftDown(void)
@@ -572,7 +592,7 @@ static void SO_Queue(int ui, int cx, int cy)
             {
                 tid = *(int*)(tb + 0);
                 act = OU_MouseOverObject(u->unit, slotObj);
-                ms = (act < 0) ? -1 : SO_MissionFor(ABS_BUILDING, act);
+                ms = (act < 0) ? -1 : SO_MissionFor(u->w, ABS_BUILDING, act);
                 if ((ms == MISSION_ATTACK || ms == MISSION_ENTER ||
                       ms == MISSION_SABOTAGE || ms == MISSION_CAPTURE) &&
                     !(slotObj == g_SoProtTgt && ms == MISSION_ATTACK))
@@ -735,7 +755,7 @@ static int SO_SmartPoint(int bx, int by, void* tgt)
     /* 全局决策: 游戏自己定 (只读 DecideAction)。 */
     gAct = OU_DecideAction(bx, by, tgt);
     if (gAct < 0) return 0;
-    gMiss = SO_MissionFor(tgtWhat, gAct);
+    gMiss = SO_MissionFor(SO_RepWhat(gAct, tgt), tgtWhat, gAct);
     if (gMiss == MISSION_MOVE) return 0; /* 移动: 调用方散开 */
     if (gMiss < 0)
     {
@@ -754,7 +774,7 @@ static int SO_SmartPoint(int bx, int by, void* tgt)
             if (!OU_PtrAlive(u->unit, u->id, g_SoIdxOk)) continue;
             act = OU_MouseOverObject(u->unit, tgt);
             if (act < 0) ms = -1;
-            else ms = SO_MissionFor(tgtWhat, act);
+            else ms = SO_MissionFor(u->w, tgtWhat, act);
             if (ms == MISSION_ATTACK || ms == MISSION_ENTER ||
                 ms == MISSION_SABOTAGE || ms == MISSION_CAPTURE)
                 missions[i] = ms;
@@ -777,7 +797,7 @@ static int SO_SmartPoint(int bx, int by, void* tgt)
         if (!OU_PtrAlive(u->unit, u->id, g_SoIdxOk)) continue;
         act = OU_MouseOverObject(u->unit, tgt);
         if (act < 0) ms = -1;
-        else ms = SO_MissionFor(tgtWhat, act);
+        else ms = SO_MissionFor(u->w, tgtWhat, act);
         if (ms == gMiss) missions[i] = ms;
         else if (ms == MISSION_MOVE) missions[i] = MISSION_MOVE;
         else missions[i] = -1;

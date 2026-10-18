@@ -8,10 +8,10 @@
  *
  * 目标/订单取"鼠标对应的事件" (与左键点同一目标同判):
  *   - 目标只认**敌方**建筑, 忽略中立 (House->Type->MultiplayPassive, 与 SmartArea 同式)。
- *   - 订单 = 该单位对该建筑的固有光标 (OU_MouseOverObjectNative, ignoreForce=1)
- *     → Mission 映射 (攻击1/占领8; 与 SmartOrder/SmartArea 同表)。
- *     不做单位类型特判 (工程师占领、劫持等一律按实际左键光标)。
- *     这样作战单位自动攻击、工程师自动占领, 且不会对打不了的目标下场。
+ *   - 订单 = 复刻引擎左键点击的真实派发链 (见下 AG_UnitMission): 固有光标
+ *     (OU_MouseOverObjectNative, ignoreForce=1) → 类内重映射 → FootClass 的
+ *     Action→Mission 表。不做单位类型特判 (工程师占领、劫持等一律按实际左键),
+ *     所以工程师自动占领、作战单位自动攻击, 打不了的目标不下单。
  *
  * 联机 (AGENTS.md 铁律): 不写任何模拟内存, 不直调改模拟的引擎函数。
  *   - 标记集合是本机 UI 状态 (同 MindSelect 的选中), 各客户端各自维护。
@@ -184,27 +184,29 @@ static int AG_GuardRange(void* u)
     return r;
 }
 
-/* ---------------- 鼠标对应的事件: 单位固有光标 → 订单 ---------------- */
+/* ---------------- 鼠标对应的事件: 单位固有光标 → 订单 ----------------
+ *
+ * 复刻 gamemd 左键点击的真实派发链 (反汇编实证), 不做兵种特判:
+ *
+ *   ① 取光标 OU_MouseOverObjectNative = vtbl+0x74 = Class::GetActionOnObject
+ *      (InfantryClass 0x51E3B0 / UnitClass 0x73FD50 ...), 正是引擎点同一目标时调的那个。
+ *
+ *   ② 类内重映射 (InfantryClass::ObjectClickedAction 0x51F190 / UnitClass 0x738890):
+ *      工程师对血厚敌楼的固有光标是 Damage(28), 引擎在这一层翻成 Capture(9)
+ *      再派发 —— 所以必须照做, 否则会误发主武器攻击 (Mission=Attack)。
+ *
+ *   ③ FootClass::ObjectClickedAction (0x4D74E0) Action→Mission 表。
+ *
+ * 三者都封在 OrderUtil 的 OU_RemapAction / OU_NativeMission 里 (SmartOrder/
+ * FuzzyAttack/AttackMove 共用同一份, 避免逐模块维护)。详见 notes/侵略模式.md。
+ * 事件布局: Attack 放 Target=目标, 进驻/占领/破坏 放 Destination=目标。 */
 
-/* Action(光标) → Mission: 与 SmartOrder/SmartArea 同表。
- * 本模块目标只认敌方建筑: 攻击类光标 → Attack(1), 占领光标 → Capture(8)。
- * 进入/进驻是自家士兵进空楼, 对敌方建筑不成立; 维修/移动等也不下单, 一律回 -1。 */
-static int AG_MissionFor(int action)
-{
-    if (action == ACTION_ATTACK || action == 62 || action == 63 ||
-        action == 64 || action == 71 || action == 53 ||
-        action == 10 || action == 28 || action == 55 || action == 56)
-        return MISSION_ATTACK;
-    if (action == ACTION_CAPTURE)
-        return MISSION_CAPTURE;
-    return -1;
-}
-
-/* 单位 u 对建筑 t 的订单 = 实际左键光标对应的 Mission (ignoreForce=1, 无视修饰键)。
- * 不做任何单位类型特判: 工程师占领、劫持等一律按光标, 免维护逐类型分支。 */
+/* 单位 u 对建筑 t 的订单 = 实际左键会下的 Mission (ignoreForce=1, 无视修饰键)。
+ * 本模块不下移动令 (光标为 Move 时不作为目标)。 */
 static int AG_UnitMission(void* u, void* t)
 {
-    return AG_MissionFor(OU_MouseOverObjectNative(u, t));
+    int ms = OU_NativeMission(u, t);
+    return (ms == MISSION_MOVE) ? -1 : ms;
 }
 
 /* ---------------- 标记集合 (本机 UI 状态) ---------------- */
@@ -413,7 +415,7 @@ static AGPend g_AgPend[AG_PEND_CAP];
 static int g_AgPendN = 0;
 
 /* 发一条对象令事件 (MegaMission, 直接下令 flag=0)。
- * 攻击: Target=敌对象, Destination=空; 占领: Target=空, Destination=敌对象
+ * 攻击: Target=敌对象, Destination=空; 进驻/占领/破坏: Target=空, Destination=敌对象
  * (与鼠标点建筑的真实事件布局同形, 见 SmartOrder/SmartArea)。 */
 static int AG_Fire(int houseIdx, int srcID, unsigned char srcRtti, int mission,
                    int tgtID, unsigned char tgtRtti,
@@ -456,7 +458,7 @@ static void AG_Drain(void)
         srcID = AG_FetchId(e->unit, &srcR);
         tgtID = AG_FetchId(e->foe, &tgtR);
         if (srcID <= 0 || tgtID <= 0) { AG_ShiftDown(); continue; }
-        /* 攻击放 Target 槽, 占领放 Destination 槽。 */
+        /* 攻击放 Target 槽; 进驻/占领/破坏放 Destination 槽 (与引擎同形)。 */
         atk = (e->mission == MISSION_ATTACK);
         if (!AG_Fire(houseIdx, srcID, srcR, e->mission,
                      atk ? tgtID : 0, atk ? tgtR : 0,
