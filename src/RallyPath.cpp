@@ -36,7 +36,7 @@ extern int g_Calibrated;
 /* ---------------- 字段偏移 (gamemd 实测) ---------------- */
 
 #define OFF_BLD_TYPE      0x520u   /* BuildingClass::Type */
-#define OFF_BLD_FACTORY   0x21Cu   /* BuildingClass::Factory (空 = 不产东西) */
+#define OFF_BLD_OWNER     0x21Cu   /* TechnoClass::Owner -> HouseClass* (归属判定) */
 #define OFF_TYP_UNDEPLOY  0x16B9u  /* BuildingTypeClass::UndeploysInto */
 #define VT_ISUNITFACTORY  0x284u   /* TechnoClass::IsUnitFactory() */
 #define OFF_INLIMBO       0x81u    /* ObjectClass::InLimbo */
@@ -212,7 +212,8 @@ static int RP_IsFactory(void* b)
     vt = *(void***)b;
     if (!vt || !IsPlausiblePtr(vt)) return 0;
     if (OU_WhatAmI(b) != ABS_BUILDING) return 0;
-    if (!*(void**)((char*)b + OFF_BLD_FACTORY)) return 0;          /* 空 = 不产东西 */
+    /* 不查 BuildingClass::Factory (+0x524): 引擎在改派/转产时会临时把它置 NULL,
+     * 判空会误杀真工厂。类型/是否单位工厂由 IsUnitFactory() + ID 白名单定。 */
     type = *(unsigned char**)((char*)b + OFF_BLD_TYPE);
     if (!type || !IsPlausiblePtr(type)) return 0;
     if (*(unsigned char*)(type + OFF_TYP_UNDEPLOY)) return 0;      /* 反部署建筑 */
@@ -272,13 +273,28 @@ static void RP_ClearAll(void)
     g_RpSyncFrame = -1;
 }
 
-/* 每轮清掉建筑已没的表项 (卖/摧毁/被占领后地址可能被复用)。 */
+/* 是不是本机当前玩家的建筑 (Owner == CurrentPlayer)。
+ * 单看"在选中表内"不够: 联机/盟友共享视野等情形下选中表可能混入非本家建筑,
+ * 非本家建筑一律不准设折线 (也不能吞掉它的原生聚集点行为)。 */
+static int RP_Owned(void* b)
+{
+    void* cur;
+    void* own;
+    if (!b || !IsPlausiblePtr(b)) return 0;
+    cur = *(void**)ADDR_CURPLAYER;
+    if (!cur || !IsPlausiblePtr(cur)) return 0;
+    own = *(void**)((char*)b + OFF_BLD_OWNER);
+    return (own && own == cur) ? 1 : 0;
+}
+
+/* 每轮清掉建筑已没的表项 (卖/摧毁/被占领后地址可能被复用)。
+ * 被击破占领后 Owner 变非本家, 也一并清: 非本家工厂的出厂不再走本机的折线。 */
 static void RP_DropDead(void)
 {
     int i = 0;
     while (i < g_RpTabCount)
     {
-        if (RP_AliveAt(&g_RpTab[i])) { i++; continue; }
+        if (RP_AliveAt(&g_RpTab[i]) && RP_Owned(g_RpTab[i].bld)) { i++; continue; }
         RP_ShiftTabDown(i);
     }
 }
@@ -402,7 +418,9 @@ static int RP_Gate(void* bld)
     RP_EnsureInit();
     if (!g_RpEnable) return 0;
     if (!bld || !IsPlausiblePtr(bld)) return 0;
-    /* 只认选中的工厂: 单发调用 (AI/触发器等) 传未选中建筑, 不记也不清。 */
+    /* 只认本家选中的工厂: 单发调用 (AI/触发器等) 传未选中建筑, 不记也不清;
+     * 非本家 (AI/其它玩家/盟友) 建筑即使被选中也不设折线, 放行原生行为。 */
+    if (!RP_Owned(bld)) return 0;
     if (!RP_Selected(bld)) return 0;
     /* 普通左键 = 玩家改聚集点, 只记起点并清旧尾巴。
      * 画线期 (g_RpZRecent > 0) 内不清尾巴, 防钩子漏读 Z 误删。 */
@@ -480,7 +498,7 @@ static void RP_CaptureClick(void)
     items = *(void***)ADDR_SELOBJ_ITEMS;
     if (selN <= 0 || !items || !IsPlausiblePtr(items)) return;
     for (i = 0; i < selN; i++)
-        if (RP_IsFactory(items[i])) RP_Push(items[i], cx, cy);
+        if (RP_IsFactory(items[i]) && RP_Owned(items[i])) RP_Push(items[i], cx, cy);
 }
 
 /* ---------------- 钩 2: 出厂 (0x443C81) ----------------
@@ -500,6 +518,7 @@ static void RP_Exit(void* bld, void* unit)
     if (!g_RpEnable) return;
     if (!bld || !unit) return;
     if (!RP_IsFoot(unit)) return;
+    if (!RP_Owned(bld)) return;             /* 只追本家工厂出厂的单位 */
     src = RP_Find(bld);
     if (!src || src->n < 1) return;
     if (!RP_AliveAt(src)) return;
