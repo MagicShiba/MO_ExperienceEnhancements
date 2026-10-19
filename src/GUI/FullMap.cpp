@@ -1207,14 +1207,26 @@ static void Fm_ApplyViewWidth(void)
             {
                 s_SyncViewFrame = fr;
                 s_InSetViewDims = 1;
-                /* 用 A 重建 (InitGUI 一次性布局按它算, 传 R 侧栏全错), 完事写回 R。 */
+                /* 用 A 重建 (InitGUI 一次性布局按它算, 传 R 侧栏全错), 完事写回 R。
+                 * 但 setDims 落到 Set_Viewport (0x6D5F60) 会把相机中心 (+0xD74)
+                 * 按**传入的 A** 夹位: 中心停在地图边缘时会被 A 的界拽回 (A 界比
+                 * R 界窄) ⇒ 换档瞬间视野跳回 1x 边缘。存下中心, setDims 后写回,
+                 * 让随后 Fm_SyncViewCache 的 Set_Viewport(R) 按 R 重新夹位。 */
                 {
                     RectangleStruct keep = *vb;      /* = R */
+                    int c0 = *(int*)((char*)tac + 0xD64);
+                    int c1 = *(int*)((char*)tac + 0xD68);
+                    int c2 = *(int*)((char*)tac + 0xD74);
+                    int c3 = *(int*)((char*)tac + 0xD78);
                     vb->X = s_ViewA.X; vb->Y = s_ViewA.Y;
                     vb->Width = s_ViewA.Width; vb->Height = s_ViewA.Height;
                     setDims((void*)(size_t)ADDR_DISPLAY_INSTANCE,
                             (const void*)(size_t)ADDR_VIEWBOUNDS);
                     *vb = keep;                       /* 还原成 R */
+                    *(int*)((char*)tac + 0xD64) = c0;
+                    *(int*)((char*)tac + 0xD68) = c1;
+                    *(int*)((char*)tac + 0xD74) = c2;
+                    *(int*)((char*)tac + 0xD78) = c3;
                 }
                 s_InSetViewDims = 0;
                 /* 重建裁剪器顺带改了侧栏的一次性布局 —— 立刻纠正列起点。*/
