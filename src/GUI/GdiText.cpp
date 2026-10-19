@@ -42,6 +42,15 @@ unsigned AppendCh(char* dst, unsigned pos, char c, unsigned cap)
     return pos;
 }
 
+/* 有符号整数追加 (坐标/界值可能为负)。 */
+unsigned AppendInt(char* dst, unsigned pos, unsigned cap, int v)
+{
+    char n[16];
+    if (v < 0) { pos = AppendCh(dst, pos, '-', cap); v = -v; }
+    UtoA((unsigned)v, n);
+    return AppendCStr(dst, pos, n, cap);
+}
+
 int IsPlausiblePtr(const void* p)
 {
     unsigned u = (unsigned)(size_t)p;

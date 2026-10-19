@@ -37,6 +37,7 @@
 #include "WeaponRange.h"
 #include "ScaleBar.h"
 #include "PauseView.h"
+#include "PiP.h"
 #include "MOExperience.h"
 #include "MOEVersion.h"
 
@@ -204,6 +205,7 @@ void MOE_EnsureInit(void)
     FM_EnsureInit();
     SB_EnsureInit();   /* 底栏: 读 [BottomBar] (缩放档位/几何); ScaleEnable=0 时缩放空转 */
     PV_EnsureInit();   /* 底栏: 读 [BottomBar] (暂停按钮 PauseEnable/PauseHotkey) */
+    PiP_EnsureInit();  /* 画中画: 读 [PiP] (第二摄像机小窗) */
 }
 
 /* ---------------- 渲染回退原因统计 ----------------
@@ -249,6 +251,10 @@ void* g_PrepareTramp = NULL;
 
 static void PowerDrawBoth(void)
 {
+    /* PiP 离屏渲染期间引擎会在内部再次走到 prepare (0x4F42F0): FM_Poll 会把
+     * ViewBounds 改回主视图, SB_Poll 会按主视图重建并释放 ZBuffer/大面 (PiP 正
+     * 引用它们 → 野指针崩溃)。整体跳过。 */
+    if (PiP_InRender()) return;
     AirWay_Poll();
     BuildQueue_Poll();
     PatrolCircle_Poll();
@@ -379,6 +385,10 @@ void* g_RenderTramp = NULL;
 
 static void RenderEntrySwap(void)
 {
+    /* PiP 离屏渲染期间引擎可能再走一次主渲染入口; 此时主视图换面/截胡一律跳过。*/
+    if (PiP_InRender()) return;
+    /* 聚焦时小地图跳转"截胡": 必须在主视图渲染之前退回主相机 (见 PiP)。*/
+    PiP_PreRender();
     /* 必须在引擎动 R 之前 (SwapIn 那一步会把 [0x88731C] 换成大面)。*/
     SB_ViewPreRender();
     SB_RenderSwapIn();
@@ -485,6 +495,7 @@ static void AfterMapC(void)
 {
     MOE_EnsureInit();
     SB_RenderAfterMap();
+    PiP_AfterMap();
 }
 static void* g_CallAfterMap = (void*)AfterMapC;
 __attribute__((naked)) void MOExperience_AfterMapEntry(void)
@@ -534,21 +545,50 @@ __attribute__((naked)) void MOExperience_EdgeFixEntry(void)
  * ⚠️ 例外: 侧栏顶部那一块走小地图点击门 (0x692406), 判据只能是**物理**鼠标
  * 位置 (映射值已钳进 R, 看不出界; 见 FM_ShouldDeferClick)。 */
 void* g_ClickCoordsTramp = NULL;
+static int g_ClickResult = 0;
 
-static int ClickCoordsReject(void* pt)
+/* 返回值: -1 = 走原版; 0 = 拒掉 (返回 false); 1 = 已在 C 里跑完原函数,
+ * 结果放在 g_ClickResult (naked 入口用它做返回值)。 */
+static int ClickCoordsReject(void* regs)
 {
     static int s_tick = 0;
-    if (!IsPlausiblePtr(pt)) return 0;
-    if (SB_PtInView(((const int*)pt)[0], ((const int*)pt)[1])) return 0;
+    int* r = (int*)regs;
+    Point2D* pt;
+    int gx = 0, gy = 0, mode = 0;
+    pt = (Point2D*)(size_t)r[9];      /* pushal 帧: [8]=返回地址, [9]=arg1 */
+    if (!IsPlausiblePtr(pt)) return -1;
+    /* 小窗渲染期间若游戏内部又走了这个入口, 一律按原版跑, 别重入换表/换相机。 */
+    if (PiP_InRender()) return -1;
+
+    /* 小窗: 操作模式把点击重映射到小窗里的世界位置; 其余情况按老规矩吞/放行。 */
+    if (GtMouseGameXY(&gx, &gy)) mode = PiP_ClickCoordsMode(gx, gy);
+    if (mode == 1) return 0;
+    if (mode == 2)
+    {
+        int px = 0, py = 0, ox, oy, ok;
+        if (!PiP_BeginClickMap(gx, gy, &px, &py)) return 0;
+        ox = pt->X; oy = pt->Y;
+        pt->X = px; pt->Y = py;
+        ok = ((Fn_ClickCoords)g_ClickCoordsTramp)((void*)(size_t)r[6], pt,
+                 (CellStruct*)(size_t)r[10], (CoordStruct*)(size_t)r[11],
+                 (void**)(size_t)r[12], (unsigned char*)(size_t)r[13],
+                 (unsigned char*)(size_t)r[14]);
+        pt->X = ox; pt->Y = oy;
+        PiP_EndClickMap();
+        g_ClickResult = ok ? 1 : 0;
+        return 1;
+    }
+
+    if (SB_PtInView(((const int*)pt)[0], ((const int*)pt)[1])) return -1;
     /* 侧栏顶部那一块交给后面的点击门吞, 别在这里拒掉 (放行而没人接手 = 点成对
      * 地图某点的下令, 比点不动更糟, 所以判据里含"门武装好了没有")。*/
-    if (SB_Zoomed() && FM_ShouldDeferClick()) return 0;
+    if (SB_Zoomed() && FM_ShouldDeferClick()) return -1;
     /* 映射值已全钳制 (框选不断崖), 出界只能看物理: 栏带点击物理必在 A 外。
      * Gt 失败则沿用旧路 (映射判), 不多事。 */
     if (SB_Zoomed())
     {
         int rx = 0, ry = 0;
-        if (GtMouseGameXY(&rx, &ry) && !SB_PtInRawView(rx, ry)) return 1;
+        if (GtMouseGameXY(&rx, &ry) && !SB_PtInRawView(rx, ry)) return 0;
     }
     /* 真拒掉才打一条 (2 秒一条): 确认底栏点击走到了这条总闸。 */
     if (--s_tick <= 0)
@@ -565,27 +605,32 @@ static int ClickCoordsReject(void* pt)
         UtoA(now, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         LogLine(buf);
     }
-    return 1;
+    return 0;
 }
 static void* g_CallClickCoords = (void*)ClickCoordsReject;
 __attribute__((naked)) void MOExperience_ClickCoordsEntry(void)
 {
     __asm__ volatile (
         "pushal\n\t"
-        "movl 0x24(%%esp), %%eax\n\t"     /* pushal 帧之上 = 原栈 arg1 = Point2D* */
-        "pushl %%eax\n\t"
+        "pushl %%esp\n\t"                 /* regs (pushal 帧) */
         "call *%0\n\t"
         "addl $4, %%esp\n\t"
+        "cmpl $-1, %%eax\n\t"
+        "je 1f\n\t"                       /* -1: 走原版 */
         "testl %%eax, %%eax\n\t"
-        "jnz 1f\n\t"
-        "popal\n\t"
-        "jmp *%1\n\t"
-        "1:\n\t"
+        "jz 2f\n\t"                       /* 0: 拒掉 */
+        "popal\n\t"                       /* 1: C 已跑完原函数 */
+        "movl %2, %%eax\n\t"
+        "ret $0x18\n\t"
+        "2:\n\t"
         "popal\n\t"
         "xorl %%eax, %%eax\n\t"
         "ret $0x18\n\t"
+        "1:\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
         :
-        : "m" (g_CallClickCoords), "m" (g_ClickCoordsTramp)
+        : "m" (g_CallClickCoords), "m" (g_ClickCoordsTramp), "m" (g_ClickResult)
         : "memory", "cc");
 }
 
@@ -612,6 +657,52 @@ __attribute__((naked)) void MOExperience_ClampCenterEntry(void)
         "ret $4\n\t"                     /* 与原版 epilogue 一致 */
         :
         : "m" (g_CallClamp)
+        : "memory", "cc");
+}
+
+/* 小地图/程序化相机定位 (0x6D6070) 入口钩: 只标记, 不动栈/寄存器。 */
+void* g_CameraSetTramp = NULL;
+static void CameraSetC(void* regs)
+{
+    int* r = (int*)regs;   /* pushal 后: [8]=返回地址, [9]=arg1 (CoordStruct* 世界坐标) */
+    PiP_OnCameraSet((const int*)(size_t)r[9]);
+}
+static void* g_CallCameraSet = (void*)CameraSetC;
+__attribute__((naked)) void MOExperience_CameraSetEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "pushl %%esp\n\t"
+        "call *%0\n\t"
+        "addl $4, %%esp\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"
+        :
+        : "m" (g_CallCameraSet), "m" (g_CameraSetTramp)
+        : "memory", "cc");
+}
+
+/* RadarClass::Action 内部钳制前 (0x653D92) 入口钩: 读 si/di = 引擎算出的未钳制格,
+ * 交 PiP 留存 (小窗按自己尺寸重钳, 才能贴到地图边缘)。**只读**, 不动状态。 */
+void* g_RadarCellTramp = NULL;
+static void RadarCellC(void* regs)
+{
+    int* r = (int*)regs;   /* pushal 后: [0]=edi, [1]=esi */
+    PiP_OnRadarRawCell((int)(short)(r[1] & 0xFFFF),
+                       (int)(short)(r[0] & 0xFFFF));
+}
+static void* g_CallRadarCell = (void*)RadarCellC;
+__attribute__((naked)) void MOExperience_RadarClampEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "pushl %%esp\n\t"           /* arg = 保存寄存器区指针 (edi 在 [esp]) */
+        "call *%0\n\t"
+        "addl $4, %%esp\n\t"
+        "popal\n\t"
+        "jmp *%1\n\t"               /* 跳板 = 原 6B + jmp 0x653D98 */
+        :
+        : "m" (g_CallRadarCell), "m" (g_RadarCellTramp)
         : "memory", "cc");
 }
 
@@ -644,6 +735,8 @@ static int BlitGuardC(void* r, void* s1, void* s2)
     void** vt;
     int* ri;
     int i;
+    /* PiP 第二摄像机离屏渲染中: 几何自洽, 原样放行, 不套主视图缩放档的判定。 */
+    if (PiP_InRender()) return 1;
     if (!SB_Zoomed()) return 1;
     /* 面指针野了直接跳过。*/
     if (!IsPlausiblePtr(s1) || !IsPlausiblePtr(s2))
@@ -1101,6 +1194,8 @@ int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch,
     WeaponRange_Draw(surf, surfW, surfH, surfPitch);
     Aggressive_Draw(surf, surfW, surfH, surfPitch);
     if (FM_DrawRadarTo(surf)) drew = 1;
+    /* 画中画侧栏开关按钮: 必须在小地图条带之后 (压在最上面)。 */
+    PiP_DrawButton(surf);
     return drew;
 }
 
@@ -1123,6 +1218,9 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     static int s_firstDraw = 1;
 
     (void)regs;
+    /* 画中画离屏渲染期间: 若这条消息帧链路被二次进入, 会把 UI 文字画进小窗离屏面
+     * (超武列表/操作提示/战役框等), 也会让 PiP_DrawOnComposite 递归。直接空转。 */
+    if (PiP_InRender()) return 0;
     MOE_EnsureInit();
     MOE_SetPhase(MP_MSGDRAW);
     /* 缩小档: 渲染期 Composite/地图面被换成了 R 大的离屏面, 这里必须**先**还原成
@@ -1161,6 +1259,10 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
      * 该钩没装上时才回退到这里跑。 */
     if (SB_In()) SB_CompositeMagnify();
     else if (SB_Out() && !g_AfterMapTramp) { SB_PaintVoid(); SB_CompositeDemagnify(); }
+
+    /* 画中画小窗: 必须在这之后贴 (Composite 已是缩放呈现后的窗口面),
+     * 否则被缩放模块一起放大/缩小。 */
+    PiP_DrawOnComposite(surf);
 
     drew = MOE_DrawUILayers(surf, surfW, surfH, surfPitch, &bitLineH, &screenW, NULL);
 

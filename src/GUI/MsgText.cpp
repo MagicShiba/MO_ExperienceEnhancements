@@ -43,6 +43,10 @@
 /* 视口跳转: 见下面 MsgText_JumpToCell。 */
 #define ADDR_TACTICAL            0x00887324u  /* TacticalClass::Instance */
 #define ADDR_SET_TACTICAL_POS    0x006D6070u  /* TacticalClass::SetTacticalPosition(CoordStruct*) */
+#define ADDR_MAP_INSTANCE        0x0087F7E8u  /* MapClass::Instance */
+#define ADDR_MAP_GET_CELL        0x005657A0u  /* CellClass* MapClass::GetCellAt(CellStruct*) */
+#define ADDR_CELL_GET_COORDS     0x00480A30u  /* CoordStruct* CellClass::GetCellCoords(CoordStruct*) */
+#define ADDR_Z_TO_SCREEN         0x006D20E0u  /* int TacticalClass::ZToScreen(int z) */
 
 /* 点击门落点: ProcessClickCoords (0x692300) 的"未处理"出口, 栈形对齐。 */
 #define ADDR_CLICKGATE_SKIP      0x006925FCu
@@ -238,6 +242,8 @@ static void RingPush(MsgRing* r, const wchar_t* name, const wchar_t* text,
 /* 雷达事件入提示环: 文案就是 [MsgRadar] 里配的类型名 (不带坐标)。
  * 按 HintRadarHold 正常过期消失 (不永久驻留); 收起时只留最近几行,
  * 悬停末行触发区可展开看到同一段时间里的其余几条。 */
+static unsigned g_RadarSeq = 0;   /* 新雷达事件序号 (只增不减, 清历史也不归零) */
+
 static void RingPushRadar(int type, short cx, short cy)
 {
     ChatMsg* m = &g_HintBuf[g_HintRing.head];
@@ -261,6 +267,7 @@ static void RingPushRadar(int type, short cx, short cy)
 
     g_HintRing.head = (g_HintRing.head + 1) % g_HintRing.cap;
     if (g_HintRing.count < g_HintRing.cap) g_HintRing.count++;
+    g_RadarSeq++;
 }
 
 /* 已报过的雷达事件, 跨帧保留: 扫到刷时间戳, 未扫到即引擎已删;
@@ -368,6 +375,24 @@ static int MsgVisibleMul(ChatMsg* m, unsigned mul)
     if (mul < 1) mul = 1;
     span = (m->expire - m->born) * mul;
     return (int)(GtClockNow() - m->born) <= (int)span;
+}
+
+/* 最新一条仍可见的雷达事件 (PiP 自动跟随用)。倒扫提示环: 环里的顺序就是入队顺序,
+ * 最新的在 count-1。只读, 不消耗任何状态。 */
+int MsgText_LatestRadar(short* cx, short* cy, unsigned* seq)
+{
+    int i;
+    for (i = g_HintRing.count - 1; i >= 0; i--)
+    {
+        ChatMsg* m = MsgAt(&g_HintRing, i);
+        if (m->kind != KIND_RADAR) continue;
+        if (!MsgVisibleMul(m, 1)) continue;
+        if (cx) *cx = m->cellX;
+        if (cy) *cy = m->cellY;
+        if (seq) *seq = g_RadarSeq;
+        return 1;
+    }
+    return 0;
 }
 
 /* ---------------- 取色 (ColorScheme -> 显示色) ----------------
@@ -1285,6 +1310,34 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
  * 联机安全: 只动本地摄像机, 不写模拟对象、不发事件。 */
 typedef struct { int X, Y, Z; } Crd;
 typedef void (__attribute__((thiscall)) *FnSetTacticalPos)(void*, const Crd*);
+typedef void* (__attribute__((thiscall)) *FnMapGetCell)(void*, void*);
+typedef void* (__attribute__((thiscall)) *FnCellGetCoords)(void*, void*);
+typedef int (__attribute__((fastcall)) *FnZToScreen)(int);
+
+/* 格子的地形高度 (只读)。雷达事件/单位在坡上时, 引擎的相机换算会减去
+ * ZToScreen(Z), 否则目标会偏高 (事件看起来在小窗上方)。 */
+int MsgText_CellZ(short cx, short cy)
+{
+    /* MapClass::Instance 是 0x87F7E8 处的对象本身, 不是指针变量。 */
+    void* map = (void*)(size_t)ADDR_MAP_INSTANCE;
+    void* pCell;
+    short cell[2];
+    Crd c;
+
+    cell[0] = cx;
+    cell[1] = cy;
+    pCell = ((FnMapGetCell)(size_t)ADDR_MAP_GET_CELL)(map, cell);
+    if (!pCell || !IsPlausiblePtr(pCell) || pCell == (void*)0x00ABDC50u) return 0;
+    c.X = c.Y = c.Z = 0;
+    ((FnCellGetCoords)(size_t)ADDR_CELL_GET_COORDS)(pCell, &c);
+    return c.Z;
+}
+
+int MsgText_ZToScreen(int z)
+{
+    if (z <= 0) return 0;
+    return ((FnZToScreen)(size_t)ADDR_Z_TO_SCREEN)(z);
+}
 
 static void MsgText_JumpToCell(short cx, short cy)
 {
@@ -1294,7 +1347,7 @@ static void MsgText_JumpToCell(short cx, short cy)
     if (!IsPlausiblePtr(tac)) return;
     c.X = ((int)cx << 8) + 0x80;
     c.Y = ((int)cy << 8) + 0x80;
-    c.Z = 0;
+    c.Z = MsgText_CellZ(cx, cy);
     ((FnSetTacticalPos)(size_t)ADDR_SET_TACTICAL_POS)(tac, &c);
 }
 

@@ -9,6 +9,7 @@
 #include "Icon.h"
 #include "FullMap.h"
 #include "ScaleBar.h"
+#include "PiP.h"
 #include "MOExperience.h"
 
 #define VC_MAXW 32
@@ -1012,6 +1013,23 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
     int a1, int a2, int a3, int a4, int a5, int a6, int a7)
 {
     if (!g_OrigSimple) return 0;
+    /* 画中画离屏渲染期间: 一律不画文本 —— 引擎这趟会把超武原始列表/操作提示/战役框
+     * 等文字画到小窗离屏面上 (主画布判据在此不成立, 拦不住)。按"已绘制"口径返回
+     * (与超武列表隐藏同约定, pRetVal=入参位置), 免得调用方改走别的绘制路径。 */
+    if (PiP_InRender())
+    {
+        if (IsPlausiblePtr((void*)ecxIn))
+        {
+            int sx = 0, sy = 0;
+            if (IsPlausiblePtr((void*)a2))
+            { sx = ((int*)(size_t)a2)[0]; sy = ((int*)(size_t)a2)[1]; }
+            if (IsPlausiblePtr((void*)a3))
+            { sx += ((int*)(size_t)a3)[0]; sy += ((int*)(size_t)a3)[1]; }
+            ((int*)ecxIn)[0] = sx;
+            ((int*)ecxIn)[1] = sy;
+        }
+        return ecxIn;
+    }
     if (g_ScoreScreen)
         return g_OrigSimple(ecxIn, edxIn, a1, a2, a3, a4, a5, a6, a7);
     /* Ares FPS 计数器钉住: 收串并跳过原绘制, Render 尾固定位 1x 重画。
@@ -2677,6 +2695,32 @@ void VecText_Install(void)
             else LogLine("vtext: clampcenter hook OFF");
         }
         else { LogLine("vtext: clampcenter bytes mismatch"); LogBytes((unsigned char*)0x6D8640u); }
+    }
+/* 小地图/程序化相机定位钩 (0x6D6070): PiP 聚焦时标记跳转 (与 Enable/缩放无关)。 */
+    {
+        static const unsigned char kWantCamSet[5] = { 0x83, 0xEC, 0x08, 0x53, 0x55 };
+        if (BytesSame((unsigned char*)0x6D6070u, kWantCamSet, 5))
+        {
+            g_CameraSetTramp = BuildTrampAt(0x6D6070u, 5, 0x6D6075u);
+            if (g_CameraSetTramp && PatchAt(0x6D6070u, (void*)MOExperience_CameraSetEntry, 5))
+                LogLine("pip: cameraset hook ON");
+            else { LogLine("pip: cameraset hook OFF"); g_CameraSetTramp = NULL; }
+        }
+        else { LogLine("pip: cameraset bytes mismatch"); LogBytes((unsigned char*)0x6D6070u); }
+    }
+/* 小地图点击原始格钩 (RadarClass::Action 0x653D92 = "主视野出界"钳制前):
+ * 只读留一份未钳制格; PiP 聚焦时用小窗尺寸重钳 -> 小窗能贴到地图最外圈。 */
+    {
+        static const unsigned char kWantRadarCell[6] =
+            { 0x8B, 0x0D, 0xA8, 0x6F, 0x88, 0x00 };
+        if (BytesSame((unsigned char*)0x653D92u, kWantRadarCell, 6))
+        {
+            g_RadarCellTramp = BuildTrampAt(0x653D92u, 6, 0x653D98u);
+            if (g_RadarCellTramp && PatchAt(0x653D92u, (void*)MOExperience_RadarClampEntry, 6))
+                LogLine("pip: radarraw hook ON");
+            else { LogLine("pip: radarraw hook OFF"); g_RadarCellTramp = NULL; }
+        }
+        else { LogLine("pip: radarraw bytes mismatch"); LogBytes((unsigned char*)0x653D92u); }
     }
 /* 通用拉伸 blit 守卫钩 (0x6BA580, cameo/图标越界写拦)。 */
     {

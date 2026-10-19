@@ -18,6 +18,7 @@ unsigned UtoA(unsigned v, char* p);
 unsigned HtoA(unsigned v, char* p);
 unsigned AppendCStr(char* dst, unsigned pos, const char* src, unsigned cap);
 unsigned AppendCh(char* dst, unsigned pos, char c, unsigned cap);
+unsigned AppendInt(char* dst, unsigned pos, unsigned cap, int v);
 int IsPlausiblePtr(const void* p);
 
 /* ---------------- 日志 ---------------- */

@@ -307,6 +307,8 @@ static int DP_CenterProj(int cx, int cy, int fbZ, int* px, int* py)
 
 /* 认领条件 (纯函数, SmartOrder 按下点/按住中调用): 开关开且自动展开开,
  * 物理中键按住, 无 Z/Ctrl/组合中键, 且选中含可展开载具 (单多不论)。
+ * SmartArea 默认热键就是 Shift+中键, 与本模块的 Shift 锁轴排直线重合:
+ * 该组合 (无附加键/其它修饰) 有可展开单位时本模块优先, 其余组合仍让路。
  * 代价由指纹缓存兜底 (500ms 内同选中直接复用)。 */
 int DeployPreview_ClaimsMiddle(void)
 {
@@ -315,7 +317,7 @@ int DeployPreview_ClaimsMiddle(void)
     if (!g_DpEnable || !g_DpAuto) return 0;
     if (!OU_KeyDown(VK_MBUTTON)) return 0;
     if (OU_KeyDown('Z') || OU_KeyDown(VK_CONTROL)) return 0;
-    if (SmartArea_ClaimsMiddle()) return 0;
+    if (SmartArea_ClaimsMiddle() && !SmartArea_ShiftMiddleOnly()) return 0;
     return DP_FootprintCached(&fw, &fh);
 }
 

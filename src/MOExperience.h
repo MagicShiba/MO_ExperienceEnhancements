@@ -68,6 +68,14 @@ void MOExperience_ClickCoordsEntry(void);
 extern void* g_ClickCoordsTramp;
 /* Clamp_Center 入口钩: 视口比地图大时钉地图正中 (SB_ClampFix)。 */
 void MOExperience_ClampCenterEntry(void);
+/* 相机定位钩 (0x6D6070 = TacticalClass 定位相机, 入口钩; RadarClass::Action/ScrollTo
+ * 都走它): PiP 聚焦时交 PiP_OnCameraSet 标记"这次是程序化相机跳转"。 */
+void MOExperience_CameraSetEntry(void);
+extern void* g_CameraSetTramp;
+/* RadarClass::Action 内部 0x653D92 (钳制前) 入口钩: 只读观测小地图点击的原始格
+ * (si=格X, di=格Y), 交 PiP_OnRadarRawCell (小窗按自己尺寸重钳)。 */
+void MOExperience_RadarClampEntry(void);
+extern void* g_RadarCellTramp;
 /* DrawPixelEffects (迷雾) 入口钩: 先把 [0x887314] 换成大面挡越界写。 */
 void MOExperience_ShroudEntry(void);
 extern void* g_ShroudTramp;

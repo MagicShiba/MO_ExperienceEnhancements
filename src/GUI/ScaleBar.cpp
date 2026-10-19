@@ -7,6 +7,7 @@
 #include "MsgText.h"
 #include "VecText.h"
 #include "ScaleBar.h"
+#include "PiP.h"
 #include "MOExperience.h"
 
 #define SB_SECTION "BottomBar"
@@ -255,7 +256,7 @@ static void Sb_InitLabels(void)
  * 超限钳到 LimitFallback；过小或地图读不到才判不支持。 */
 static double s_MaxScale = 0.0;
 static int s_MaxOk = 0;
-static int Sb_MapPx(int* l, int* t, int* w, int* h);   /* 定义在文件后部 */
+int SB_MapPx(int* l, int* t, int* w, int* h);           /* 定义在文件后部 */
 static int Sb_ViewPx(int* ox, int* oy, int* w, int* h);/* 定义在文件后部 */
 static void Sb_DropMax(void) { s_MaxOk = 0; s_MaxScale = 0.0; }
 
@@ -264,7 +265,7 @@ static double Sb_CalcMaxScale(void)
     RectangleStruct a;
     int ml, mt, mw, mh, rw, rh;
     double sx, sy, sc;
-    if (!Sb_MapPx(&ml, &mt, &mw, &mh)) return 0.0;
+    if (!SB_MapPx(&ml, &mt, &mw, &mh)) return 0.0;
     FM_GetViewRects(&a, 0);
     if (a.Width < 64 || a.Height < 64) return 0.0;
     if (mw < 16 || mh < 16) return 0.0;
@@ -961,6 +962,8 @@ static int s_ShroudHit = 0;
 void SB_ShroudGuard(void)
 {
     void* cur;
+    /* PiP 第二摄像机离屏渲染中: [0x887314] 是 PiP 面, 不能按本模块的 s_CurC 改写。 */
+    if (PiP_InRender()) return;
     if (!s_Enable) return;
     if (!SB_Out() || !s_SurfActive) return;
     if (!s_CurC || !IsPlausiblePtr(s_CurC)) return;
@@ -1164,6 +1167,31 @@ static void Sb_DropBuf(int isA, void* p)
     ((SbBufDtorFn)(isA ? (size_t)ADDR_ABUF_DTOR : (size_t)ADDR_ZBUF_DTOR))(p);
     ((SbFreeFn)(size_t)ADDR_OP_DELETE)(p);
 }
+
+/* PiP 模块复用的离屏基建导出 (复用上面的 DSurface/缓冲构造)。 */
+void* SB_NewOffscreen(int w, int h) { return Sb_NewSurf(w, h); }
+void  SB_FreeOffscreen(void* s) { Sb_FreeSurf(s); }
+void  SB_ClearOffscreen(void* s) { Sb_ClearSurf(s); }
+
+int SB_NewBufPair(void** z, void** a, int w, int h)
+{
+    RectangleStruct t;
+    void* nz;
+    void* na;
+    if (z) *z = 0;
+    if (a) *a = 0;
+    if (w < 64 || h < 64) return 0;
+    if (Sb_OverLimit(w, h)) return 0;
+    t.X = 0; t.Y = 0; t.Width = w; t.Height = h;
+    nz = Sb_BuildBuf(0, &t);
+    na = Sb_BuildBuf(1, &t);
+    if (!nz || !na) { Sb_DropBuf(0, nz); Sb_DropBuf(1, na); return 0; }
+    if (z) *z = nz; else Sb_DropBuf(0, nz);
+    if (a) *a = na; else Sb_DropBuf(1, na);
+    return 1;
+}
+
+void SB_FreeBufPair(void* z, void* a) { Sb_DropBuf(0, z); Sb_DropBuf(1, a); }
 
 /* 缓冲真实尺寸直接读对象。 */
 static int SB_BufDims(int* w, int* h)
@@ -1397,7 +1425,7 @@ int SB_CanvasH(int w)
 }
 
 /* 地图矩形/视口原点：直接读引擎全局。 */
-static int Sb_MapPx(int* l, int* t, int* w, int* h)
+int SB_MapPx(int* l, int* t, int* w, int* h)
 {
     int bx, gx, gy, cw, ch;
     if (!l || !t || !w || !h) return 0;
@@ -1430,15 +1458,6 @@ static int Sb_ViewPx(int* ox, int* oy, int* w, int* h)
                           && *oy > -1000000 && *oy < 1000000);
 }
 
-/* 有符号整数字段 (钳位界可能是负数, 按无符号会打出 42 亿)。值域坐标量级, 无 INT_MIN 顾虑。 */
-static unsigned SB_AppendInt(char* buf, unsigned q, unsigned cap, int v)
-{
-    char b1[16];
-    if (v < 0) { q = AppendCh(buf, q, '-', cap); v = -v; }
-    UtoA((unsigned)v, b1);
-    return AppendCStr(buf, q, b1, cap);
-}
-
 /* 视口比地图大时居中钳位。退化轴钉地图正中。 */
 int SB_ClampFix(Point2D* c)
 {
@@ -1450,7 +1469,7 @@ int SB_ClampFix(Point2D* c)
     int cx, cy, midX, midY;
     int degX, degY;
     if (!c || !IsPlausiblePtr(c)) return 0;
-    if (!Sb_MapPx(&ml, &mt, &mw, &mh)) return 0;
+    if (!SB_MapPx(&ml, &mt, &mw, &mh)) return 0;
     vw = *(volatile int*)(size_t)0xB0CE30u;     /* ViewBounds.Width  */
     vh = *(volatile int*)(size_t)0xB0CE34u;     /* ViewBounds.Height */
     if (vw <= 16 || vh <= 16) return 0;
@@ -1473,13 +1492,13 @@ int SB_ClampFix(Point2D* c)
             q = AppendCStr(buf, q, deg ? "sbar: view > map, center-pinned  x "
                                        : "sbar: view <= map, normal clamp  x ",
                             sizeof(buf));
-            q = SB_AppendInt(buf, q, sizeof(buf), mnX);
+            q = AppendInt(buf, q, sizeof(buf), mnX);
             q = AppendCh(buf, q, ',', sizeof(buf));
-            q = SB_AppendInt(buf, q, sizeof(buf), mxX);
+            q = AppendInt(buf, q, sizeof(buf), mxX);
             q = AppendCStr(buf, q, "  y ", sizeof(buf));
-            q = SB_AppendInt(buf, q, sizeof(buf), mnY);
+            q = AppendInt(buf, q, sizeof(buf), mnY);
             q = AppendCh(buf, q, ',', sizeof(buf));
-            q = SB_AppendInt(buf, q, sizeof(buf), mxY);
+            q = AppendInt(buf, q, sizeof(buf), mxY);
             LogLine(buf);
         }
     }
@@ -1523,7 +1542,7 @@ static void Sb_PaintVoidOn(void* surf)
     unsigned char* base;
     unsigned short px;
     if (!surf || !IsPlausiblePtr(surf)) return;
-    if (!Sb_MapPx(&ml, &mt, &mw, &mh)) return;
+    if (!SB_MapPx(&ml, &mt, &mw, &mh)) return;
     if (!Sb_ViewPx(&ox, &oy, &vw, &vh)) return;
     rx0 = ml - ox;  rx1 = rx0 + mw;
     ry0 = mt - oy;  ry1 = ry0 + mh;
@@ -1786,9 +1805,9 @@ static void Sb_SetLevel(int lv, const char* why)
         char b2[16], b3[16];
         if (!SB_BufDims(&zw, &zh)) { zw = zh = -1; }
         p = AppendCStr(buf, p, " zbuf=", sizeof(buf));
-        p = SB_AppendInt(buf, p, sizeof(buf), zw);
+        p = AppendInt(buf, p, sizeof(buf), zw);
         p = AppendCh(buf, p, 'x', sizeof(buf));
-        p = SB_AppendInt(buf, p, sizeof(buf), zh);
+        p = AppendInt(buf, p, sizeof(buf), zh);
         if (zw != s_BufW || zh != s_BufH)
         {
             p = AppendCStr(buf, p, " zref=", sizeof(buf));

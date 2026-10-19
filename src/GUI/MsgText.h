@@ -43,6 +43,17 @@ int MsgText_OverCamp(int mx, int my);
  * 联机安全: 只动本地摄像机 (引擎空格跳转同款), 不写模拟对象、不发事件。 */
 extern "C" __declspec(dllexport) unsigned __cdecl MsgText_RadarClickGate(void* regs);
 
+/* 最新一条仍可见的雷达事件 (操作与战斗提示里的雷达行): 返回 1 = 有, 写出格与序号。
+ * seq 每次收到新雷达事件就 +1 (单调递增, 不随清历史归零), 供 PiP 判断"来了新事件"。
+ * 只读, 不改消息环/模拟状态。 */
+int  MsgText_LatestRadar(short* cx, short* cy, unsigned* seq);
+
+/* 格子的地形高度 (GetCellCoords 的 Z; 只读查询)。无效格返回 0。 */
+int  MsgText_CellZ(short cx, short cy);
+
+/* 引擎的 Z -> 屏幕 Y 偏移 (0x6D20E0; 纯换算, 只读)。 */
+int  MsgText_ZToScreen(int z);
+
 /* 聊天输入框锚点 (供 ChatEdit.cpp): 贴战役框下沿, 1=有锚点 (px/py 写出),
  * 0=无 (调用方留在原生位置)。只在底部模式成立。 */
 int MsgText_ChatAnchor(int surfW, int surfH, int bitLineH, int* px, int* py);

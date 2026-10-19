@@ -76,3 +76,18 @@
 ; ESI=this, EBX=pTarget; 目标非本家非盟友就跳 epilogue 0x4D7CC0 (停原地)。
 ; 见 src/NoApproach.cpp
 0x4D77BD = NoApproach_Hook, 6
+
+; 画中画窗内左键按下: 跳过引擎 LeftDownPosition 记录 (0x4AC310 前 6B 是
+; mov al,[ecx+11B0])。窗内拖框不再按主视图坐标画/选; 单击选中/下令走松开
+; 路径 0x4AB9B0, 不受影响。返回 0x4AC36E = 原函数尾 ret 4。见 PiP.cpp
+0x4AC310 = PiP_LeftDownGate, 6
+
+; 画中画窗内左键框选松手: 跳过 DisplayClass::LeftMouseButtonUp (0x4AB9B0 前 6B 是
+; sub esp,0x7C + push ebx/ebp/esi)。松手那次点击只让步给引擎把格/目标算完,
+; 最终点选/下令整段跳过, 框选在帧末自己调 MakeSelection。见 PiP.cpp
+0x4AB9B0 = PiP_LeftUpGate, 6
+
+; 小窗离屏渲染时跳过引擎框选带绘制 (TacticalClass 的 Band 画手, 0x6DA180 前 6B 是
+; mov eax,[ecx+0xD90])。Band 存的是主视口局部坐标, 第二摄像机渲染时照画会贴出
+; 错位幽灵框; 主视图渲染 (g_InRender=0) 不受影响。见 PiP.cpp
+0x6DA180 = PiP_BandGate, 6

@@ -63,6 +63,14 @@ void FM_GetViewRects(RectangleStruct* a, RectangleStruct* r);
  * 纯本地摄像机, 联机安全。 */
 unsigned FM_RadarClickGate(void* regs);
 
+/* 物理游戏坐标是否落在小地图矩形内 (PiP 用: 点小地图 = 给小窗重新定位, 不丢聚焦)。
+ * 列起点与 FM_RadarClickGate 同源 (Fm_ColumnX), 纯几何判定, 不写内存。 */
+int  FM_RadarHit(int gx, int gy);
+
+/* 侧栏列在屏幕 (合成面) 上的起点 X; 拿不到返回 -1。与侧栏条带/小地图同源
+ * (Fm_ColumnPlace), PiP 的侧栏按钮按它定位。 */
+int  FM_SidebarColumnX(void);
+
 
 
 

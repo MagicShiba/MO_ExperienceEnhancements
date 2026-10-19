@@ -99,8 +99,20 @@ void SB_AppendCrashSurfs(char* buf, unsigned* p, unsigned cap);
 /* 地图像素增量 → 屏幕增量。scale=1 时恒等。 */
 void SB_MapDeltaToScreen(int* dx, int* dy);
 
+/* 地图在大面(屏幕/战术)坐标里的矩形 (l,t,w,h)。缩放与画中画共用同一套"防出界"。 */
+int SB_MapPx(int* l, int* t, int* w, int* h);
+
 /* 刻度条：画进 Composite。 */
 int SB_DrawToComposite(void);
 
 /* 刻度条矩形 (暂停按钮锚在它左侧用)。返回 0 = 没开/没摆好。 */
 int SB_BarGeom(int* x, int* y, int* w, int* h);
+
+/* ---------------- 画中画 (PiP) 模块复用的离屏基建 ----------------
+ * 复用缩放档同款: 引擎 DSurface 构造/析构 + ZBuffer/ABuffer 构造/析构,
+ * 这样第二摄像机离屏渲染的面/缓冲与缩小档行为完全一致。 */
+void* SB_NewOffscreen(int w, int h);
+void  SB_FreeOffscreen(void* s);
+void  SB_ClearOffscreen(void* s);
+int   SB_NewBufPair(void** z, void** a, int w, int h);
+void  SB_FreeBufPair(void* z, void* a);

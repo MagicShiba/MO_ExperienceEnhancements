@@ -28,6 +28,8 @@
  * 预览=快照+分配与终判同一套 (双 sink, 终判松手重扫一次); 预览截断
  * 64 单位/96 目标/128 线, 换格或 400ms 刷, 80ms 节流, 松手即消。
  * 仲裁: 须无 Ctrl (归模糊); Z 不禁。关或热键坏不认领, 回落裸中键。
+ * 热点冲突: 默认组合恰为 Shift+Middle, 与 DeployPreview 的 Shift 锁轴排直线
+ * 重合; 选中含可展开单位时 DeployPreview 优先 (见 SmartArea_ShiftMiddleOnly)。
  * 联机: 只发标准事件, 本地只读不写模拟内存。
  * 日志: 仅启动行。
  */
@@ -36,6 +38,7 @@
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "OrderThrottle.h"
+#include "DeployPreview.h"
 #include "SmartArea.h"
 
 #define SA_SECTION "SmartArea"
@@ -106,6 +109,16 @@ int SmartArea_ClaimsMiddle(void)
     if (!OU_ModsDown(g_SaHk.mods) || !OU_ExtraDown(&g_SaHk)) return 0;
     if (OU_KeyDown(VK_CONTROL)) return 0;
     return 1;
+}
+
+/* 组合键本体就是 Shift+中键 (无附加键/其它修饰): 该组合与 DeployPreview
+ * 的 Shift 锁轴排直线重合, 有可展开单位时让 DeployPreview 优先。 */
+int SmartArea_ShiftMiddleOnly(void)
+{
+    SA_EnsureInit();
+    if (!g_SaEnable) return 0;
+    if (g_SaHk.vk != VK_MBUTTON || g_SaHk.nExtra != 0) return 0;
+    return g_SaHk.mods == OU_MOD_SHIFT ? 1 : 0;
 }
 
 /* 组合保持 (松开边用): 开且修饰/附加键按住、无 Ctrl, 不看主键 (Z 不禁)。 */
@@ -1142,6 +1155,13 @@ void SmartArea_Poll(void)
         s_PrevN = 0;
         if (OU_MouseCell(&ax, &ay)) SA_NodePush(ax, ay);
         SA_BoxReset();
+    }
+    /* DeployPreview 认领 (选中含可展开单位 + Shift 锁轴/裸中键) 时让路:
+     * 组合键只是 Shift+中键时它优先, 否则仍归本模块 (见 ClaimsMiddle 仲裁)。 */
+    if (trigDown && DeployPreview_ClaimsMiddle())
+    {
+        g_SaPrevTrig = trigDown;
+        return;
     }
     if (trigDown && combo)
     {

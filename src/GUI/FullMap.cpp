@@ -1902,6 +1902,31 @@ unsigned FM_RadarClickGate(void* regs)
     return (unsigned)ADDR_CLICKGATE_SKIP;
 }
 
+/* 物理游戏坐标是否落在小地图矩形内。PiP 用它区分"点小地图 = 给小窗定位"与
+ * "点别处 = 失焦"。列起点必须与 FM_RadarClickGate 同源 (Fm_ColumnX)。 */
+int FM_RadarHit(int gx, int gy)
+{
+    RectangleStruct radar;
+    RectangleStruct* sb = (RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS;
+    int colX;
+
+    if (!Fm_RadarRect(&radar)) return 0;
+    colX = Fm_ColumnX(0);
+    if (colX < 0) colX = sb->X;
+    if (colX < 0 || colX > 8192) return 0;
+    gx -= colX + radar.X;
+    gy -= radar.Y;
+    return (gx >= 0 && gx < radar.Width && gy >= 0 && gy < radar.Height) ? 1 : 0;
+}
+
+/* 侧栏列在屏幕 (合成面) 上的起点 X; 拿不到返回 -1。 */
+int FM_SidebarColumnX(void)
+{
+    int colX = Fm_ColumnPlace();   /* 无效时自己退回"贴右缘" */
+    if (colX < 0 || colX > 8192) return -1;
+    return colX;
+}
+
 /* Syringe 入口 (cdecl, regs 未用; 返回值 = 继续执行的地址, 0=走原版) */
 extern "C" __declspec(dllexport) unsigned __cdecl FullMap_RadarClickGate(void* regs)
 {
