@@ -91,3 +91,8 @@
 ; mov eax,[ecx+0xD90])。Band 存的是主视口局部坐标, 第二摄像机渲染时照画会贴出
 ; 错位幽灵框; 主视图渲染 (g_InRender=0) 不受影响。见 PiP.cpp
 0x6DA180 = PiP_BandGate, 6
+
+; ESC 菜单: 对话框创建后 (ESI=HWND, 5B). 见 src/GUI/EscMenu.cpp 与 notes/ESC菜单.md
+0x4F1140 = EscMenu_OnShow, 5
+; ESC 菜单: 临时 BSurface 内容绘制后、blit 前 (6B).
+0x622396 = EscMenu_OnPaintSurface, 6

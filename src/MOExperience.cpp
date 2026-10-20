@@ -38,6 +38,7 @@
 #include "ScaleBar.h"
 #include "PauseView.h"
 #include "PiP.h"
+#include "EscMenu.h"
 #include "MOExperience.h"
 #include "MOEVersion.h"
 
@@ -206,6 +207,7 @@ void MOE_EnsureInit(void)
     SB_EnsureInit();   /* 底栏: 读 [BottomBar] (缩放档位/几何); ScaleEnable=0 时缩放空转 */
     PV_EnsureInit();   /* 底栏: 读 [BottomBar] (暂停按钮 PauseEnable/PauseHotkey) */
     PiP_EnsureInit();  /* 画中画: 读 [PiP] (第二摄像机小窗) */
+    EscMenu_EnsureInit(); /* ESC 菜单自定义页: 读 [EscMenu] */
 }
 
 /* ---------------- 渲染回退原因统计 ----------------
