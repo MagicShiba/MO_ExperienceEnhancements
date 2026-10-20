@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include "GdiText.h"
+#include "Lang.h"
 #include "EscMenu.h"
 
 #define ESC_SECTION          "EscMenu"
@@ -33,12 +34,17 @@
 #define ESC_SEP_GAP          4
 #define ESC_ROW_H            24
 #define ESC_TEXT_SS          2
+#define ESC_LABEL_CAP        96
 
 static int  s_Init = 0;
 static int  s_Enable = 1;
 static int  s_Sel = 0;
 
 static HWND s_Host = NULL;
+static wchar_t s_LeftTitle[ESC_LABEL_CAP];
+static wchar_t s_LeftItem[2][ESC_LABEL_CAP];
+static wchar_t s_RightTitle[ESC_LABEL_CAP];
+static wchar_t s_RightItem[2][ESC_LABEL_CAP];
 
 /* ---------------- init ---------------- */
 
@@ -49,6 +55,19 @@ void EscMenu_EnsureInit(void)
     BuildPaths();
     GtEnsureLog();
     s_Enable = GetPrivateProfileIntA(ESC_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
+    Lang_EnsureInit();
+    Lang_GetW(ESC_SECTION, "LeftTitle", L"\u529F\u80FD\u83DC\u5355",
+              s_LeftTitle, ESC_LABEL_CAP);
+    Lang_GetW(ESC_SECTION, "LeftItem1", L"\u5360\u4F4D\u9879 1",
+              s_LeftItem[0], ESC_LABEL_CAP);
+    Lang_GetW(ESC_SECTION, "LeftItem2", L"\u5360\u4F4D\u9879 2",
+              s_LeftItem[1], ESC_LABEL_CAP);
+    Lang_GetW(ESC_SECTION, "RightTitle", L"\u8BE6\u7EC6\u8BBE\u7F6E",
+              s_RightTitle, ESC_LABEL_CAP);
+    Lang_GetW(ESC_SECTION, "RightItem1", L"\u5360\u4F4D\u8BBE\u7F6E A",
+              s_RightItem[0], ESC_LABEL_CAP);
+    Lang_GetW(ESC_SECTION, "RightItem2", L"\u5360\u4F4D\u8BBE\u7F6E B",
+              s_RightItem[1], ESC_LABEL_CAP);
     if (!g_Calibrated) Calibrate();
     if (!g_ExpReady) GtBuildExpand();
     if (g_Log) LogLine(s_Enable ? "esc: init on" : "esc: init off");
@@ -295,12 +314,12 @@ static void Esc_Panel(void* surf, RECT* p, const wchar_t* title,
 static void Esc_DrawPanels(void* surf, HWND hDlg)
 {
     EscRow leftRows[2] = {
-        { L"\u5360\u4F4D\u9879 1", s_Sel == 0 },
-        { L"\u5360\u4F4D\u9879 2", s_Sel == 1 },
+        { s_LeftItem[0], s_Sel == 0 },
+        { s_LeftItem[1], s_Sel == 1 },
     };
     EscRow rightRows[2] = {
-        { L"\u5360\u4F4D\u8BBE\u7F6E A", 0 },
-        { L"\u5360\u4F4D\u8BBE\u7F6E B", 0 },
+        { s_RightItem[0], 0 },
+        { s_RightItem[1], 0 },
     };
     RECT a, b;
 
@@ -308,8 +327,8 @@ static void Esc_DrawPanels(void* surf, HWND hDlg)
     if (!g_ExpReady) GtBuildExpand();
     if (!Esc_Layout(hDlg, &a, &b)) return;
 
-    Esc_Panel(surf, &a, L"\u529F\u80FD\u83DC\u5355", leftRows, 2);
-    Esc_Panel(surf, &b, L"\u8BE6\u7EC6\u8BBE\u7F6E", rightRows, 2);
+    Esc_Panel(surf, &a, s_LeftTitle, leftRows, 2);
+    Esc_Panel(surf, &b, s_RightTitle, rightRows, 2);
 }
 
 /* ---------------- input ---------------- */

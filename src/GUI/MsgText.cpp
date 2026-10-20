@@ -18,6 +18,7 @@
 
 #include <windows.h>
 #include "GdiText.h"
+#include "Lang.h"
 #include "OrderUtil.h"
 #include "ChatEdit.h"
 #include "MsgText.h"
@@ -637,11 +638,11 @@ static void MsgText_LoadRadarNames(void)
         q = AppendCStr(key, q, "Name", sizeof(key));
         UtoA((unsigned)i, kb);
         q = AppendCStr(key, q, kb, sizeof(key));
-        OU_ReadString(RADAR_SEC, key, kRadarNameDef[i],
-                      g_Cfg.RadarName[i], sizeof(g_Cfg.RadarName[i]));
+        Lang_GetA(RADAR_SEC, key, kRadarNameDef[i],
+                  g_Cfg.RadarName[i], sizeof(g_Cfg.RadarName[i]));
     }
-    OU_ReadString(RADAR_SEC, "NameOther", "雷达事件",
-                  g_Cfg.RadarNameOther, sizeof(g_Cfg.RadarNameOther));
+    Lang_GetA(RADAR_SEC, "NameOther", "雷达事件",
+              g_Cfg.RadarNameOther, sizeof(g_Cfg.RadarNameOther));
     /* 顺手转成宽字符 (每帧不转, 只在载入时一次) */
     for (i = 0; i < RADAR_NAME_N; i++)
         Utf8ToWide(g_Cfg.RadarNameW[i], g_Cfg.RadarNameW[i] + FONT_FACE_MAX,
@@ -668,6 +669,7 @@ void MsgText_EnsureInit(void)
     g_InitDone = 1;
     GtEnsureLog();
     if (!g_Log) return;
+    Lang_EnsureInit();
     MsgText_LoadConfig();
     MsgText_LoadRadarNames();
     LogLine("msgtext: start");

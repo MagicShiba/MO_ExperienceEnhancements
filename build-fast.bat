@@ -19,7 +19,7 @@ if /i "%~1"=="/clean" (
 
 set NEEDFULL=0
 if not exist obj mkdir obj
-for %%N in (MOExperience SyringeHooks GdiText MsgText SWPanel PowerDisplay VecText ToolTip ChatEdit FullMap ScaleBar PauseView PiP GridView SideScroll EscMenu TypeSelect AirWay BuildQueue PatrolCircle RallyPath SmartOrder TreeChop FuzzyAttack AttackMove SmartArea OrderUtil MindSelect Observer DeployPreview WeaponRange SWSBar RepairAll PlaceScatter OrderThrottle WaypointCap MegaListCap NoApproach Aggressive Icon IconMap) do (
+for %%N in (MOExperience SyringeHooks GdiText Lang MsgText SWPanel PowerDisplay VecText ToolTip ChatEdit FullMap ScaleBar PauseView PiP GridView SideScroll EscMenu TypeSelect AirWay BuildQueue PatrolCircle RallyPath SmartOrder TreeChop FuzzyAttack AttackMove SmartArea OrderUtil MindSelect Observer DeployPreview WeaponRange SWSBar RepairAll PlaceScatter OrderThrottle WaypointCap MegaListCap NoApproach Aggressive Icon IconMap) do (
   if not exist "obj\%%N.o" set NEEDFULL=1
 )
 if "%NEEDFULL%"=="1" (
@@ -56,7 +56,7 @@ if not exist obj\compiled.flag (
 )
 
 echo [ld] linking
-g++ -shared -o dist\MOExperience.dll obj\MOExperience.o obj\SyringeHooks.o obj\GdiText.o obj\MsgText.o obj\SWPanel.o obj\PowerDisplay.o obj\VecText.o obj\TypeSelect.o obj\AirWay.o obj\BuildQueue.o obj\PatrolCircle.o obj\RallyPath.o obj\SmartOrder.o obj\TreeChop.o obj\FuzzyAttack.o obj\AttackMove.o obj\SmartArea.o obj\OrderUtil.o obj\MindSelect.o obj\Observer.o obj\DeployPreview.o obj\WeaponRange.o obj\ToolTip.o obj\ChatEdit.o obj\FullMap.o obj\ScaleBar.o obj\PauseView.o obj\PiP.o obj\GridView.o obj\SideScroll.o obj\SWSBar.o obj\RepairAll.o obj\PlaceScatter.o obj\OrderThrottle.o obj\WaypointCap.o obj\MegaListCap.o obj\NoApproach.o obj\Aggressive.o obj\EscMenu.o obj\Icon.o obj\IconMap.o ^
+g++ -shared -o dist\MOExperience.dll obj\MOExperience.o obj\SyringeHooks.o obj\GdiText.o obj\Lang.o obj\MsgText.o obj\SWPanel.o obj\PowerDisplay.o obj\VecText.o obj\TypeSelect.o obj\AirWay.o obj\BuildQueue.o obj\PatrolCircle.o obj\RallyPath.o obj\SmartOrder.o obj\TreeChop.o obj\FuzzyAttack.o obj\AttackMove.o obj\SmartArea.o obj\OrderUtil.o obj\MindSelect.o obj\Observer.o obj\DeployPreview.o obj\WeaponRange.o obj\ToolTip.o obj\ChatEdit.o obj\FullMap.o obj\ScaleBar.o obj\PauseView.o obj\PiP.o obj\GridView.o obj\SideScroll.o obj\SWSBar.o obj\RepairAll.o obj\PlaceScatter.o obj\OrderThrottle.o obj\WaypointCap.o obj\MegaListCap.o obj\NoApproach.o obj\Aggressive.o obj\EscMenu.o obj\Icon.o obj\IconMap.o ^
   -nostdlib -lkernel32 -luser32 -lgdi32 -limm32 -lgcc ^
   -Wl,--enable-stdcall-fixup -Wl,--no-insert-timestamp -Wl,--entry,_DllMain@12
 if errorlevel 1 exit /b 1

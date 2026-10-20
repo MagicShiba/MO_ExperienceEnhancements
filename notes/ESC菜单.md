@@ -57,7 +57,18 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
 - 原 WndProc 存在窗口属性 `MOE_EscOldProc`；按 `IsWindowUnicode` 选择
   `CallWindowProcA/W` 或 `DefWindowProcA/W`。
 
-## 5. 日志
+## 5. 多语言
+
+- 每个语言一个文件：`MOExperienceResources\<locale>.ini`，节名固定为
+  `[EscMenu]` 和 `[MsgRadar]`。
+- 语言取系统 UI 语言；存在同名的 `<locale>.ini` 就优先使用。
+  zh 系列无对应文件用 `zh-CN.ini`，其它语言无对应文件用 `en-US.ini`。
+- 菜单标题和占位项读取 `[EscMenu]` 的 `LeftTitle`、`LeftItem1/2`、
+  `RightTitle`、`RightItem1/2`；雷达文案读取 `[MsgRadar]` 的
+  `Name0..Name16`、`NameOther`。
+- 语言文件缺失或条目为空时，回退旧主 ini 同名节/内置默认值。
+
+## 6. 日志
 
 `MOExperience.log`：`esc: init on/off`、`esc: host set`、`esc: subclass ok`、
 `esc: subclass fail`、`esc: select N`。

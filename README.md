@@ -60,7 +60,7 @@
 目前不打算合并。
 
 ## 使用说明
-将 `MOExperience.dll` 与 `MOExperience.ini` 配置文件放在游戏根目录内。
+将 `MOExperience.dll`、`MOExperience.ini` 与 `MOExperienceResources` 文件夹放在游戏根目录内。
 
 ### 功能配置
 在 `MOExperience.ini` 中写了详细的使用说明。  
