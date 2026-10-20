@@ -10,6 +10,9 @@ void SB_EnsureInit(void);
  * 只判这个的钩子: 原版那条被整条换掉、不回调原版, 不在管事时不能装。*/
 int SB_Enabled(void);
 
+/* 运行时开关: 关闭前先回到 1x 并释放放大的离屏表面。 */
+void SB_SetEnabled(int enable);
+
 /* 每循环 (prepare 钩) 调: 摆刻度条矩形 + 处理点击换档 + 准备缩小档大面。 */
 void SB_Poll(void);
 

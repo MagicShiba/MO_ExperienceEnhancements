@@ -721,6 +721,11 @@ void MsgText_EnsureInit(void)
     ResolveFontFace(g_Cfg.HintFontFace, "hint", g_HintFace, L"Microsoft YaHei");
 }
 
+void MsgText_ReloadLang(void)
+{
+    if (g_InitDone) MsgText_LoadRadarNames();
+}
+
 /* 战役框文字样式 (ChatEdit 的输入框同源, 不另设字体键)。
  * *face=已解析的字体名, *px=字高 (<=0 表示跟游戏点阵), *bold=1/0。 */
 void MsgText_CampStyle(const wchar_t** face, int* px, int* bold)

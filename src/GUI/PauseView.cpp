@@ -197,6 +197,26 @@ static int PV_ShowButtons(void)
     return (s_BtnShowInit || s_AutoShow) ? 1 : 0;
 }
 
+int PV_ButtonsEnabled(void)
+{
+    PV_EnsureInit();
+    return PV_ShowButtons();
+}
+
+void PV_SetButtonsEnabled(int enable)
+{
+    PV_EnsureInit();
+    s_BtnShowInit = enable ? 1 : 0;
+    if (!s_BtnShowInit)
+    {
+        s_AutoShow = 0;
+        s_Paused = 0;
+        s_Step = 0;
+    }
+    s_LbPrev = 0;
+    s_HovG = s_Hov1 = s_Hov2 = 0;
+}
+
 /* 格网缓存/绘制已移入 GridView.cpp, 本文件只调 GV_ 接口 (见 GridView.h)。 */
 
 /* 点击 + 悬停 (左键上升沿才动作, 按下点在别处划进来的不算)。 */

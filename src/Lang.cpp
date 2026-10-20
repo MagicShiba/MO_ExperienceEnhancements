@@ -18,6 +18,7 @@
 #define LANG_VALUE_CAP      512
 
 static int  s_Ready = 0;
+static int  s_Mode = LANG_MODE_AUTO;
 static char s_SystemLocale[LANG_LOCALE_CAP];
 static char s_Path[MAX_PATH_LEN];
 
@@ -55,7 +56,7 @@ static int Lang_ValidLocale(const char* s)
     return n > 0;
 }
 
-static int Lang_IsChinese(const char* s)
+static int Lang_LocaleIsChinese(const char* s)
 {
     if (!s) return 0;
     return (s[0] == 'z' || s[0] == 'Z') &&
@@ -133,8 +134,10 @@ static int Lang_TryLocale(const char* locale)
 static void Lang_SelectFile(void)
 {
     s_Path[0] = 0;
+    if (s_Mode == LANG_MODE_ZH) { Lang_TryLocale(LANG_DEFAULT_ZH); return; }
+    if (s_Mode == LANG_MODE_EN) { Lang_TryLocale(LANG_DEFAULT_EN); return; }
     if (Lang_TryLocale(s_SystemLocale)) return;
-    if (Lang_IsChinese(s_SystemLocale))
+    if (Lang_LocaleIsChinese(s_SystemLocale))
     {
         if (Lang_TryLocale(LANG_DEFAULT_ZH)) return;
     }
@@ -151,16 +154,30 @@ void Lang_EnsureInit(void)
     if (!g_IniPath[0]) BuildPaths();
     Lang_GetSystemLocale();
     Lang_SelectFile();
-    if (g_Log)
-    {
-        char b[384];
-        unsigned n = 0;
-        n = AppendCStr(b, n, "lang: sys=", sizeof(b));
-        n = AppendCStr(b, n, s_SystemLocale, sizeof(b));
-        n = AppendCStr(b, n, " file=", sizeof(b));
-        n = AppendCStr(b, n, s_Path[0] ? s_Path : "(none)", sizeof(b));
-        LogLine(b);
-    }
+    if (g_Log && !s_Path[0]) LogLine("lang: no language file");
+}
+
+int Lang_IsChinese(void)
+{
+    Lang_EnsureInit();
+    if (s_Mode == LANG_MODE_ZH) return 1;
+    if (s_Mode == LANG_MODE_EN) return 0;
+    return Lang_LocaleIsChinese(s_SystemLocale);
+}
+
+int Lang_GetMode(void)
+{
+    Lang_EnsureInit();
+    return s_Mode;
+}
+
+void Lang_SetMode(int mode)
+{
+    if (mode < LANG_MODE_AUTO || mode > LANG_MODE_EN) mode = LANG_MODE_AUTO;
+    Lang_EnsureInit();
+    if (mode == s_Mode) return;
+    s_Mode = mode;
+    Lang_SelectFile();
 }
 
 static void Lang_Read(const char* path, const char* section, const char* key,
@@ -225,17 +242,17 @@ static wchar_t* Lang_Utf8ToWide(wchar_t* dst, wchar_t* end, const unsigned char*
     return dst;
 }
 
-void Lang_GetW(const char* section, const char* key, const wchar_t* def,
-               wchar_t* buf, int cap)
+int Lang_GetW(const char* section, const char* key, const wchar_t* def,
+              wchar_t* buf, int cap)
 {
     char tmp[LANG_VALUE_CAP];
-    if (!buf || cap <= 0) return;
+    if (!buf || cap <= 0) return 0;
     buf[0] = 0;
     Lang_GetA(section, key, "", tmp, sizeof(tmp));
     if (tmp[0])
     {
         Lang_Utf8ToWide(buf, buf + cap, (const unsigned char*)tmp);
-        if (buf[0]) return;
+        if (buf[0]) return 1;
     }
     if (def)
     {
@@ -243,4 +260,5 @@ void Lang_GetW(const char* section, const char* key, const wchar_t* def,
         while (i < cap - 1 && def[i]) { buf[i] = def[i]; i++; }
         buf[i] = 0;
     }
+    return 0;
 }

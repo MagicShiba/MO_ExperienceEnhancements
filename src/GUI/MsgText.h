@@ -21,6 +21,9 @@
 /* 一次性初始化 (读配置 + 解析字体); 幂等, 各钩子入口都先调它。 */
 void MsgText_EnsureInit(void);
 
+/* 运行期切换语言后重载缓存的雷达文案。 */
+void MsgText_ReloadLang(void);
+
 /* 是否接管 (与 MsgText_DrawFrame 同一开关, 协调层无条件抑制原版用)。 */
 int MsgText_Enabled(void);
 

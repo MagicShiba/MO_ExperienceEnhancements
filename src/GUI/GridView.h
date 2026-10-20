@@ -15,6 +15,7 @@ int GV_ShowBlocked(void);
 /* 开关状态; Toggle 翻转并处理缓存 (关时释放内存, 开时作废等重建), 返回新状态。 */
 int GV_IsOn(void);
 int GV_Toggle(void);
+void GV_SetOn(int on);
 
 /* 缓存作废 (新开/读档/换图/开关切换时调, 保留已分配内存供复用)。 */
 void GV_Drop(void);

@@ -1840,6 +1840,22 @@ void SB_ResetZoom1x(void)
     Sb_LevelChanged();
 }
 
+void SB_SetEnabled(int enable)
+{
+    SB_EnsureInit();
+    enable = enable ? 1 : 0;
+    if (enable == s_Enable) return;
+
+    if (!enable)
+    {
+        if (s_Level != s_LevOne) SB_ResetZoom1x();
+        if (s_SurfActive) SB_SurfaceDestroy();
+    }
+
+    s_Enable = enable;
+    Sb_SyncZoomed();
+}
+
 /* 每循环: 摆矩形 + 点击换档。 */
 void SB_Poll(void)
 {

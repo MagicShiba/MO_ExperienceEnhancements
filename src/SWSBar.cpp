@@ -2560,6 +2560,66 @@ static void SwsToggleFill(void)
     LogLine(s_FillMode ? "sws: fillmode on" : "sws: fillmode off");
 }
 
+int SWS_Enabled(void)
+{
+    SwsEnsureInit();
+    return s_Enable;
+}
+
+static void SwsInvalidateCache(void);
+
+void SWS_SetEnabled(int enable)
+{
+    SwsEnsureInit();
+    enable = enable ? 1 : 0;
+    if (enable == s_Enable) return;
+    s_Enable = enable;
+    SwsInvalidateCache();
+    s_BoundsKnown = 0;
+    if (enable)
+    {
+        s_ForceScan = 1;
+        s_DedupDirty = 1;
+    }
+    else
+    {
+        s_HidValid = 0;
+    }
+}
+
+int SWS_FillMode(void)
+{
+    SwsEnsureInit();
+    return s_FillMode;
+}
+
+void SWS_SetFillMode(int fill)
+{
+    SwsEnsureInit();
+    if ((fill ? 1 : 0) == s_FillMode) return;
+    SwsToggleFill();
+}
+
+int SWS_MaxRows(void)
+{
+    SwsEnsureInit();
+    return s_MaxRows;
+}
+
+void SWS_SetMaxRows(int rows)
+{
+    SwsEnsureInit();
+    if (rows < 1) rows = 1;
+    if (rows > 40) rows = 40;
+    if (rows == s_MaxRows) return;
+    s_MaxRows = rows;
+    s_Scroll = 0;
+    s_OrderN = -1;
+    SwsInvalidateCache();
+    s_BoundsKnown = 0;
+    s_ForceScan = 1;
+}
+
 void SWS_Poll(void)
 {
     static int s_LastItemN = -1;
@@ -2975,6 +3035,11 @@ static unsigned s_CchSig = 0;           /* 上次重建时的结构指纹 */
 static int s_CchHover = -2;             /* 上次重建用的悬停项 (改了就重画) */
 static int s_CchBtn = -1;               /* 上次重建用的按钮悬停态 */
 static int s_CchSel = -9999;            /* 上次重建用的当前选中 (改了就重画) */
+
+static void SwsInvalidateCache(void)
+{
+    s_CchOK = 0;
+}
 
 /* 8 位 RGB -> 目标位深的 16 位色 (与 Blend16 同一套移位/掩码) */
 static unsigned short SwsPack(unsigned char r, unsigned char g, unsigned char b)

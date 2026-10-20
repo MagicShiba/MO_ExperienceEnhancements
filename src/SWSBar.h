@@ -20,3 +20,11 @@ extern "C" __declspec(dllexport) unsigned __cdecl SWS_ClickGate(void* regs);
  * 发布, 无需开关时自问向上随滚动条回卷。 */
 extern "C" __declspec(dllexport) int __cdecl SWS_WheelIn(int mx, int my, int dir);
 extern "C" __declspec(dllexport) int __cdecl SWS_OverBar(int mx, int my);
+
+/* GUI 设置菜单用的运行时开关/查询。 */
+int SWS_Enabled(void);
+void SWS_SetEnabled(int enable);
+int SWS_FillMode(void);
+void SWS_SetFillMode(int fill);
+int SWS_MaxRows(void);
+void SWS_SetMaxRows(int rows);

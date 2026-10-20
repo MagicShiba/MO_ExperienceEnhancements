@@ -31,6 +31,7 @@ void GV_EnsureInit(void)
     GtEnsureLog();
     if (g_Log)
     {
+        s_GridOn = GetPrivateProfileIntA(GV_SECTION, "GridEnable", 0, g_IniPath) ? 1 : 0;
         s_GridCullBack = GetPrivateProfileIntA(GV_SECTION, "GridCullBack", 1, g_IniPath) ? 1 : 0;
         s_GridShowBlocked = GetPrivateProfileIntA(GV_SECTION, "GridShowBlocked", 1, g_IniPath) ? 1 : 0;
     }
@@ -38,7 +39,7 @@ void GV_EnsureInit(void)
 
 int GV_CullBack(void) { return s_GridCullBack; }
 int GV_ShowBlocked(void) { return s_GridShowBlocked; }
-int GV_IsOn(void) { return s_GridOn; }
+int GV_IsOn(void) { GV_EnsureInit(); return s_GridOn; }
 
 /* ---------------- 格网缓存 (逐格自有平面, 停稳重建) ---------------- */
 
@@ -158,6 +159,14 @@ int GV_Toggle(void)
     if (!s_GridOn) GV_Free();   /* 关: 释放内存; 开: 防抖后重建 (内存复用) */
     GV_Drop();
     return s_GridOn;
+}
+
+void GV_SetOn(int on)
+{
+    GV_EnsureInit();
+    on = on ? 1 : 0;
+    if (on == s_GridOn) return;
+    GV_Toggle();
 }
 
 static void* GV_AllocBytes(unsigned n)
