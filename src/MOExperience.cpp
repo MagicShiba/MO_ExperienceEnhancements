@@ -39,6 +39,7 @@
 #include "PauseView.h"
 #include "PiP.h"
 #include "EscMenu.h"
+#include "SidebarSkin.h"
 #include "MOExperience.h"
 #include "MOEVersion.h"
 
@@ -207,6 +208,7 @@ void MOE_EnsureInit(void)
     SB_EnsureInit();   /* 底栏: 读 [BottomBar] (缩放档位/几何); ScaleEnable=0 时缩放空转 */
     PV_EnsureInit();   /* 底栏: 读 [BottomBar] (暂停按钮 PauseEnable/PauseHotkey) */
     PiP_EnsureInit();  /* 画中画: 读 [PiP] (第二摄像机小窗) */
+    SidebarSkin_EnsureInit(); /* 阵营 UI 皮肤: 读 [Sidebar] SkinSide */
     EscMenu_EnsureInit(); /* ESC 菜单自定义页: 读 [EscMenu] */
 }
 
@@ -303,6 +305,9 @@ static void PowerDrawBoth(void)
     /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;
      * 侧栏不呈现时 BlitSidebar 不跑, 字不会冒出来。 */
     PowerDisplay_DrawSb();
+    /* 阵营 UI: InitGUI/setDims 内只登记, 等本循环所有视口/侧栏消费者都跑完,
+     * 在稳定点换资源; 否则会在 applyview 阶段换掉侧栏 SHP 导致绘制崩溃。 */
+    SidebarSkin_Poll();
 }
 
 static void* g_CallPrepare = (void*)PowerDrawBoth;

@@ -12,6 +12,7 @@
 #include "MsgText.h"
 #include "OrderUtil.h"
 #include "EscMenu.h"
+#include "SidebarSkin.h"
 
 #define ESC_SECTION          "EscMenu"
 #define ESC_REG_ESI          0x0Cu          /* Syringe REGISTERS: ESI */
@@ -49,8 +50,9 @@
 #define ESC_TEXT_SS          2
 #define ESC_LABEL_CAP        96
 #define ESC_LEFT_ROWS        2
-#define ESC_GUI_ITEMS        6
-#define ESC_GUI_DISPLAY      8
+#define ESC_GUI_ITEMS        7
+#define ESC_GUI_DISPLAY      11
+#define ESC_SKIN_N           5
 #define ESC_LANG_N           3
 #define ESC_LANG_GAP         14
 
@@ -61,6 +63,7 @@
 #define ESC_STEP_W           96
 #define ESC_STEP_BTN_W       24
 #define ESC_STEP_BTN_H       20
+#define ESC_SKIN_GAP         10
 #define ESC_ROWS_MIN         1
 #define ESC_ROWS_MAX         40
 #define ESC_AA_SS            8
@@ -86,12 +89,13 @@ static wchar_t s_LeftItem[ESC_LEFT_ROWS][ESC_LABEL_CAP];
 static wchar_t s_RightTitle[ESC_LABEL_CAP];
 static wchar_t s_RightItem[2][ESC_LABEL_CAP];
 static wchar_t s_GuiTitle[ESC_LABEL_CAP];
-static wchar_t s_GuiGroup[2][ESC_LABEL_CAP];
+static wchar_t s_GuiGroup[4][ESC_LABEL_CAP];
 static wchar_t s_GuiLabel[ESC_GUI_ITEMS][ESC_LABEL_CAP];
 static wchar_t s_GuiOn[16];
 static wchar_t s_GuiOff[16];
 static wchar_t s_GuiFaction[32];
 static wchar_t s_GuiFill[32];
+static wchar_t s_GuiSkinName[ESC_SKIN_N][32];
 
 static const wchar_t* const s_LangLabel[ESC_LANG_N] = { L"ZH", L"EN", L"AUTO" };
 static const int s_LangMode[ESC_LANG_N] = {
@@ -132,18 +136,26 @@ static void Esc_LoadAllText(void)
 
     s_GuiMissing = 0;
     Esc_GuiText("GuiTitle", s_GuiTitle, ESC_LABEL_CAP);
-    Esc_GuiText("GuiGroupBottom", s_GuiGroup[0], ESC_LABEL_CAP);
+    Esc_GuiText("GuiGroupGeneral", s_GuiGroup[0], ESC_LABEL_CAP);
+    Esc_GuiText("GuiGroupBottom", s_GuiGroup[1], ESC_LABEL_CAP);
     Esc_GuiText("GuiScale", s_GuiLabel[0], ESC_LABEL_CAP);
     Esc_GuiText("GuiPause", s_GuiLabel[1], ESC_LABEL_CAP);
     Esc_GuiText("GuiGrid", s_GuiLabel[2], ESC_LABEL_CAP);
-    Esc_GuiText("GuiGroupSws", s_GuiGroup[1], ESC_LABEL_CAP);
+    Esc_GuiText("GuiGroupSws", s_GuiGroup[2], ESC_LABEL_CAP);
+    Esc_GuiText("GuiGroupMisc", s_GuiGroup[3], ESC_LABEL_CAP);
     Esc_GuiText("GuiSws", s_GuiLabel[3], ESC_LABEL_CAP);
     Esc_GuiText("GuiSort", s_GuiLabel[4], ESC_LABEL_CAP);
     Esc_GuiText("GuiRows", s_GuiLabel[5], ESC_LABEL_CAP);
+    Esc_GuiText("GuiSkin", s_GuiLabel[6], ESC_LABEL_CAP);
     Esc_GuiText("GuiOn", s_GuiOn, 16);
     Esc_GuiText("GuiOff", s_GuiOff, 16);
     Esc_GuiText("GuiSortFaction", s_GuiFaction, 32);
     Esc_GuiText("GuiSortFill", s_GuiFill, 32);
+    Esc_GuiText("GuiSkinDefault", s_GuiSkinName[0], 32);
+    Esc_GuiText("GuiSkin1", s_GuiSkinName[1], 32);
+    Esc_GuiText("GuiSkin2", s_GuiSkinName[2], 32);
+    Esc_GuiText("GuiSkin3", s_GuiSkinName[3], 32);
+    Esc_GuiText("GuiSkin4", s_GuiSkinName[4], 32);
 }
 
 void EscMenu_EnsureInit(void)
@@ -260,7 +272,8 @@ enum {
     EG_GROUP = 0,
     EG_SWITCH,
     EG_SORT,
-    EG_ROWS
+    EG_ROWS,
+    EG_SKIN
 };
 
 typedef struct {
@@ -270,13 +283,16 @@ typedef struct {
 
 static const EscGuiRowInfo s_GuiLayout[ESC_GUI_DISPLAY] = {
     { EG_GROUP,  0 },
+    { EG_GROUP,  1 },
     { EG_SWITCH, 0 },
     { EG_SWITCH, 1 },
     { EG_SWITCH, 2 },
-    { EG_GROUP,  1 },
+    { EG_GROUP,  2 },
     { EG_SWITCH, 3 },
     { EG_SORT,   4 },
-    { EG_ROWS,   5 }
+    { EG_ROWS,   5 },
+    { EG_GROUP,  3 },
+    { EG_SKIN,   6 }
 };
 
 static int Esc_GuiContentTop(const RECT* p)
@@ -635,6 +651,34 @@ static int Esc_RowCtlX(int rowRight)
     return rowRight - ESC_CTL_RIGHT - ESC_STEP_W;
 }
 
+static void Esc_SkinSegLayout(int rowL, int rowW, int* xs, int* ws)
+{
+    int i, total = 0, x;
+
+    for (i = 0; i < ESC_SKIN_N; i++)
+    {
+        ws[i] = Esc_TextWidth(s_GuiSkinName[i], ESC_BODY_PX, ESC_BODY_SLOT);
+        total += ws[i];
+        if (i) total += ESC_SKIN_GAP;
+    }
+    x = rowL + rowW - ESC_CTL_RIGHT - total;
+    for (i = 0; i < ESC_SKIN_N; i++)
+    {
+        xs[i] = x;
+        x += ws[i] + ESC_SKIN_GAP;
+    }
+}
+
+static int Esc_SkinSegmentAt(int rowL, int rowW, int mx)
+{
+    int xs[ESC_SKIN_N], ws[ESC_SKIN_N], i;
+
+    Esc_SkinSegLayout(rowL, rowW, xs, ws);
+    for (i = 0; i < ESC_SKIN_N; i++)
+        if (mx >= xs[i] && mx < xs[i] + ws[i]) return i;
+    return -1;
+}
+
 static int Esc_CtlX(const RECT* p)
 {
     return Esc_RowCtlX(p->right - ESC_PAD);
@@ -781,6 +825,30 @@ static void Esc_DrawRowsRow(void* surf, int rowL, int rowY, int rowW,
              numW, ESC_BODY_PX, ESC_BODY_SLOT, 238, 238, 238);
 }
 
+static void Esc_DrawSkinRow(void* surf, int rowL, int rowY, int rowW,
+                            int bodyH, const wchar_t* label)
+{
+    int xs[ESC_SKIN_N], ws[ESC_SKIN_N];
+    int value = SidebarSkin_Get();
+    int i, ty;
+
+    if (value < 0 || value >= ESC_SKIN_N) value = 0;
+    ty = rowY + (ESC_ROW_H - bodyH) / 2;
+
+    Esc_SkinSegLayout(rowL, rowW, xs, ws);
+    Esc_RowLabel(surf, rowL, rowY, xs[0], bodyH, label);
+
+    for (i = 0; i < ESC_SKIN_N; i++)
+    {
+        int on = (i == value);
+        Esc_Text(surf, s_GuiSkinName[i], xs[i], ty, ws[i] + 2,
+                 ESC_BODY_PX, ESC_BODY_SLOT,
+                 on ? 245 : 145, on ? 225 : 145, on ? 170 : 145);
+    }
+    Esc_Fill(surf, xs[value], rowY + ESC_ROW_H - 6, ws[value], 2,
+             208, 160, 64, 255);
+}
+
 static void Esc_SettingsPanel(void* surf, RECT* p)
 {
     int w, bodyH, rowL, rowW, i, y, rh, kind, item;
@@ -841,6 +909,8 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
             Esc_DrawSortRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
         else if (kind == EG_ROWS)
             Esc_DrawRowsRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
+        else if (kind == EG_SKIN)
+            Esc_DrawSkinRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
     }
 }
 
@@ -1134,6 +1204,9 @@ static int Esc_HitRight(const RECT* b, int mx, int my, int* index)
                     my < sy || my >= sy + ESC_SW_H)
                     return 0;
             }
+            if (s_GuiLayout[i].kind == EG_SKIN &&
+                Esc_SkinSegmentAt(rowL, rowW, mx) < 0)
+                return 0;
             *index = s_GuiLayout[i].item;
             return 1;
         }
@@ -1183,6 +1256,18 @@ static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx)
         if (value < ESC_ROWS_MIN || value > ESC_ROWS_MAX) return;
         SWS_SetMaxRows(value);
         Esc_WriteIniValue("SWSidebar", "MaxRows", value);
+        break;
+    }
+    case 6:
+    {
+        int rowL = right->left + ESC_PAD;
+        int rowW = (right->right - right->left) - ESC_PAD * 2;
+        int pick = Esc_SkinSegmentAt(rowL, rowW, mx);
+
+        if (pick < 0 || pick == SidebarSkin_Get()) return;
+        SidebarSkin_Set(pick);
+        SidebarSkin_Poll();
+        Esc_WriteIniValue("Sidebar", "SkinSide", pick);
         break;
     }
     default:
