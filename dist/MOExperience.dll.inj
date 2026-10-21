@@ -96,3 +96,6 @@
 0x4F1140 = EscMenu_OnShow, 5
 ; ESC 菜单: 临时 BSurface 内容绘制后、blit 前 (6B).
 0x622396 = EscMenu_OnPaintSurface, 6
+
+; Player color rainbow tick (MainLoop frame step, 5B). src/GUI/PlayerColor.cpp
+0x55DDA0 = PlayerColor_TickHook, 5

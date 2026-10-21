@@ -12,7 +12,7 @@
  *
  * 渲染: Microsoft YaHei 经 GDI 光栅化到 32 位内存 DIB (灰度抗锯齿取覆盖率),
  * 经启动校准得到的 16 位格式 (565/555) alpha 混入 Composite。
- * 取色: ColorScheme BaseColor 经 0x517440 转显示色 (Phobos 同用法)。
+ * 取色: ColorScheme BaseColor (HSV) 经 0x517440 转显示色 (Phobos 同用法)。
  * 构建见 build-fast.bat (32 位 mingw, 无 CRT)。
  */
 
@@ -398,8 +398,8 @@ int MsgText_LatestRadar(short* cx, short* cy, unsigned* seq)
 
 /* ---------------- 取色 (ColorScheme -> 显示色) ----------------
  * 与引擎 Fancy_Text_Print_Wide (0x4A61C0) 完全一致。
- * 引擎做法 (反汇编实证): ECX = scheme+0x308 (即 &BaseColor), 栈传 3 字节
- * 输出缓冲, call 0x517440 (stdcall, ret 4), 返回输出缓冲指针。
+ * 引擎做法 (反汇编实证): ECX = scheme+0x308 (即 &BaseColor, HSV 三元组),
+ * 栈传 3 字节输出缓冲, call 0x517440 (HSV->RGB, stdcall, ret 4)。
  * 输出 3 字节的通道顺序由运行时移位表 (0x8A0DD0..0x8A0DE4) 的 shl 决定,
  * 首次使用读表定序: 红 11/10, 绿 5, 蓝 0。 */
 typedef unsigned char* (__fastcall *SchemeToColorFn)(void* base, void* edxUnused, unsigned char* out3);

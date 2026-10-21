@@ -273,8 +273,6 @@ static void Esc_IntToW(wchar_t* dst, unsigned value, int cap)
     dst[n] = 0;
 }
 
-static int s_GuiRowW = ESC_RIGHT_W - ESC_PAD * 2;
-
 static int Esc_ColorPerRow(int rowW)
 {
     int avail = rowW - ESC_COLOR_LABEL_W - ESC_CTL_RIGHT;
@@ -284,12 +282,11 @@ static int Esc_ColorPerRow(int rowW)
 
 static int Esc_ColorRows(int rowW)
 {
-    int count, per, rows;
-    count = PlayerColor_Count();
+    int count = PlayerColor_Count();
+    int per;
     if (count <= 0) return 1;
     per = Esc_ColorPerRow(rowW);
-    rows = (count + per - 1) / per;
-    return rows > 0 ? rows : 1;
+    return (count + per - 1) / per;
 }
 
 enum {
@@ -328,55 +325,51 @@ static int Esc_GuiContentTop(const RECT* p)
     return y;
 }
 
-static int Esc_GuiRowH(int index)
+static int Esc_GuiRowH(const RECT* p, int index)
 {
     int rows;
 
     if (s_GuiLayout[index].kind == EG_GROUP) return ESC_GROUP_H;
     if (s_GuiLayout[index].kind != EG_COLOR) return ESC_ROW_H;
 
-    rows = Esc_ColorRows(s_GuiRowW);
+    rows = Esc_ColorRows((p->right - p->left) - ESC_PAD * 2);
     return ESC_ROW_H + (rows - 1) * (ESC_COLOR_SW + ESC_COLOR_GAP);
 }
 
-static int Esc_GuiRowTop(const RECT* p, int index)
-{
-    int y = Esc_GuiContentTop(p);
-    int i;
-    for (i = 0; i < index; i++)
-    {
-        if (s_GuiLayout[i].kind == EG_GROUP && s_GuiLayout[i].item != 0)
-            y += ESC_BLOCK_GAP;
-        y += Esc_GuiRowH(i);
-    }
-    if (s_GuiLayout[index].kind == EG_GROUP && s_GuiLayout[index].item != 0)
-        y += ESC_BLOCK_GAP;
-    return y;
-}
-
 /* ---------------- 16-bit BSurface drawing ---------------- */
+
+static unsigned char* Esc_LockRect(void* surf, int* x, int* y, int* w, int* h,
+                                   int* pitch)
+{
+    int W, H, bpp;
+    unsigned char* base;
+
+    if (!surf || *w <= 0 || *h <= 0) return NULL;
+    W = GtSurfGet(surf, GtVT_GET_WIDTH);
+    H = GtSurfGet(surf, GtVT_GET_HEIGHT);
+    bpp = GtSurfGet(surf, GtVT_GET_BPP);
+    *pitch = GtSurfGet(surf, GtVT_GET_PITCH);
+    if (W < 1 || H < 1 || bpp != 2 || *pitch < W * 2) return NULL;
+
+    if (*x < 0) { *w += *x; *x = 0; }
+    if (*y < 0) { *h += *y; *y = 0; }
+    if (*x + *w > W) *w = W - *x;
+    if (*y + *h > H) *h = H - *y;
+    if (*w <= 0 || *h <= 0) return NULL;
+
+    base = GtLock(surf);
+    return base;
+}
 
 static void Esc_Fill(void* surf, int x, int y, int w, int h,
                      unsigned r, unsigned g, unsigned b, unsigned a)
 {
     unsigned char* base;
-    int W, H, bpp, pitch, i, j;
+    int pitch, i, j;
     unsigned short col;
 
-    if (!surf || w <= 0 || h <= 0 || a == 0) return;
-    W = GtSurfGet(surf, GtVT_GET_WIDTH);
-    H = GtSurfGet(surf, GtVT_GET_HEIGHT);
-    bpp = GtSurfGet(surf, GtVT_GET_BPP);
-    pitch = GtSurfGet(surf, GtVT_GET_PITCH);
-    if (W < 1 || H < 1 || bpp != 2 || pitch < W * 2) return;
-
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > W) w = W - x;
-    if (y + h > H) h = H - y;
-    if (w <= 0 || h <= 0) return;
-
-    base = GtLock(surf);
+    if (a == 0) return;
+    base = Esc_LockRect(surf, &x, &y, &w, &h, &pitch);
     if (!base) return;
 
     if (a >= 255)
@@ -403,22 +396,9 @@ static void Esc_Fill16(void* surf, int x, int y, int w, int h,
                        unsigned short col)
 {
     unsigned char* base;
-    int W, H, bpp, pitch, i, j;
+    int pitch, i, j;
 
-    if (!surf || w <= 0 || h <= 0) return;
-    W = GtSurfGet(surf, GtVT_GET_WIDTH);
-    H = GtSurfGet(surf, GtVT_GET_HEIGHT);
-    bpp = GtSurfGet(surf, GtVT_GET_BPP);
-    pitch = GtSurfGet(surf, GtVT_GET_PITCH);
-    if (W < 1 || H < 1 || bpp != 2 || pitch < W * 2) return;
-
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > W) w = W - x;
-    if (y + h > H) h = H - y;
-    if (w <= 0 || h <= 0) return;
-
-    base = GtLock(surf);
+    base = Esc_LockRect(surf, &x, &y, &w, &h, &pitch);
     if (!base) return;
     for (j = 0; j < h; j++)
     {
@@ -740,37 +720,41 @@ static int Esc_SkinSegmentAt(int rowL, int rowW, int mx)
     return -1;
 }
 
-static void Esc_ColorSegLayout(int rowL, int rowW, int* xs, int* ys)
+static void Esc_ColorCell(int i, int per, int rowL, int* px, int* py)
 {
-    int i, x, y = 0, count = PlayerColor_Count();
-    int per = Esc_ColorPerRow(rowW);
+    int step = ESC_COLOR_SW + ESC_COLOR_GAP;
 
-    x = rowL + ESC_COLOR_LABEL_W;
-    for (i = 0; i < count; i++)
-    {
-        if (i && i % per == 0)
-        {
-            x = rowL + ESC_COLOR_LABEL_W;
-            y += ESC_COLOR_SW + ESC_COLOR_GAP;
-        }
-        xs[i] = x;
-        ys[i] = y;
-        x += ESC_COLOR_SW + ESC_COLOR_GAP;
-    }
+    *px = rowL + ESC_COLOR_LABEL_W + (i % per) * step;
+    *py = (i / per) * step;
 }
 
 static int Esc_ColorSegmentAt(int rowL, int rowW, int rowY, int mx, int my)
 {
-    int xs[PLAYER_COLOR_MAX], ys[PLAYER_COLOR_MAX], i;
-    int count = PlayerColor_Count();
+    int i, x, y, count = PlayerColor_Count();
+    int per = Esc_ColorPerRow(rowW);
     int top = rowY + (ESC_ROW_H - ESC_COLOR_SW) / 2;
 
-    Esc_ColorSegLayout(rowL, rowW, xs, ys);
     for (i = 0; i < count; i++)
-        if (mx >= xs[i] - 2 && mx < xs[i] + ESC_COLOR_SW + 2 &&
-            my >= top + ys[i] - 2 && my < top + ys[i] + ESC_COLOR_SW + 2)
+    {
+        Esc_ColorCell(i, per, rowL, &x, &y);
+        y += top;
+        if (mx >= x - 2 && mx < x + ESC_COLOR_SW + 2 &&
+            my >= y - 2 && my < y + ESC_COLOR_SW + 2)
             return i;
+    }
     return -1;
+}
+
+static void Esc_DrawRainbowSwatch(void* surf, int x, int y, int size)
+{
+    int i;
+    for (i = 0; i < PLAYER_COLOR_RAINBOW_SEGS; i++)
+    {
+        int x0 = x + (i * size) / PLAYER_COLOR_RAINBOW_SEGS;
+        int x1 = x + ((i + 1) * size) / PLAYER_COLOR_RAINBOW_SEGS;
+        Esc_Fill16(surf, x0, y, x1 - x0, size,
+                   PlayerColor_RainbowSwatch(i));
+    }
 }
 
 static int Esc_CtlX(const RECT* p)
@@ -946,24 +930,27 @@ static void Esc_DrawSkinRow(void* surf, int rowL, int rowY, int rowW,
 static void Esc_DrawColorRow(void* surf, int rowL, int rowY, int rowW,
                              int bodyH, const wchar_t* label)
 {
-    int xs[PLAYER_COLOR_MAX], ys[PLAYER_COLOR_MAX];
     int value = PlayerColor_Current();
-    int i, count = PlayerColor_Count();
+    int i, x, y, count = PlayerColor_Count();
+    int per = Esc_ColorPerRow(rowW);
     int top = rowY + (ESC_ROW_H - ESC_COLOR_SW) / 2;
 
-    Esc_ColorSegLayout(rowL, rowW, xs, ys);
     Esc_RowLabel(surf, rowL, rowY, rowL + ESC_COLOR_LABEL_W - 8,
                  bodyH, label);
 
     for (i = 0; i < count; i++)
     {
-        int y = top + ys[i];
+        Esc_ColorCell(i, per, rowL, &x, &y);
+        y += top;
         if (i == value)
-            Esc_Fill(surf, xs[i] - 2, y - 2, ESC_COLOR_SW + 4,
+            Esc_Fill(surf, x - 2, y - 2, ESC_COLOR_SW + 4,
                      ESC_COLOR_SW + 4, 208, 160, 64, 255);
-        Esc_Fill16(surf, xs[i], y, ESC_COLOR_SW, ESC_COLOR_SW,
-                   PlayerColor_Swatch(i));
-        Esc_Outline(surf, xs[i], y, ESC_COLOR_SW, ESC_COLOR_SW, 0, 0, 0, 200);
+        if (i == count - 1)
+            Esc_DrawRainbowSwatch(surf, x, y, ESC_COLOR_SW);
+        else
+            Esc_Fill16(surf, x, y, ESC_COLOR_SW, ESC_COLOR_SW,
+                       PlayerColor_Swatch(i));
+        Esc_Outline(surf, x, y, ESC_COLOR_SW, ESC_COLOR_SW, 0, 0, 0, 200);
     }
 }
 
@@ -979,7 +966,6 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
 
     rowL = p->left + ESC_PAD;
     rowW = w - ESC_PAD * 2;
-    s_GuiRowW = rowW;
 
     if (s_GuiMissing)
     {
@@ -991,14 +977,14 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
                  255, 210, 210);
     }
 
-    for (i = 0; i < ESC_GUI_DISPLAY; i++)
+    for (i = 0, y = Esc_GuiContentTop(p); i < ESC_GUI_DISPLAY; i++)
     {
-        y = Esc_GuiRowTop(p, i);
-        rh = Esc_GuiRowH(i);
-        if (y + rh > p->bottom - ESC_PAD) break;
-
         kind = s_GuiLayout[i].kind;
         item = s_GuiLayout[i].item;
+
+        if (kind == EG_GROUP && item != 0) y += ESC_BLOCK_GAP;
+        rh = Esc_GuiRowH(p, i);
+        if (y + rh > p->bottom - ESC_PAD) break;
 
         if (kind == EG_GROUP)
         {
@@ -1007,6 +993,7 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
             Esc_Text(surf, s_GuiGroup[item], rowL + ESC_TEXT_INSET,
                      y + (rh - bodyH) / 2, rowW - ESC_TEXT_INSET - 6,
                      ESC_BODY_PX, ESC_BODY_SLOT, 250, 220, 160);
+            y += rh;
             continue;
         }
 
@@ -1035,6 +1022,7 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
             Esc_DrawColorRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
         else if (kind == EG_SKIN)
             Esc_DrawSkinRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
+        y += rh;
     }
 }
 
@@ -1312,17 +1300,18 @@ static int Esc_HitRight(const RECT* b, int mx, int my, int* index,
 
     rowL = b->left + ESC_PAD;
     rowW = (b->right - b->left) - ESC_PAD * 2;
-    s_GuiRowW = rowW;
-    for (i = 0; i < ESC_GUI_DISPLAY; i++)
+    for (i = 0, rowY = Esc_GuiContentTop(b); i < ESC_GUI_DISPLAY; i++)
     {
-        rowY = Esc_GuiRowTop(b, i);
-        rh = Esc_GuiRowH(i);
+        int kind = s_GuiLayout[i].kind;
+
+        if (kind == EG_GROUP && s_GuiLayout[i].item != 0) rowY += ESC_BLOCK_GAP;
+        rh = Esc_GuiRowH(b, i);
         if (rowY + rh > b->bottom - ESC_PAD) break;
         if (mx >= rowL && mx < rowL + rowW &&
             my >= rowY && my < rowY + rh)
         {
-            if (s_GuiLayout[i].kind == EG_GROUP) return 0;
-            if (s_GuiLayout[i].kind == EG_SWITCH)
+            if (kind == EG_GROUP) return 0;
+            if (kind == EG_SWITCH)
             {
                 int sx = rowL + rowW - ESC_CTL_RIGHT - ESC_SW_W;
                 int sy = rowY + (rh - ESC_SW_H) / 2;
@@ -1330,16 +1319,16 @@ static int Esc_HitRight(const RECT* b, int mx, int my, int* index,
                     my < sy || my >= sy + ESC_SW_H)
                     return 0;
             }
-            if (s_GuiLayout[i].kind == EG_SKIN &&
-                Esc_SkinSegmentAt(rowL, rowW, mx) < 0)
+            if (kind == EG_SKIN && Esc_SkinSegmentAt(rowL, rowW, mx) < 0)
                 return 0;
-            if (s_GuiLayout[i].kind == EG_COLOR &&
+            if (kind == EG_COLOR &&
                 Esc_ColorSegmentAt(rowL, rowW, rowY, mx, my) < 0)
                 return 0;
             *index = s_GuiLayout[i].item;
             if (rowTop) *rowTop = rowY;
             return 1;
         }
+        rowY += rh;
     }
     return 0;
 }

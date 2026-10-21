@@ -35,7 +35,7 @@ struct SyHookDecl
 
 #define SYHOOK(a, s, n) { (a), (s), (n), 0u }
 
-/* 与 dist/MOExperience.dll.inj 逐行对应 (39 项, 顺序一致)。 */
+/* 与 dist/MOExperience.dll.inj 逐行对应 (40 项, 顺序一致)。 */
 static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(16))) =
 {
     SYHOOK(0x5D3BA0u, 6u, "MsgText_AddMessageHook"),
@@ -77,6 +77,7 @@ static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(
     SYHOOK(0x6DA180u, 6u, "PiP_BandGate"),
     SYHOOK(0x4F1140u, 5u, "EscMenu_OnShow"),
     SYHOOK(0x622396u, 6u, "EscMenu_OnPaintSurface"),
+    SYHOOK(0x55DDA0u, 5u, "PlayerColor_TickHook"),
 };
 
 /* ---------------- Syringe 握手 ---------------- */
