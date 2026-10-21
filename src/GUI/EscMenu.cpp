@@ -12,6 +12,7 @@
 #include "MsgText.h"
 #include "OrderUtil.h"
 #include "EscMenu.h"
+#include "PlayerColor.h"
 #include "SidebarSkin.h"
 
 #define ESC_SECTION          "EscMenu"
@@ -50,9 +51,12 @@
 #define ESC_TEXT_SS          2
 #define ESC_LABEL_CAP        96
 #define ESC_LEFT_ROWS        2
-#define ESC_GUI_ITEMS        7
-#define ESC_GUI_DISPLAY      11
+#define ESC_GUI_ITEMS        8
+#define ESC_GUI_DISPLAY      12
 #define ESC_SKIN_N           5
+#define ESC_COLOR_SW         14
+#define ESC_COLOR_GAP        4
+#define ESC_COLOR_LABEL_W    128
 #define ESC_LANG_N           3
 #define ESC_LANG_GAP         14
 
@@ -147,6 +151,7 @@ static void Esc_LoadAllText(void)
     Esc_GuiText("GuiSort", s_GuiLabel[4], ESC_LABEL_CAP);
     Esc_GuiText("GuiRows", s_GuiLabel[5], ESC_LABEL_CAP);
     Esc_GuiText("GuiSkin", s_GuiLabel[6], ESC_LABEL_CAP);
+    Esc_GuiText("GuiColor", s_GuiLabel[7], ESC_LABEL_CAP);
     Esc_GuiText("GuiOn", s_GuiOn, 16);
     Esc_GuiText("GuiOff", s_GuiOff, 16);
     Esc_GuiText("GuiSortFaction", s_GuiFaction, 32);
@@ -268,12 +273,32 @@ static void Esc_IntToW(wchar_t* dst, unsigned value, int cap)
     dst[n] = 0;
 }
 
+static int s_GuiRowW = ESC_RIGHT_W - ESC_PAD * 2;
+
+static int Esc_ColorPerRow(int rowW)
+{
+    int avail = rowW - ESC_COLOR_LABEL_W - ESC_CTL_RIGHT;
+    int per = (avail + ESC_COLOR_GAP) / (ESC_COLOR_SW + ESC_COLOR_GAP);
+    return per > 0 ? per : 1;
+}
+
+static int Esc_ColorRows(int rowW)
+{
+    int count, per, rows;
+    count = PlayerColor_Count();
+    if (count <= 0) return 1;
+    per = Esc_ColorPerRow(rowW);
+    rows = (count + per - 1) / per;
+    return rows > 0 ? rows : 1;
+}
+
 enum {
     EG_GROUP = 0,
     EG_SWITCH,
     EG_SORT,
     EG_ROWS,
-    EG_SKIN
+    EG_SKIN,
+    EG_COLOR
 };
 
 typedef struct {
@@ -292,6 +317,7 @@ static const EscGuiRowInfo s_GuiLayout[ESC_GUI_DISPLAY] = {
     { EG_SORT,   4 },
     { EG_ROWS,   5 },
     { EG_GROUP,  3 },
+    { EG_COLOR,  7 },
     { EG_SKIN,   6 }
 };
 
@@ -304,7 +330,13 @@ static int Esc_GuiContentTop(const RECT* p)
 
 static int Esc_GuiRowH(int index)
 {
-    return (s_GuiLayout[index].kind == EG_GROUP) ? ESC_GROUP_H : ESC_ROW_H;
+    int rows;
+
+    if (s_GuiLayout[index].kind == EG_GROUP) return ESC_GROUP_H;
+    if (s_GuiLayout[index].kind != EG_COLOR) return ESC_ROW_H;
+
+    rows = Esc_ColorRows(s_GuiRowW);
+    return ESC_ROW_H + (rows - 1) * (ESC_COLOR_SW + ESC_COLOR_GAP);
 }
 
 static int Esc_GuiRowTop(const RECT* p, int index)
@@ -363,6 +395,35 @@ static void Esc_Fill(void* surf, int x, int y, int w, int h,
             unsigned short* row = (unsigned short*)(base + (size_t)(y + j) * pitch + (size_t)x * 2);
             for (i = 0; i < w; i++) row[i] = Blend16(row[i], r, g, b, a);
         }
+    }
+    GtUnlock(surf);
+}
+
+static void Esc_Fill16(void* surf, int x, int y, int w, int h,
+                       unsigned short col)
+{
+    unsigned char* base;
+    int W, H, bpp, pitch, i, j;
+
+    if (!surf || w <= 0 || h <= 0) return;
+    W = GtSurfGet(surf, GtVT_GET_WIDTH);
+    H = GtSurfGet(surf, GtVT_GET_HEIGHT);
+    bpp = GtSurfGet(surf, GtVT_GET_BPP);
+    pitch = GtSurfGet(surf, GtVT_GET_PITCH);
+    if (W < 1 || H < 1 || bpp != 2 || pitch < W * 2) return;
+
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > W) w = W - x;
+    if (y + h > H) h = H - y;
+    if (w <= 0 || h <= 0) return;
+
+    base = GtLock(surf);
+    if (!base) return;
+    for (j = 0; j < h; j++)
+    {
+        unsigned short* row = (unsigned short*)(base + (size_t)(y + j) * pitch + (size_t)x * 2);
+        for (i = 0; i < w; i++) row[i] = col;
     }
     GtUnlock(surf);
 }
@@ -679,6 +740,39 @@ static int Esc_SkinSegmentAt(int rowL, int rowW, int mx)
     return -1;
 }
 
+static void Esc_ColorSegLayout(int rowL, int rowW, int* xs, int* ys)
+{
+    int i, x, y = 0, count = PlayerColor_Count();
+    int per = Esc_ColorPerRow(rowW);
+
+    x = rowL + ESC_COLOR_LABEL_W;
+    for (i = 0; i < count; i++)
+    {
+        if (i && i % per == 0)
+        {
+            x = rowL + ESC_COLOR_LABEL_W;
+            y += ESC_COLOR_SW + ESC_COLOR_GAP;
+        }
+        xs[i] = x;
+        ys[i] = y;
+        x += ESC_COLOR_SW + ESC_COLOR_GAP;
+    }
+}
+
+static int Esc_ColorSegmentAt(int rowL, int rowW, int rowY, int mx, int my)
+{
+    int xs[PLAYER_COLOR_MAX], ys[PLAYER_COLOR_MAX], i;
+    int count = PlayerColor_Count();
+    int top = rowY + (ESC_ROW_H - ESC_COLOR_SW) / 2;
+
+    Esc_ColorSegLayout(rowL, rowW, xs, ys);
+    for (i = 0; i < count; i++)
+        if (mx >= xs[i] - 2 && mx < xs[i] + ESC_COLOR_SW + 2 &&
+            my >= top + ys[i] - 2 && my < top + ys[i] + ESC_COLOR_SW + 2)
+            return i;
+    return -1;
+}
+
 static int Esc_CtlX(const RECT* p)
 {
     return Esc_RowCtlX(p->right - ESC_PAD);
@@ -849,6 +943,30 @@ static void Esc_DrawSkinRow(void* surf, int rowL, int rowY, int rowW,
              208, 160, 64, 255);
 }
 
+static void Esc_DrawColorRow(void* surf, int rowL, int rowY, int rowW,
+                             int bodyH, const wchar_t* label)
+{
+    int xs[PLAYER_COLOR_MAX], ys[PLAYER_COLOR_MAX];
+    int value = PlayerColor_Current();
+    int i, count = PlayerColor_Count();
+    int top = rowY + (ESC_ROW_H - ESC_COLOR_SW) / 2;
+
+    Esc_ColorSegLayout(rowL, rowW, xs, ys);
+    Esc_RowLabel(surf, rowL, rowY, rowL + ESC_COLOR_LABEL_W - 8,
+                 bodyH, label);
+
+    for (i = 0; i < count; i++)
+    {
+        int y = top + ys[i];
+        if (i == value)
+            Esc_Fill(surf, xs[i] - 2, y - 2, ESC_COLOR_SW + 4,
+                     ESC_COLOR_SW + 4, 208, 160, 64, 255);
+        Esc_Fill16(surf, xs[i], y, ESC_COLOR_SW, ESC_COLOR_SW,
+                   PlayerColor_Swatch(i));
+        Esc_Outline(surf, xs[i], y, ESC_COLOR_SW, ESC_COLOR_SW, 0, 0, 0, 200);
+    }
+}
+
 static void Esc_SettingsPanel(void* surf, RECT* p)
 {
     int w, bodyH, rowL, rowW, i, y, rh, kind, item;
@@ -861,6 +979,7 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
 
     rowL = p->left + ESC_PAD;
     rowW = w - ESC_PAD * 2;
+    s_GuiRowW = rowW;
 
     if (s_GuiMissing)
     {
@@ -892,7 +1011,10 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
         }
 
         Esc_RowBg(surf, rowL, y, rowW);
-        Esc_Fill(surf, rowL, y + ESC_ROW_H - 1, rowW, 1,
+        if (rh > ESC_ROW_H)
+            Esc_Fill(surf, rowL, y + ESC_ROW_H, rowW, rh - ESC_ROW_H,
+                     32, 32, 32, 120);
+        Esc_Fill(surf, rowL, y + rh - 1, rowW, 1,
                  0x7B, 0x79, 0x7B, 80);
 
         if (kind == EG_SWITCH)
@@ -909,6 +1031,8 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
             Esc_DrawSortRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
         else if (kind == EG_ROWS)
             Esc_DrawRowsRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
+        else if (kind == EG_COLOR)
+            Esc_DrawColorRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
         else if (kind == EG_SKIN)
             Esc_DrawSkinRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
     }
@@ -1180,13 +1304,15 @@ static int Esc_HitLeft(const RECT* a, int mx, int my, int* index)
     return 0;
 }
 
-static int Esc_HitRight(const RECT* b, int mx, int my, int* index)
+static int Esc_HitRight(const RECT* b, int mx, int my, int* index,
+                        int* rowTop)
 {
     int i, rowY, rowL, rowW, rh;
     if (s_Sel != 0) return 0;
 
     rowL = b->left + ESC_PAD;
     rowW = (b->right - b->left) - ESC_PAD * 2;
+    s_GuiRowW = rowW;
     for (i = 0; i < ESC_GUI_DISPLAY; i++)
     {
         rowY = Esc_GuiRowTop(b, i);
@@ -1207,14 +1333,19 @@ static int Esc_HitRight(const RECT* b, int mx, int my, int* index)
             if (s_GuiLayout[i].kind == EG_SKIN &&
                 Esc_SkinSegmentAt(rowL, rowW, mx) < 0)
                 return 0;
+            if (s_GuiLayout[i].kind == EG_COLOR &&
+                Esc_ColorSegmentAt(rowL, rowW, rowY, mx, my) < 0)
+                return 0;
             *index = s_GuiLayout[i].item;
+            if (rowTop) *rowTop = rowY;
             return 1;
         }
     }
     return 0;
 }
 
-static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx)
+static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx,
+                         int my, int rowTop)
 {
     int value;
 
@@ -1270,6 +1401,16 @@ static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx)
         Esc_WriteIniValue("Sidebar", "SkinSide", pick);
         break;
     }
+    case 7:
+    {
+        int rowL = right->left + ESC_PAD;
+        int rowW = (right->right - right->left) - ESC_PAD * 2;
+        int pick = Esc_ColorSegmentAt(rowL, rowW, rowTop, mx, my);
+
+        if (pick < 0 || pick == PlayerColor_Current()) return;
+        if (!PlayerColor_Set(pick)) return;
+        break;
+    }
     default:
         return;
     }
@@ -1314,7 +1455,7 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     {
         int mx = (int)(short)LOWORD(lp);
         int my = (int)(short)HIWORD(lp);
-        int index = -1;
+        int index = -1, rowY = 0;
         RECT a, b;
         if (Esc_Layout(h, &a, &b))
         {
@@ -1329,9 +1470,9 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 Esc_Select(h, index);
                 return 0;   /* consume only the list click */
             }
-            if (Esc_HitRight(&b, mx, my, &index))
+            if (Esc_HitRight(&b, mx, my, &index, &rowY))
             {
-                Esc_ApplyGui(h, &b, index, mx);
+                Esc_ApplyGui(h, &b, index, mx, my, rowY);
                 return 0;
             }
         }
