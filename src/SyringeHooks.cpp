@@ -78,6 +78,7 @@ static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(
     SYHOOK(0x4F1140u, 5u, "EscMenu_OnShow"),
     SYHOOK(0x622396u, 6u, "EscMenu_OnPaintSurface"),
     SYHOOK(0x55DDA0u, 5u, "PlayerColor_TickHook"),
+    SYHOOK(0x6DD8B0u, 6u, "TAction_UISkin"),
 };
 
 /* ---------------- Syringe 握手 ---------------- */

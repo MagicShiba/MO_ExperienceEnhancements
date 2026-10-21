@@ -99,3 +99,7 @@
 
 ; Player color rainbow tick (MainLoop frame step, 5B). src/GUI/PlayerColor.cpp
 0x55DDA0 = PlayerColor_TickHook, 5
+
+; TActionClass::Execute entry (0x6DD8B0, 6B = sub esp,0x240).
+; Action 900 = switch local sidebar UI skin (visual only).
+0x6DD8B0 = TAction_UISkin, 6

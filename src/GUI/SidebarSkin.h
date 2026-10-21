@@ -17,3 +17,6 @@ void SidebarSkin_Poll(void);
 /* ESC 菜单用: 0=默认, 1..4=强制阵营。Set 标记待应用, 主循环或设置页立即应用。 */
 int  SidebarSkin_Get(void);
 void SidebarSkin_Set(int value);
+
+/* Action 900: switch the local sidebar skin; visual-only, works in MP too. */
+void SidebarSkin_SetAction(int value);

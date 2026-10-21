@@ -108,11 +108,18 @@ static const unsigned k_SideCmps[] =
 };
 
 static int   s_Init = 0;
-static int   s_Force = 0;          /* 0=默认, 1..4=强制阵营 */
+static int   s_Force = 0;          /* 0=默认, 1..4=强制阵营 (持久设置/ESC) */
+static int   s_ActionForce = -1;   /* 触发器临时覆盖: -1=无, 0..4=Action 900 参数 */
 static int   s_SidePatch = 0;
 static int   s_CmpPatch = 0;
 static int   s_Applying = 0;
 static int   s_Pending = 0;
+static int   s_ActionLocal = 0;    /* pending switch came from Action 900 (allowed in MP) */
+
+static int Sk_EffectiveForce(void)
+{
+    return (s_ActionForce >= 0) ? s_ActionForce : s_Force;
+}
 
 /* 0x5B40B0 的文件缓存按文件名 hash 命中后直接返回旧 buffer。
  * 0x534FA0 里的 0x72F350 会先 0x730100/0x730400 释放上一阵营的 UI SHP/PAL,
@@ -211,6 +218,13 @@ static char __fastcall Sk_LoadUISide(int side)
     char ok;
 
     SidebarSkin_EnsureInit();
+
+    /* Action 900 只改变当前这局的显示, 不是持久设置。新局/读档重新走
+     * LoadUI 时丢弃临时覆盖, 回到 INI/ESC 的 SkinSide。 */
+    s_ActionForce = -1;
+    s_ActionLocal = 0;
+    s_Pending = 0;
+
     if (!s_Force)
     {
         s_SkinSide = side;
@@ -352,10 +366,11 @@ void SidebarSkin_EnsureInit(void)
 void SidebarSkin_Poll(void)
 {
     void* scen;
-    int actual, target;
+    int actual, target, force;
 
     SidebarSkin_EnsureInit();
-    if (!s_Force)
+    force = Sk_EffectiveForce();
+    if (!force)
     {
         void* sc = *(void**)ADDR_SCENARIO;
         if (sc && IsPlausiblePtr(sc))
@@ -366,9 +381,10 @@ void SidebarSkin_Poll(void)
     }
     if (!s_Pending || s_Applying) return;
 
-    if (OU_IsMP())
+    if (OU_IsMP() && !s_ActionLocal)
     {
         s_Pending = 0;
+        s_ActionLocal = 0;
         return;
     }
 
@@ -377,12 +393,14 @@ void SidebarSkin_Poll(void)
 
     actual = *(int*)((char*)scen + OFF_PLAYER_SIDE);
     if (actual < 0 || actual > 3) actual = 0;
-    target = s_Force ? s_Force - 1 : actual;
+    target = force ? force - 1 : actual;
 
     Sk_Reload(target, actual, scen);
     s_Pending = 0;
+    s_ActionLocal = 0;
 }
 
+/* 返回持久设置 (INI/ESC), 不返回 Action 900 的临时覆盖。 */
 int SidebarSkin_Get(void)
 {
     SidebarSkin_EnsureInit();
@@ -394,6 +412,8 @@ void SidebarSkin_Set(int value)
     SidebarSkin_EnsureInit();
     if (value < 0 || value > 4) value = 0;
     s_Force = value;
+    s_ActionForce = -1;
+    s_ActionLocal = 0;
 
     if (OU_IsMP())
     {
@@ -403,4 +423,38 @@ void SidebarSkin_Set(int value)
 
     /* 默认延迟到主循环稳定点应用; ESC 设置页会立即 Poll 以便预览。 */
     s_Pending = 1;
+}
+
+/* Action 900 switch: local-only visual, so it is allowed in multiplayer.
+ * 只覆盖当前场景的显示, 不写 s_Force/INI; 新局或读档时由 Sk_LoadUISide 丢弃。 */
+void SidebarSkin_SetAction(int value)
+{
+    SidebarSkin_EnsureInit();
+    if (value < 0 || value > 4) return;
+    s_ActionForce = value;
+    s_ActionLocal = 1;
+    s_Pending = 1;
+}
+
+/* Syringe hook at TActionClass::Execute (0x6DD8B0, 6 bytes).
+ * Unknown actions are safely ignored by the engine, so we only need to read
+ * the action and let the original prologue/epilogue run. Return 0 = original. */
+extern "C" __declspec(dllexport) DWORD __cdecl TAction_UISkin(void* regs)
+{
+    unsigned char* r = (unsigned char*)regs;
+    void* self;
+    int value;
+
+    if (!r) return 0;
+    self = *(void**)(r + 0x20); /* ECX = TActionClass* */
+    if (!self || !IsPlausiblePtr(self)) return 0;
+    if (*(int*)((char*)self + 0x2C) != 900) return 0;
+
+    value = *(int*)((char*)self + 0x90);
+    if (value < 0 || value > 4) return 0;
+
+    if (Sk_EffectiveForce() != value || (value != 0 && s_SkinSide != value - 1))
+        SidebarSkin_SetAction(value);
+
+    return 0;
 }
