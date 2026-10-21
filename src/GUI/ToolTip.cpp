@@ -9,9 +9,9 @@
  *   原文($换费用图标) + "\n" + ▲N/▼N + " " + ○MM:SS (建筑)
  *   原文($换费用图标) + "\n" + ○MM:SS (单位/步兵/飞机)
  * (▲=供电, ▼=耗电, N=绝对值; 图标列等宽, 与价格行图标列对齐)
- *   图标为 PNG 位图 (icons/icon_*.png, 黑=墨白=忽略, 见 icons/Icon.h)。雅黑缺
- *   ⚡U+26A1/⌚U+231A 字形 (GDI 实测皆回 .notdef), 文本方式必 tofu, 故串里只放
- *   PUA 占位码 (U+E000~E002), 由 VecText 按 PNG 实画, 步进统一。
+ *   图标为内嵌 PCX (icons/icon_*.pcx, 8bpp 覆盖率, 0=忽略 255=墨,
+ *   见 Icon.h)。字体缺 ⚡/⌚ 字形, 串里放 PUA 占位码 (U+E000~E003),
+ *   由 VecText 按 PCX 实画, 步进=图宽。
  *   时间经 TechnoClass::TimeToBuild (0x6F47A0) 假对象求值 (Phobos 同式)。
  *   电量只看 BuildingType PowerBonus-PowerDrain (0xEE0/0xEE4, UpdatePower
  *   0x508C30 反汇编实证; Extra 不计); 非建筑不显示电量。
@@ -75,8 +75,8 @@ typedef int __attribute__((thiscall)) (*Fn_WhatAmI)(void* self);
 
 static int g_TTInit = 0;
 static int g_TTEnable = 1;
-/* 图标走 Icon.h 的 PUA 码 (PNG 位图, VecText 拦截绘制)。
- * 固定图标 (icons/icon_*.png, 黑=墨白=忽略, 等宽归一天然对齐):
+/* 图标走 Icon.h 的 PUA 码 (内嵌 PCX, VecText 拦截绘制)。
+ * 固定图标 (icons/icon_*.pcx, 8bpp 灰度索引):
  *   ICON_PWR_UP=供电 / ICON_PWR_DOWN=耗电 / ICON_TIME=耗时表盘。 */
 
 static unsigned TT_Reg(void* regs, unsigned off)

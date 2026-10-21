@@ -1,0 +1,7 @@
+#include "IconRes.h"
+
+ICONRES_AGGRESSIVE RCDATA "icons\\icon_aggressive.pcx"
+ICONRES_COST       RCDATA "icons\\icon_cost.pcx"
+ICONRES_POWER_DOWN RCDATA "icons\\icon_power_down.pcx"
+ICONRES_POWER_UP   RCDATA "icons\\icon_power_up.pcx"
+ICONRES_TIME       RCDATA "icons\\icon_time.pcx"

@@ -1,16 +1,8 @@
 /* WeaponRange.cpp - 单选按住 Ctrl 显示单位攻击范围圈。
  *
- * 蓝=当前武器最大射程, 红=最小射程 (0 不画), 青虚线=对空射程
- * (+AirRangeBonus), 绿=部署武器作用半径 (弹头 CellSpread 为主),
- * 黄=隐形探测, 紫=间谍识别 (0 不画)。只认 Unit/Infantry/Aircraft。
- * 当前武器 = CurrentWeaponNumber 下标 + 精英换 EliteWeapon;
- * 对空在下标 0/1 里找 (威胁位 Air 位); 部署按 DeployFireWeapon
- * (0=主,1=副,默认1), 不可用顺延另一槽; 占位扫描器按名跳过
- * (搜索分支另加低伤害 backstop; 心控/辐射爆发等真武器不受影响)。
- * 圆心取单位自身高度, 半径不做地形修正。全只读 + 渲染面绘制, 联机安全。
- * 细节见 notes/攻击范围显示.md。
- * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
- * 渲染挂 MOExperience_MessageDrawHook (见 MOExperience.cpp)。
+ * 蓝=最大射程, 红=最小射程, 青虚线=对空, 绿=部署, 黄=探测, 紫=识别。
+ * 圆心取单位所在位置的地表投影 (含桥面); 对空圈高度由 WeaponRangeAAZ 控制。
+ * 只读 + 渲染面绘制, 联机安全; 细节见 notes/攻击范围显示.md。
  */
 
 #include <windows.h>
@@ -51,15 +43,21 @@ typedef int (__fastcall *WR_UnlockFn)(void*, void*);
 
 static int g_WrInit = 0;
 static int g_WrEnable = 1;
+static int g_WrAAZ = 0;
 
 static void WR_EnsureInit(void)
 {
+    unsigned aaZ;
     if (g_WrInit) return;
     g_WrInit = 1;
     BuildPaths();
     GtEnsureLog();
     g_WrEnable = GetPrivateProfileIntA(WR_SECTION, "WeaponRange", 1, g_IniPath) ? 1 : 0;
-    LogLine(g_WrEnable ? "wrange: ON (ctrl+single)" : "wrange: OFF");
+    aaZ = GetPrivateProfileIntA(WR_SECTION, "WeaponRangeAAZ", 0, g_IniPath);
+    g_WrAAZ = (aaZ > 8192u) ? 8192 : (int)aaZ;
+    if (!g_WrEnable) LogLine("wrange: OFF");
+    else if (g_WrAAZ > 0) LogLine("wrange: ON (ctrl+single, aa-high)");
+    else LogLine("wrange: ON (ctrl+single, aa-ground)");
 }
 
 /* ---------------- 类型取得 (DeployPreview 同式) ---------------- */
@@ -569,6 +567,12 @@ static WRInfo WR_Resolve(void* u)
     r.sensRange = sensC * 256;
     r.disRange = disC * 256;
     if (!OU_GetCoords(u, &r.center)) return r;
+    /* 圆心统一取地表投影 (含桥面), 不考虑自身高度; 对空圈绘制时再按配置抬高。 */
+    {
+        int gz;
+        if (OU_SurfaceZAt(r.center.X, r.center.Y, r.center.Z, &gz))
+            r.center.Z = gz;
+    }
     r.ok = 1;
     /* 诊断 (每把新武器一行, 远测用)。 */
     if (wt != s_WrLogWt)
@@ -667,7 +671,7 @@ static int WR_ProjLep(int lx, int ly, int lz, int* px, int* py)
 
 #define WR_SEGS 72
 
-/* 世界圆 (圆心同 Z, 自身高度) → 屏折线。
+/* 世界圆 (圆心同 Z, 地面/桥面投影) → 屏折线。
  * 无 libm (构建 -nostdlib): 用旋转迭代代替 cos/sin
  * (步进 2π/72, cos=0.9961946980917455, sin=0.08715574274765817)。
  * dash=1 时画虚线 (对空圈与最大圈同半径重合时仍可分辨)。 */
@@ -735,7 +739,11 @@ void WeaponRange_Draw(void* surf, int w, int h, int pitch)
     if (r.minRange >= 256)
         WR_Circle(r.center.X, r.center.Y, r.center.Z, r.minRange, 255, 64, 64, 230, 0);
     if (r.aaRange >= 256)
-        WR_Circle(r.center.X, r.center.Y, r.center.Z, r.aaRange, 64, 255, 255, 230, 1);
+    {
+        int az = r.center.Z;
+        if (g_WrAAZ > 0) az += g_WrAAZ;
+        WR_Circle(r.center.X, r.center.Y, az, r.aaRange, 64, 255, 255, 230, 1);
+    }
     if (r.depRange >= 256)
         WR_Circle(r.center.X, r.center.Y, r.center.Z, r.depRange, 0, 255, 0, 230, 0);
     if (r.sensRange >= 256)

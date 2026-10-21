@@ -7,6 +7,7 @@
 
 #include <windows.h>
 #include "GdiText.h"
+#include "Icon.h"
 #include "FullMap.h"
 #include "OrderUtil.h"
 #include "VecText.h"
@@ -1171,10 +1172,16 @@ int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch,
 {
     int drew = 0, rc, lh, sw;
     RectangleStruct viewA;
+    static int s_IconPreload = 0;
     MOE_SetPhase(MP_UILAYER);
     if (pMsgDrew) *pMsgDrew = 0;
     if (!IsPlausiblePtr(surf)) return 0;
     if (surfW <= 0 || surfH <= 0 || surfPitch <= 0) return 0;
+    if (!s_IconPreload)
+    {
+        s_IconPreload = 1;
+        Icon_Preload();
+    }
     lh = GtBitLineHeight();
     /* 布局基准取视图区 A (1752), 不是视口 R (放大档 R 才几百, 居中全偏左)。 */
     FM_GetViewRects(&viewA, 0);

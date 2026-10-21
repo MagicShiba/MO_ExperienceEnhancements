@@ -64,7 +64,7 @@
 目前不打算合并。
 
 ## 使用说明
-将 `MOExperience.dll`、`MOExperience.ini` 与 `MOExperienceResources` 文件夹放在游戏根目录内。
+将 `MOExperience.dll`、`MOExperience.ini` 与 `MOExperienceResources` 文件夹放在游戏根目录内（`MOExperienceResources` 仅存放语言 ini，图标已打包进 DLL）。
 
 ### 功能配置
 在 `MOExperience.ini` 中写了详细的使用说明。  
@@ -80,6 +80,11 @@
 - 环境：`mingw-i686`
 - 构建脚本：build-fast.bat
 - 全量构建：build-full.bat
+- 图标 PCX：源文件在 `icons/`。改动图标后手动运行
+  `python icons/pcx_tool.py` 归一化（RGBA 转 3-plane RGB，文字图标转
+  1-plane 8bpp），再构建（build-fast 会按 PCX 修改时间自动重编资源）。
+  构建脚本不再自动转码；`src/GUI/icons.rc` 把 PCX 作为 DLL 资源编译进
+  DLL，不再部署到 `MOExperienceResources/icons`。
 
 未在项目中列出的文件夹：  
 参考文件夹 即 phobos,yrpp,临时地图等参考  

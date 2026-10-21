@@ -11,6 +11,12 @@
  * 触发点就是原版那两处, 不新增键位; 快捷键 VK 从 KeyboardMD.ini 的
  * [Hotkey] ToggleRepair 读, 玩家改键自动跟随。
  *
+ * 注意 Ctrl+维修快捷键走不了引擎命令派发: 按住 Ctrl 时 0x55DEE0 只按精确的
+ * "Ctrl+K" 查命令表 (KeyboardMD 把 ToggleRepair 绑在裸 K 上), 而
+ * ToggleRepariModeCommandClass::PreventCombinationOverride (0x535BD0) 恒返回
+ * false, 不会退回裸 K 命令, 于是 0x536FA0 的 Execute 根本不被调用。Ctrl 那条
+ * 只能由 RepairAll_Poll 自己轮询键态补上 (见文件末尾)。
+ *
  * 联机 (AGENTS.md 铁律): **不写任何模拟内存, 不直调改模拟的引擎函数**。
  *   唯一的模拟变更 = 往 OutList 塞标准事件 EventType::Repair (0x15), 构造
  *   方式与玩家手点维修图标**逐字节同形** (照抄引擎 0x4AC0BE 那一段, 连 house
@@ -433,8 +439,9 @@ static void RA_Drain(void)
 
 /* ---------------- 两个触发钩子 (见 dist/MOExperience.dll.inj) ---------------- */
 
-static int s_RaPending = 0;     /* 钩子只置这个标志, 扫描挪到 Poll 里做 */
+static int s_RaPending = 0;     /* 钩子/Poll 只置这个标志, 扫描挪到 Poll 里做 */
 static int s_RaKeyFresh = 0;    /* 维修快捷键在上次"按下"之后被松开过 */
+static int s_RaCtrlPrev = 0;    /* Ctrl+维修键边沿 (引擎不派发, 由 Poll 轮询) */
 
 static int s_RaDblFrame = -1;
 static int s_RaDblX = 0;
@@ -513,16 +520,32 @@ extern "C" __declspec(dllexport) unsigned __cdecl RepairAll_Button(void* regs)
 static int s_RaLastFrame = -1;
 static int s_RaLastScan = -100000;
 
+/* 聊天输入中不响应: 引擎此时不派发命令热键, 而 Ctrl+维修键是 Poll 自己补的,
+ * 不加这道门会在聊天框里打 Ctrl+K 就触发全修。MessageListClass::IsEdit=+0x19。 */
+static int RA_ChatTyping(void)
+{
+    return *(volatile unsigned char*)(size_t)(0xA8BC60u + 0x19u) ? 1 : 0;
+}
+
 void RepairAll_Poll(void)
 {
     int fr;
+    int ctrlCombo;
+    int repairDown;
     if (!RA_On()) return;
+    /* 键态每循环都采: 不能放在下面帧门之后 —— 卡帧时一帧只采一次, 快按会漏。 */
+    repairDown = OU_KeyDown((unsigned)g_RaRepairVk);
+    if (!repairDown) s_RaKeyFresh = 1;
+    /* Ctrl+维修键: 引擎不派发 (见文件头), 只能这里轮询补, 边沿触发一次。
+     * 先查键态再查焦点/聊天框: 每帧约 142 次调用, 常态下省掉窗口查询。 */
+    ctrlCombo = (repairDown && OU_KeyDown(VK_CONTROL) &&
+                 GtGameFocused() && !RA_ChatTyping()) ? 1 : 0;
+    if (ctrlCombo && !s_RaCtrlPrev) s_RaPending = 1;
+    s_RaCtrlPrev = ctrlCombo;
     /* 0x4F42F0 一帧跑 ~142 次 (SWSBar 实测), 必须自门控帧号。 */
     fr = *(int*)ADDR_FRAME;
     if (fr == s_RaLastFrame) return;
     s_RaLastFrame = fr;
-    /* 记维修快捷键是否松开过: 把"按住不放的自动重复"从双击里剔掉。 */
-    if (!OU_KeyDown((unsigned)g_RaRepairVk)) s_RaKeyFresh = 1;
     RA_Observe();
     RA_Drain();
     if (s_RaPending)

@@ -164,6 +164,13 @@ typedef struct { int ulx, uly, ulz, tlx, tly, tlz; } OU_PrevLine;
 int OU_ProjWorld(int lx, int ly, int lz, int* px, int* py);
 /* 格地面高度 (CellClass::GetFloorHeight 0x47B3A0, 只读)。 */
 int OU_CellGroundZ(int cx, int cy, int* zOut);
+/* 指定 lepton 坐标处地面高度 (MapClass::GetCellFloorHeight 0x578080, 只读)。 */
+int OU_GroundZAt(int x, int y, int* zOut);
+/* 指定 lepton 坐标处可站立表面高度 (地形 + 桥面; 只读)。
+ * refZ 传单位自身 Z, 用于区分在桥上还是桥下 (取更接近的一层)。 */
+int OU_SurfaceZAt(int x, int y, int refZ, int* zOut);
+/* 指定格中心处地表高度 (地形 + 桥面, 有桥取桥面; 只读)。 */
+int OU_CellSurfaceZ(int cx, int cy, int* zOut);
 /* 单像素细线 (Bresenham, 自带裁剪; locked=已锁定渲染面)。
  * thick<=1 = 1 像素; 2 = 两行 (每个像素再补 (x,y+1)), 视觉上 2 像素粗。 */
 void OU_ThinLine(unsigned char* locked, int w, int h, int pitch,
@@ -175,8 +182,8 @@ int OU_PrevPush(OU_PrevLine* buf, int* nio,
                 int ulx, int uly, int ulz, int tlx, int tly, int tlz);
 /* 双端取 OU_GetCoords 存线 (任一失败回 0)。 */
 int OU_PrevPushObjs(OU_PrevLine* buf, int* nio, void* u, void* t);
-/* 起点取单位中心, 终点取落点格心 (地面高度; fly!=0 用单位自身高度)。 */
-int OU_PrevPushCell(OU_PrevLine* buf, int* nio, void* u, int fly, int cx, int cy);
+/* 起点取单位中心, 终点取落点格心地表高度 (含桥面, 与空军高度无关)。 */
+int OU_PrevPushCell(OU_PrevLine* buf, int* nio, void* u, int cx, int cy);
 /* 绘制全部预览线 (逐对引擎投影, 失败跳过)。thick = 线宽像素。 */
 void OU_PrevDraw(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, int pitch,
                  unsigned r, unsigned g, unsigned b, unsigned a, int thick);

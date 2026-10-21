@@ -620,7 +620,7 @@ static void SO_Queue(int ui, int cx, int cy)
     if (s_SoPrevSink)
     {
         if (OU_PtrAlive(u->unit, u->id, g_SoIdxOk))
-            OU_PrevPushCell(s_SoPrevBuf, &s_SoPrevN, u->unit, u->fly, ox, oy);
+            OU_PrevPushCell(s_SoPrevBuf, &s_SoPrevN, u->unit, ox, oy);
         return;
     }
     if (g_SoPendCount >= SO_PEND_CAP) return;

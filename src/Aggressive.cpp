@@ -4,7 +4,7 @@
  * "侵略标记"集合 (全体已在集合内则整体移出, 否则整体加入)。已标记的单位处于
  * 闲置 (Mission=Guard/Area_Guard/Stop) 时, 每隔 Interval 帧扫一次: 对警戒半径内的
  * 敌方建筑发一条与鼠标左键同形的标准事件 (经 OT_Fire / OutList 广播), 并在其上方
- * 画 icon_aggressive 图像 (IconMap, 原图彩色)。
+ * 画 icon_aggressive 图像 (内嵌 PCX, 原版 16 位 blit)。
  *
  * 目标/订单取"鼠标对应的事件" (与左键点同一目标同判):
  *   - 目标只认**敌方**建筑, 忽略中立 (House->Type->MultiplayPassive, 与 SmartArea 同式)。
@@ -38,7 +38,7 @@
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "OrderThrottle.h"
-#include "IconMap.h"
+#include "PcxImage.h"
 #include "Aggressive.h"
 
 #define AG_SECTION "Aggressive"
@@ -56,8 +56,6 @@
 #define OFF_OWNER   0x21Cu
 
 #define VT_GETMISSION (0x184u / 4u)
-#define VT_AG_LOCK   0x5Cu
-#define VT_AG_UNLOCK 0x60u
 
 /* MISSION_ATTACK 已在 OrderUtil.h 定义; 这里只补闲置判定用到的三个。 */
 #define MISSION_GUARD  5
@@ -67,8 +65,6 @@
 typedef int __attribute__((thiscall)) (*Fn_GetMission)(void* self);
 typedef int __attribute__((thiscall)) (*Fn_GetGuardRange)(void* self, int control);
 typedef int __attribute__((thiscall)) (*Fn_GetWeaponRange)(void* self, int idxWeapon);
-typedef void* (__fastcall *AG_LockFn)(void*, void*, int, int);
-typedef int (__fastcall *AG_UnlockFn)(void*, void*);
 
 #define FN_GETGUARDRANGE ((Fn_GetGuardRange)(void*)0x707E60u)
 
@@ -553,27 +549,18 @@ void Aggressive_Poll(void)
 
 void Aggressive_Draw(void* surf, int w, int h, int pitch)
 {
-    unsigned char* vt;
-    AG_LockFn lockFn;
-    AG_UnlockFn unlockFn;
-    unsigned char* locked;
-    int iw, ih, i;
+    PcxImage img;
+    int ox, oy, i;
     AG_EnsureInit();
     if (!g_AgEnable || s_AgTrkN <= 0) return;
     if (!g_Calibrated) return;
     if (!surf || !IsPlausiblePtr(surf)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;
-    vt = *(unsigned char**)surf;
-    if (!vt || !IsPlausiblePtr(vt)) return;
-    lockFn = (AG_LockFn)(*(void**)(vt + VT_AG_LOCK));
-    unlockFn = (AG_UnlockFn)(*(void**)(vt + VT_AG_UNLOCK));
-    if (!lockFn || !unlockFn) return;
-    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
-    if (!locked || !IsPlausiblePtr(locked)) return;
-    iw = IconMap_Width(MAPICON_AGGRESSIVE);
-    ih = IconMap_Height(MAPICON_AGGRESSIVE);
-    if (iw < 0) iw = 0;
-    if (ih < 0) ih = 0;
+    /* 首帧真正加载; 之后 PcxGet 命中引擎面表 (不为每帧读盘/重建路径)。
+     * 每帧现取是因为引擎缓存重载后 BSurface 指针会变, 一张图多个标记共用。 */
+    if (!PcxImage_Load(&img, "icon_aggressive.pcx", 2)) return;
+    ox = g_AgOffX - img.width / 2;
+    oy = g_AgOffY - img.height / 2;
     for (i = 0; i < s_AgTrkN; i++)
     {
         CoordStruct c;
@@ -581,8 +568,12 @@ void Aggressive_Draw(void* surf, int w, int h, int pitch)
         if (!AG_Alive(s_AgTrk[i].p, s_AgTrk[i].uid)) continue;
         if (!OU_GetCoords(s_AgTrk[i].p, &c)) continue;
         if (!OU_ProjWorld(c.X, c.Y, c.Z, &px, &py)) continue;
-        IconMap_Blit(locked, w, h, pitch, MAPICON_AGGRESSIVE,
-                     px + g_AgOffX - iw / 2, py + g_AgOffY - ih / 2, 255);
+        /* 完全在面外不画: PcxImage_Draw 会把越界坐标夹进面内, 屏外单位
+         * 否则会以图标贴在屏幕边缘。 */
+        px += ox;
+        py += oy;
+        if (px + img.width <= 0 || py + img.height <= 0 ||
+            px >= w || py >= h) continue;
+        PcxImage_Draw(&img, surf, px, py);
     }
-    unlockFn(surf, NULL);
 }

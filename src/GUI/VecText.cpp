@@ -1845,8 +1845,9 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
     x = VecNormC(x);
     y = VecNormC(y);
     eff = (color == -1) ? (int)(*(unsigned short*)((char*)t + 0x24)) : color;
-    /* PUA 自定义图标 (建造提示第三行): PNG 位图直画, 不走 GDI/原版点阵。
-     * 放在 VecMeasure 之前 (原版度量不认 PUA, 必失败回落出 tofu)。 */
+    /* PUA 自定义图标 (建造提示第三行): PCX 索引直画, 不走 GDI/原版点阵。
+     * 放在 VecMeasure 之前 (原版度量不认 PUA, 必失败回落出 tofu)。
+     * PCX 缺失/加载失败时跳过, 不要回落成 tofu。 */
     if (Icon_Is((unsigned)wc & 0xFFFFu))
     {
         int ia = Icon_Advance((unsigned)wc & 0xFFFFu);
@@ -1856,7 +1857,7 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                                Icon_LineH(t));
             if (rr >= 0) return x + ia;
         }
-        return g_OrigBlit(t, NULL, wch, x, y, color);
+        return x;
     }
     adv = VecMeasure(t, wc, &h);
     if (adv < 0)

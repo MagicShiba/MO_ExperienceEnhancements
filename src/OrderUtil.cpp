@@ -374,9 +374,17 @@ int OU_PtrAlive(void* u, int id, int idxOk)
 typedef int __attribute__((thiscall)) (*Fn_OUC2C)(void* tac,
     const CoordStruct* c, Point2D* out);
 typedef int __attribute__((thiscall)) (*Fn_OUFloorH)(void* cell, const Point2D* p);
+typedef int __attribute__((thiscall)) (*Fn_OUFloorZAt)(void* map, const CoordStruct* c);
 #define FN_OU_C2C ((Fn_OUC2C)(void*)0x6D2140u)
 #define OU_TAC_INSTANCE 0x887324u
 #define FN_OU_FLOORH ((Fn_OUFloorH)(void*)0x47B3A0u)
+#define FN_OU_FLOORZAT ((Fn_OUFloorZAt)(void*)0x578080u)
+
+/* CellClass::Flags +0x140, BridgeHead|BridgeBody; 桥高
+ * CellClass::BridgeLevels(4) * Unsorted::LevelHeight(104)。 */
+#define OFF_OU_CELLFLAGS 0x140u
+#define OU_CELLFLAG_BRIDGE 0x500u
+#define OU_BRIDGE_HEIGHT 416
 
 /* 世界点 → 屏像素 (含高度; CoordsToClient 给渲染面坐标, 缩放档再折到屏幕)。 */
 int OU_ProjWorld(int lx, int ly, int lz, int* px, int* py)
@@ -406,6 +414,62 @@ int OU_CellGroundZ(int cx, int cy, int* zOut)
     if (z < -8192 || z > 8192) return 0;
     *zOut = z;
     return 1;
+}
+
+/* 指定 lepton 坐标处的地面高度 (MapClass::GetCellFloorHeight 0x578080, 只读)。
+ * 按 X/Y 低 8 位采子格, 比 OU_CellGroundZ 的格角更精确。 */
+int OU_GroundZAt(int x, int y, int* zOut)
+{
+    CoordStruct c;
+    int z;
+    if (!zOut) return 0;
+    if (x < 0 || y < 0 ||
+        x >= OU_MAP_CELLS * OU_LEP_PER_CELL ||
+        y >= OU_MAP_CELLS * OU_LEP_PER_CELL)
+        return 0;
+    c.X = x; c.Y = y; c.Z = 0;
+    z = FN_OU_FLOORZAT((void*)ADDR_DISPLAY, &c);
+    if (z < -8192 || z > 8192) return 0;
+    *zOut = z;
+    return 1;
+}
+
+/* 可站立表面高度: GetCellFloorHeight 不含桥高。topBridge=1 时有桥直接取桥面,
+ * 否则按 refZ 取更接近的一层 (桥下单位仍取地形)。只读。 */
+static int OU_SurfaceZRaw(int x, int y, int refZ, int topBridge, int* zOut)
+{
+    void* cell;
+    int z, bz, dg, db;
+    if (!OU_GroundZAt(x, y, &z)) return 0;
+    cell = OU_CellPtr(x >> 8, y >> 8);
+    if (cell && IsPlausiblePtr(cell) &&
+        (*(unsigned*)((char*)cell + OFF_OU_CELLFLAGS) & OU_CELLFLAG_BRIDGE))
+    {
+        bz = z + OU_BRIDGE_HEIGHT;
+        if (topBridge) z = bz;
+        else
+        {
+            dg = refZ - z; if (dg < 0) dg = -dg;
+            db = refZ - bz; if (db < 0) db = -db;
+            if (db <= dg) z = bz;
+        }
+    }
+    if (z < -8192 || z > 8192) return 0;
+    *zOut = z;
+    return 1;
+}
+
+int OU_SurfaceZAt(int x, int y, int refZ, int* zOut)
+{
+    return OU_SurfaceZRaw(x, y, refZ, 0, zOut);
+}
+
+int OU_CellSurfaceZ(int cx, int cy, int* zOut)
+{
+    if (cx < 0 || cy < 0 || cx >= OU_MAP_CELLS || cy >= OU_MAP_CELLS) return 0;
+    return OU_SurfaceZRaw(cx * OU_LEP_PER_CELL + OU_LEP_PER_CELL / 2,
+                          cy * OU_LEP_PER_CELL + OU_LEP_PER_CELL / 2,
+                          0, 1, zOut);
 }
 
 void OU_ThinLine(unsigned char* locked, int w, int h, int pitch,
@@ -500,13 +564,12 @@ int OU_PrevPushObjs(OU_PrevLine* buf, int* nio, void* u, void* t)
     return OU_PrevPush(buf, nio, a.X, a.Y, a.Z, b.X, b.Y, b.Z);
 }
 
-int OU_PrevPushCell(OU_PrevLine* buf, int* nio, void* u, int fly, int cx, int cy)
+int OU_PrevPushCell(OU_PrevLine* buf, int* nio, void* u, int cx, int cy)
 {
     CoordStruct a;
     int gz;
     if (!OU_GetCoords(u, &a)) return 0;
-    if (fly) gz = a.Z;
-    else if (!OU_CellGroundZ(cx, cy, &gz)) gz = 0;
+    if (!OU_CellSurfaceZ(cx, cy, &gz)) gz = 0;
     return OU_PrevPush(buf, nio, a.X, a.Y, a.Z,
                        cx * OU_LEP_PER_CELL + OU_LEP_PER_CELL / 2,
                        cy * OU_LEP_PER_CELL + OU_LEP_PER_CELL / 2, gz);

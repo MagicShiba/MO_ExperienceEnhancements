@@ -1,15 +1,26 @@
-/* Icon.cpp - 提示栏自定义图标运行时 (声明见 Icon.h)。
+/* Icon - 提示栏自定义图标。
  *
- * 数据来自构建期生成的 icons/icons.inc (mkicons.py 由 icons/icon_*.png 转换,
- * 黑=墨白=忽略, 等宽归一化; 见文件头)。此处只做只读 blit, 不写模拟。
- * 混合管线复用 GdiText (Calibrate + GtUnpack16 + Blend16), 坐标裁剪口径
- * 与 VecText VecRender 一致 (Tp/B 取 t+0x34/0x3C, 横向只认面界)。
- */
+ * 从 icons/icon_*.pcx 取 8bpp 覆盖率 (0=透明 255=全墨)，首次使用后缓存。
+ * 混合复用 GdiText 的 Calibrate/GtUnpack16/Blend16；只读，不写模拟。 */
 
 #include <windows.h>
 #include "GdiText.h"
+#include "PcxImage.h"
 #include "Icon.h"
-#include "icons.inc"
+
+#define ICON_CAP_W 64
+#define ICON_CAP_H 64
+
+static const char* const s_IconFile[4] = {
+    "icon_power_up.pcx",
+    "icon_power_down.pcx",
+    "icon_time.pcx",
+    "icon_cost.pcx"
+};
+static unsigned char s_IconPx[4][ICON_CAP_W * ICON_CAP_H];
+static int s_IconW[4];
+static int s_IconH[4];
+static int s_IconState[4];   /* 0=未取 1=成功 2=失败 (只试一次) */
 
 static int Icon_Slot(unsigned wc)
 {
@@ -20,6 +31,38 @@ static int Icon_Slot(unsigned wc)
     return -1;
 }
 
+static int Icon_Ensure(int slot)
+{
+    PcxImage img;
+    int x, y;
+    if (slot < 0 || slot >= 4) return 0;
+    if (s_IconState[slot] == 1) return 1;
+    if (s_IconState[slot] == 2) return 0;
+    if (!PcxImage_Load(&img, s_IconFile[slot], 1) ||
+        img.width < 1 || img.height < 1 ||
+        img.width > ICON_CAP_W || img.height > ICON_CAP_H)
+    {
+        s_IconState[slot] = 2;
+        return 0;
+    }
+    for (y = 0; y < img.height; y++)
+        for (x = 0; x < img.width; x++)
+            s_IconPx[slot][y * ICON_CAP_W + x] = img.px[y * img.width + x];
+    s_IconW[slot] = img.width;
+    s_IconH[slot] = img.height;
+    s_IconState[slot] = 1;
+    return 1;
+}
+
+/* 统一预载全部图标 (含地图标记), 与各功能开关无关。 */
+void Icon_Preload(void)
+{
+    PcxImage img;
+    int i;
+    for (i = 0; i < 4; i++) Icon_Ensure(i);
+    (void)PcxImage_Load(&img, "icon_aggressive.pcx", 2);
+}
+
 int Icon_Is(unsigned wc)
 {
     return Icon_Slot(wc) >= 0 ? 1 : 0;
@@ -27,9 +70,9 @@ int Icon_Is(unsigned wc)
 
 int Icon_Advance(unsigned wc)
 {
-    if (Icon_Slot(wc) < 0) return 0;
-    if (ICON_W < 1 || ICON_W > 64) return 0;
-    return ICON_W;
+    int slot = Icon_Slot(wc);
+    if (slot < 0 || !Icon_Ensure(slot)) return 0;
+    return s_IconW[slot];
 }
 
 int Icon_LineH(void* t)
@@ -44,8 +87,8 @@ int Icon_LineH(void* t)
 int Icon_Height(unsigned wc)
 {
     int slot = Icon_Slot(wc);
-    if (slot < 0 || slot >= ICON_N) return 0;
-    return g_IconH[slot];
+    if (slot < 0 || !Icon_Ensure(slot)) return 0;
+    return s_IconH[slot];
 }
 
 int Icon_Blit(void* t, unsigned wc, int x, int y, int colorW, int h)
@@ -56,11 +99,10 @@ int Icon_Blit(void* t, unsigned wc, int x, int y, int colorW, int h)
     int pitchW, Tp, B;
     unsigned char fr, fg, fb;
     const unsigned char* px;
-    if (slot < 0 || slot >= ICON_N) return -1;
+    if (slot < 0 || !Icon_Ensure(slot)) return -1;
     if (!t || !IsPlausiblePtr(t)) return -1;
-    iw = g_IconW[slot];
-    ih = g_IconH[slot];
-    if (iw <= 0 || iw > ICON_W || ih <= 0 || ih > ICON_HMAX) return -1;
+    iw = s_IconW[slot];
+    ih = s_IconH[slot];
     if (h < 8 || h > 64) return -1;
     buf = *(unsigned short**)((char*)t + 0x0C);
     pitchW = *(int*)((char*)t + 0x10);
@@ -84,7 +126,7 @@ int Icon_Blit(void* t, unsigned wc, int x, int y, int colorW, int h)
             if (dy > hi) dy = hi;
         }
     }
-    px = g_IconPx[slot];
+    px = s_IconPx[slot];
     for (sy = 0; sy < ih; sy++)
     {
         int yy = dy + sy;
@@ -96,7 +138,7 @@ int Icon_Blit(void* t, unsigned wc, int x, int y, int colorW, int h)
             int sx = x + dx;
             unsigned a;
             if (sx < 0 || sx >= pitchW) continue;
-            a = px[sy * ICON_W + dx];
+            a = px[sy * ICON_CAP_W + dx];
             if (!a) continue;
             row[sx] = Blend16(row[sx], fr, fg, fb, a);
         }
