@@ -6,8 +6,7 @@
 !/dist/MOExperienceResources/*.ini
 /test/*.exe
 /test/*.o
-*.zip
-*.7z
+
 /obj
 /test
 /tools
