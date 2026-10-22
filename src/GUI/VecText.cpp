@@ -685,10 +685,120 @@ static int VecGdiSlot(int px)
 /* ---------------- 结算界面显示钩 ----------------
  * 展示函数是模态的: 0x5C9720 (遭遇战积分/多人积分, 对话框 0x108) 与
  * 0x6C8E80 (任务积分, 对话框 0x103) 内部跑游戏帧循环, 直到窗口关闭才返回。
- * 期间置 g_ScoreScreen, 关闭即清。 */
+ * 期间置 g_ScoreScreen, 关闭即清。
+ * 另: 任务结算对话框 (0x103) 上挂一个“退出游戏”按钮, 见 VecScoreDlgEntry。
+ * 按钮只置 0x60D380 的模态退出标志, 等展示函数返回、帧循环收尾后再退出。 */
 typedef int (__fastcall *ShowDlgFn)(void* thisptr, void* edx);
 static ShowDlgFn g_OrigMPScoreShow = NULL;
 static ShowDlgFn g_OrigStandaloneShow = NULL;
+
+/* 任务结算对话框过程 0x6C8FF0: 标准 DLGPROC (stdcall, ret 0x10)。 */
+typedef INT_PTR (__stdcall *DlgProcFn)(HWND, UINT, WPARAM, LPARAM);
+static DlgProcFn g_OrigScoreDlgProc = NULL;
+static int g_ExitPending = 0;
+
+/* 引擎退出例程: 0x6BEC60 收尾 (关主窗/清资源), 0x6BEC50(1) 走 CRT exit。 */
+static void VecExitGameNow(void)
+{
+    typedef void (__cdecl *ShutdownFn)(void);
+    typedef void (__fastcall *CrtExitFn)(int);
+    ((ShutdownFn)0x6BEC60u)();
+    ((CrtExitFn)0x6BEC50u)(1);
+}
+
+/* 0xAC1B00: HWND -> ownerdraw 元素表。表项 { HWND, elem, ..., next@+0x204 }，
+ * elem 即 OwnerDrawDialogElement。只读查找，找不到返回 NULL。 */
+static unsigned* VecOwnerDrawElem(HWND h)
+{
+    void** buckets;
+    unsigned log2, n, i, guard;
+    if (!h) return NULL;
+    buckets = *(void***)0xAC1B00u;
+    log2 = *(unsigned*)0xAC1B0Cu;
+    if (!buckets || log2 > 14) return NULL;
+    n = 1u << log2;
+    for (i = 0; i < n; ++i)
+    {
+        unsigned char* e = (unsigned char*)buckets[i];
+        for (guard = 0; e && guard < 4096; ++guard)
+        {
+            if (*(HWND*)e == h) return (unsigned*)(e + 4);
+            e = *(unsigned char**)(e + 0x204);
+        }
+    }
+    return NULL;
+}
+
+static INT_PTR __stdcall VecScoreDlgEntry(HWND hDlg, UINT msg,
+                                          WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_INITDIALOG)
+    {
+        INT_PTR r;
+        HWND cont = NULL;
+        HWND b = NULL;
+        if (!g_OrigScoreDlgProc) return FALSE;
+        /* 必须在原版 WM_INITDIALOG 前建: 才能被 0x60F9A0 挂上
+         * 0x610CA0 子类并走 0x612B70 原版自绘。 */
+        if (g_OrigStandaloneShow)
+        {
+            RECT rc;
+            cont = GetDlgItem(hDlg, 0x423);   /* 原版“继续” */
+            if (cont && !GetDlgItem(hDlg, 0x424) && GetWindowRect(cont, &rc))
+            {
+                MapWindowPoints(NULL, hDlg, (POINT*)&rc, 2);
+                /* 文本是 CSF 键, 与原版“继续”模板里的 GUI:Continue 同机制;
+                 * 0x60F9A0/0x612B70 会走 StringTable 按游戏语言加载。 */
+                b = CreateWindowExW(0, L"Button", L"GUI:ExitGame",
+                                    WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                    rc.left,
+                                    rc.top - (rc.bottom - rc.top) - 7,
+                                    rc.right - rc.left, rc.bottom - rc.top,
+                                    hDlg, (HMENU)(INT_PTR)0x424,
+                                    GetModuleHandleW(NULL), NULL);
+            }
+        }
+        r = g_OrigScoreDlgProc(hDlg, msg, wp, lp);
+        /* 初始化后方可确认“继续”最终位置/字体; 按它再校正一次。 */
+        if (b && cont)
+        {
+            RECT cr;
+            HFONT f;
+            if (GetWindowRect(cont, &cr))
+            {
+                MapWindowPoints(NULL, hDlg, (POINT*)&cr, 2);
+                MoveWindow(b, cr.left, cr.top - (cr.bottom - cr.top) - 7,
+                           cr.right - cr.left, cr.bottom - cr.top, TRUE);
+            }
+            f = (HFONT)SendMessageW(cont, WM_GETFONT, 0, 0);
+            if (f) SendMessageW(b, WM_SETFONT, (WPARAM)f, TRUE);
+            /* +0xB0: 复用“继续”的按钮底图 band。 */
+            {
+                unsigned* ec = VecOwnerDrawElem(cont);
+                unsigned* eb = VecOwnerDrawElem(b);
+                if (ec && eb)
+                {
+                    *(unsigned*)((char*)eb + 0xB0) =
+                        *(unsigned*)((char*)ec + 0xB0);
+                    InvalidateRect(b, NULL, TRUE);
+                }
+            }
+        }
+        return r;
+    }
+    if (msg == WM_COMMAND && LOWORD(wp) == 0x424 &&
+        HIWORD(wp) == BN_CLICKED)
+    {
+        /* DWL_USER = 0x60D380 的局部标志; 置 1 让模态帧循环退出。
+         * 真正退出放到 0x6C8E80 返回后 (见 VecStandaloneShowEntry)。 */
+        int* flag = (int*)GetWindowLongA(hDlg, 8);
+        if (flag) *flag = 1;
+        g_ExitPending = 1;
+        return TRUE;
+    }
+    if (!g_OrigScoreDlgProc) return FALSE;
+    return g_OrigScoreDlgProc(hDlg, msg, wp, lp);
+}
 
 static void __fastcall VecMPScoreShowEntry(void* thisptr, void* edx)
 {
@@ -702,6 +812,11 @@ static void __fastcall VecStandaloneShowEntry(void* thisptr, void* edx)
     g_ScoreScreen++;
     if (g_OrigStandaloneShow) g_OrigStandaloneShow(thisptr, edx);
     g_ScoreScreen--;
+    if (g_ExitPending)
+    {
+        g_ExitPending = 0;
+        VecExitGameNow();
+    }
 }
 
 int __fastcall VecDrawTextEntry(void* t, void* e,
@@ -2365,10 +2480,13 @@ void VecText_LateInstall(void)
 {
     static const unsigned char kWantScoreShow[8] =
         { 0x83, 0xEC, 0x10, 0xA1, 0x30, 0xB2, 0xA8, 0x00 };
+    static const unsigned char kWantScoreProc[8] =
+        { 0x8B, 0x44, 0x24, 0x10, 0x83, 0xEC, 0x40, 0x53 };
     static const unsigned char kWantFpsPin[5] = { 0xA1, 0x1C, 0x73, 0x88, 0x00 };
     if (g_LateHooksDone) return;
-    if (!g_Log || !g_VT.Enable) return;
-    /* 结算界面显示钩: 打开期间 g_ScoreScreen>0, 文本钩整条回落原版。 */
+    if (!g_Log) return;
+    /* 结算界面显示钩: 打开期间 g_ScoreScreen>0, 文本钩整条回落原版。
+     * 与文本开关无关 (任务结算的退出按钮也靠它收尾)。 */
     if (BytesSame((unsigned char*)0x5C9720u, kWantScoreShow, 8))
     {
         g_OrigMPScoreShow = (ShowDlgFn)BuildTrampAt(0x5C9720u, 8, 0x5C9728u);
@@ -2386,6 +2504,21 @@ void VecText_LateInstall(void)
             g_OrigStandaloneShow = NULL;
         else LogLine("vtext: standalone show hook ON (late)");
     }
+    else LogLine("vtext: standalone show site not pristine - OFF (foreign hook?)");
+    /* 任务结算对话框过程钩: 加“退出游戏”按钮。展示钩没装上就不加
+     * (按钮点了也走不到收尾)。 */
+    if (g_OrigStandaloneShow)
+    {
+        if (BytesSame((unsigned char*)0x6C8FF0u, kWantScoreProc, 8))
+        {
+            g_OrigScoreDlgProc =
+                (DlgProcFn)BuildTrampAt(0x6C8FF0u, 8, 0x6C8FF8u);
+            if (!g_OrigScoreDlgProc ||
+                !PatchAt(0x6C8FF0u, (void*)(size_t)VecScoreDlgEntry, 8))
+                g_OrigScoreDlgProc = NULL;
+        }
+    }
+    if (!g_VT.Enable) { g_LateHooksDone = 1; return; }
     /* FPS 钉住钩 (0x4F4589, GScreenClass::Render 尾): 计数器固定位 1x。 */
     if (BytesSame((unsigned char*)0x4F4589u, kWantFpsPin, 5))
     {

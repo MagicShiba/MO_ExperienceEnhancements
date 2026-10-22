@@ -98,6 +98,39 @@ Print 0x434B90 / Simple 0x4A5EB0 / GetDim 0x433CF0。
 - 颜色 font+0x24；不可靠返回 -1 走引擎。
 - 自绘块须挂 `g_VT.Render &&` 门，否则 Render=0 时简报与他处字体混排。
 
+## 任务结算界面“退出游戏”按钮
+
+- 任务结算展示 `0x6C8E80`（对话框 `0x103`，对话框过程 `0x6C8FF0`）。
+- 晚装钩 `0x6C8FF0` 头 8 字节；在**原版 `WM_INITDIALOG` 之前**，按
+  “继续” (id `0x423`) 的窗口矩形在其正上方 7px 建 `BS_OWNERDRAW`
+  Button (id `0x424`, style `0x5000000B`，与原版模板一致)，再调原版。
+  原版 `EnumChildWindows` 会把所有子控件挂 `0x610CA0` 子类，按钮类
+  (style&0xB==0xB) 走 `0x612B70` 原版绘制；外观/字体/悬停/按下与
+  “继续”完全一致。不要用系统 Button 或自绘仿制。
+- 文本写 CSF 键 `GUI:ExitGame`（原版“继续”模板标题就是 `GUI:Continue`），
+  引擎按游戏语言加载。`WS_TABSTOP` 故意不加，避免回车误触退出。
+- 参考：Ares `src/Misc/Interface.cpp` / `Interface.Buttons.cpp` 的菜单
+  按钮是复用模板控件 + `moveItem`/`swapItems` + hook 点击；Phobos 侧栏
+  按钮走 `GadgetClass`/`GScreenClass::AddButton`，不适用于 Win32 对话框。
+  Ares/Phobos 无“在游戏对话框新建按钮”的先例，故采用“模板同款 style
+  + 提前创建”的等价做法。
+- 按钮底图由 `OwnerDrawDialogElement` 的 `+0xB0 LayoutBand` 选择：
+  0=默认灰石（0x6131D7），1=0x72E2C0，2=0x72F4B0，3=0x72B050
+  （0x612E87）。新控件不在模板里，`0x60A330` 不会给它和“继续”相同
+  的 band。初始化后从 0x423 的元素复制 **仅 +0xB0 一个字段** 再
+  `InvalidateRect` 即可，不动任何指针。
+  正确元素表是 `0xAC1B00`（log2 `0xAC1B0C`）：表项
+  `{+0 HWND, +4 element, +0x204 next}`，元素基址=表项+4。
+  **注意 `0xAC1B48` 是 HWND→旧 WNDPROC 表，不是元素表**；往
+  `0xAC1B48` 表项 +4 写元素字段会改到 user32 代码，必崩。
+- 点按钮: 取 `DWL_USER` (`GetWindowLongA(hDlg, 8)`) 置 1，令 `0x60D380`
+  模态帧循环退出；同时置 `g_ExitPending`。
+- `0x6C8E80` 返回后（`VecStandaloneShowEntry` 尾部）清 `g_ScoreScreen`，
+  再调 `0x6BEC60` 收尾 + `0x6BEC50(1)` 退出。
+- `0x6C8FF0` 晚装前验原版 8 字节；展示钩被外部占（非原版字节）时不加
+  按钮，避免点了走不到收尾。
+- 只挂任务结算 `0x103`；遭遇战/多人 `0x108`/`0x5C9720` 不挂（联机安全）。
+
 ## 配置（[VecText]，改后重启）
 
 - Enable=1，FontFace=文件名原样匹配（先游戏目录后系统目录），FontPx=0（自动），Bold=0。
