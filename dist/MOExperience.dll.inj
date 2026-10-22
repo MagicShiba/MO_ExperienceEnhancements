@@ -103,3 +103,7 @@
 ; TActionClass::Execute entry (0x6DD8B0, 6B = sub esp,0x240).
 ; Action 900 = switch local sidebar UI skin (visual only).
 0x6DD8B0 = TAction_UISkin, 6
+; 建筑放置半透明预览 (0x6D528A, 6B = mov ecx,[0x880990])。画完绿/红地基格后
+; 追加一次半透明 Buildup/Image 静态帧; 只读+渲染面绘制, 检测到 Phobos.dll 时不画。
+; 见 src/PlacementPreview.cpp
+0x6D528A = PlacementPreview_DrawHook, 6

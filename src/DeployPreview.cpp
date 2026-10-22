@@ -3,6 +3,10 @@
  *
  * 预览: 物理中键按住时, 以光标格画展开后地基黄框 (引擎 CoordsToClient
  * 投影, 每角取其框内格高, 平地高地同式), 细框套目标格, 方便对墙对齐。
+ * 可选半透明展开虚影 ([DeployPreview] Ghost=1): 每块地基上叠加展开后
+ * 建筑的 Buildup/Image 静态帧, 画在黄框与轨迹线之上; 界面缩放档按缩放比
+ * 缩放位图后混合写入 (每帧有像素预算)。透明度统一取
+ * [PlacementPreview] Translucency, 本模块不单独配置。
  * 落点 = 光标格 + (大地基 -1,-1), 预览=移动目标=实际落点同一套数学
  * (TryToDeploy 0x7393C0 反汇编+运行时双确认)。
  *
@@ -15,7 +19,7 @@
  * 死车/换边/超时 (DeployTimeout 秒)/无处可铺则放弃, 新点按取代旧跟踪。
  * 认领态另画白色轨迹线 (SmartOrder 熄火时补上, 同观感)。
  * 开销: 地基尺寸指纹缓存 (选中签名+500ms), 帧内一次 ClickCoords。
- * 日志: 启动行 + 首次命中 + 每次 plots/fired/timeout。
+ * 日志: 仅启动一行 (deployprev: ON)。
  * 构建见 build-fast.bat。渲染挂 MOExperience_MessageDrawHook。
  */
 
@@ -26,6 +30,7 @@
 #include "OrderThrottle.h"
 #include "ScaleBar.h"
 #include "SmartArea.h"
+#include "PlacementPreview.h"
 #include "DeployPreview.h"
 
 #define DP_SECTION "DeployPreview"
@@ -64,6 +69,13 @@ static int g_DpInit = 0;
 static int g_DpEnable = 1;
 static int g_DpAuto = 1;     /* 1=单基地车裸中键点按自动开过去+到位展开 */
 static int g_DpTimeoutMs = 45000;
+static int g_DpGhost = 1;     /* 1=展开位置显示半透明建筑虚影 */
+                            /* 透明度不单独配置: 恒取 [PlacementPreview] Translucency,
+                             * 与手放建筑的预览虚影同一档 (单一来源, 免两处对不上)。 */
+
+/* 虚影缓存: 选中里第一个可展开单位的展开建筑类型 + 单位 (取玩家色)。 */
+static void* s_DpBld = 0;
+static void* s_DpBldUnit = 0;
 
 static void DP_EnsureInit(void)
 {
@@ -78,9 +90,9 @@ static void DP_EnsureInit(void)
     if (to < 5) to = 5;
     if (to > 300) to = 300;
     g_DpTimeoutMs = to * 1000;
-    LogLine("deployprev: ON (middle hold)");
-    if (!g_DpEnable) LogLine("deployprev: OFF");
-    if (!g_DpAuto) LogLine("deployprev: autodeploy OFF");
+    g_DpGhost = GetPrivateProfileIntA(DP_SECTION, "Ghost", 1, g_IniPath) ? 1 : 0;
+    PlacementPreview_GetTranslucency();   /* 同时完成放置预览配置读取 (虚影透明度来源) */
+    LogLine(g_DpEnable ? "deployprev: ON" : "deployprev: OFF");
 }
 
 /* ---------------- 类型取得 (固定偏移, 无扫描无字符串探测) ----------------
@@ -130,6 +142,8 @@ static int DP_FindFootprint(int* wOut, int* hOut)
 {
     void** items;
     int selN, i;
+    s_DpBld = 0;
+    s_DpBldUnit = 0;
     selN = *(int*)ADDR_SELOBJ_COUNT;
     items = *(void***)ADDR_SELOBJ_ITEMS;
     if (selN <= 0 || !items || !IsPlausiblePtr(items)) return 0;
@@ -152,6 +166,8 @@ static int DP_FindFootprint(int* wOut, int* hOut)
         h = (int)DP_FN_FH(bld, 0);
         if (w < 1 || w > 10 || h < 1 || h > 10) continue;
         *wOut = w; *hOut = h;
+        s_DpBld = bld;
+        s_DpBldUnit = o;
         return 1;
     }
     return 0;
@@ -267,16 +283,13 @@ static int DP_MouseCellZ(int* mcx, int* mcy, int* lz)
 }
 
 /* 角点高度 = 其框内格高度, 失败回落 fb (光标高度)。 */
-static int DP_CornerZ(int cx, int cy, int fb, int* zOut)
+static void DP_CornerZ(int cx, int cy, int fb, int* zOut)
 {
-    if (DP_CellZ(cx, cy, zOut)) return 1;
-    *zOut = fb;
-    return 1;
+    if (!DP_CellZ(cx, cy, zOut)) *zOut = fb;
 }
 
-/* 任意 lep 点 → 屏像素 (唯一投影出口, 调引擎 CoordsToClient)。
- * CoordsToClient 给的是**渲染面坐标**, 缩放档还要折到屏幕坐标 (ScaleBar)。 */
-static int DP_CornerLep(int lx, int ly, int lz, int* px, int* py)
+/* 任意 lep 点 → 渲染面坐标 (不折界面缩放; 缩放档虚影自己缩位图用)。 */
+static int DP_CornerLepView(int lx, int ly, int lz, int* px, int* py)
 {
     void* tac = *(void**)DP_TAC_INSTANCE;
     CoordStruct c;
@@ -285,7 +298,20 @@ static int DP_CornerLep(int lx, int ly, int lz, int* px, int* py)
     c.X = lx; c.Y = ly; c.Z = lz;
     o.X = 0; o.Y = 0;
     FN_DP_C2C(tac, &c, &o);
-    if (!SB_ViewToScreen(o.X, o.Y, px, py)) { *px = o.X; *py = o.Y; }
+    *px = o.X;
+    *py = o.Y;
+    return 1;
+}
+
+/* 任意 lep 点 → 屏像素 (唯一投影出口, 调引擎 CoordsToClient)。
+ * CoordsToClient 给的是**渲染面坐标**, 缩放档还要折到屏幕坐标 (ScaleBar)。 */
+static int DP_CornerLep(int lx, int ly, int lz, int* px, int* py)
+{
+    if (!DP_CornerLepView(lx, ly, lz, px, py)) return 0;
+    {
+        int vx = *px, vy = *py;
+        if (!SB_ViewToScreen(vx, vy, px, py)) { *px = vx; *py = vy; }
+    }
     return 1;
 }
 
@@ -413,6 +439,7 @@ static int s_DpPrevTrig = 0;
 /* 按下快照: 基地车 (上限) + 其它单位 + 各车实际地基 + 起点格 */
 static void* s_DpDepU[DP_DEP_CAP];
 static int s_DpDepId[DP_DEP_CAP];
+static void* s_DpDepBld[DP_DEP_CAP];
 static int s_DpDepFw[DP_DEP_CAP];
 static int s_DpDepFh[DP_DEP_CAP];
 static int s_DpDepN0 = 0;
@@ -816,7 +843,6 @@ static void DP_ServiceDeps(void)
         if (GetTickCount() - e->startMs > (unsigned)g_DpTimeoutMs)
         {
             DP_DepShiftDown(i);
-            LogLine("deploy: timeout, abandoned");
             continue;
         }
         if (!OU_PtrAlive(e->unit, e->id, s_DpIdxOk)) { DP_DepShiftDown(i); continue; }
@@ -842,7 +868,6 @@ static void DP_ServiceDeps(void)
             if (DP_FireDeploy(hIdx, id, rt, e->unit, e->id, s_DpIdxOk))
             {
                 DP_DepShiftDown(i);
-                LogLine("deploy: fired");
                 continue;
             }
             i++; /* OutList 满: 下轮继续 (车已在位)。 */
@@ -889,6 +914,7 @@ static void DP_Snapshot(void)
             {
                 s_DpDepU[s_DpDepN0] = o;
                 s_DpDepId[s_DpDepN0] = *(int*)(tb + 0);
+                s_DpDepBld[s_DpDepN0] = bld;
                 s_DpDepFw[s_DpDepN0] = bw;
                 s_DpDepFh[s_DpDepN0] = bh;
                 s_DpDepN0++;
@@ -1004,7 +1030,7 @@ void DeployPreview_Poll(void)
         /* 松开: 单车跟随终点; 多车按住 Shift 走锁轴直线,
          * 划线够长走手绘轨迹, 否则点按平铺。
          * 车进自家框目标, 其它单位散开避让 → 排空。 */
-        int ccx, ccy, nPlot, k, dropped = 0;
+        int ccx, ccy, nPlot, k;
         int apx, apy;
         void* cur;
         static int bases[DP_DEP_CAP][2], dests[DP_DEP_CAP][2];
@@ -1046,8 +1072,8 @@ void DeployPreview_Poll(void)
             int dx, dy;
             void* u = s_DpDepU[k];
             int id = s_DpDepId[k];
-            if (!OU_PtrAlive(u, id, s_DpIdxOk)) { dropped++; continue; }
-            if (!DP_NearValid(dests[k][0], dests[k][1], &dx, &dy)) { dropped++; continue; }
+            if (!OU_PtrAlive(u, id, s_DpIdxOk)) continue;
+            if (!DP_NearValid(dests[k][0], dests[k][1], &dx, &dy)) continue;
             DP_QueueMove(u, id, dx, dy);
             if (s_DpDepN < DP_DEP_CAP)
             {
@@ -1071,19 +1097,9 @@ void DeployPreview_Poll(void)
                 s_DpOthW[s_DpOthN0] = ABS_UNIT;
                 s_DpOthN0++;
             }
-            else dropped++;
         }
         DP_ScatterOthers(ccx, ccy, bases, nPlot, s_DpDepFw, s_DpDepFh);
         DP_DrainMoves();
-        {
-            char sb[96], t1[16], t2[16];
-            unsigned q = 0;
-            q = AppendCStr(sb, q, "deploy: plots=", sizeof(sb));
-            UtoA((unsigned)nPlot, t1); q = AppendCStr(sb, q, t1, sizeof(sb));
-            q = AppendCStr(sb, q, " dropped=", sizeof(sb));
-            UtoA((unsigned)dropped, t2); q = AppendCStr(sb, q, t2, sizeof(sb));
-            LogLine(sb);
-        }
     }
     s_DpPrevTrig = trigDown;
 }
@@ -1153,14 +1169,67 @@ static void DP_ThinLine(int x0, int y0, int x1, int y1, unsigned a)
     }
 }
 
-static int g_DpLoggedOnce = 0;
+/* 缓存单位仍在选中数组里才用 (避免死指针)。 */
+static int DP_InSelection(void* p)
+{
+    void** items;
+    int n, i;
+    if (!p || !IsPlausiblePtr(p)) return 0;
+    items = *(void***)ADDR_SELOBJ_ITEMS;
+    n = *(int*)ADDR_SELOBJ_COUNT;
+    if (!items || !IsPlausiblePtr(items) || n <= 0) return 0;
+    if (n > 64) n = 64;
+    for (i = 0; i < n; i++)
+        if (items[i] == p) return 1;
+    return 0;
+}
+
+static void* DP_LiveBldUnit(void)
+{
+    return DP_InSelection(s_DpBldUnit) ? s_DpBldUnit : 0;
+}
+
+/* 每帧虚影混合像素预算: 缩放档多车大范围平铺时, 虚影是逐像素混合的,
+ * 不给上限会拖帧。用完就只留黄框 (下一帧重置)。 */
+#define DP_GHOST_PIX_BUDGET 700000
+static int s_DpGhostBudget = 0;
+
+/* 在 (bx,by) 地基左上格画展开后建筑半透明虚影 (画在黄线之上)。
+ * 透明度/偏移与放置预览同源; 缩放档由 PlacementPreview 自己缩放位图。
+ * 返回消耗的目标面像素数 (供每帧预算)。 */
+static int DP_DrawGhostPlot(void* surf, int bx, int by, void* bld,
+                            void* owner, int fbZ)
+{
+    int z, vx, vy, used;
+    if (!g_DpGhost || !bld || !IsPlausiblePtr(bld)) return 0;
+    if (s_DpGhostBudget <= 0) return 0;    /* 本帧预算用完: 剩下的块只留黄框 */
+    DP_CornerZ(bx, by, fbZ, &z);
+    if (!DP_CornerLepView(bx * 256 + 128, by * 256 + 128, z + 1, &vx, &vy))
+        return 0;
+    used = PlacementPreview_DrawGhostView(bld, owner, surf, vx, vy,
+                                          PlacementPreview_GetTranslucency());
+    s_DpGhostBudget -= used;
+    return used;
+}
+
+/* 锁渲染面并设手绘全局 (DP_PlotC 等用)。失败回 0。 */
+static int DP_LockSurface(void* surf, DP_LockFn lockFn, int w, int h, int pitch)
+{
+    unsigned char* locked;
+    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
+    if (!locked || !IsPlausiblePtr(locked)) return 0;
+    s_DpLocked = locked;
+    s_DpW = w;
+    s_DpH = h;
+    s_DpPitch = pitch;
+    return 1;
+}
 
 void DeployPreview_Draw(void* surf, int w, int h, int pitch)
 {
     unsigned char* vt;
     DP_LockFn lockFn;
     DP_UnlockFn unlockFn;
-    unsigned char* locked;
     int mcx, mcy, mlz;
     int fw, fh, bx, by;
     int x0, y0, x1, y1, x2, y2, x3, y3;
@@ -1177,34 +1246,14 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
     /* 基点 = 光标格 + 引擎偏移 (大地基 -1,-1; 小地基 0) */
     if (fw > 2 || fh > 2) { bx = mcx - 1; by = mcy - 1; }
     else { bx = mcx; by = mcy; }
-    if (!g_DpLoggedOnce)
-    {
-        char sb[160], t1[16], t2[16], t5[16], t6[16], t7[16], t8[16];
-        unsigned q = 0;
-        g_DpLoggedOnce = 1;
-        q = AppendCStr(sb, q, "deployprev: fw=", sizeof(sb));
-        UtoA((unsigned)fw, t1); q = AppendCStr(sb, q, t1, sizeof(sb));
-        q = AppendCStr(sb, q, " fh=", sizeof(sb));
-        UtoA((unsigned)fh, t2); q = AppendCStr(sb, q, t2, sizeof(sb));
-        q = AppendCStr(sb, q, " cur=", sizeof(sb));
-        UtoA((unsigned)(mcx < 0 ? 0 : mcx), t7); q = AppendCStr(sb, q, t7, sizeof(sb));
-        q = AppendCh(sb, q, ',', sizeof(sb));
-        UtoA((unsigned)(mcy < 0 ? 0 : mcy), t8); q = AppendCStr(sb, q, t8, sizeof(sb));
-        q = AppendCStr(sb, q, " base=", sizeof(sb));
-        UtoA((unsigned)(bx < 0 ? 0 : bx), t5); q = AppendCStr(sb, q, t5, sizeof(sb));
-        q = AppendCh(sb, q, ',', sizeof(sb));
-        UtoA((unsigned)(by < 0 ? 0 : by), t6); q = AppendCStr(sb, q, t6, sizeof(sb));
-        LogLine(sb);
-    }
     /* 四角投影在认领分支之后算 (认领态提前返回, 省 8 次投影)。 */
     vt = *(unsigned char**)surf;
     if (!vt || !IsPlausiblePtr(vt)) return;
     lockFn = (DP_LockFn)(*(void**)(vt + VT_DP_LOCK));
     unlockFn = (DP_UnlockFn)(*(void**)(vt + VT_DP_UNLOCK));
     if (!lockFn || !unlockFn) return;
-    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
-    if (!locked || !IsPlausiblePtr(locked)) return;
-    s_DpLocked = locked; s_DpW = w; s_DpH = h; s_DpPitch = pitch;
+    s_DpLocked = 0;
+    s_DpGhostBudget = DP_GHOST_PIX_BUDGET;   /* 每帧重置虚影像素预算 */
     /* 认领态多框预览 (与松手执行同一套分配, 所见即所得): 起点=按下格,
      * 终点=当前格, Shift 锁轴。未认领时走下面单框路径。 */
     if (s_DpArmed && s_DpDepN0 > 0)
@@ -1243,6 +1292,7 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
                                        s_DpDepFw, s_DpDepFh,
                                        bases, dests);
             }
+            if (!DP_LockSurface(surf, lockFn, w, h, pitch)) return;
             /* 轨迹白线 (认领后 SmartOrder 熄火, 这里补上; 与裸中键同观感):
              * 节点格心连线 + 当前格心橡皮尾巴, 引擎投影吸格。 */
             {
@@ -1307,6 +1357,13 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
             }
             s_DpLocked = 0;
             unlockFn(surf, NULL);
+            /* 虚影最后画: 压在轨迹线与黄框之上 (缩放档内部自己锁面)。 */
+            for (k = 0; k < nPlot; k++)
+            {
+                void* owner = DP_InSelection(s_DpDepU[k]) ? s_DpDepU[k] : 0;
+                DP_DrawGhostPlot(surf, bases[k][0], bases[k][1],
+                                 s_DpDepBld[k], owner, mlz);
+            }
             return;
         }
     }
@@ -1320,6 +1377,8 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
     if (!DP_Corner(bx + fw, by, z1, &x1, &y1)) return;
     if (!DP_Corner(bx + fw, by + fh, z2, &x2, &y2)) return;
     if (!DP_Corner(bx, by + fh, z3, &x3, &y3)) return;
+    /* 虚影在框之上; 先锁面画完框线, 解锁后再叠虚影。 */
+    if (!DP_LockSurface(surf, lockFn, w, h, pitch)) return;
     DP_LineC(x0, y0, x1, y1, 255, 255, 0, 255);
     DP_LineC(x1, y1, x2, y2, 255, 255, 0, 255);
     DP_LineC(x2, y2, x3, y3, 255, 255, 0, 255);
@@ -1332,16 +1391,22 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
      * 细框就套哪格, 与黄框是否对齐一眼可见。 */
     {
         int tx0, ty0, tx1, ty1, tx2, ty2, tx3, ty3;
+        int ok;
         DP_CornerZ(mcx, mcy, mlz, &zt);
-        if (!DP_Corner(mcx, mcy, zt, &tx0, &ty0)) return;
-        if (!DP_Corner(mcx + 1, mcy, zt, &tx1, &ty1)) return;
-        if (!DP_Corner(mcx + 1, mcy + 1, zt, &tx2, &ty2)) return;
-        if (!DP_Corner(mcx, mcy + 1, zt, &tx3, &ty3)) return;
-        DP_ThinLine(tx0, ty0, tx1, ty1, 200);
-        DP_ThinLine(tx1, ty1, tx2, ty2, 200);
-        DP_ThinLine(tx2, ty2, tx3, ty3, 200);
-        DP_ThinLine(tx3, ty3, tx0, ty0, 200);
+        ok = DP_Corner(mcx, mcy, zt, &tx0, &ty0);
+        if (ok) ok = DP_Corner(mcx + 1, mcy, zt, &tx1, &ty1);
+        if (ok) ok = DP_Corner(mcx + 1, mcy + 1, zt, &tx2, &ty2);
+        if (ok) ok = DP_Corner(mcx, mcy + 1, zt, &tx3, &ty3);
+        if (ok)
+        {
+            DP_ThinLine(tx0, ty0, tx1, ty1, 200);
+            DP_ThinLine(tx1, ty1, tx2, ty2, 200);
+            DP_ThinLine(tx2, ty2, tx3, ty3, 200);
+            DP_ThinLine(tx3, ty3, tx0, ty0, 200);
+        }
     }
     s_DpLocked = 0;
     unlockFn(surf, NULL);
+    /* 虚影最后画: 压在框线与目标格描边之上。 */
+    DP_DrawGhostPlot(surf, bx, by, s_DpBld, DP_LiveBldUnit(), mlz);
 }
