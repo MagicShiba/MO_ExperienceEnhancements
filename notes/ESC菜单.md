@@ -53,9 +53,36 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
 - 仅子类化对话框处理输入，不创建子窗口：`WM_LBUTTONDOWN` 命中左侧行时更新
   `s_Sel`，命中右侧设置行时执行开关；`InvalidateRect + UpdateWindow` 重绘；
   其它消息原样转发。
-- 左侧第一项为“GUI设置”，右侧按功能组显示：`底栏功能`（视图缩放、暂停和帧进、
-  网格显示）与`超级武器侧边栏`（侧栏总开关、排序方式、显示行数）。分组竖线与
-  分组文本同高，分组文本与子项文本左对齐。
+- 左侧第一项为“GUI功能”，右侧按功能组显示：`通用`（建筑队列、放置时建筑
+  驱逐单位）、`超级武器侧边栏`（侧栏总开关、排序方式、显示行数、面板停靠边）、
+  `底栏功能`（视图缩放、暂停和帧进、网格显示）、`侧边栏`（侧栏滚动条、
+  隐藏侧栏功能）与`杂项`（玩家颜色、阵营 UI）。分组竖线与分组文本同高，
+  分组文本与子项文本左对齐。
+- 左侧第二项为“文本显示调整”，右侧按三组显示：`作战文本信息`（战役文本框
+  开关、文本行数、背景透明度、显示位置、水平对齐、宽度、打字机显示、滚动条）、
+  `聊天文本框`（自定义输入框、单机名字前缀）与`操作与战斗提示`（启用开关、
+  文本颜色、显示行数、宽度、滚动条、显示雷达事件）。组间用分割线隔开。
+  该页内容较高，超出面板时用鼠标滚轮滚动（滚动量吸附到行顶，右侧画滑块）。
+- 文本页设置回写主 INI 的 `[MsgText] CampEnable/MaxLines/BoardOpacity/
+  CampBottom/CampCentered/MaxWidth/CampAnim/CampBarSide/ChatEdit/ChatNameSP/
+  HintShow/HintColorFollow/HintMaxLines/HintMaxWidth/HintBarSide/
+  HintRadarShow`，并经 `MsgText_GetOption/SetOption`、`ChatEdit_Enabled/
+  SetEnabled`、`ChatEdit_ShowNameSP/SetShowNameSP` 立即生效。
+- “战役文本框”关闭时 `MsgText_DrawFrame` 与 `MsgText_Enabled` 一起返回 0，
+  整个消息框交回引擎原版绘制（战役与操作/战斗提示一起回原版），此时提示组
+  选项只写入 INI、不生效，重新开启战役文本框后恢复。
+- ESC 菜单选中项与文本页滚动位置跨次打开保留。
+- 设置页点击只改内存并排队 (`Esc_QueueValue/Esc_QueueRaw`)，离开页面
+  （切左栏项、菜单隐藏或销毁、新菜单句柄）时 `Esc_FlushPending` 统一落盘；
+  同一 `section+key` 只保留最后一次值。鼠标左键 `WM_LBUTTONDBLCLK` 与
+  `WM_LBUTTONDOWN` 同处理，连续点 `+`/`-` 不会被双击吞掉。
+- “隐藏侧栏功能”为四段选择：`禁用` / `完全显示` / `小地图` / `不显示`，对应
+  `[Sidebar] HideEnable` 与 `Mode`。运行期选`禁用`时模块内部仍按完全显示跑
+  （缩放开着时视口补偿不能停），只是不再响应切换键；下次启动按
+  `HideEnable=0` 真正关掉。若启动时本就禁用（全宽视口补丁未安装），其它三档
+  只记录选择、重启后生效。
+- “面板停靠边”为两段选择：`右侧` / `左侧`，对应 `[SWSidebar] Side=right|left`，
+  切换时同步列序、滚动位置与命中缓存。
 - 左侧`功能菜单`标题栏右端显示 `ZH` / `EN` / `AUTO` 三个固定分段（不额外增加
   分组或说明文本），点击某段立即切换语言（仅本次运行有效，不写 INI）。切换后
   菜单文案、缺失提示与雷达文案缓存同步重载。
@@ -63,9 +90,11 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
   使用 8x8 超采样抗锯齿，圆角横纵半径一致，圆点在轨道内垂直居中。只有点击
   胶囊开关本身才会切换，点击整行文字不生效。排序行右侧同时显示“按阵营/填充”，
   点击整行切换；行数行右侧为 `- N +`，点减/加按钮调整（1~40）。
-- 设置项回写主 INI 的 `[BottomBar] ScaleEnable/PauseEnable/GridEnable` 与
-  `[SWSidebar] Enable/FillMode/MaxRows`。回写按字节定位 `key=value`，只替换
-  值，保留行尾注释、空行和文件编码。
+- 设置项回写主 INI 的 `[BottomBar] ScaleEnable/PauseEnable/GridEnable`、
+  `[SWSidebar] Enable/FillMode/MaxRows/Side`、`[Sidebar] ScrollEnable/
+  HideEnable/Mode`、`[Features] BuildQueue` 与 `[PlaceScatter] Mode`。
+  `Side` 按字符串写 `right`/`left`，其余按整数。回写按字节定位 `key=value`，
+  只替换值，保留行尾注释、空行和文件编码。
 - “玩家颜色”只保留界面布局/绘制/命中测试；颜色枚举、当前色、切换与
   刷新逻辑在 `src/GUI/PlayerColor.cpp`，详见 `notes/玩家颜色切换.md`。
 - 原 WndProc 存在窗口属性 `MOE_EscOldProc`；按 `IsWindowUnicode` 选择
@@ -80,10 +109,15 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
 - 左侧标题栏的语言分段可运行时覆盖为 `ZH` 或 `EN`，`AUTO` 恢复跟随系统。
   覆盖只改内存选择（不写 INI），重启游戏后回到 AUTO。
 - 菜单标题和占位项读取 `[EscMenu]` 的 `LeftTitle`、`LeftItem1/2`、
-  `RightTitle`、`RightItem1/2`；GUI 设置读取 `GuiTitle`、`GuiGroupBottom`、
-  `GuiScale`、`GuiPause`、`GuiGrid`、`GuiGroupSws`、`GuiSws`、`GuiSort`、
-  `GuiRows`、`GuiOn`、`GuiOff`、`GuiSortFaction`、`GuiSortFill`；雷达文案读取
-  `[MsgRadar]` 的 `Name0..Name16`、`NameOther`。
+   `RightTitle`、`RightItem1/2`；GUI 设置读取 `GuiTitle`、`GuiGroupBottom`、
+   `GuiScale`、`GuiPause`、`GuiGrid`、`GuiGroupSws`、`GuiSws`、`GuiSort`、
+   `GuiRows`、`GuiBuildQueue`、`GuiScatter`、`GuiScatterOff/OnPlace/Auto`、
+   `GuiGroupSidebar`、`GuiSideScroll`、`GuiSideHide`、
+   `GuiSideHideOff/Full/Radar/Bare`、`GuiSwsSide`、`GuiSwsSideRight/Left`、
+   `GuiOn`、`GuiOff`、`GuiSortFaction`、`GuiSortFill`、`GuiSkin*`、`GuiColor`；
+   文本页读取 `TextTitle`、`TextGroupCamp/Chat/Hint`、`TextCamp*`、`TextChat*`、
+   `TextHint*`、`TextBar*`、`TextAlign*`、`TextColor*` 与 `TextPos*`；
+   雷达文案读取 `[MsgRadar]` 的 `Name0..Name16`、`NameOther`。
 - 所有菜单文案缺失时先回退旧主 ini 同名节，仍缺失则显示“文本缺失”；
   设置面板顶部会显示“文本缺失，请检查多语言文件”。代码内不保留默认文案。
 - 缺失提示本身只按系统语言分两组：zh 系列用中文，其它语言用英文

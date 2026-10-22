@@ -1036,3 +1036,19 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_ShowCount(void* regs)
  * 故不钩切换清产, 也不镜像取消/对账工厂指针: 前者会在放置瞬间误清队列,
  * 后者会在开工换指针时丢单。 */
 
+/* GUI 设置菜单用的运行时开关/查询 (ESC 菜单 "建筑队列" 开关)。 */
+int BQ_Enabled(void)
+{
+    BQ_EnsureInit();
+    return g_BQEnable;
+}
+
+void BQ_SetEnabled(int enable)
+{
+    BQ_EnsureInit();
+    g_BQEnable = enable ? 1 : 0;
+    if (g_BQEnable) BQ_ReadyLeftPatch(); /* 幂等; 菜单开时补挂就绪左对齐桩 */
+    LogLine(g_BQEnable ? "bqueue: enabled (menu)"
+                       : "bqueue: disabled (menu)");
+}
+

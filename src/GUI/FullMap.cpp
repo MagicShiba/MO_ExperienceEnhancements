@@ -127,6 +127,12 @@ static int s_Mode = FM_MODE_FULL;
 static OU_Hotkey s_ToggleHk;   /* [Sidebar] ToggleKey (默认 F11) */
 static int s_Enable = 0;
 static int s_LockedFull = 0;   /* HideEnable=0 但缩放开着: 锁定完全显示, 不许 F11 切换 */
+/* 菜单选中"禁用" (HideEnable=0)。模块内部仍按完全显示跑 (缩放开着时视口补偿不能停),
+ * 只是不响应切换键; 下次启动按 ini 真正关掉。 */
+static int s_MenuOff = 0;
+/* 启动即禁用时菜单选了启用: 全宽视口补丁没装, 运行期无法安全接管 ⇒ 记下, 重启生效。 */
+static int s_WantState = -1;
+static int s_PatchesInstalled = 0;
 static int s_ExtraH = 5;
 /* 左键"本次按下已处理"标记 —— 只由点击门维护 (读 GetAsyncKeyState, 松开时清) */
 static int s_LbPress = 0;
@@ -150,6 +156,7 @@ void FM_EnsureInit(void)
     GtEnsureLog();
     if (!g_Log) return;
     s_Enable = GetPrivateProfileIntA(FM_SECTION, "HideEnable", 1, g_IniPath) ? 1 : 0;
+    s_MenuOff = !s_Enable;
     s_ExtraH = GetPrivateProfileIntA(FM_SECTION, "ExtraH", 5, g_IniPath);
     if (s_ExtraH < 0) s_ExtraH = 0;
     if (s_ExtraH > 64) s_ExtraH = 64;
@@ -663,6 +670,7 @@ void FM_Install(void)
             LogLine("fullmap: edge-scroll zone ON (already patched)");
         else LogLine(Fm_SiteBad("edgezone", 0x00692BB4u));
     }
+    s_PatchesInstalled = 1;
     LogLine("fullmap: viewrect hook ON (surface full width / view follows mode)");
 }
 /* ---------------- 小地图矩形 (侧栏面内坐标) ----------------
@@ -1269,7 +1277,7 @@ static void Fm_PollToggle(void)
     char buf[96];
     unsigned p = 0;
     int fr, down;
-    if (!s_Enable || s_LockedFull || s_ToggleHk.disabled) return;
+    if (!s_Enable || s_LockedFull || s_MenuOff || s_ToggleHk.disabled) return;
     fr = *(int*)(size_t)ADDR_FRAME_COUNT;
     if (fr == s_TogLastFrame) return;
     s_TogLastFrame = fr;
@@ -1931,4 +1939,70 @@ int FM_SidebarColumnX(void)
 extern "C" __declspec(dllexport) unsigned __cdecl FullMap_RadarClickGate(void* regs)
 {
     return FM_RadarClickGate(regs);
+}
+
+/* ---------------- GUI 设置菜单接口 ---------------- */
+
+int FM_HideState(void)
+{
+    FM_EnsureInit();
+    if (s_WantState >= 0) return s_WantState;
+    if (s_MenuOff || !s_Enable) return 0;
+    if (s_LockedFull) return 1;
+    return 1 + s_Mode;
+}
+
+void FM_SetHideState(int state)
+{
+    static const char* const kState[4] = { "off", "full", "radar", "bare" };
+    char buf[64];
+    unsigned p = 0;
+
+    if (state < 0) state = 0;
+    if (state > 3) state = 3;
+    FM_EnsureInit();
+
+    if (state != 0 && !s_Enable && !s_PatchesInstalled)
+    {
+        /* 启动即禁用 ⇒ 全宽视口补丁没装, 运行期接管会把侧栏画到面外。
+         * 记下选择, 让 ini 在下次启动时按正常路径生效。 */
+        s_WantState = state;
+        LogLine("fullmap: hide state saved (restart required)");
+        return;
+    }
+    s_WantState = -1;
+
+    if (state == 0)
+    {
+        /* 菜单"禁用": 内部回完全显示 (原版视口 + 整条侧栏), 只是不响应切换键。
+         * 下次启动按 HideEnable=0 真正关掉 (缩放开着时仍锁完全显示补偿视口)。*/
+        s_MenuOff = 1;
+        s_Mode = FM_MODE_FULL;
+        s_LockedFull = 0;
+    }
+    else
+    {
+        s_MenuOff = 0;
+        s_Mode = state - 1;
+        s_LockedFull = 0;
+        if (!s_Enable)
+        {
+            s_Enable = 1;
+            Fm_ViewPatchSet(s_Mode != FM_MODE_FULL);
+        }
+    }
+
+    /* 与切换键同一条收尾: 侧栏强制全量重画 + 清输入/悬停态。 */
+    *(unsigned char*)(size_t)ADDR_SIDEBAR_REDRAW = 1;
+    *(unsigned char*)(size_t)ADDR_SIDEBAR_NEEDRD = 1;
+    *(unsigned char*)(size_t)ADDR_SIDEBAR_BGNEEDRD = 1;
+    s_RadarLockOk = 0;
+    s_LbPress = 0;
+    s_GadgetsArmed = 0;
+    s_ForceRedraw = Fm_ModeFull() ? 8 : 0;
+    s_ForceRedrawFrame = -1;
+
+    p = AppendCStr(buf, 0, "fullmap: menu state -> ", sizeof(buf));
+    p = AppendCStr(buf, p, kState[state], sizeof(buf));
+    LogLine(buf);
 }

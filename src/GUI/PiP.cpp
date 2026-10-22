@@ -8,6 +8,8 @@
 #include "FullMap.h"
 #include "MsgText.h"
 #include "ScaleBar.h"
+#include "PcxImage.h"
+#include "SidebarSkin.h"
 #include "PiP.h"
 
 #define PIP_SECTION "PiP"
@@ -128,11 +130,11 @@ static unsigned g_AutoSeq = 0; /* 已跟随的雷达事件序号 */
 static int g_AutoSeen = 0;     /* g_AutoSeq 是否有意义 (开窗/开按钮后先跳一次最新事件) */
 static int g_LastRtX = 0x7fffffff, g_LastRtY = 0x7fffffff;  /* 上次记日志的目标 */
 
-/* 侧栏按钮 (物理坐标 = 侧栏列起点 + ButtonX, ButtonY; 可在 ini 里改) 与窗内移动图标。 */
-static int g_BtnX = 30;       /* [PiP] ButtonX: 按钮相对侧栏列左缘 */
-static int g_BtnY = 2;        /* [PiP] ButtonY: 按钮相对屏幕顶边 */
-#define PIP_BTN_W     16
-#define PIP_BTN_H     16
+/* 侧栏按钮坐标。[PiP] ButtonPos 依次是盟军/苏联/厄普西隆/焚风的 X,Y:
+ * X 相对侧栏列左缘 (= 侧栏面局部 x), Y 相对屏幕顶边 (= 侧栏面局部 y)。 */
+static int g_BtnPos[4][2] = { { 8, 155 }, { 25, 158 }, { 0, 160 }, { 0, 168 } };
+#define PIP_BTN_W     20
+#define PIP_BTN_H     20
 #define PIP_ICON_PAD  3      /* 移动图标到小窗右上角的内边距 */
 #define PIP_ICON_W    13     /* 移动图标尺寸 */
 #define PIP_ICON_H    13
@@ -176,9 +178,28 @@ static int PiP_Scratch(void)
     return 1;
 }
 
+/* 逗号/分号/空白分隔的整数表。返回读出的个数。 */
+static int PiP_ParseInts(const char* s, int* out, int cap)
+{
+    int i = 0, n = 0;
+    while (s[i] && n < cap)
+    {
+        int sign = 1, v = 0;
+        while (s[i] == ',' || s[i] == ';' || s[i] == ' ' || s[i] == '\t') i++;
+        if (!s[i]) break;
+        if (s[i] == '-') { sign = -1; i++; }
+        if (s[i] < '0' || s[i] > '9') { i++; continue; }
+        while (s[i] >= '0' && s[i] <= '9') v = v * 10 + (s[i++] - '0');
+        out[n++] = sign * v;
+    }
+    return n;
+}
+
 void PiP_EnsureInit(void)
 {
     int v;
+    char raw[128];
+    int pos[8];
     if (g_Init) return;
     g_Init = 1;
     GtEnsureLog();
@@ -211,12 +232,14 @@ void PiP_EnsureInit(void)
     g_PanMax = v;
     g_AutoJump = GetPrivateProfileIntA(PIP_SECTION, "AutoJump", 0, g_IniPath) ? 1 : 0;
     g_Operate = GetPrivateProfileIntA(PIP_SECTION, "Operate", 0, g_IniPath) ? 1 : 0;
-    g_BtnX = GetPrivateProfileIntA(PIP_SECTION, "ButtonX", 30, g_IniPath);
-    g_BtnY = GetPrivateProfileIntA(PIP_SECTION, "ButtonY", 2, g_IniPath);
-    if (g_BtnX < 0) g_BtnX = 0;
-    if (g_BtnX > 400) g_BtnX = 400;
-    if (g_BtnY < 0) g_BtnY = 0;
-    if (g_BtnY > 400) g_BtnY = 400;
+    GetPrivateProfileStringA(PIP_SECTION, "ButtonPos",
+                             "8,155,25,158,0,160,0,168", raw, sizeof(raw), g_IniPath);
+    if (PiP_ParseInts(raw, pos, 8) == 8)
+        for (v = 0; v < 4; v++)
+        {
+            g_BtnPos[v][0] = pos[v * 2];
+            g_BtnPos[v][1] = pos[v * 2 + 1];
+        }
     if (g_Enable) LogLine("pip: module ON (sidebar button)");
     else LogLine("pip: module OFF");
 }
@@ -243,30 +266,52 @@ static void PiP_PxFrame(unsigned short* db, int dp, int cw, int ch,
                               PiP_PxPut(db, dp, cw, ch, x + w - 1, y + i, c); }
 }
 
-static void PiP_PxFill(unsigned short* db, int dp, int cw, int ch,
-                       int x, int y, int w, int h, unsigned short c)
+static int PiP_BtnSide(void)
 {
-    int i, j;
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > cw) w = cw - x;
-    if (y + h > ch) h = ch - y;
-    if (w <= 0 || h <= 0) return;
-    for (j = 0; j < h; j++)
-    {
-        unsigned short* row = (unsigned short*)
-            ((unsigned char*)db + (size_t)(y + j) * dp) + x;
-        for (i = 0; i < w; i++) row[i] = c;
-    }
+    int side = SidebarSkin_Side();
+    return (side >= 0 && side <= 3) ? side : 0;
 }
 
 /* 侧栏开关按钮在屏幕上的矩形 (物理游戏坐标)。0 = 拿不到侧栏位置。 */
 static int PiP_BtnRect(int* x, int* y, int* w, int* h)
 {
+    int side = PiP_BtnSide();
     int colX = FM_SidebarColumnX();
     if (colX < 0) return 0;
-    *x = colX + g_BtnX; *y = g_BtnY; *w = PIP_BTN_W; *h = PIP_BTN_H;
+    *x = colX + g_BtnPos[side][0]; *y = g_BtnPos[side][1];
+    *w = PIP_BTN_W; *h = PIP_BTN_H;
     return 1;
+}
+
+/* 贴当前阵营的 btn_small_window 格 (20x20); hover 时叠白提亮。 */
+static void PiP_DrawBtnImg(unsigned short* db, int dp, int cw, int ch,
+                           int side, int x, int y, int hover)
+{
+    PcxImage img;
+    int cellW, cellH, cx, cy;
+    if (!PcxImage_Load(&img, "btn_small_window.pcx", 2)) return;
+    cellW = img.width / 4;
+    cellH = img.height;
+    if (cellW <= 0 || cellH <= 0 || side * cellW + cellW > img.width) return;
+    for (cy = 0; cy < cellH; cy++)
+    {
+        int ty = y + cy;
+        const unsigned short* srow =
+            (const unsigned short*)img.px + (size_t)cy * img.width + side * cellW;
+        unsigned short* drow;
+        if (ty < 0 || ty >= ch) continue;
+        drow = (unsigned short*)((unsigned char*)db + (size_t)ty * dp);
+        for (cx = 0; cx < cellW; cx++)
+        {
+            int tx = x + cx;
+            unsigned short c;
+            if (tx < 0 || tx >= cw) continue;
+            c = srow[cx];
+            if (c == img.key) continue;
+            if (hover) c = Blend16(c, 255, 255, 255, 64);
+            drow[tx] = c;
+        }
+    }
 }
 
 /* 窗内按钮 (右上角一排, 从右到左: 移动 / 自动跟随 / 操作)。 */
@@ -1401,32 +1446,31 @@ void PiP_DrawOnComposite(void* surf)
     PiP_DrawSelBand(comp);
 }
 
-/* 侧栏开关按钮 (画在合成面上; UI 链最后调, 压在小地图条带之上)。开启=绿。 */
-void PiP_DrawButton(void* surf)
+/* 侧栏开关按钮: 和底部电量一样画进侧栏面, 跟着条带上屏, 避免 Composite
+ * 被侧栏 blit 盖掉造成闪烁。坐标为侧栏面局部坐标 (x 从侧栏列左缘算)。 */
+void PiP_DrawButton(void)
 {
-    int x = 0, y = 0, w = 0, h = 0, dp, cw, ch;
+    void* sb;
+    int side, x, y, dp, cw, ch, hover = 0;
+    int mx, my, bx, by, bw, bh;
     unsigned short* db;
-    RectangleStruct r;
-    ColorStruct c;
 
     PiP_EnsureInit();
     if (!g_Enable) return;
-    if (!surf || !IsPlausiblePtr(surf)) return;
-    if (!PiP_BtnRect(&x, &y, &w, &h)) return;
-    cw = GtSurfGet(surf, GtVT_GET_WIDTH);
-    ch = GtSurfGet(surf, GtVT_GET_HEIGHT);
-    dp = GtSurfGet(surf, GtVT_GET_PITCH);
-    if (dp <= 0 || x < 0 || y < 0 || x + w > cw || y + h > ch) return;
-    /* 深色半透明底衬: 保证压在资金条上也看得清。 */
-    r.X = x; r.Y = y; r.Width = w; r.Height = h;
-    c.R = 0; c.G = 0; c.B = 0;
-    GtFillRectTrans(surf, &r, &c, 60);
-    db = (unsigned short*)GtLock(surf);
+    sb = *(void**)ADDR_SURF_SIDEBAR;
+    if (!sb || !IsPlausiblePtr(sb)) return;
+    side = PiP_BtnSide();
+    x = g_BtnPos[side][0];
+    y = g_BtnPos[side][1];
+    if (PiP_BtnRect(&bx, &by, &bw, &bh) && GtMouseGameXY(&mx, &my) &&
+        PiP_PointIn(mx, my, bx, by, bw, bh))
+        hover = 1;
+    cw = GtSurfGet(sb, GtVT_GET_WIDTH);
+    ch = GtSurfGet(sb, GtVT_GET_HEIGHT);
+    dp = GtSurfGet(sb, GtVT_GET_PITCH);
+    if (dp <= 0 || x >= cw || y >= ch) return;
+    db = (unsigned short*)GtLock(sb);
     if (!db) return;
-    /* 外框 1px; 里面一个小矩形 = 小窗本身 (开启填绿, 关闭只描灰框)。 */
-    PiP_PxFrame(db, dp, cw, ch, x + 2, y + 2, w - 4, h - 4,
-                g_Show ? PIP_C_GREEN : PIP_C_GRAY);
-    if (g_Show) PiP_PxFill(db, dp, cw, ch, x + 5, y + 5, w - 10, h - 10, PIP_C_GREEN);
-    else        PiP_PxFrame(db, dp, cw, ch, x + 5, y + 5, w - 10, h - 10, PIP_C_GRAY);
-    GtUnlock(surf);
+    PiP_DrawBtnImg(db, dp, cw, ch, side, x, y, hover);
+    GtUnlock(sb);
 }

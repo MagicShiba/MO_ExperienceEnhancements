@@ -18,5 +18,8 @@ void SidebarSkin_Poll(void);
 int  SidebarSkin_Get(void);
 void SidebarSkin_Set(int value);
 
+/* 当前实际使用的 UI 阵营 (0=盟军 1=苏联 2=厄普西隆 3=焚风)。 */
+int  SidebarSkin_Side(void);
+
 /* Action 900: switch the local sidebar skin; visual-only, works in MP too. */
 void SidebarSkin_SetAction(int value);

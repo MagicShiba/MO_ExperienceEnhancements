@@ -64,3 +64,25 @@ int MsgText_ChatAnchor(int surfW, int surfH, int bitLineH, int* px, int* py);
 /* 战役框文字样式 (供 ChatEdit.cpp 的输入框同源):
  * *face=已解析字体名, *px=字高 (<=0 表示跟游戏点阵), *bold=1/0。 */
 void MsgText_CampStyle(const wchar_t** face, int* px, int* bold);
+
+/* ESC 菜单运行期读取/修改的显示选项 (只改内存, 不写 INI)。 */
+enum {
+    MSG_OPT_CAMP_ENABLE = 0,
+    MSG_OPT_CAMP_LINES,
+    MSG_OPT_CAMP_OPACITY,
+    MSG_OPT_CAMP_BOTTOM,
+    MSG_OPT_CAMP_CENTERED,
+    MSG_OPT_CAMP_WIDTH,
+    MSG_OPT_CAMP_ANIM,
+    MSG_OPT_CAMP_BAR,
+    MSG_OPT_HINT_SHOW,
+    MSG_OPT_HINT_COLOR,
+    MSG_OPT_HINT_LINES,
+    MSG_OPT_HINT_WIDTH,
+    MSG_OPT_HINT_BAR,
+    MSG_OPT_HINT_RADAR,
+    MSG_OPT_COUNT
+};
+
+int  MsgText_GetOption(int id);
+void MsgText_SetOption(int id, int value);

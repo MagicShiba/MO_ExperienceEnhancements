@@ -419,3 +419,21 @@ int SS_Draw(void)
     GtFillRectTrans(sb, &r, &c, 100);
     return 1;
 }
+
+/* ---------------- GUI 设置菜单接口 ---------------- */
+
+int SS_Enabled(void)
+{
+    SS_EnsureInit();
+    return s_Enable;
+}
+
+void SS_SetEnabled(int enable)
+{
+    SS_EnsureInit();
+    enable = enable ? 1 : 0;
+    if (enable == s_Enable) return;
+    s_Enable = enable;
+    s_Drag = 0;
+    s_LbPrev = 0;
+}

@@ -581,3 +581,21 @@ void PlaceScatter_Poll(void)
     /* 点下驱离: OutList 哨兵抓自家 Place 事件 (Mode=1/2 都有)。 */
     PS_WatchPlace(cur, houseIdx, fr);
 }
+
+/* GUI 设置菜单用的运行时模式/查询 (ESC 菜单 "放置时建筑驱逐单位")。 */
+int PS_Mode(void)
+{
+    PS_EnsureInit();
+    return g_PsMode;
+}
+
+void PS_SetMode(int mode)
+{
+    PS_EnsureInit();
+    if (mode < 0) mode = 0;
+    if (mode > 2) mode = 2;
+    g_PsMode = mode;
+    LogLine(mode == 0 ? "placescatter: mode=0 (menu)"
+                      : (mode == 1 ? "placescatter: mode=1 (menu)"
+                                   : "placescatter: mode=2 (menu)"));
+}

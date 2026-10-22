@@ -28,3 +28,5 @@ int SWS_FillMode(void);
 void SWS_SetFillMode(int fill);
 int SWS_MaxRows(void);
 void SWS_SetMaxRows(int rows);
+int SWS_SideRight(void);
+void SWS_SetSideRight(int right);

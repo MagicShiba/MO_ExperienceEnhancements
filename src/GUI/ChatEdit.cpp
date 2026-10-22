@@ -85,6 +85,7 @@ static int ce_Bold = 0;
 /* ---------------- 状态 ---------------- */
 
 static int ce_Init = 0;
+static int ce_Installed = 0;
 static int ce_Enable = 1;
 static int ce_ChatBoxSP = 1;   /* 单人也建原生聊天框 */
 static int ce_ChatNameSP = 0;  /* 单人消息也显示 "名字: " */
@@ -1471,6 +1472,7 @@ void ChatEdit_Install(void)
     int rel, i;
     DWORD old;
     CE_EnsureInit();
+    if (ce_Installed) return;
     /* 非 gamemd 宿主由 DllMain 宿主守卫拦截 (见 MOExperience.cpp),
      * 到这里必是游戏本体, 0x5D4510 恒在镜像内, 直接版本校验即可。 */
     /* [MsgText] ChatEdit=0 = 全走原生: Input 补丁永久有效 (无还原路径),
@@ -1493,6 +1495,7 @@ void ChatEdit_Install(void)
     VirtualProtect(p, 5, old, &old);
     FlushInstructionCache(GetCurrentProcess(), p, 5);
     LogLine("chatedit: input hook ON");
+    ce_Installed = 1;
 }
 
 
@@ -1572,6 +1575,25 @@ int ChatEdit_ShowNameSP(void)
 {
     CE_EnsureInit();
     return ce_ChatNameSP;
+}
+
+int ChatEdit_Enabled(void)
+{
+    CE_EnsureInit();
+    return ce_Enable;
+}
+
+void ChatEdit_SetEnabled(int on)
+{
+    CE_EnsureInit();
+    ce_Enable = on ? 1 : 0;
+    if (ce_Enable && !ce_Installed) ChatEdit_Install();
+}
+
+void ChatEdit_SetShowNameSP(int on)
+{
+    CE_EnsureInit();
+    ce_ChatNameSP = on ? 1 : 0;
 }
 
 /* ---------------- 帧入口 ---------------- */

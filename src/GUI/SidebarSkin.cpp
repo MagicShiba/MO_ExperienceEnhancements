@@ -400,6 +400,11 @@ void SidebarSkin_Poll(void)
     s_ActionLocal = 0;
 }
 
+int SidebarSkin_Side(void)
+{
+    return s_SkinSide;
+}
+
 /* 返回持久设置 (INI/ESC), 不返回 Action 900 的临时覆盖。 */
 int SidebarSkin_Get(void)
 {

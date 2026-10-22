@@ -38,5 +38,5 @@ void PiP_OnRadarRawCell(int cx, int cy);
 /* Composite 上的实际贴窗 (必须在缩放的放大/降采样呈现之后调, 否则被一起缩放)。 */
 void PiP_DrawOnComposite(void* surf);
 
-/* 侧栏开关按钮 (UI 链最后调, 才能压在小地图条带之上)。 */
-void PiP_DrawButton(void* surf);
+/* 侧栏开关按钮: 画进侧栏面, 在条带上屏前调 (同底部电量)。 */
+void PiP_DrawButton(void);

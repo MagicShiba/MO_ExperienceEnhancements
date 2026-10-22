@@ -9,7 +9,12 @@
 #include "PauseView.h"
 #include "GridView.h"
 #include "SWSBar.h"
+#include "BuildQueue.h"
+#include "PlaceScatter.h"
+#include "FullMap.h"
+#include "SideScroll.h"
 #include "MsgText.h"
+#include "ChatEdit.h"
 #include "OrderUtil.h"
 #include "EscMenu.h"
 #include "PlayerColor.h"
@@ -51,9 +56,13 @@
 #define ESC_TEXT_SS          2
 #define ESC_LABEL_CAP        96
 #define ESC_LEFT_ROWS        2
-#define ESC_GUI_ITEMS        8
-#define ESC_GUI_DISPLAY      12
+#define ESC_GUI_DISPLAY      18
+#define ESC_SEP_H            14
 #define ESC_SKIN_N           5
+#define ESC_SCATTER_N        3
+#define ESC_HIDE_N           4
+#define ESC_SWS_SIDE_N       2
+#define ESC_SEG_MAX          8
 #define ESC_COLOR_SW         14
 #define ESC_COLOR_GAP        4
 #define ESC_COLOR_LABEL_W    128
@@ -79,6 +88,57 @@
 #define ESC_MISSING_NOTICE_ZH L"!!文本缺失，请检查多语言文件!!"
 #define ESC_MISSING_NOTICE_EN L"!!Text missing - check the language file!!"
 
+enum {
+    GUI_GROUP_GENERAL = 0,
+    GUI_GROUP_BOTTOM,
+    GUI_GROUP_SWS,
+    GUI_GROUP_MISC,
+    GUI_GROUP_SIDEBAR,
+    GUI_GROUP_COUNT
+};
+
+enum {
+    GUI_ITEM_SCALE = 0,
+    GUI_ITEM_PAUSE,
+    GUI_ITEM_GRID,
+    GUI_ITEM_SWS,
+    GUI_ITEM_SORT,
+    GUI_ITEM_ROWS,
+    GUI_ITEM_SKIN,
+    GUI_ITEM_COLOR,
+    GUI_ITEM_BUILD_QUEUE,
+    GUI_ITEM_SCATTER,
+    GUI_ITEM_SIDE_SCROLL,
+    GUI_ITEM_SIDE_HIDE,
+    GUI_ITEM_SWS_SIDE,
+    GUI_ITEM_COUNT
+};
+
+enum {
+    TX_GROUP_CAMP = 0,
+    TX_CAMP_ENABLE,
+    TX_CAMP_LINES,
+    TX_CAMP_OPACITY,
+    TX_CAMP_POS,
+    TX_CAMP_ALIGN,
+    TX_CAMP_WIDTH,
+    TX_CAMP_ANIM,
+    TX_CAMP_BAR,
+    TX_SEP1,
+    TX_GROUP_CHAT,
+    TX_CHAT_EDIT,
+    TX_CHAT_NAME,
+    TX_SEP2,
+    TX_GROUP_HINT,
+    TX_HINT_SHOW,
+    TX_HINT_COLOR,
+    TX_HINT_LINES,
+    TX_HINT_WIDTH,
+    TX_HINT_BAR,
+    TX_HINT_RADAR,
+    TX_COUNT
+};
+
 static int  s_Init = 0;
 static int  s_Enable = 1;
 static int  s_Sel = 0;
@@ -93,13 +153,25 @@ static wchar_t s_LeftItem[ESC_LEFT_ROWS][ESC_LABEL_CAP];
 static wchar_t s_RightTitle[ESC_LABEL_CAP];
 static wchar_t s_RightItem[2][ESC_LABEL_CAP];
 static wchar_t s_GuiTitle[ESC_LABEL_CAP];
-static wchar_t s_GuiGroup[4][ESC_LABEL_CAP];
-static wchar_t s_GuiLabel[ESC_GUI_ITEMS][ESC_LABEL_CAP];
+static wchar_t s_GuiGroup[GUI_GROUP_COUNT][ESC_LABEL_CAP];
+static wchar_t s_GuiLabel[GUI_ITEM_COUNT][ESC_LABEL_CAP];
 static wchar_t s_GuiOn[16];
 static wchar_t s_GuiOff[16];
 static wchar_t s_GuiFaction[32];
 static wchar_t s_GuiFill[32];
 static wchar_t s_GuiSkinName[ESC_SKIN_N][32];
+static wchar_t s_GuiScatter[ESC_SCATTER_N][32];
+static wchar_t s_GuiHide[ESC_HIDE_N][32];
+static wchar_t s_GuiSwsSide[ESC_SWS_SIDE_N][32];
+
+static wchar_t s_TextTitle[ESC_LABEL_CAP];
+static wchar_t s_TextLabel[TX_COUNT][ESC_LABEL_CAP];
+static wchar_t s_TextPos[2][32];
+static wchar_t s_TextAlign[2][32];
+static wchar_t s_TextBar[3][32];
+static wchar_t s_TextColor[2][32];
+static int s_TextMissing = 0;
+static int s_TextScroll = 0;
 
 static const wchar_t* const s_LangLabel[ESC_LANG_N] = { L"ZH", L"EN", L"AUTO" };
 static const int s_LangMode[ESC_LANG_N] = {
@@ -116,6 +188,11 @@ static int Esc_LoadText(const char* key, wchar_t* out, int cap)
 static void Esc_GuiText(const char* key, wchar_t* out, int cap)
 {
     if (!Esc_LoadText(key, out, cap)) s_GuiMissing = 1;
+}
+
+static void Esc_TextText(const char* key, wchar_t* out, int cap)
+{
+    if (!Esc_LoadText(key, out, cap)) s_TextMissing = 1;
 }
 
 static void Esc_LoadAllText(void)
@@ -140,18 +217,24 @@ static void Esc_LoadAllText(void)
 
     s_GuiMissing = 0;
     Esc_GuiText("GuiTitle", s_GuiTitle, ESC_LABEL_CAP);
-    Esc_GuiText("GuiGroupGeneral", s_GuiGroup[0], ESC_LABEL_CAP);
-    Esc_GuiText("GuiGroupBottom", s_GuiGroup[1], ESC_LABEL_CAP);
-    Esc_GuiText("GuiScale", s_GuiLabel[0], ESC_LABEL_CAP);
-    Esc_GuiText("GuiPause", s_GuiLabel[1], ESC_LABEL_CAP);
-    Esc_GuiText("GuiGrid", s_GuiLabel[2], ESC_LABEL_CAP);
-    Esc_GuiText("GuiGroupSws", s_GuiGroup[2], ESC_LABEL_CAP);
-    Esc_GuiText("GuiGroupMisc", s_GuiGroup[3], ESC_LABEL_CAP);
-    Esc_GuiText("GuiSws", s_GuiLabel[3], ESC_LABEL_CAP);
-    Esc_GuiText("GuiSort", s_GuiLabel[4], ESC_LABEL_CAP);
-    Esc_GuiText("GuiRows", s_GuiLabel[5], ESC_LABEL_CAP);
-    Esc_GuiText("GuiSkin", s_GuiLabel[6], ESC_LABEL_CAP);
-    Esc_GuiText("GuiColor", s_GuiLabel[7], ESC_LABEL_CAP);
+    Esc_GuiText("GuiGroupGeneral", s_GuiGroup[GUI_GROUP_GENERAL], ESC_LABEL_CAP);
+    Esc_GuiText("GuiGroupBottom", s_GuiGroup[GUI_GROUP_BOTTOM], ESC_LABEL_CAP);
+    Esc_GuiText("GuiGroupSws", s_GuiGroup[GUI_GROUP_SWS], ESC_LABEL_CAP);
+    Esc_GuiText("GuiGroupMisc", s_GuiGroup[GUI_GROUP_MISC], ESC_LABEL_CAP);
+    Esc_GuiText("GuiGroupSidebar", s_GuiGroup[GUI_GROUP_SIDEBAR], ESC_LABEL_CAP);
+    Esc_GuiText("GuiScale", s_GuiLabel[GUI_ITEM_SCALE], ESC_LABEL_CAP);
+    Esc_GuiText("GuiPause", s_GuiLabel[GUI_ITEM_PAUSE], ESC_LABEL_CAP);
+    Esc_GuiText("GuiGrid", s_GuiLabel[GUI_ITEM_GRID], ESC_LABEL_CAP);
+    Esc_GuiText("GuiSws", s_GuiLabel[GUI_ITEM_SWS], ESC_LABEL_CAP);
+    Esc_GuiText("GuiSort", s_GuiLabel[GUI_ITEM_SORT], ESC_LABEL_CAP);
+    Esc_GuiText("GuiRows", s_GuiLabel[GUI_ITEM_ROWS], ESC_LABEL_CAP);
+    Esc_GuiText("GuiSkin", s_GuiLabel[GUI_ITEM_SKIN], ESC_LABEL_CAP);
+    Esc_GuiText("GuiColor", s_GuiLabel[GUI_ITEM_COLOR], ESC_LABEL_CAP);
+    Esc_GuiText("GuiBuildQueue", s_GuiLabel[GUI_ITEM_BUILD_QUEUE], ESC_LABEL_CAP);
+    Esc_GuiText("GuiScatter", s_GuiLabel[GUI_ITEM_SCATTER], ESC_LABEL_CAP);
+    Esc_GuiText("GuiSideScroll", s_GuiLabel[GUI_ITEM_SIDE_SCROLL], ESC_LABEL_CAP);
+    Esc_GuiText("GuiSideHide", s_GuiLabel[GUI_ITEM_SIDE_HIDE], ESC_LABEL_CAP);
+    Esc_GuiText("GuiSwsSide", s_GuiLabel[GUI_ITEM_SWS_SIDE], ESC_LABEL_CAP);
     Esc_GuiText("GuiOn", s_GuiOn, 16);
     Esc_GuiText("GuiOff", s_GuiOff, 16);
     Esc_GuiText("GuiSortFaction", s_GuiFaction, 32);
@@ -161,6 +244,46 @@ static void Esc_LoadAllText(void)
     Esc_GuiText("GuiSkin2", s_GuiSkinName[2], 32);
     Esc_GuiText("GuiSkin3", s_GuiSkinName[3], 32);
     Esc_GuiText("GuiSkin4", s_GuiSkinName[4], 32);
+    Esc_GuiText("GuiScatterOff", s_GuiScatter[0], 32);
+    Esc_GuiText("GuiScatterOnPlace", s_GuiScatter[1], 32);
+    Esc_GuiText("GuiScatterAuto", s_GuiScatter[2], 32);
+    Esc_GuiText("GuiSideHideOff", s_GuiHide[0], 32);
+    Esc_GuiText("GuiSideHideFull", s_GuiHide[1], 32);
+    Esc_GuiText("GuiSideHideRadar", s_GuiHide[2], 32);
+    Esc_GuiText("GuiSideHideBare", s_GuiHide[3], 32);
+    Esc_GuiText("GuiSwsSideRight", s_GuiSwsSide[0], 32);
+    Esc_GuiText("GuiSwsSideLeft", s_GuiSwsSide[1], 32);
+
+    s_TextMissing = 0;
+    Esc_TextText("TextTitle", s_TextTitle, ESC_LABEL_CAP);
+    Esc_TextText("TextGroupCamp", s_TextLabel[TX_GROUP_CAMP], ESC_LABEL_CAP);
+    Esc_TextText("TextCampEnable", s_TextLabel[TX_CAMP_ENABLE], ESC_LABEL_CAP);
+    Esc_TextText("TextCampLines", s_TextLabel[TX_CAMP_LINES], ESC_LABEL_CAP);
+    Esc_TextText("TextCampOpacity", s_TextLabel[TX_CAMP_OPACITY], ESC_LABEL_CAP);
+    Esc_TextText("TextCampPos", s_TextLabel[TX_CAMP_POS], ESC_LABEL_CAP);
+    Esc_TextText("TextCampAlign", s_TextLabel[TX_CAMP_ALIGN], ESC_LABEL_CAP);
+    Esc_TextText("TextCampWidth", s_TextLabel[TX_CAMP_WIDTH], ESC_LABEL_CAP);
+    Esc_TextText("TextCampAnim", s_TextLabel[TX_CAMP_ANIM], ESC_LABEL_CAP);
+    Esc_TextText("TextCampBar", s_TextLabel[TX_CAMP_BAR], ESC_LABEL_CAP);
+    Esc_TextText("TextGroupChat", s_TextLabel[TX_GROUP_CHAT], ESC_LABEL_CAP);
+    Esc_TextText("TextChatEdit", s_TextLabel[TX_CHAT_EDIT], ESC_LABEL_CAP);
+    Esc_TextText("TextChatName", s_TextLabel[TX_CHAT_NAME], ESC_LABEL_CAP);
+    Esc_TextText("TextGroupHint", s_TextLabel[TX_GROUP_HINT], ESC_LABEL_CAP);
+    Esc_TextText("TextHintShow", s_TextLabel[TX_HINT_SHOW], ESC_LABEL_CAP);
+    Esc_TextText("TextHintColor", s_TextLabel[TX_HINT_COLOR], ESC_LABEL_CAP);
+    Esc_TextText("TextHintLines", s_TextLabel[TX_HINT_LINES], ESC_LABEL_CAP);
+    Esc_TextText("TextHintWidth", s_TextLabel[TX_HINT_WIDTH], ESC_LABEL_CAP);
+    Esc_TextText("TextHintBar", s_TextLabel[TX_HINT_BAR], ESC_LABEL_CAP);
+    Esc_TextText("TextHintRadar", s_TextLabel[TX_HINT_RADAR], ESC_LABEL_CAP);
+    Esc_TextText("TextCampPosBottom", s_TextPos[0], 32);
+    Esc_TextText("TextCampPosTop", s_TextPos[1], 32);
+    Esc_TextText("TextAlignLeft", s_TextAlign[0], 32);
+    Esc_TextText("TextAlignCenter", s_TextAlign[1], 32);
+    Esc_TextText("TextBarNone", s_TextBar[0], 32);
+    Esc_TextText("TextBarLeft", s_TextBar[1], 32);
+    Esc_TextText("TextBarRight", s_TextBar[2], 32);
+    Esc_TextText("TextColorWhite", s_TextColor[0], 32);
+    Esc_TextText("TextColorPlayer", s_TextColor[1], 32);
 }
 
 void EscMenu_EnsureInit(void)
@@ -295,7 +418,10 @@ enum {
     EG_SORT,
     EG_ROWS,
     EG_SKIN,
-    EG_COLOR
+    EG_COLOR,
+    EG_CHOICE,
+    EG_VALUE,
+    EG_SEP
 };
 
 typedef struct {
@@ -304,18 +430,48 @@ typedef struct {
 } EscGuiRowInfo;
 
 static const EscGuiRowInfo s_GuiLayout[ESC_GUI_DISPLAY] = {
-    { EG_GROUP,  0 },
-    { EG_GROUP,  1 },
-    { EG_SWITCH, 0 },
-    { EG_SWITCH, 1 },
-    { EG_SWITCH, 2 },
-    { EG_GROUP,  2 },
-    { EG_SWITCH, 3 },
-    { EG_SORT,   4 },
-    { EG_ROWS,   5 },
-    { EG_GROUP,  3 },
-    { EG_COLOR,  7 },
-    { EG_SKIN,   6 }
+    { EG_GROUP,  GUI_GROUP_GENERAL },
+    { EG_SWITCH, GUI_ITEM_BUILD_QUEUE },
+    { EG_CHOICE, GUI_ITEM_SCATTER },
+    { EG_GROUP,  GUI_GROUP_SWS },
+    { EG_SWITCH, GUI_ITEM_SWS },
+    { EG_SORT,   GUI_ITEM_SORT },
+    { EG_ROWS,   GUI_ITEM_ROWS },
+    { EG_CHOICE, GUI_ITEM_SWS_SIDE },
+    { EG_GROUP,  GUI_GROUP_BOTTOM },
+    { EG_SWITCH, GUI_ITEM_SCALE },
+    { EG_SWITCH, GUI_ITEM_PAUSE },
+    { EG_SWITCH, GUI_ITEM_GRID },
+    { EG_GROUP,  GUI_GROUP_SIDEBAR },
+    { EG_SWITCH, GUI_ITEM_SIDE_SCROLL },
+    { EG_CHOICE, GUI_ITEM_SIDE_HIDE },
+    { EG_GROUP,  GUI_GROUP_MISC },
+    { EG_COLOR,  GUI_ITEM_COLOR },
+    { EG_SKIN,   GUI_ITEM_SKIN }
+};
+
+static const EscGuiRowInfo s_TextLayout[TX_COUNT] = {
+    { EG_GROUP,  TX_GROUP_CAMP },
+    { EG_SWITCH, TX_CAMP_ENABLE },
+    { EG_VALUE,  TX_CAMP_LINES },
+    { EG_VALUE,  TX_CAMP_OPACITY },
+    { EG_CHOICE, TX_CAMP_POS },
+    { EG_CHOICE, TX_CAMP_ALIGN },
+    { EG_VALUE,  TX_CAMP_WIDTH },
+    { EG_SWITCH, TX_CAMP_ANIM },
+    { EG_CHOICE, TX_CAMP_BAR },
+    { EG_SEP,    TX_SEP1 },
+    { EG_GROUP,  TX_GROUP_CHAT },
+    { EG_SWITCH, TX_CHAT_EDIT },
+    { EG_SWITCH, TX_CHAT_NAME },
+    { EG_SEP,    TX_SEP2 },
+    { EG_GROUP,  TX_GROUP_HINT },
+    { EG_SWITCH, TX_HINT_SHOW },
+    { EG_CHOICE, TX_HINT_COLOR },
+    { EG_VALUE,  TX_HINT_LINES },
+    { EG_VALUE,  TX_HINT_WIDTH },
+    { EG_CHOICE, TX_HINT_BAR },
+    { EG_SWITCH, TX_HINT_RADAR }
 };
 
 static int Esc_GuiContentTop(const RECT* p)
@@ -334,6 +490,67 @@ static int Esc_GuiRowH(const RECT* p, int index)
 
     rows = Esc_ColorRows((p->right - p->left) - ESC_PAD * 2);
     return ESC_ROW_H + (rows - 1) * (ESC_COLOR_SW + ESC_COLOR_GAP);
+}
+
+static int Esc_TextContentTop(const RECT* p)
+{
+    int y = Esc_ContentTop(p);
+    if (s_TextMissing) y += ESC_WARN_H + ESC_WARN_GAP;
+    return y;
+}
+
+static int Esc_TextRowH(int index)
+{
+    int kind = s_TextLayout[index].kind;
+    if (kind == EG_GROUP) return ESC_GROUP_H;
+    if (kind == EG_SEP) return ESC_SEP_H;
+    return ESC_ROW_H;
+}
+
+static int Esc_TextTotalH(void)
+{
+    int i, h = 0;
+    for (i = 0; i < TX_COUNT; i++)
+    {
+        if (s_TextLayout[i].kind == EG_GROUP && s_TextLayout[i].item != 0)
+            h += ESC_BLOCK_GAP;
+        h += Esc_TextRowH(i);
+    }
+    return h;
+}
+
+/* 吸附到行顶: 滚动量只取行起始位置, 避免整行被上下裁剪。 */
+static int Esc_TextSnap(int scroll)
+{
+    int i, y = 0, best = 0;
+    for (i = 0; i < TX_COUNT; i++)
+    {
+        if (s_TextLayout[i].kind == EG_GROUP && s_TextLayout[i].item != 0)
+            y += ESC_BLOCK_GAP;
+        if (y <= scroll) best = y;
+        y += Esc_TextRowH(i);
+    }
+    return best;
+}
+
+static int Esc_TextViewH(const RECT* p)
+{
+    int h = p->bottom - ESC_PAD - Esc_TextContentTop(p);
+    return h > 0 ? h : 0;
+}
+
+static int Esc_TextMaxScroll(const RECT* p)
+{
+    int max = Esc_TextTotalH() - Esc_TextViewH(p);
+    return max > 0 ? max : 0;
+}
+
+static int Esc_TextClampScroll(const RECT* p)
+{
+    int max = Esc_TextMaxScroll(p);
+    if (s_TextScroll > max) s_TextScroll = Esc_TextSnap(max);
+    if (s_TextScroll < 0) s_TextScroll = 0;
+    return max;
 }
 
 /* ---------------- 16-bit BSurface drawing ---------------- */
@@ -479,6 +696,18 @@ static void Esc_Text(void* surf, const wchar_t* s, int x, int y, int maxW,
 static int Esc_TextWidth(const wchar_t* s, int px, int slot)
 {
     return Esc_Measure(s, px, slot, NULL);
+}
+
+static void Esc_DrawMissingNotice(void* surf, const RECT* p, int bodyH,
+                                  int rowL, int rowW)
+{
+    int y = Esc_ContentTop(p);
+
+    Esc_Fill(surf, rowL, y, rowW, ESC_WARN_H, 88, 30, 30, 220);
+    Esc_Text(surf, s_MissingNotice, rowL + ESC_TEXT_INSET,
+             y + (ESC_WARN_H - bodyH) / 2,
+             rowW - ESC_TEXT_INSET * 2, ESC_BODY_PX, ESC_BODY_SLOT,
+             255, 210, 210);
 }
 
 static void Esc_RowBg(void* surf, int rowL, int rowY, int rowW)
@@ -692,32 +921,108 @@ static int Esc_RowCtlX(int rowRight)
     return rowRight - ESC_CTL_RIGHT - ESC_STEP_W;
 }
 
-static void Esc_SkinSegLayout(int rowL, int rowW, int* xs, int* ws)
+static void Esc_SegLayout(wchar_t names[][32], int n,
+                          int rowL, int rowW, int* xs, int* ws)
 {
     int i, total = 0, x;
 
-    for (i = 0; i < ESC_SKIN_N; i++)
+    for (i = 0; i < n; i++)
     {
-        ws[i] = Esc_TextWidth(s_GuiSkinName[i], ESC_BODY_PX, ESC_BODY_SLOT);
+        ws[i] = Esc_TextWidth(names[i], ESC_BODY_PX, ESC_BODY_SLOT);
         total += ws[i];
         if (i) total += ESC_SKIN_GAP;
     }
     x = rowL + rowW - ESC_CTL_RIGHT - total;
-    for (i = 0; i < ESC_SKIN_N; i++)
+    for (i = 0; i < n; i++)
     {
         xs[i] = x;
         x += ws[i] + ESC_SKIN_GAP;
     }
 }
 
-static int Esc_SkinSegmentAt(int rowL, int rowW, int mx)
+static int Esc_SegmentAt(wchar_t names[][32], int n,
+                         int rowL, int rowW, int mx)
 {
-    int xs[ESC_SKIN_N], ws[ESC_SKIN_N], i;
+    int xs[ESC_SEG_MAX], ws[ESC_SEG_MAX], i;
 
-    Esc_SkinSegLayout(rowL, rowW, xs, ws);
-    for (i = 0; i < ESC_SKIN_N; i++)
+    Esc_SegLayout(names, n, rowL, rowW, xs, ws);
+    for (i = 0; i < n; i++)
         if (mx >= xs[i] && mx < xs[i] + ws[i]) return i;
     return -1;
+}
+
+static int Esc_PickSeg(wchar_t names[][32], int n, const RECT* right, int mx)
+{
+    return Esc_SegmentAt(names, n, right->left + ESC_PAD,
+                         (right->right - right->left) - ESC_PAD * 2, mx);
+}
+
+static wchar_t (*Esc_ChoiceNames(int item))[32]
+{
+    if (item == GUI_ITEM_SIDE_HIDE) return s_GuiHide;
+    if (item == GUI_ITEM_SWS_SIDE) return s_GuiSwsSide;
+    return s_GuiScatter;
+}
+
+static int Esc_ChoiceN(int item)
+{
+    if (item == GUI_ITEM_SIDE_HIDE) return ESC_HIDE_N;
+    if (item == GUI_ITEM_SWS_SIDE) return ESC_SWS_SIDE_N;
+    return ESC_SCATTER_N;
+}
+
+static int Esc_ChoiceValue(int item)
+{
+    if (item == GUI_ITEM_SIDE_HIDE) return FM_HideState();
+    if (item == GUI_ITEM_SWS_SIDE) return SWS_SideRight() ? 0 : 1;
+    return PS_Mode();
+}
+
+static wchar_t (*Esc_TextChoiceNames(int item))[32]
+{
+    if (item == TX_CAMP_POS) return s_TextPos;
+    if (item == TX_CAMP_ALIGN) return s_TextAlign;
+    if (item == TX_HINT_COLOR) return s_TextColor;
+    return s_TextBar;
+}
+
+static int Esc_TextChoiceN(int item)
+{
+    if (item == TX_CAMP_BAR || item == TX_HINT_BAR) return 3;
+    return 2;
+}
+
+static int Esc_TextChoiceValue(int item)
+{
+    if (item == TX_CAMP_POS) return MsgText_GetOption(MSG_OPT_CAMP_BOTTOM) ? 0 : 1;
+    if (item == TX_CAMP_ALIGN) return MsgText_GetOption(MSG_OPT_CAMP_CENTERED) ? 1 : 0;
+    if (item == TX_CAMP_BAR) return MsgText_GetOption(MSG_OPT_CAMP_BAR);
+    if (item == TX_HINT_COLOR) return MsgText_GetOption(MSG_OPT_HINT_COLOR);
+    if (item == TX_HINT_BAR) return MsgText_GetOption(MSG_OPT_HINT_BAR);
+    return 0;
+}
+
+typedef struct {
+    int item;
+    int opt;
+    const char* key;
+    int min, max, step;
+} EscTextNum;
+
+static const EscTextNum s_TextNum[] = {
+    { TX_CAMP_LINES,   MSG_OPT_CAMP_LINES,   "MaxLines",     ESC_ROWS_MIN, ESC_ROWS_MAX, 1 },
+    { TX_CAMP_OPACITY, MSG_OPT_CAMP_OPACITY, "BoardOpacity", 0,            100,          5 },
+    { TX_CAMP_WIDTH,   MSG_OPT_CAMP_WIDTH,   "MaxWidth",     200,          1600,         50 },
+    { TX_HINT_LINES,   MSG_OPT_HINT_LINES,   "HintMaxLines", ESC_ROWS_MIN, ESC_ROWS_MAX, 1 },
+    { TX_HINT_WIDTH,   MSG_OPT_HINT_WIDTH,   "HintMaxWidth", 100,          1600,         20 }
+};
+
+static const EscTextNum* Esc_TextNumFind(int item)
+{
+    int i;
+    for (i = 0; i < (int)(sizeof(s_TextNum) / sizeof(s_TextNum[0])); i++)
+        if (s_TextNum[i].item == item) return &s_TextNum[i];
+    return NULL;
 }
 
 static void Esc_ColorCell(int i, int per, int rowL, int* px, int* py)
@@ -760,6 +1065,28 @@ static void Esc_DrawRainbowSwatch(void* surf, int x, int y, int size)
 static int Esc_CtlX(const RECT* p)
 {
     return Esc_RowCtlX(p->right - ESC_PAD);
+}
+
+static int Esc_StepHit(const RECT* right, int mx, int* value,
+                       int minValue, int maxValue, int step)
+{
+    int ctlX = Esc_CtlX(right);
+
+    if (mx < ctlX || mx >= ctlX + ESC_STEP_W) return 0;
+    if (mx < ctlX + ESC_STEP_BTN_W) *value -= step;
+    else if (mx >= ctlX + ESC_STEP_W - ESC_STEP_BTN_W) *value += step;
+    else return 0;
+    return *value >= minValue && *value <= maxValue;
+}
+
+static int Esc_TextNumStep(const RECT* right, int mx, const EscTextNum* num,
+                           int* out)
+{
+    int v = MsgText_GetOption(num->opt);
+
+    if (!Esc_StepHit(right, mx, &v, num->min, num->max, num->step)) return 0;
+    *out = v;
+    return 1;
 }
 
 static void Esc_StepButton(void* surf, int x, int y, const wchar_t* glyph,
@@ -880,46 +1207,23 @@ static void Esc_DrawLangTitle(void* surf, const RECT* p)
     }
 }
 
-static void Esc_DrawRowsRow(void* surf, int rowL, int rowY, int rowW,
-                            int bodyH, const wchar_t* label)
+static void Esc_DrawSegRow(void* surf, int rowL, int rowY, int rowW,
+                           int bodyH, const wchar_t* label,
+                           wchar_t names[][32], int n, int value)
 {
-    wchar_t num[16];
-    int value = SWS_MaxRows();
-    int ctlX, btnY, numW, tw, numX;
-
-    ctlX = Esc_RowCtlX(rowL + rowW);
-    btnY = rowY + (ESC_ROW_H - ESC_STEP_BTN_H) / 2;
-    Esc_RowLabel(surf, rowL, rowY, ctlX, bodyH, label);
-
-    Esc_StepButton(surf, ctlX, btnY, L"-", value > ESC_ROWS_MIN);
-    Esc_StepButton(surf, ctlX + ESC_STEP_W - ESC_STEP_BTN_W, btnY, L"+",
-                   value < ESC_ROWS_MAX);
-
-    Esc_IntToW(num, (unsigned)value, 16);
-    tw = Esc_TextWidth(num, ESC_BODY_PX, ESC_BODY_SLOT);
-    numW = ESC_STEP_W - ESC_STEP_BTN_W * 2 - 8;
-    numX = ctlX + ESC_STEP_BTN_W + 4 + (numW - tw) / 2;
-    Esc_Text(surf, num, numX, rowY + (ESC_ROW_H - bodyH) / 2,
-             numW, ESC_BODY_PX, ESC_BODY_SLOT, 238, 238, 238);
-}
-
-static void Esc_DrawSkinRow(void* surf, int rowL, int rowY, int rowW,
-                            int bodyH, const wchar_t* label)
-{
-    int xs[ESC_SKIN_N], ws[ESC_SKIN_N];
-    int value = SidebarSkin_Get();
+    int xs[ESC_SEG_MAX], ws[ESC_SEG_MAX];
     int i, ty;
 
-    if (value < 0 || value >= ESC_SKIN_N) value = 0;
+    if (value < 0 || value >= n) value = 0;
     ty = rowY + (ESC_ROW_H - bodyH) / 2;
 
-    Esc_SkinSegLayout(rowL, rowW, xs, ws);
+    Esc_SegLayout(names, n, rowL, rowW, xs, ws);
     Esc_RowLabel(surf, rowL, rowY, xs[0], bodyH, label);
 
-    for (i = 0; i < ESC_SKIN_N; i++)
+    for (i = 0; i < n; i++)
     {
         int on = (i == value);
-        Esc_Text(surf, s_GuiSkinName[i], xs[i], ty, ws[i] + 2,
+        Esc_Text(surf, names[i], xs[i], ty, ws[i] + 2,
                  ESC_BODY_PX, ESC_BODY_SLOT,
                  on ? 245 : 145, on ? 225 : 145, on ? 170 : 145);
     }
@@ -954,6 +1258,136 @@ static void Esc_DrawColorRow(void* surf, int rowL, int rowY, int rowW,
     }
 }
 
+static void Esc_DrawValueRow(void* surf, int rowL, int rowY, int rowW,
+                             int bodyH, const wchar_t* label, int value,
+                             int minValue, int maxValue)
+{
+    wchar_t num[16];
+    int ctlX, btnY, numW, tw, numX;
+
+    ctlX = Esc_RowCtlX(rowL + rowW);
+    btnY = rowY + (ESC_ROW_H - ESC_STEP_BTN_H) / 2;
+    Esc_RowLabel(surf, rowL, rowY, ctlX, bodyH, label);
+
+    Esc_StepButton(surf, ctlX, btnY, L"-", value > minValue);
+    Esc_StepButton(surf, ctlX + ESC_STEP_W - ESC_STEP_BTN_W, btnY, L"+",
+                   value < maxValue);
+
+    Esc_IntToW(num, (unsigned)value, 16);
+    tw = Esc_TextWidth(num, ESC_BODY_PX, ESC_BODY_SLOT);
+    numW = ESC_STEP_W - ESC_STEP_BTN_W * 2 - 8;
+    numX = ctlX + ESC_STEP_BTN_W + 4 + (numW - tw) / 2;
+    Esc_Text(surf, num, numX, rowY + (ESC_ROW_H - bodyH) / 2,
+             numW, ESC_BODY_PX, ESC_BODY_SLOT, 238, 238, 238);
+}
+
+static int Esc_TextSwitchValue(int item)
+{
+    switch (item)
+    {
+    case TX_CAMP_ENABLE: return MsgText_GetOption(MSG_OPT_CAMP_ENABLE);
+    case TX_CAMP_ANIM:   return MsgText_GetOption(MSG_OPT_CAMP_ANIM);
+    case TX_CHAT_EDIT:   return ChatEdit_Enabled();
+    case TX_CHAT_NAME:   return ChatEdit_ShowNameSP();
+    case TX_HINT_SHOW:   return MsgText_GetOption(MSG_OPT_HINT_SHOW);
+    case TX_HINT_RADAR:  return MsgText_GetOption(MSG_OPT_HINT_RADAR);
+    default:             return 0;
+    }
+}
+
+static void Esc_TextPanel(void* surf, RECT* p)
+{
+    int w, bodyH, rowL, rowW, i, y, rh, kind, item;
+    int clipTop, clipBottom, maxScroll;
+
+    if (!Esc_PanelFrame(surf, p, s_TextTitle)) return;
+
+    w = p->right - p->left;
+    bodyH = Esc_TextHeight(ESC_BODY_PX, ESC_BODY_SLOT);
+    if (bodyH > ESC_ROW_H) bodyH = ESC_ROW_H;
+
+    rowL = p->left + ESC_PAD;
+    rowW = w - ESC_PAD * 2;
+    clipTop = Esc_TextContentTop(p);
+    clipBottom = p->bottom - ESC_PAD;
+    maxScroll = Esc_TextClampScroll(p);
+
+    if (s_TextMissing)
+        Esc_DrawMissingNotice(surf, p, bodyH, rowL, rowW);
+
+    for (i = 0, y = clipTop - s_TextScroll; i < TX_COUNT; i++)
+    {
+        kind = s_TextLayout[i].kind;
+        item = s_TextLayout[i].item;
+
+        if (kind == EG_GROUP && item != 0) y += ESC_BLOCK_GAP;
+        rh = Esc_TextRowH(i);
+
+        if (y >= clipTop && y + rh <= clipBottom)
+        {
+            if (kind == EG_SEP)
+            {
+                int sy = y + rh / 2;
+                Esc_Fill(surf, rowL + ESC_TEXT_INSET, sy,
+                         rowW - ESC_TEXT_INSET * 2, 1, 0x7B, 0x79, 0x7B, 160);
+            }
+            else if (kind == EG_GROUP)
+            {
+                Esc_Fill(surf, rowL, y + (rh - ESC_BODY_PX) / 2, 3,
+                         ESC_BODY_PX, 208, 160, 64, 255);
+                Esc_Text(surf, s_TextLabel[item], rowL + ESC_TEXT_INSET,
+                         y + (rh - bodyH) / 2, rowW - ESC_TEXT_INSET - 6,
+                         ESC_BODY_PX, ESC_BODY_SLOT, 250, 220, 160);
+            }
+            else
+            {
+                Esc_RowBg(surf, rowL, y, rowW);
+                Esc_Fill(surf, rowL, y + rh - 1, rowW, 1,
+                         0x7B, 0x79, 0x7B, 80);
+
+                if (kind == EG_SWITCH)
+                    Esc_DrawSwitchRow(surf, rowL, y, rowW, bodyH,
+                                      s_TextLabel[item],
+                                      Esc_TextSwitchValue(item));
+                else if (kind == EG_VALUE)
+                {
+                    const EscTextNum* num = Esc_TextNumFind(item);
+                    if (num)
+                        Esc_DrawValueRow(surf, rowL, y, rowW, bodyH,
+                                         s_TextLabel[item],
+                                         MsgText_GetOption(num->opt),
+                                         num->min, num->max);
+                }
+                else if (kind == EG_CHOICE)
+                    Esc_DrawSegRow(surf, rowL, y, rowW, bodyH,
+                                   s_TextLabel[item],
+                                   Esc_TextChoiceNames(item),
+                                   Esc_TextChoiceN(item),
+                                   Esc_TextChoiceValue(item));
+            }
+        }
+        y += rh;
+    }
+
+    if (maxScroll > 0)
+    {
+        int trackX = p->right - 6;
+        int trackH = clipBottom - clipTop;
+        int total = Esc_TextTotalH();
+        int thumbH, thumbY;
+
+        if (total < 1) total = 1;
+        thumbH = trackH * (trackH + maxScroll) / total;
+        if (thumbH < 18) thumbH = 18;
+        if (thumbH > trackH) thumbH = trackH;
+        thumbY = clipTop;
+        if (trackH > thumbH)
+            thumbY += (trackH - thumbH) * s_TextScroll / maxScroll;
+        Esc_Fill(surf, trackX, clipTop, 3, trackH, 0x7B, 0x79, 0x7B, 90);
+        Esc_Fill(surf, trackX, thumbY, 3, thumbH, 208, 160, 64, 220);
+    }
+}
+
 static void Esc_SettingsPanel(void* surf, RECT* p)
 {
     int w, bodyH, rowL, rowW, i, y, rh, kind, item;
@@ -968,14 +1402,7 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
     rowW = w - ESC_PAD * 2;
 
     if (s_GuiMissing)
-    {
-        int wy = Esc_ContentTop(p);
-        Esc_Fill(surf, rowL, wy, rowW, ESC_WARN_H, 88, 30, 30, 220);
-        Esc_Text(surf, s_MissingNotice, rowL + ESC_TEXT_INSET,
-                 wy + (ESC_WARN_H - bodyH) / 2,
-                 rowW - ESC_TEXT_INSET * 2, ESC_BODY_PX, ESC_BODY_SLOT,
-                 255, 210, 210);
-    }
+        Esc_DrawMissingNotice(surf, p, bodyH, rowL, rowW);
 
     for (i = 0, y = Esc_GuiContentTop(p); i < ESC_GUI_DISPLAY; i++)
     {
@@ -1007,21 +1434,32 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
         if (kind == EG_SWITCH)
         {
             int on = 0;
-            if (item == 0) on = SB_Enabled();
-            else if (item == 1) on = PV_ButtonsEnabled();
-            else if (item == 2) on = GV_IsOn();
-            else if (item == 3) on = SWS_Enabled();
+            switch (item)
+            {
+            case GUI_ITEM_SCALE:       on = SB_Enabled(); break;
+            case GUI_ITEM_PAUSE:       on = PV_ButtonsEnabled(); break;
+            case GUI_ITEM_GRID:        on = GV_IsOn(); break;
+            case GUI_ITEM_SWS:         on = SWS_Enabled(); break;
+            case GUI_ITEM_BUILD_QUEUE: on = BQ_Enabled(); break;
+            case GUI_ITEM_SIDE_SCROLL: on = SS_Enabled(); break;
+            }
             Esc_DrawSwitchRow(surf, rowL, y, rowW, bodyH,
                               s_GuiLabel[item], on);
         }
         else if (kind == EG_SORT)
             Esc_DrawSortRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
         else if (kind == EG_ROWS)
-            Esc_DrawRowsRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
+            Esc_DrawValueRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item],
+                             SWS_MaxRows(), ESC_ROWS_MIN, ESC_ROWS_MAX);
         else if (kind == EG_COLOR)
             Esc_DrawColorRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
         else if (kind == EG_SKIN)
-            Esc_DrawSkinRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
+            Esc_DrawSegRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item],
+                           s_GuiSkinName, ESC_SKIN_N, SidebarSkin_Get());
+        else if (kind == EG_CHOICE)
+            Esc_DrawSegRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item],
+                           Esc_ChoiceNames(item), Esc_ChoiceN(item),
+                           Esc_ChoiceValue(item));
         y += rh;
     }
 }
@@ -1050,6 +1488,8 @@ static void Esc_DrawPanels(void* surf, HWND hDlg)
     Esc_DrawLangTitle(surf, &a);
     if (s_Sel == 0)
         Esc_SettingsPanel(surf, &b);
+    else if (s_Sel == 1)
+        Esc_TextPanel(surf, &b);
     else
         Esc_Panel(surf, &b, s_RightTitle, rightRows, 2);
 }
@@ -1168,13 +1608,13 @@ static unsigned Esc_PutText(unsigned char* out, unsigned pos, const char* s)
     return pos;
 }
 
-static int Esc_WriteIniValue(const char* section, const char* key, int value)
+static int Esc_WriteIniRaw(const char* section, const char* key,
+                           const char* value)
 {
     HANDLE h;
     DWORD size, got, put, need, vs = 0, ve = 0, insertAt = 0;
     unsigned char* d;
     unsigned char* out;
-    char val[16];
     unsigned vlen, keyLen, pos;
     int loc;
 
@@ -1201,9 +1641,7 @@ static int Esc_WriteIniValue(const char* section, const char* key, int value)
         return 0;
     }
 
-    val[0] = 0;
-    UtoA((unsigned)value, val);
-    vlen = (unsigned)lstrlenA(val);
+    vlen = (unsigned)lstrlenA(value);
     keyLen = (unsigned)lstrlenA(key);
 
     loc = Esc_IniLocate(d, size, section, key, &vs, &ve, &insertAt);
@@ -1213,7 +1651,7 @@ static int Esc_WriteIniValue(const char* section, const char* key, int value)
         out = (unsigned char*)LocalAlloc(LPTR, need);
         if (!out) { LocalFree(d); CloseHandle(h); return 0; }
         pos = Esc_PutBytes(out, 0, d, vs);
-        pos = Esc_PutText(out, pos, val);
+        pos = Esc_PutText(out, pos, value);
         pos = Esc_PutBytes(out, pos, d + ve, size - ve);
         need = pos;
     }
@@ -1230,7 +1668,7 @@ static int Esc_WriteIniValue(const char* section, const char* key, int value)
         }
         pos = Esc_PutText(out, pos, key);
         out[pos++] = '=';
-        pos = Esc_PutText(out, pos, val);
+        pos = Esc_PutText(out, pos, value);
         out[pos++] = '\r';
         out[pos++] = '\n';
         pos = Esc_PutBytes(out, pos, d + insertAt, size - insertAt);
@@ -1252,7 +1690,7 @@ static int Esc_WriteIniValue(const char* section, const char* key, int value)
         out[pos++] = '\n';
         pos = Esc_PutText(out, pos, key);
         out[pos++] = '=';
-        pos = Esc_PutText(out, pos, val);
+        pos = Esc_PutText(out, pos, value);
         out[pos++] = '\r';
         out[pos++] = '\n';
         need = pos;
@@ -1271,6 +1709,57 @@ static int Esc_WriteIniValue(const char* section, const char* key, int value)
     LocalFree(out);
     LocalFree(d);
     return 1;
+}
+
+/* 延迟写入: 设置页面内点击只改内存并排队, 离开页面 (切页或关闭菜单) 时
+ * 统一落盘。同一 section+key 只保留最后一次, 避免反复重写文件。 */
+#define ESC_PENDING_MAX 40
+typedef struct {
+    char section[24];
+    char key[40];
+    char value[24];
+} EscPending;
+static EscPending s_Pend[ESC_PENDING_MAX];
+static int s_PendN = 0;
+
+static int Esc_PendFind(const char* section, const char* key)
+{
+    int i;
+    for (i = 0; i < s_PendN; i++)
+        if (!lstrcmpiA(s_Pend[i].section, section) &&
+            !lstrcmpiA(s_Pend[i].key, key))
+            return i;
+    return -1;
+}
+
+static void Esc_FlushPending(void)
+{
+    int i;
+    for (i = 0; i < s_PendN; i++)
+        Esc_WriteIniRaw(s_Pend[i].section, s_Pend[i].key, s_Pend[i].value);
+    s_PendN = 0;
+}
+
+static void Esc_QueueRaw(const char* section, const char* key,
+                         const char* value)
+{
+    int i = Esc_PendFind(section, key);
+    if (i < 0)
+    {
+        if (s_PendN >= ESC_PENDING_MAX) Esc_FlushPending();
+        i = s_PendN++;
+        lstrcpynA(s_Pend[i].section, section, sizeof(s_Pend[i].section));
+        lstrcpynA(s_Pend[i].key, key, sizeof(s_Pend[i].key));
+    }
+    lstrcpynA(s_Pend[i].value, value, sizeof(s_Pend[i].value));
+}
+
+static void Esc_QueueValue(const char* section, const char* key, int value)
+{
+    char val[16];
+    val[0] = 0;
+    UtoA((unsigned)value, val);
+    Esc_QueueRaw(section, key, val);
 }
 
 static int Esc_HitLeft(const RECT* a, int mx, int my, int* index)
@@ -1319,7 +1808,13 @@ static int Esc_HitRight(const RECT* b, int mx, int my, int* index,
                     my < sy || my >= sy + ESC_SW_H)
                     return 0;
             }
-            if (kind == EG_SKIN && Esc_SkinSegmentAt(rowL, rowW, mx) < 0)
+            if (kind == EG_SKIN &&
+                Esc_SegmentAt(s_GuiSkinName, ESC_SKIN_N, rowL, rowW, mx) < 0)
+                return 0;
+            if (kind == EG_CHOICE &&
+                Esc_SegmentAt(Esc_ChoiceNames(s_GuiLayout[i].item),
+                              Esc_ChoiceN(s_GuiLayout[i].item),
+                              rowL, rowW, mx) < 0)
                 return 0;
             if (kind == EG_COLOR &&
                 Esc_ColorSegmentAt(rowL, rowW, rowY, mx, my) < 0)
@@ -1340,57 +1835,49 @@ static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx,
 
     switch (index)
     {
-    case 0:
+    case GUI_ITEM_SCALE:
         value = SB_Enabled() ? 0 : 1;
         SB_SetEnabled(value);
-        Esc_WriteIniValue("BottomBar", "ScaleEnable", value);
+        Esc_QueueValue("BottomBar", "ScaleEnable", value);
         break;
-    case 1:
+    case GUI_ITEM_PAUSE:
         value = PV_ButtonsEnabled() ? 0 : 1;
         PV_SetButtonsEnabled(value);
-        Esc_WriteIniValue("BottomBar", "PauseEnable", value);
+        Esc_QueueValue("BottomBar", "PauseEnable", value);
         break;
-    case 2:
+    case GUI_ITEM_GRID:
         value = GV_IsOn() ? 0 : 1;
         GV_SetOn(value);
-        Esc_WriteIniValue("BottomBar", "GridEnable", value);
+        Esc_QueueValue("BottomBar", "GridEnable", value);
         break;
-    case 3:
+    case GUI_ITEM_SWS:
         value = SWS_Enabled() ? 0 : 1;
         SWS_SetEnabled(value);
-        Esc_WriteIniValue("SWSidebar", "Enable", value);
+        Esc_QueueValue("SWSidebar", "Enable", value);
         break;
-    case 4:
+    case GUI_ITEM_SORT:
         value = SWS_FillMode() ? 0 : 1;
         SWS_SetFillMode(value);
-        Esc_WriteIniValue("SWSidebar", "FillMode", value);
+        Esc_QueueValue("SWSidebar", "FillMode", value);
         break;
-    case 5:
-    {
-        int ctlX = Esc_CtlX(right);
-        if (mx < ctlX || mx >= ctlX + ESC_STEP_W) return;
+    case GUI_ITEM_ROWS:
         value = SWS_MaxRows();
-        if (mx < ctlX + ESC_STEP_BTN_W) value--;
-        else if (mx >= ctlX + ESC_STEP_W - ESC_STEP_BTN_W) value++;
-        else return;
-        if (value < ESC_ROWS_MIN || value > ESC_ROWS_MAX) return;
+        if (!Esc_StepHit(right, mx, &value, ESC_ROWS_MIN, ESC_ROWS_MAX, 1))
+            return;
         SWS_SetMaxRows(value);
-        Esc_WriteIniValue("SWSidebar", "MaxRows", value);
+        Esc_QueueValue("SWSidebar", "MaxRows", value);
         break;
-    }
-    case 6:
+    case GUI_ITEM_SKIN:
     {
-        int rowL = right->left + ESC_PAD;
-        int rowW = (right->right - right->left) - ESC_PAD * 2;
-        int pick = Esc_SkinSegmentAt(rowL, rowW, mx);
+        int pick = Esc_PickSeg(s_GuiSkinName, ESC_SKIN_N, right, mx);
 
         if (pick < 0 || pick == SidebarSkin_Get()) return;
         SidebarSkin_Set(pick);
         SidebarSkin_Poll();
-        Esc_WriteIniValue("Sidebar", "SkinSide", pick);
+        Esc_QueueValue("Sidebar", "SkinSide", pick);
         break;
     }
-    case 7:
+    case GUI_ITEM_COLOR:
     {
         int rowL = right->left + ESC_PAD;
         int rowW = (right->right - right->left) - ESC_PAD * 2;
@@ -1400,6 +1887,192 @@ static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx,
         if (!PlayerColor_Set(pick)) return;
         break;
     }
+    case GUI_ITEM_BUILD_QUEUE:
+        value = BQ_Enabled() ? 0 : 1;
+        BQ_SetEnabled(value);
+        Esc_QueueValue("Features", "BuildQueue", value);
+        break;
+    case GUI_ITEM_SCATTER:
+    {
+        int pick = Esc_PickSeg(s_GuiScatter, ESC_SCATTER_N, right, mx);
+
+        if (pick < 0 || pick == PS_Mode()) return;
+        PS_SetMode(pick);
+        Esc_QueueValue("PlaceScatter", "Mode", pick);
+        break;
+    }
+    case GUI_ITEM_SIDE_SCROLL:
+        value = SS_Enabled() ? 0 : 1;
+        SS_SetEnabled(value);
+        Esc_QueueValue("Sidebar", "ScrollEnable", value);
+        break;
+    case GUI_ITEM_SIDE_HIDE:
+    {
+        int pick = Esc_PickSeg(s_GuiHide, ESC_HIDE_N, right, mx);
+
+        if (pick < 0 || pick == FM_HideState()) return;
+        FM_SetHideState(pick);
+        Esc_QueueValue("Sidebar", "HideEnable", pick ? 1 : 0);
+        if (pick) Esc_QueueValue("Sidebar", "Mode", pick - 1);
+        break;
+    }
+    case GUI_ITEM_SWS_SIDE:
+    {
+        int pick = Esc_PickSeg(s_GuiSwsSide, ESC_SWS_SIDE_N, right, mx);
+        int rightSide;
+
+        if (pick < 0) return;
+        rightSide = (pick == 0);
+        if (rightSide == (SWS_SideRight() != 0)) return;
+        SWS_SetSideRight(rightSide);
+        Esc_QueueRaw("SWSidebar", "Side", rightSide ? "right" : "left");
+        break;
+    }
+    default:
+        return;
+    }
+
+    InvalidateRect(hDlg, NULL, FALSE);
+    UpdateWindow(hDlg);
+}
+
+static int Esc_TextHitRight(const RECT* b, int mx, int my, int* index)
+{
+    int i, y, rh, kind, item;
+    int rowL = b->left + ESC_PAD;
+    int rowW = (b->right - b->left) - ESC_PAD * 2;
+    int clipTop = Esc_TextContentTop(b);
+    int clipBottom = b->bottom - ESC_PAD;
+
+    if (s_Sel != 1) return 0;
+    Esc_TextClampScroll(b);
+
+    y = clipTop - s_TextScroll;
+    for (i = 0; i < TX_COUNT; i++)
+    {
+        kind = s_TextLayout[i].kind;
+        item = s_TextLayout[i].item;
+
+        if (kind == EG_GROUP && item != 0) y += ESC_BLOCK_GAP;
+        rh = Esc_TextRowH(i);
+        if (y >= clipTop && y + rh <= clipBottom &&
+            mx >= rowL && mx < rowL + rowW &&
+            my >= y && my < y + rh)
+        {
+            if (kind == EG_GROUP || kind == EG_SEP) return 0;
+            if (kind == EG_SWITCH)
+            {
+                int sx = rowL + rowW - ESC_CTL_RIGHT - ESC_SW_W;
+                int sy = y + (rh - ESC_SW_H) / 2;
+                if (mx < sx || mx >= sx + ESC_SW_W ||
+                    my < sy || my >= sy + ESC_SW_H)
+                    return 0;
+            }
+            if (kind == EG_VALUE)
+            {
+                int ctlX = Esc_RowCtlX(rowL + rowW);
+                if (mx < ctlX || mx >= ctlX + ESC_STEP_W) return 0;
+            }
+            if (kind == EG_CHOICE &&
+                Esc_SegmentAt(Esc_TextChoiceNames(item),
+                              Esc_TextChoiceN(item), rowL, rowW, mx) < 0)
+                return 0;
+            *index = item;
+            return 1;
+        }
+        y += rh;
+    }
+    return 0;
+}
+
+static void Esc_TextApply(HWND hDlg, const RECT* right, int index, int mx)
+{
+    int value;
+
+    switch (index)
+    {
+    case TX_CAMP_ENABLE:
+        value = MsgText_GetOption(MSG_OPT_CAMP_ENABLE) ? 0 : 1;
+        MsgText_SetOption(MSG_OPT_CAMP_ENABLE, value);
+        Esc_QueueValue("MsgText", "CampEnable", value);
+        break;
+    case TX_CAMP_LINES:
+    case TX_CAMP_OPACITY:
+    case TX_CAMP_WIDTH:
+    case TX_HINT_LINES:
+    case TX_HINT_WIDTH:
+    {
+        const EscTextNum* num = Esc_TextNumFind(index);
+        if (!num || !Esc_TextNumStep(right, mx, num, &value)) return;
+        MsgText_SetOption(num->opt, value);
+        Esc_QueueValue("MsgText", num->key, value);
+        break;
+    }
+    case TX_CAMP_POS:
+    {
+        int pick = Esc_PickSeg(s_TextPos, 2, right, mx);
+        if (pick < 0) return;
+        MsgText_SetOption(MSG_OPT_CAMP_BOTTOM, pick == 0 ? 1 : 0);
+        Esc_QueueValue("MsgText", "CampBottom", pick == 0 ? 1 : 0);
+        break;
+    }
+    case TX_CAMP_ALIGN:
+    {
+        int pick = Esc_PickSeg(s_TextAlign, 2, right, mx);
+        if (pick < 0) return;
+        MsgText_SetOption(MSG_OPT_CAMP_CENTERED, pick);
+        Esc_QueueValue("MsgText", "CampCentered", pick);
+        break;
+    }
+    case TX_CAMP_ANIM:
+        value = MsgText_GetOption(MSG_OPT_CAMP_ANIM) ? 0 : 1;
+        MsgText_SetOption(MSG_OPT_CAMP_ANIM, value);
+        Esc_QueueValue("MsgText", "CampAnim", value);
+        break;
+    case TX_CAMP_BAR:
+    {
+        int pick = Esc_PickSeg(s_TextBar, 3, right, mx);
+        if (pick < 0) return;
+        MsgText_SetOption(MSG_OPT_CAMP_BAR, pick);
+        Esc_QueueValue("MsgText", "CampBarSide", pick);
+        break;
+    }
+    case TX_CHAT_EDIT:
+        value = ChatEdit_Enabled() ? 0 : 1;
+        ChatEdit_SetEnabled(value);
+        Esc_QueueValue("MsgText", "ChatEdit", value);
+        break;
+    case TX_CHAT_NAME:
+        value = ChatEdit_ShowNameSP() ? 0 : 1;
+        ChatEdit_SetShowNameSP(value);
+        Esc_QueueValue("MsgText", "ChatNameSP", value);
+        break;
+    case TX_HINT_SHOW:
+        value = MsgText_GetOption(MSG_OPT_HINT_SHOW) ? 0 : 1;
+        MsgText_SetOption(MSG_OPT_HINT_SHOW, value);
+        Esc_QueueValue("MsgText", "HintShow", value);
+        break;
+    case TX_HINT_COLOR:
+    {
+        int pick = Esc_PickSeg(s_TextColor, 2, right, mx);
+        if (pick < 0) return;
+        MsgText_SetOption(MSG_OPT_HINT_COLOR, pick);
+        Esc_QueueValue("MsgText", "HintColorFollow", pick);
+        break;
+    }
+    case TX_HINT_BAR:
+    {
+        int pick = Esc_PickSeg(s_TextBar, 3, right, mx);
+        if (pick < 0) return;
+        MsgText_SetOption(MSG_OPT_HINT_BAR, pick);
+        Esc_QueueValue("MsgText", "HintBarSide", pick);
+        break;
+    }
+    case TX_HINT_RADAR:
+        value = MsgText_GetOption(MSG_OPT_HINT_RADAR) ? 0 : 1;
+        MsgText_SetOption(MSG_OPT_HINT_RADAR, value);
+        Esc_QueueValue("MsgText", "HintRadarShow", value);
+        break;
     default:
         return;
     }
@@ -1421,9 +2094,39 @@ static void Esc_ApplyLang(HWND hDlg, int seg)
 static void Esc_Select(HWND hDlg, int index)
 {
     if (index == s_Sel) return;
+    Esc_FlushPending();
     s_Sel = index;
+    if (index != 1) s_TextScroll = 0;
     InvalidateRect(hDlg, NULL, FALSE);
     UpdateWindow(hDlg);
+}
+
+static int Esc_TextWheel(HWND h, WPARAM wp, LPARAM lp)
+{
+    POINT pt;
+    RECT a, b;
+    int delta, old;
+
+    if (s_Sel != 1) return 0;
+    pt.x = (int)(short)LOWORD(lp);
+    pt.y = (int)(short)HIWORD(lp);
+    if (!ScreenToClient(h, &pt)) return 0;
+    if (!Esc_Layout(h, &a, &b)) return 0;
+    if (pt.x < b.left || pt.x >= b.right ||
+        pt.y < b.top || pt.y >= b.bottom)
+        return 0;
+
+    delta = (int)(short)HIWORD(wp);
+    if (delta == 0) return 0;
+    old = s_TextScroll;
+    s_TextScroll = Esc_TextSnap(s_TextScroll - (delta / 120) * ESC_ROW_H * 3);
+    Esc_TextClampScroll(&b);
+    if (s_TextScroll != old)
+    {
+        InvalidateRect(h, NULL, FALSE);
+        UpdateWindow(h);
+    }
+    return 1;
 }
 
 static LRESULT Esc_CallOld(HWND h, WNDPROC old, UINT msg, WPARAM wp, LPARAM lp)
@@ -1440,7 +2143,7 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     WNDPROC old = (WNDPROC)GetPropW(h, ESC_PROP_OLD_PROC);
     LRESULT r;
 
-    if (msg == WM_LBUTTONDOWN && h == s_Host)
+    if ((msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) && h == s_Host)
     {
         int mx = (int)(short)LOWORD(lp);
         int my = (int)(short)HIWORD(lp);
@@ -1464,15 +2167,31 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 Esc_ApplyGui(h, &b, index, mx, my, rowY);
                 return 0;
             }
+            if (Esc_TextHitRight(&b, mx, my, &index))
+            {
+                Esc_TextApply(h, &b, index, mx);
+                return 0;
+            }
         }
     }
+
+    if (msg == WM_MOUSEWHEEL && h == s_Host && Esc_TextWheel(h, wp, lp))
+        return 0;
+
+    /* 隐藏/销毁 ESC 菜单都视为离开设置页, 统一落盘。 */
+    if (msg == WM_SHOWWINDOW && !wp && h == s_Host)
+        Esc_FlushPending();
 
     r = Esc_CallOld(h, old, msg, wp, lp);
 
     if (msg == WM_NCDESTROY)
     {
         RemovePropW(h, ESC_PROP_OLD_PROC);
-        if (h == s_Host) s_Host = NULL;
+        if (h == s_Host)
+        {
+            Esc_FlushPending();
+            s_Host = NULL;
+        }
     }
     return r;
 }
@@ -1502,8 +2221,8 @@ static void Esc_OnShow(HWND hDlg)
 
     if (s_Host != hDlg)
     {
+        Esc_FlushPending();
         s_Host = hDlg;
-        s_Sel = 0;
     }
     Esc_Subclass(hDlg);
 }

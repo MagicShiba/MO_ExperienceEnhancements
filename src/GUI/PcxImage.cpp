@@ -10,7 +10,6 @@
 #include "PcxImage.h"
 
 #define ADDR_PCX_INSTANCE 0xAC4848u
-#define PCX_RES_N         5
 
 typedef void* (__thiscall *PcxGetSurfFn)(void* pcx, const char* name, void* pal);
 /* 引擎返回 bool (al), 用 unsigned char 读。 */
@@ -29,13 +28,17 @@ typedef struct {
     int res;
 } PcxDef;
 
-static const PcxDef s_Defs[PCX_RES_N] = {
+static const PcxDef s_Defs[] = {
     { "icon_aggressive.pcx", ICONRES_AGGRESSIVE },
     { "icon_cost.pcx",       ICONRES_COST },
     { "icon_power_down.pcx", ICONRES_POWER_DOWN },
     { "icon_power_up.pcx",   ICONRES_POWER_UP },
-    { "icon_time.pcx",       ICONRES_TIME }
+    { "icon_time.pcx",       ICONRES_TIME },
+    { "btn_small_arrow.pcx", ICONRES_BTN_ARROW },
+    { "btn_small_filter.pcx", ICONRES_BTN_FILTER },
+    { "btn_small_window.pcx", ICONRES_BTN_WINDOW }
 };
+#define PCX_RES_N ((int)(sizeof(s_Defs) / sizeof(s_Defs[0])))
 
 /* 每个资源只拼一次路径、只真正加载一次; 之后每帧仅查引擎面表。 */
 typedef struct {

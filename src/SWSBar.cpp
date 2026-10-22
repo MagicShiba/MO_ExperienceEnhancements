@@ -44,6 +44,8 @@
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "VecText.h"
+#include "PcxImage.h"
+#include "SidebarSkin.h"
 #include "SWSBar.h"
 
 #define SWS_SECTION "SWSidebar"
@@ -2620,6 +2622,26 @@ void SWS_SetMaxRows(int rows)
     s_ForceScan = 1;
 }
 
+int SWS_SideRight(void)
+{
+    SwsEnsureInit();
+    return s_SideRight;
+}
+
+void SWS_SetSideRight(int right)
+{
+    SwsEnsureInit();
+    right = right ? 1 : 0;
+    if (right == s_SideRight) return;
+    s_SideRight = right;
+    kColOrder = s_SideRight ? kColOrderRight : kColOrderLeft;
+    s_Scroll = 0;
+    s_OrderN = -1;
+    SwsInvalidateCache();
+    s_BoundsKnown = 0;
+    s_ForceScan = 1;
+}
+
 void SWS_Poll(void)
 {
     static int s_LastItemN = -1;
@@ -3111,6 +3133,34 @@ static void SwsCFillA(int x, int y, int rw, int rh, unsigned char r,
     if (op > 100) op = 100;
     SwsCFill(x, y, rw, rh, r, g, b, (op * s_Alpha) / 100);
 }
+/* 同 SwsCFillA, 但只压在已有像素上 (保留透明底)。用于按钮悬停提亮、
+ * 关闭态压暗, 不会把图标四周的透明区填成方块。 */
+static void SwsCTintA(int x, int y, int rw, int rh, unsigned char r,
+                      unsigned char g, unsigned char b, int op)
+{
+    int x0, x1, y0, y1, xx, yy, a8;
+    unsigned short c;
+    if (!s_CchA || rw <= 0 || rh <= 0 || op <= 0) return;
+    op = (op * s_Alpha) / 100;
+    if (op <= 0) return;
+    if (op > 100) op = 100;
+    x -= s_CchX; y -= s_CchY;
+    x0 = (x < 0) ? 0 : x;
+    x1 = x + rw; if (x1 > s_CchW) x1 = s_CchW;
+    y0 = (y < 0) ? 0 : y;
+    y1 = y + rh; if (y1 > s_CchH) y1 = s_CchH;
+    if (x1 <= x0 || y1 <= y0) return;
+    c = SwsPack(r, g, b);
+    a8 = (op * 255 + 50) / 100;
+    for (yy = y0; yy < y1; yy++)
+    {
+        unsigned short* crow = s_CchC + (size_t)yy * s_CchW;
+        unsigned char* arow = s_CchA + (size_t)yy * s_CchW;
+        for (xx = x0; xx < x1; xx++)
+            if (arow[xx]) SwsOver(crow + xx, arow + xx, c, a8);
+    }
+}
+
 /* ---- PCX 逐像素贴图进缓存 ----
  * BSurface 布局 (gamemd 0x6B9D00 构造):
  *   +0x00 vptr / +0x04 Width / +0x08 Height / +0x0C LockLevel /
@@ -3153,6 +3203,58 @@ static void SwsCPSrc(int x, int y, int dw, int dh,
         {
             unsigned short c = srow[sxmap[xx - x0]];
             if (c == PCX_TRANS_PARENT) continue;   /* 色键 */
+            SwsOver(crow + xx, arow + xx, c, a8);
+        }
+    }
+}
+
+/* SwsCPSrc 的子矩形版本: 从 pw x ph 源面的 (sx,sy,sw,sh) 取图, 缩放到 dw x dh,
+ * flip 时水平镜像。侧栏按钮图一张 80x18 排四个阵营, 按本家取其中 20x18。 */
+static void SwsCPSrcPart(int x, int y, int dw, int dh,
+                         const unsigned short* src, int pw, int ph,
+                         int sx, int sy, int sw, int sh, int flip, int opaque)
+{
+    int r, xx, x0, x1, y0, a8;
+    unsigned short sxmap[SWS_ICON_W];
+    if (!s_CchA || dw <= 0 || dh <= 0 || dw > SWS_ICON_W) return;
+    if (!src || pw < 1 || pw > 256 || ph < 1 || ph > 256) return;
+    if (sx < 0) { sw += sx; sx = 0; }
+    if (sy < 0) { sh += sy; sy = 0; }
+    if (sw <= 0 || sh <= 0) return;
+    if (sx + sw > pw) sw = pw - sx;
+    if (sy + sh > ph) sh = ph - sy;
+    if (sw <= 0 || sh <= 0) return;
+    x -= s_CchX; y -= s_CchY;
+    x0 = (x < 0) ? 0 : x;
+    x1 = x + dw; if (x1 > s_CchW) x1 = s_CchW;
+    y0 = (y < 0) ? 0 : y;
+    if (x1 <= x0) return;
+    for (xx = x0; xx < x1; xx++)
+    {
+        int k = ((xx - x) * sw) / dw;
+        if (k >= sw) k = sw - 1;
+        if (flip) k = sw - 1 - k;
+        sxmap[xx - x0] = (unsigned short)(sx + k);
+    }
+    a8 = opaque ? 255 : (s_Alpha * 255 + 50) / 100;
+    if (a8 <= 0) return;
+    for (r = 0; r < dh; r++)
+    {
+        int ty = y + r;
+        int syy = sy + (r * sh) / dh;
+        unsigned short* crow;
+        unsigned char* arow;
+        const unsigned short* srow;
+        if (ty < y0) continue;
+        if (ty >= s_CchH) break;
+        if (syy >= ph) syy = ph - 1;
+        crow = s_CchC + (size_t)ty * s_CchW;
+        arow = s_CchA + (size_t)ty * s_CchW;
+        srow = src + (size_t)syy * pw;
+        for (xx = x0; xx < x1; xx++)
+        {
+            unsigned short c = srow[sxmap[xx - x0]];
+            if (c == PCX_TRANS_PARENT) continue;
             SwsOver(crow + xx, arow + xx, c, a8);
         }
     }
@@ -3457,68 +3559,36 @@ static void SwsDrawTip(int w, int h, int panelRight, int ax, int ayTop)
     }
 }
 
-/* ---- 显隐按钮: 圆角底板 + 边框 + 实心三角 (三层由外到内)。
- * dir=0 ◀ (收起时, 点它展开); dir=1 ▶ (展开时, 点它收起)。
- * 悬停 hov 由调用方算好 (按钮在缓存里, 亮暗变化靠重建)。 */
-static void SwsDrawArrow(int x, int y, int bw, int bh, int dir, int hov)
+/* ---- 阵营按钮图: btn_small_arrow / btn_small_filter 各 80x18, 四格从左到右
+ * 依次是盟军/苏联/厄普西隆/焚风。按当前 UI 皮肤阵营取一格; flip=1 时水平镜像。
+ * on=0 时压暗 (过滤关闭), hov=1 时提亮。 */
+static void SwsDrawFactionBtn(int x, int y, int bw, int bh, const char* file,
+                              int flip, int on, int hov)
 {
-    int cx, inX, inY, inW, inH, a;
-    if (bw < 8) bw = 8;
-    if (bh < 5) bh = 5;
-    SwsCFillA(x, y, bw, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B,
-              hov ? 70 : 45);
-    a = hov ? 225 : 165;
-    SwsCFillA(x, y, bw, 1, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, a);
-    SwsCFillA(x, y + bh - 1, bw, 1, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, a);
-    SwsCFillA(x, y, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, a);
-    SwsCFillA(x + bw - 1, y, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, a);
-    inX = x + 3; inY = y + 2;                 /* 留 2px 内边距 */
-    inW = bw - 6; inH = bh - 4;
-    if (inW < 2) inW = 2;
-    if (inH < 1) inH = 1;
-    for (cx = 0; cx < inW; cx++)
-    {
-        int hh = (inH * cx) / (inW - 1 > 0 ? inW - 1 : 1);
-        int off;
-        if (dir) hh = inH - hh;               /* dir=1 ▶ 尖端在右 */
-        if (hh < 1) hh = 1;
-        if (hh > inH) hh = inH;
-        off = (inH - hh) / 2;
-        SwsCFillA(inX + cx, inY + off, 1, hh, SWS_ACCENT_R, SWS_ACCENT_G,
-                  SWS_ACCENT_B, hov ? 255 : 215);
-    }
+    PcxImage img;
+    int side, sw, sh;
+    if (!PcxImage_Load(&img, file, 2)) return;
+    side = SidebarSkin_Side();
+    if (side < 0 || side > 3) side = 0;
+    sw = img.width / 4;
+    sh = img.height;
+    if (sw <= 0 || sh <= 0 || side * sw + sw > img.width) return;
+    SwsCPSrcPart(x, y, bw, bh, (const unsigned short*)img.px,
+                 img.width, img.height, side * sw, 0, sw, sh, flip, hov);
+    if (!on) SwsCTintA(x, y, bw, bh, 0, 0, 0, hov ? 35 : 50);
+    if (hov) SwsCTintA(x, y, bw, bh, 255, 255, 255, 18);
 }
 
-/* ---- 隐藏重复按钮: 禁入牌 (方框 + 斜杠, 开着偏绿、灭掉偏灰, 悬停提亮)。
- * 斜杠只在隐藏中画, 灭掉是空框, 状态一眼可分。 */
+/* dir=0 ◀ 收起 (点它展开); dir=1 ▶ 展开 (点它收起)。 */
+static void SwsDrawArrow(int x, int y, int bw, int bh, int dir, int hov)
+{
+    int flip = (dir != 0) ^ (s_SideRight != 0);
+    SwsDrawFactionBtn(x, y, bw, bh, "btn_small_arrow.pcx", flip, 1, hov);
+}
+
 static void SwsDrawDedup(int x, int y, int bw, int bh, int on, int hov)
 {
-    static const unsigned char kOn[3]  = { 90, 235, 150 };
-    static const unsigned char kOff[3] = { 155, 155, 165 };
-    const unsigned char* c = on ? kOn : kOff;
-    int s, bx, by, i, a;
-    if (bw < 8) bw = 8;
-    if (bh < 5) bh = 5;
-    SwsCFillA(x, y, bw, bh, c[0], c[1], c[2], hov ? 70 : 40);
-    a = hov ? 235 : (on ? 190 : 115);
-    SwsCFillA(x, y, bw, 1, c[0], c[1], c[2], a);
-    SwsCFillA(x, y + bh - 1, bw, 1, c[0], c[1], c[2], a);
-    SwsCFillA(x, y, 1, bh, c[0], c[1], c[2], a);
-    SwsCFillA(x + bw - 1, y, 1, bh, c[0], c[1], c[2], a);
-    s = bw - 6;                                /* 取宽高小的那个做正方, 居中 */
-    if (bh - 6 < s) s = bh - 6;
-    if (s < 3) s = 3;
-    bx = x + (bw - s) / 2;
-    by = y + (bh - s) / 2;
-    a = hov ? 235 : (on ? 210 : 130);
-    SwsCFillA(bx, by, s, 1, c[0], c[1], c[2], a);
-    SwsCFillA(bx, by + s - 1, s, 1, c[0], c[1], c[2], a);
-    SwsCFillA(bx, by, 1, s, c[0], c[1], c[2], a);
-    SwsCFillA(bx + s - 1, by, 1, s, c[0], c[1], c[2], a);
-    /* 斜杠只在隐藏中画 (灭掉是空框)。 */
-    if (on)
-        for (i = 0; i < s; i++)
-            SwsCFillA(bx + i, by + i, 1, 1, c[0], c[1], c[2], hov ? 255 : 225);
+    SwsDrawFactionBtn(x, y, bw, bh, "btn_small_filter.pcx", 0, on, hov);
 }
 
 /* ---- 两个按钮的公共几何 ----
@@ -3528,8 +3598,8 @@ static void SwsDrawDedup(int x, int y, int bw, int bh, int on, int hov)
  * 块右缘紧贴原版侧栏, 挂右边 x 会算到面外被丢掉。
  * 位置由重建期统一发布 (Poll 命中读这几个值); 两按钮都在栏区判定框之外
  * (块顶之上), 命中须排在栏区判定之前, 否则永远点不到。 */
-#define SWS_BTN_W  20      /* 宽>高, 好点中 */
-#define SWS_BTN_H  16
+#define SWS_BTN_W  20      /* 与阵营按钮图单格同宽 (80/4) */
+#define SWS_BTN_H  18      /* 与阵营按钮图同高 */
 #define SWS_BTN_GAP 3
 
 static void SwsTwoBtnGeom(int xStart, int totW, int w, int blockTop)
@@ -3615,6 +3685,8 @@ static unsigned SwsSig(int w, int h, int pitch)
     s = s * 33u + (unsigned)g_MapRight;
     /* s_SideRight 也进 (切 Side 后列序/滚动条/命中全镜像, 缓存须失效)。 */
     s = s * 33u + (unsigned)s_SideRight;
+    /* UI 皮肤阵营进签名: 切皮肤后按钮图标要立刻换。 */
+    s = s * 33u + (unsigned)SidebarSkin_Side();
     s = s * 33u + (unsigned)s_Visible;
     /* 显示模式进签名: 箭头右键切换后列布局/排序全变, 缓存须失效。 */
     s = s * 33u + (unsigned)s_FillMode;

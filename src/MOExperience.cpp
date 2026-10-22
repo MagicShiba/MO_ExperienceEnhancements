@@ -306,6 +306,7 @@ static void PowerDrawBoth(void)
     /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;
      * 侧栏不呈现时 BlitSidebar 不跑, 字不会冒出来。 */
     PowerDisplay_DrawSb();
+    PiP_DrawButton();
     /* 阵营 UI: InitGUI/setDims 内只登记, 等本循环所有视口/侧栏消费者都跑完,
      * 在稳定点换资源; 否则会在 applyview 阶段换掉侧栏 SHP 导致绘制崩溃。 */
     SidebarSkin_Poll();
@@ -343,6 +344,7 @@ static void BlitSbEntryDraw(void)
      * 排在 PowerDisplay 之后 = 层级最上, 不被底电那行字盖住。 */
     SS_Draw();
     PowerDisplay_DrawSb();   /* 先画字再上屏, 否则晚一帧闪烁。 */
+    PiP_DrawButton();
     tramp = (void*)(size_t)FM_BlitSb();   /* 0 = 不接管, 返回引擎跳板 */
     if (tramp) g_BlitSbTramp = tramp;
 }
@@ -1208,8 +1210,6 @@ int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch,
     WeaponRange_Draw(surf, surfW, surfH, surfPitch);
     Aggressive_Draw(surf, surfW, surfH, surfPitch);
     if (FM_DrawRadarTo(surf)) drew = 1;
-    /* 画中画侧栏开关按钮: 必须在小地图条带之后 (压在最上面)。 */
-    PiP_DrawButton(surf);
     return drew;
 }
 

@@ -92,10 +92,12 @@ typedef struct {
     int TopGapLines;
     int MaxWidth;      /* >1 = 像素; 0 = 自动半屏 (小数走 MaxWidthPm) */
     int MaxWidthPm;    /* >0 = 按屏宽千分比 (1~1000, 如500=50%), 优先于 MaxWidth */
+    int CampEnable;    /* 1 = 战役文本框显示 */
     int CampBottom;    /* 1 = 底部显示 (底边固定, 文本向上增长), 0 = 顶部显示 */
     int CampBottomMargin; /* 底部模式时距底边像素 */
     int CampCentered;  /* 1 = 水平居中, 0 = 左对齐 (PosX) */
     int CampAnim;      /* 1 = 打字机逐字 (原版 Animate 同速率), 0 = 整行即时 */
+    int CampBarSide;   /* 滚动条: 0=不显示, 1=左侧, 2=右侧 */
     int LogMessages;
     int ShowHotZone;   /* 1 = 画出悬停生效范围 (调试悬停用) */
     int ScrollStep;    /* 滚轮步长(行) */
@@ -113,6 +115,7 @@ typedef struct {
     int HintRadarHold; /* 雷达事件行显示时长 (引擎时钟刻, 1刻≈16ms) */
     int HintMaxWidth;  /* 0 = 自动 */
     int HintOpacity;   /* 底板不透明度 0~100; 0=不画底板但文字阴影照画 */
+    int HintBarSide;   /* 滚动条: 0=不显示, 1=左侧, 2=右侧 */
     int HintTimeoutMul;/* 操作提示显示时长倍率 (1=原版速度) */
     char RadarName[RADAR_NAME_N][RADAR_NAME_CAP];   /* [MsgRadar] Name0..16 */
     char RadarNameOther[RADAR_NAME_CAP];            /* [MsgRadar] NameOther */
@@ -504,6 +507,8 @@ static void MsgText_LoadConfig(void)
     g_Cfg.CampBottomMargin = GetPrivateProfileIntA(MSG_SECTION, "CampBottomMargin", 8, g_IniPath);
     g_Cfg.CampCentered = GetPrivateProfileIntA(MSG_SECTION, "CampCentered", 0, g_IniPath);
     g_Cfg.CampAnim = GetPrivateProfileIntA(MSG_SECTION, "CampAnim", 1, g_IniPath);
+    g_Cfg.CampEnable = GetPrivateProfileIntA(MSG_SECTION, "CampEnable", 1, g_IniPath);
+    g_Cfg.CampBarSide = GetPrivateProfileIntA(MSG_SECTION, "CampBarSide", 2, g_IniPath);
     g_Cfg.LogMessages = GetPrivateProfileIntA(MSG_SECTION, "LogMessages", 0, g_IniPath);
     g_Cfg.ShowHotZone = GetPrivateProfileIntA(MSG_SECTION, "ShowHotZone", 1, g_IniPath);
     g_Cfg.ScrollStep  = GetPrivateProfileIntA(MSG_SECTION, "ScrollStep", 3, g_IniPath);
@@ -522,6 +527,7 @@ static void MsgText_LoadConfig(void)
     g_Cfg.HintRadarHold = GetPrivateProfileIntA(MSG_SECTION, "HintRadarHold", 900, g_IniPath);
     g_Cfg.HintMaxWidth= GetPrivateProfileIntA(MSG_SECTION, "HintMaxWidth", 320, g_IniPath);
     g_Cfg.HintOpacity = GetPrivateProfileIntA(MSG_SECTION, "HintOpacity", 45, g_IniPath);
+    g_Cfg.HintBarSide = GetPrivateProfileIntA(MSG_SECTION, "HintBarSide", 2, g_IniPath);
     g_Cfg.HintTimeoutMul = GetPrivateProfileIntA(MSG_SECTION, "HintTimeoutMul", 2, g_IniPath);
 
     g_Cfg.Enable = g_Cfg.Enable ? 1 : 0;
@@ -551,6 +557,9 @@ static void MsgText_LoadConfig(void)
     if (g_Cfg.CampBottomMargin > 2000) g_Cfg.CampBottomMargin = 2000;
     g_Cfg.CampCentered = g_Cfg.CampCentered ? 1 : 0;
     g_Cfg.CampAnim = g_Cfg.CampAnim ? 1 : 0;
+    g_Cfg.CampEnable = g_Cfg.CampEnable ? 1 : 0;
+    if (g_Cfg.CampBarSide < 0) g_Cfg.CampBarSide = 0;
+    if (g_Cfg.CampBarSide > 2) g_Cfg.CampBarSide = 2;
     if (g_Cfg.TopGapLines < 0) g_Cfg.TopGapLines = 0;
     if (g_Cfg.TopGapLines > 10) g_Cfg.TopGapLines = 10;
     if (g_Cfg.ScrollStep < 1) g_Cfg.ScrollStep = 1;
@@ -577,8 +586,103 @@ static void MsgText_LoadConfig(void)
     if (g_Cfg.HintMaxWidth < 0) g_Cfg.HintMaxWidth = 0;
     if (g_Cfg.HintOpacity < 0) g_Cfg.HintOpacity = 0;
     if (g_Cfg.HintOpacity > 100) g_Cfg.HintOpacity = 100;
+    if (g_Cfg.HintBarSide < 0) g_Cfg.HintBarSide = 0;
+    if (g_Cfg.HintBarSide > 2) g_Cfg.HintBarSide = 2;
     if (g_Cfg.HintTimeoutMul < 1) g_Cfg.HintTimeoutMul = 1;
     if (g_Cfg.HintTimeoutMul > 10) g_Cfg.HintTimeoutMul = 10;
+}
+
+int MsgText_GetOption(int id)
+{
+    MsgText_EnsureInit();
+    switch (id)
+    {
+    case MSG_OPT_CAMP_ENABLE:  return g_Cfg.CampEnable;
+    case MSG_OPT_CAMP_LINES:   return g_Cfg.MaxLines;
+    case MSG_OPT_CAMP_OPACITY: return g_Cfg.BoardOpacity;
+    case MSG_OPT_CAMP_BOTTOM:  return g_Cfg.CampBottom;
+    case MSG_OPT_CAMP_CENTERED:return g_Cfg.CampCentered;
+    case MSG_OPT_CAMP_WIDTH:   return g_Cfg.MaxWidth > 0 ? g_Cfg.MaxWidth : 550;
+    case MSG_OPT_CAMP_ANIM:    return g_Cfg.CampAnim;
+    case MSG_OPT_CAMP_BAR:     return g_Cfg.CampBarSide;
+    case MSG_OPT_HINT_SHOW:    return g_Cfg.HintShow;
+    case MSG_OPT_HINT_COLOR:   return g_Cfg.HintColorFollow;
+    case MSG_OPT_HINT_LINES:   return g_Cfg.HintMaxLines;
+    case MSG_OPT_HINT_WIDTH:   return g_Cfg.HintMaxWidth;
+    case MSG_OPT_HINT_BAR:     return g_Cfg.HintBarSide;
+    case MSG_OPT_HINT_RADAR:   return g_Cfg.HintRadarShow;
+    default:                   return 0;
+    }
+}
+
+void MsgText_SetOption(int id, int value)
+{
+    MsgText_EnsureInit();
+    switch (id)
+    {
+    case MSG_OPT_CAMP_ENABLE:
+        g_Cfg.CampEnable = value ? 1 : 0;
+        break;
+    case MSG_OPT_CAMP_LINES:
+        if (value < 1) value = 1;
+        if (value > 40) value = 40;
+        g_Cfg.MaxLines = value;
+        break;
+    case MSG_OPT_CAMP_OPACITY:
+        if (value < 0) value = 0;
+        if (value > 100) value = 100;
+        g_Cfg.BoardOpacity = value;
+        break;
+    case MSG_OPT_CAMP_BOTTOM:
+        g_Cfg.CampBottom = value ? 1 : 0;
+        break;
+    case MSG_OPT_CAMP_CENTERED:
+        g_Cfg.CampCentered = value ? 1 : 0;
+        break;
+    case MSG_OPT_CAMP_WIDTH:
+        if (value < 200) value = 200;
+        if (value > 1600) value = 1600;
+        g_Cfg.MaxWidth = value;
+        g_Cfg.MaxWidthPm = 0;
+        break;
+    case MSG_OPT_CAMP_ANIM:
+        g_Cfg.CampAnim = value ? 1 : 0;
+        break;
+    case MSG_OPT_CAMP_BAR:
+        if (value < 0) value = 0;
+        if (value > 2) value = 2;
+        g_Cfg.CampBarSide = value;
+        break;
+    case MSG_OPT_HINT_SHOW:
+        g_Cfg.HintShow = value ? 1 : 0;
+        break;
+    case MSG_OPT_HINT_COLOR:
+        g_Cfg.HintColorFollow = value ? 1 : 0;
+        break;
+    case MSG_OPT_HINT_LINES:
+        if (value < 1) value = 1;
+        if (value > 40) value = 40;
+        g_Cfg.HintMaxLines = value;
+        if (g_Cfg.HintOpMaxLines > g_Cfg.HintMaxLines - 1)
+            g_Cfg.HintOpMaxLines = g_Cfg.HintMaxLines - 1;
+        if (g_Cfg.HintOpMaxLines < 0) g_Cfg.HintOpMaxLines = 0;
+        break;
+    case MSG_OPT_HINT_WIDTH:
+        if (value < 100) value = 100;
+        if (value > 1600) value = 1600;
+        g_Cfg.HintMaxWidth = value;
+        break;
+    case MSG_OPT_HINT_BAR:
+        if (value < 0) value = 0;
+        if (value > 2) value = 2;
+        g_Cfg.HintBarSide = value;
+        break;
+    case MSG_OPT_HINT_RADAR:
+        g_Cfg.HintRadarShow = value ? 1 : 0;
+        break;
+    default:
+        break;
+    }
 }
 
 static const char* const kRadarNameDef[RADAR_NAME_N] =
@@ -841,7 +945,8 @@ typedef struct {
     int* pSkip;      /* 战役框专用: 写聊天输入框锚点 (提示框不碰) */
     int* pScroll;   /* 非 NULL = 该框可滚轮翻历史 (内部维护的 skip 行数) */
     int* pPrevTotal;/* pScroll 配套: 上一帧总行数 (保持 skip 锚定) */
-    int bar;         /* 滚动条 */
+    int bar;         /* 滚动条: 0=不画, 1=按 barSide 画 */
+    int barSide;     /* 1=左侧, 2=右侧 */
     int schemeColor; /* 1 = 用颜色方案 (原版色), 0 = 白字 */
     unsigned tmoMul; /* 超时倍率 (操作提示延长用, 战役=1; 雷达事件不吃) */
     int slot;        /* GDI 槽位 (战役=0, 提示=1) */
@@ -1279,10 +1384,10 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
         g_HintZonesOk = 1;
     }
 
-    if (B->bar && totalAll > limit)
+    if (B->bar && B->barSide != 0 && totalAll > limit)
     {
         int maxSkip = totalAll - limit;
-        int barX = rect.X + rect.Width + 1;
+        int barX = (B->barSide == 1) ? rect.X - 5 : rect.X + rect.Width + 1;
         int barY = rect.Y + 2;
         int barH = rect.Height - 4;
         if (barH > 12)
@@ -1455,6 +1560,7 @@ int MsgText_ChatAnchor(int surfW, int surfH, int bitLineH, int* px, int* py)
     RectangleStruct tr;
     int adv, gap = 6, ax, ay;
     if (!g_Cfg.Enable) return 0;
+    if (!g_Cfg.CampEnable) return 0;
     if (surfW <= 0 || surfH <= 0) return 0;
     /* 缓存是本次绘制用的同一批数字, 与战役框天然对齐。 */
     if (g_AnchorValid)
@@ -1501,6 +1607,17 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
     BoxSpec camp, hint;
 
     if (!g_Cfg.Enable) return 0;
+    /* 自定义战役文本框关闭 = 整个消息框交回引擎原版绘制 (战役与提示一起),
+     * 见 MsgText_Enabled 同一开关。清掉上一帧的命中/锚点缓存, 免得残留在
+     * 未绘制时仍能滚轮/悬停/点击。 */
+    if (!g_Cfg.CampEnable)
+    {
+        g_CampValid = 0;
+        g_HintZonesOk = 0;
+        g_ReHitN = 0;
+        g_AnchorValid = 0;
+        return 0;
+    }
     if (!surf || surfW <= 0 || surfH <= 0 || surfPitch <= 0) return 0;
     /* 565/555 判定: 本函数也可能被绿框入口钩直接调 (不经消息帧), 故自带守卫;
      * 幂等, 协调层消息帧已经校准过就是空操作。 */
@@ -1643,6 +1760,7 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
             else if (!HasCampHistory()) s_expand = 0;
             /* else: 保持上帧 s_expand (淡出中), 不新设 */
             camp.bar = s_expand;   /* 滚动条悬停/淡出即显示 (alpha 随斜坡, 不闪) */
+            camp.barSide = g_Cfg.CampBarSide;
             camp.ignoreTimeout = s_expand;
             camp.fullBoard = s_expand;   /* 悬停/展开铺整块 (Phobos hover 态), 平时包裹 */
         }
@@ -1721,6 +1839,7 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
     hint.pScroll = &g_HintSkip; hint.pPrevTotal = &s_prevHintTotal;
     /* 滚动条: 收起时 totalAll<=limit 天然不画, 展开看到更多行才出来 */
     hint.bar = 1;
+    hint.barSide = g_Cfg.HintBarSide;
     hint.fullBoard = 1; hint.anim = 0;   /* 提示框行为不变: 整块底板+整行即时 */
     hint.ring = &g_HintRing;
     hint.schemeColor = g_Cfg.HintColorFollow;
@@ -1737,7 +1856,7 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
      * (顶部或底部, 由 CampBottom 决定), 先画绿底+绿边, 再画战役/提示文本压在上层。
      * ShowHotZone=0 时隐藏绿框, 但触发判定 (hoverCamp) 仍然有效。
      * 鼠标放上去时上面的 DrawBox 会展开历史文本。 */
-    if (g_Cfg.ShowHotZone)
+    if (g_Cfg.CampEnable && g_Cfg.ShowHotZone)
     {
         RectangleStruct zr;
         ColorStruct zc;
@@ -1831,8 +1950,9 @@ int MsgText_OverCamp(int mx, int my)
     return 1;
 }
 
-/* 是否接管 (供 MOExperience.cpp): 与 MsgText_DrawFrame 同一开关。 */
+/* 是否接管 (供 MOExperience.cpp): 与 MsgText_DrawFrame 同一开关。
+ * 战役文本框关闭时返回 0, 让引擎原版消息框照常绘制。 */
 int MsgText_Enabled(void)
 {
-    return g_Cfg.Enable ? 1 : 0;
+    return (g_Cfg.Enable && g_Cfg.CampEnable) ? 1 : 0;
 }

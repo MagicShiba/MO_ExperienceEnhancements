@@ -17,3 +17,7 @@ void SS_NoteTip(void* surf, int x, int y, int w, int h);
 /* 侧栏面上屏前调 (BlitSidebar 0x6A70E0 钩): 画滑块。侧栏面是靠 BlitSidebar 带
  * 上屏的, 画在呈现之前 (同 notes/隐藏侧栏.md §4.5)。返回 1 = 画了。 */
 int  SS_Draw(void);
+
+/* GUI 设置菜单用的运行时开关/查询 ([Sidebar] ScrollEnable)。 */
+int  SS_Enabled(void);
+void SS_SetEnabled(int enable);

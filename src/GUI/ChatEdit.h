@@ -18,6 +18,11 @@ int ChatEdit_MatchSent(const wchar_t* msg);
 /* 单人消息是否显示 "名字: " 前缀 (MsgText 排版用) */
 int ChatEdit_ShowNameSP(void);
 
+/* ESC 菜单运行期读取/修改 (只改内存, 不写 INI)。 */
+int  ChatEdit_Enabled(void);
+void ChatEdit_SetEnabled(int on);
+void ChatEdit_SetShowNameSP(int on);
+
 /* 单人聊天框: 对话框函数按 [SessionClass 0xA8B238]==0/5 判单人并跳过聊天框
  * 四处逻辑。ChatBoxSP=1 时跳过 session 检查 (保留其余旗标检查),
  * 返回 0 走原版。 */

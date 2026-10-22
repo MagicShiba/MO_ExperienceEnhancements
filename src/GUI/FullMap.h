@@ -99,3 +99,11 @@ int  FM_SidebarVisible(void);
  * SWPanel) 必须锚到这里, 否则侧栏一显示就被压在侧栏底下 / 一隐藏就偏出屏幕
  * 右缘。返回 0 = 本模块没接管, 调用方退回用面宽。 */
 int  FM_MapRightEdge(void);
+
+/* GUI 设置菜单用的隐藏侧栏档位 (对应 [Sidebar] HideEnable + Mode):
+ *   0=禁用  1=完全显示  2=只显示小地图/顶部按钮  3=不显示 (全屏)
+ * 运行期切到"禁用"时模块内部按完全显示跑 (缩放开着必须做视口补偿), 只是不再响应
+ * 切换键; 下次启动按 HideEnable=0 真正关掉。启动即禁用 (补丁没装) 时改为记住
+ * 选择、重启生效。 */
+int  FM_HideState(void);
+void FM_SetHideState(int state);
