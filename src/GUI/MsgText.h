@@ -86,3 +86,7 @@ enum {
 
 int  MsgText_GetOption(int id);
 void MsgText_SetOption(int id, int value);
+
+/* ESC 设置页取消: 整份运行期配置快照/恢复 (不碰 INI)。 */
+void MsgText_SaveOptions(void);
+void MsgText_RestoreOptions(void);

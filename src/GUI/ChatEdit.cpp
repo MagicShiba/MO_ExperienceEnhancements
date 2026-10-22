@@ -32,6 +32,7 @@
 #include <imm.h>
 #include "GdiText.h"
 #include "MsgText.h"
+#include "LineEdit.h"
 #include "ChatEdit.h"
 
 #define CE_MSGLIST      0xA8BC60u
@@ -129,21 +130,15 @@ static unsigned ce_LastCur = 0xFFFFFFFFu;
 static void CE_CharPostInstall(void);
 static HWND ce_FgWnd = NULL;
 
-typedef struct { int vk; int prev; unsigned nextRep; } CENavKey;
-static CENavKey ce_NavKeys[] = {
-    { VK_LEFT, 0, 0 }, { VK_RIGHT, 0, 0 },
-    { VK_HOME, 0, 0 }, { VK_END, 0, 0 }, { VK_DELETE, 0, 0 },
-    { VK_UP, 0, 0 }, { VK_DOWN, 0, 0 },   /* 上下翻输入历史 */
-    { VK_BACK, 0, 0 },   /* 退格: 对话框上游直改原生时 Input 钩收不到, 轮询后备 */
+static LiKey ce_NavKeys[] = {
+    { VK_LEFT, 0, 0, 1 }, { VK_RIGHT, 0, 0, 1 },
+    { VK_HOME, 0, 0, 1 }, { VK_END, 0, 0, 1 }, { VK_DELETE, 0, 0, 1 },
+    { VK_UP, 0, 0, 1 }, { VK_DOWN, 0, 0, 1 },   /* 上下翻输入历史 */
+    { VK_BACK, 0, 0, 1 },   /* 退格: 对话框上游直改原生时 Input 钩收不到, 轮询后备 */
 };
 static int ce_CtrlPrev[4] = { 0, 0, 0, 0 };   /* C/X/V/A 边沿 */
 
 /* ---------------- 小工具 (无 CRT) ---------------- */
-
-static int CE_KeyDown(unsigned vk)
-{
-    return (GetAsyncKeyState((int)vk) & 0x8000) ? 1 : 0;
-}
 
 /* 区间可读判定 (IsPlausiblePtr 只判单指针 4 对齐, 不能直接判区间尾地址)。
  * 只看起点对齐 + 末字节合法。 */
@@ -279,55 +274,41 @@ static int CE_BudgetOk(int newLen, int fieldW)
 
 static void CE_DeleteRange(int lo, int hi)
 {
-    int i;
     ce_HistIdx = -1;   /* 改字即离翻历史 */
     if (lo < 0 || hi <= lo) return;
-    if (hi > ce_Len) hi = ce_Len;
-    for (i = hi; i <= ce_Len; i++) ce_Buf[i - (hi - lo)] = ce_Buf[i];
-    ce_Len -= (hi - lo);
-    ce_Cur = lo;
+    LiDeleteRange(ce_Buf, &ce_Len, &ce_Cur, lo, hi);
     ce_Anchor = -1;
 }
 
 static void CE_InsertOne(wchar_t c, int fieldW)
 {
-    int lo, hi, i;
-    int keep;
+    int lo, hi;
     ce_HistIdx = -1;   /* 改字即离翻历史 */
     CE_SelRange(&lo, &hi);
     if (lo >= 0) CE_DeleteRange(lo, hi);
-    if (ce_Len >= CE_BUF_N - 1) return;
-    for (i = ce_Len; i >= ce_Cur; i--) ce_Buf[i + 1] = ce_Buf[i];
-    ce_Buf[ce_Cur] = c;
-    keep = ce_Len + 1;
-    ce_Len++;
-    ce_Cur++;
-    ce_Anchor = -1;
-    if (!CE_BudgetOk(keep, fieldW))
+    if (!LiInsert(ce_Buf, CE_BUF_N, &ce_Len, &ce_Cur, c, 0)) return;
+    if (!CE_BudgetOk(ce_Len, fieldW))
     {
         /* 超宽回退 (与原生拒收同效果) */
-        for (i = ce_Cur; i <= ce_Len; i++) ce_Buf[i - 1] = ce_Buf[i];
-        ce_Len--;
-        ce_Cur--;
+        LiDeleteRange(ce_Buf, &ce_Len, &ce_Cur, ce_Cur - 1, ce_Cur);
     }
+    ce_Anchor = -1;
 }
 
 static void CE_DoBackspace(void)
 {
     int lo, hi;
     CE_SelRange(&lo, &hi);
-    if (lo >= 0) { CE_DeleteRange(lo, hi); return; }
-    if (ce_Cur <= 0) return;
-    CE_DeleteRange(ce_Cur - 1, ce_Cur);
+    if (lo >= 0) CE_DeleteRange(lo, hi);
+    else if (ce_Cur > 0) CE_DeleteRange(ce_Cur - 1, ce_Cur);
 }
 
 static void CE_DoDelete(void)
 {
     int lo, hi;
     CE_SelRange(&lo, &hi);
-    if (lo >= 0) { CE_DeleteRange(lo, hi); return; }
-    if (ce_Cur >= ce_Len) return;
-    CE_DeleteRange(ce_Cur, ce_Cur + 1);
+    if (lo >= 0) CE_DeleteRange(lo, hi);
+    else if (ce_Cur < ce_Len) CE_DeleteRange(ce_Cur, ce_Cur + 1);
 }
 
 static int CE_IsWord(wchar_t c)
@@ -812,14 +793,10 @@ static void CE_NavMove(int vk, int shift, int ctrl)
     int old = ce_Cur;
     if (!shift) ce_Anchor = -1;
     else if (ce_Anchor < 0) ce_Anchor = old;
-    switch (vk)
-    {
-    case VK_LEFT:  if (ctrl) CE_MoveWord(-1); else if (ce_Cur > 0) ce_Cur--; break;
-    case VK_RIGHT: if (ctrl) CE_MoveWord(1);  else if (ce_Cur < ce_Len) ce_Cur++; break;
-    case VK_HOME:  ce_Cur = 0; break;
-    case VK_END:   ce_Cur = ce_Len; break;
-    default: break;
-    }
+    if (ctrl && (vk == VK_LEFT || vk == VK_RIGHT))
+        CE_MoveWord(vk == VK_LEFT ? -1 : 1);
+    else
+        LiMove(vk, &ce_Cur, ce_Len);
     if (shift && ce_Anchor == ce_Cur) ce_Anchor = -1;
     CE_BlinkReset();
 }
@@ -835,8 +812,8 @@ static int CE_GameForeground(void)
 /* 轮询按帧处理移动/删除 (唯一的按键来源) */
 static void CE_ApplyNav(int vk)
 {
-    int shift = CE_KeyDown(VK_SHIFT);
-    int ctrl = CE_KeyDown(VK_CONTROL);
+    int shift = LiKeyDown(VK_SHIFT);
+    int ctrl = LiKeyDown(VK_CONTROL);
     if (vk == VK_DELETE) { CE_DoDelete(); CE_Mirror(); }
     else if (vk == VK_BACK) { CE_DoBackspace(); CE_Mirror(); }
     else if (vk == VK_UP) CE_HistMove(-1);
@@ -849,30 +826,17 @@ static void CE_PollKeys(int fieldW)
 {
     unsigned now = GetTickCount();
     unsigned i;
-    int ctrl = CE_KeyDown(VK_CONTROL);
+    int ctrl = LiKeyDown(VK_CONTROL);
     for (i = 0; i < sizeof(ce_NavKeys) / sizeof(ce_NavKeys[0]); i++)
-    {
-        int down = CE_KeyDown((unsigned)ce_NavKeys[i].vk);
-        /* 边缘立刻走一步, 按住 400ms 后起 33ms 连发; 只读按键状态, 不装全局钩。 */
-        if (down && !ce_NavKeys[i].prev)
-        {
+        if (LiKeyFire(&ce_NavKeys[i], now))
             CE_ApplyNav(ce_NavKeys[i].vk);
-            ce_NavKeys[i].nextRep = now + 400;
-        }
-        else if (down && (int)(now - ce_NavKeys[i].nextRep) >= 0)
-        {
-            CE_ApplyNav(ce_NavKeys[i].vk);
-            ce_NavKeys[i].nextRep = now + 33;
-        }
-        ce_NavKeys[i].prev = down;
-    }
     /* Ctrl+字母: Input 钩优先 (同帧先跑), 轮询只做后备 (150ms 握手防双触发) */
     if (ctrl && (int)(now - ce_CmdTick) > 150)
     {
         static const int vks[4] = { 'C', 'X', 'V', 'A' };
         for (i = 0; i < 4; i++)
         {
-            int down = CE_KeyDown((unsigned)vks[i]);
+            int down = LiKeyDown((unsigned)vks[i]);
             if (down && !ce_CtrlPrev[i])
             {
                 if (i == 0) CE_DoCopy(0);
@@ -942,8 +906,7 @@ static void CE_Activate(void)
     CE_Mirror();
     ce_FgWnd = GetForegroundWindow();
     if (!ce_FgWnd) ce_FgWnd = GetActiveWindow();
-    for (k = 0; k < sizeof(ce_NavKeys) / sizeof(ce_NavKeys[0]); k++)
-    { ce_NavKeys[k].prev = 0; ce_NavKeys[k].nextRep = 0; }
+    LiKeysReset(ce_NavKeys, (int)(sizeof(ce_NavKeys) / sizeof(ce_NavKeys[0])), 0);
     for (k = 0; k < 4; k++) ce_CtrlPrev[k] = 0;
     /* 行缓冲游标快照 (摘除判据: 只收编开框后新追加的字, 不碰旧残留) */
     ce_LastCur = 0xFFFFFFFFu;
@@ -1420,7 +1383,7 @@ int __fastcall ChatEdit_InputHook(void* t, void* edxUnused,
         *keySlot = 0;
         return 0;
     }
-    ctrl = CE_KeyDown(VK_CONTROL);
+    ctrl = LiKeyDown(VK_CONTROL);
     if (ctrl)
     {
         wchar_t c = (wchar_t)ukey;

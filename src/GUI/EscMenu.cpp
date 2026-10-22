@@ -15,6 +15,7 @@
 #include "SideScroll.h"
 #include "MsgText.h"
 #include "ChatEdit.h"
+#include "LineEdit.h"
 #include "OrderUtil.h"
 #include "EscMenu.h"
 #include "PlayerColor.h"
@@ -27,6 +28,7 @@
 #define ESC_PROP_OLD_PROC    L"MOE_EscOldProc"
 
 #define ESC_ID_GAMECONTROLS  1313
+#define ESC_ID_BACK          1670
 #define ESC_ID_BOTTOM        1685
 
 #define ESC_TPL_W            533
@@ -76,6 +78,10 @@
 #define ESC_STEP_W           96
 #define ESC_STEP_BTN_W       24
 #define ESC_STEP_BTN_H       20
+#define ESC_STEP_NUM_PAD     10
+#define ESC_CANCEL_W         78
+#define ESC_CANCEL_H         24
+#define ESC_CANCEL_GAP       3
 #define ESC_SKIN_GAP         10
 #define ESC_ROWS_MIN         1
 #define ESC_ROWS_MAX         40
@@ -170,8 +176,73 @@ static wchar_t s_TextPos[2][32];
 static wchar_t s_TextAlign[2][32];
 static wchar_t s_TextBar[3][32];
 static wchar_t s_TextColor[2][32];
+static wchar_t s_Cancel[32] = L"Cancel";
 static int s_TextMissing = 0;
 static int s_TextScroll = 0;
+
+enum {
+    EDIT_PAGE_GUI = 0,
+    EDIT_PAGE_TEXT = 1
+};
+
+#define ESC_EDIT_CAP 8
+#define ESC_EDIT_TIMER 0x4D4Fu
+
+/* 对话框键盘消息不落到自绘控件 (焦点常在原生子控件), 与 ChatEdit 一样轮询按键。 */
+#define ES_KEY(v, rep) { v, 0, 0, rep }
+static LiKey s_EditKeys[] = {
+    ES_KEY(VK_LEFT, 1), ES_KEY(VK_RIGHT, 1), ES_KEY(VK_HOME, 1), ES_KEY(VK_END, 1),
+    ES_KEY(VK_DELETE, 1), ES_KEY(VK_BACK, 1), ES_KEY(VK_RETURN, 0), ES_KEY(VK_ESCAPE, 0),
+    ES_KEY('0', 0), ES_KEY('1', 0), ES_KEY('2', 0), ES_KEY('3', 0), ES_KEY('4', 0),
+    ES_KEY('5', 0), ES_KEY('6', 0), ES_KEY('7', 0), ES_KEY('8', 0), ES_KEY('9', 0),
+    ES_KEY(VK_NUMPAD0, 0), ES_KEY(VK_NUMPAD1, 0), ES_KEY(VK_NUMPAD2, 0),
+    ES_KEY(VK_NUMPAD3, 0), ES_KEY(VK_NUMPAD4, 0), ES_KEY(VK_NUMPAD5, 0),
+    ES_KEY(VK_NUMPAD6, 0), ES_KEY(VK_NUMPAD7, 0), ES_KEY(VK_NUMPAD8, 0),
+    ES_KEY(VK_NUMPAD9, 0)
+};
+#undef ES_KEY
+
+static int s_EditOn = 0;
+static HWND s_EditHost = NULL;
+static int s_EditPage = -1;
+static int s_EditItem = -1;
+static int s_EditLen = 0;
+static int s_EditCur = 0;
+static int s_EditMin = 0;
+static int s_EditMax = 0;
+static int s_EditMaxLen = 1;
+static wchar_t s_EditBuf[ESC_EDIT_CAP];
+
+static int Esc_EditIs(int page, int item)
+{
+    return s_EditOn && s_EditPage == page && s_EditItem == item;
+}
+
+typedef struct {
+    int scale, pause, grid, sws, fill, rows, skin, color;
+    int bq, scatter, sideScroll, hide, swsSide;
+    int chatEdit, chatName;
+} EscSavedSettings;
+
+#define ESC_SETTING_LIST(X) \
+    X(scale, SB_Enabled, SB_SetEnabled) \
+    X(pause, PV_ButtonsEnabled, PV_SetButtonsEnabled) \
+    X(grid, GV_IsOn, GV_SetOn) \
+    X(sws, SWS_Enabled, SWS_SetEnabled) \
+    X(fill, SWS_FillMode, SWS_SetFillMode) \
+    X(rows, SWS_MaxRows, SWS_SetMaxRows) \
+    X(skin, SidebarSkin_Get, SidebarSkin_Set) \
+    X(bq, BQ_Enabled, BQ_SetEnabled) \
+    X(scatter, PS_Mode, PS_SetMode) \
+    X(sideScroll, SS_Enabled, SS_SetEnabled) \
+    X(hide, FM_HideState, FM_SetHideState) \
+    X(swsSide, SWS_SideRight, SWS_SetSideRight) \
+    X(chatEdit, ChatEdit_Enabled, ChatEdit_SetEnabled) \
+    X(chatName, ChatEdit_ShowNameSP, ChatEdit_SetShowNameSP)
+
+static EscSavedSettings s_Saved;
+static int s_SavedOk = 0;
+static int s_CancelDown = 0;
 
 static const wchar_t* const s_LangLabel[ESC_LANG_N] = { L"ZH", L"EN", L"AUTO" };
 static const int s_LangMode[ESC_LANG_N] = {
@@ -214,6 +285,8 @@ static void Esc_LoadAllText(void)
     Esc_LoadText("RightTitle", s_RightTitle, ESC_LABEL_CAP);
     Esc_LoadText("RightItem1", s_RightItem[0], ESC_LABEL_CAP);
     Esc_LoadText("RightItem2", s_RightItem[1], ESC_LABEL_CAP);
+    if (!Esc_LoadText("Cancel", s_Cancel, 32))
+        lstrcpynW(s_Cancel, Lang_IsChinese() ? L"取消" : L"Cancel", 32);
 
     s_GuiMissing = 0;
     Esc_GuiText("GuiTitle", s_GuiTitle, ESC_LABEL_CAP);
@@ -394,6 +467,37 @@ static void Esc_IntToW(wchar_t* dst, unsigned value, int cap)
     if ((int)n > cap - 1) n = (unsigned)(cap - 1);
     for (i = 0; i < n; i++) dst[i] = (wchar_t)b[i];
     dst[n] = 0;
+}
+
+static void Esc_Redraw(HWND hDlg)
+{
+    if (!hDlg || !IsWindow(hDlg)) return;
+    InvalidateRect(hDlg, NULL, FALSE);
+    UpdateWindow(hDlg);
+}
+
+static int Esc_EditCurAt(const RECT* right, int mx, const wchar_t* s, int len);
+
+static void Esc_EditBegin(HWND hDlg, const RECT* right, int mx, int page,
+                          int item, int value, int minValue, int maxValue)
+{
+    int i;
+
+    Esc_IntToW(s_EditBuf, (unsigned)value, ESC_EDIT_CAP);
+    s_EditLen = lstrlenW(s_EditBuf);
+    s_EditCur = Esc_EditCurAt(right, mx, s_EditBuf, s_EditLen);
+    s_EditOn = 1;
+    s_EditHost = hDlg;
+    s_EditPage = page;
+    s_EditItem = item;
+    s_EditMin = minValue;
+    s_EditMax = maxValue;
+    s_EditMaxLen = 1;
+    for (i = maxValue; i >= 10; i /= 10) s_EditMaxLen++;
+    LiKeysReset(s_EditKeys,
+                (int)(sizeof(s_EditKeys) / sizeof(s_EditKeys[0])), 1);
+    SetTimer(hDlg, ESC_EDIT_TIMER, 16, NULL);
+    Esc_Redraw(hDlg);
 }
 
 static int Esc_ColorPerRow(int rowW)
@@ -626,13 +730,14 @@ static void Esc_Fill16(void* surf, int x, int y, int w, int h,
 }
 
 static void Esc_Outline(void* surf, int x, int y, int w, int h,
-                        unsigned r, unsigned g, unsigned b, unsigned a)
+                        unsigned r, unsigned g, unsigned b, unsigned a,
+                        int t = 2)
 {
     if (w < 8 || h < 8) return;
-    Esc_Fill(surf, x, y, w, 2, r, g, b, a);
-    Esc_Fill(surf, x, y + h - 2, w, 2, r, g, b, a);
-    Esc_Fill(surf, x, y + 2, 2, h - 4, r, g, b, a);
-    Esc_Fill(surf, x + w - 2, y + 2, 2, h - 4, r, g, b, a);
+    Esc_Fill(surf, x, y, w, t, r, g, b, a);
+    Esc_Fill(surf, x, y + h - t, w, t, r, g, b, a);
+    Esc_Fill(surf, x, y + t, t, h - t * 2, r, g, b, a);
+    Esc_Fill(surf, x + w - t, y + t, t, h - t * 2, r, g, b, a);
 }
 
 /* Supersampled text: render at 2x, box-filter the red channel as coverage.
@@ -1079,14 +1184,62 @@ static int Esc_StepHit(const RECT* right, int mx, int* value,
     return *value >= minValue && *value <= maxValue;
 }
 
-static int Esc_TextNumStep(const RECT* right, int mx, const EscTextNum* num,
-                           int* out)
+static void Esc_StepBox(int ctlX, int* x, int* w)
 {
-    int v = MsgText_GetOption(num->opt);
+    *x = ctlX + ESC_STEP_BTN_W;
+    *w = ESC_STEP_W - ESC_STEP_BTN_W * 2;
+}
 
-    if (!Esc_StepHit(right, mx, &v, num->min, num->max, num->step)) return 0;
-    *out = v;
-    return 1;
+static int Esc_StepNumX(int boxX, int boxW, const wchar_t* s)
+{
+    int numW = boxW - ESC_STEP_NUM_PAD;
+    int tw = Esc_TextWidth(s, ESC_BODY_PX, ESC_BODY_SLOT);
+
+    if (tw > numW) tw = numW;
+    return boxX + (boxW - tw) / 2;
+}
+
+static int Esc_StepMid(const RECT* right, int mx)
+{
+    int x, w;
+
+    Esc_StepBox(Esc_CtlX(right), &x, &w);
+    return mx >= x && mx < x + w;
+}
+
+static void Esc_CancelRect(const RECT* p, RECT* r)
+{
+    r->right = p->right;
+    r->left = r->right - ESC_CANCEL_W;
+    r->top = p->bottom + ESC_CANCEL_GAP;
+    r->bottom = r->top + ESC_CANCEL_H;
+}
+
+static int Esc_CancelHit(const RECT* p, int mx, int my)
+{
+    RECT r;
+
+    Esc_CancelRect(p, &r);
+    return mx >= r.left && mx < r.right && my >= r.top && my < r.bottom;
+}
+
+static int Esc_EditCurAt(const RECT* right, int mx, const wchar_t* s, int len)
+{
+    wchar_t pre[ESC_EDIT_CAP];
+    int boxX, boxW, numX, i, best = 0, bestDist = 0x7FFFFFFF;
+
+    Esc_StepBox(Esc_CtlX(right), &boxX, &boxW);
+    numX = Esc_StepNumX(boxX, boxW, s);
+    for (i = 0; i <= len; i++)
+    {
+        int w, d;
+        lstrcpynW(pre, s, i + 1);
+        w = numX + Esc_TextWidth(pre, ESC_BODY_PX, ESC_BODY_SLOT);
+        d = mx - w;
+        if (d < 0) d = -d;
+        if (d < bestDist) { bestDist = d; best = i; }
+    }
+    return best;
 }
 
 static void Esc_StepButton(void* surf, int x, int y, const wchar_t* glyph,
@@ -1260,10 +1413,15 @@ static void Esc_DrawColorRow(void* surf, int rowL, int rowY, int rowW,
 
 static void Esc_DrawValueRow(void* surf, int rowL, int rowY, int rowW,
                              int bodyH, const wchar_t* label, int value,
-                             int minValue, int maxValue)
+                             int minValue, int maxValue, int editing)
 {
     wchar_t num[16];
-    int ctlX, btnY, numW, tw, numX;
+    int ctlX, btnY, boxX, boxW, numW, numX;
+    unsigned bg = editing ? 40u : 24u;
+    unsigned border = editing ? 208u : 0x7Bu;
+    unsigned borderG = editing ? 160u : 0x79u;
+    unsigned borderB = editing ? 64u : 0x7Bu;
+    unsigned borderA = editing ? 255u : 150u;
 
     ctlX = Esc_RowCtlX(rowL + rowW);
     btnY = rowY + (ESC_ROW_H - ESC_STEP_BTN_H) / 2;
@@ -1273,12 +1431,28 @@ static void Esc_DrawValueRow(void* surf, int rowL, int rowY, int rowW,
     Esc_StepButton(surf, ctlX + ESC_STEP_W - ESC_STEP_BTN_W, btnY, L"+",
                    value < maxValue);
 
-    Esc_IntToW(num, (unsigned)value, 16);
-    tw = Esc_TextWidth(num, ESC_BODY_PX, ESC_BODY_SLOT);
-    numW = ESC_STEP_W - ESC_STEP_BTN_W * 2 - 8;
-    numX = ctlX + ESC_STEP_BTN_W + 4 + (numW - tw) / 2;
+    Esc_StepBox(ctlX, &boxX, &boxW);
+    Esc_Fill(surf, boxX, btnY, boxW, ESC_STEP_BTN_H, bg, bg, bg, 230);
+    Esc_Outline(surf, boxX, btnY, boxW, ESC_STEP_BTN_H,
+                border, borderG, borderB, borderA, 1);
+
+    if (editing) lstrcpynW(num, s_EditBuf, 16);
+    else Esc_IntToW(num, (unsigned)value, 16);
+    numW = boxW - ESC_STEP_NUM_PAD;
+    numX = Esc_StepNumX(boxX, boxW, num);
     Esc_Text(surf, num, numX, rowY + (ESC_ROW_H - bodyH) / 2,
              numW, ESC_BODY_PX, ESC_BODY_SLOT, 238, 238, 238);
+
+    if (editing)
+    {
+        wchar_t pre[ESC_EDIT_CAP];
+        int caretX;
+        lstrcpynW(pre, num, s_EditCur + 1);
+        caretX = numX + Esc_TextWidth(pre, ESC_BODY_PX, ESC_BODY_SLOT);
+        if (caretX > boxX + boxW - 2) caretX = boxX + boxW - 2;
+        Esc_Fill(surf, caretX, btnY + 3, 1, ESC_STEP_BTN_H - 6,
+                 235, 235, 235, 255);
+    }
 }
 
 static int Esc_TextSwitchValue(int item)
@@ -1293,6 +1467,27 @@ static int Esc_TextSwitchValue(int item)
     case TX_HINT_RADAR:  return MsgText_GetOption(MSG_OPT_HINT_RADAR);
     default:             return 0;
     }
+}
+
+static void Esc_DrawCancel(void* surf, const RECT* p)
+{
+    RECT r;
+    int tw, th;
+    unsigned bg = s_CancelDown ? 52u : 68u;
+
+    Esc_CancelRect(p, &r);
+    Esc_Fill(surf, r.left, r.top, ESC_CANCEL_W, ESC_CANCEL_H,
+             bg, bg, bg, 255);
+    Esc_Outline(surf, r.left, r.top, ESC_CANCEL_W, ESC_CANCEL_H,
+                0x7B, 0x79, 0x7B, 220, 1);
+
+    tw = Esc_TextWidth(s_Cancel, ESC_BODY_PX, ESC_BODY_SLOT);
+    if (tw > ESC_CANCEL_W - 8) tw = ESC_CANCEL_W - 8;
+    th = Esc_TextHeight(ESC_BODY_PX, ESC_BODY_SLOT);
+    if (th > ESC_CANCEL_H) th = ESC_CANCEL_H;
+    Esc_Text(surf, s_Cancel, r.left + (ESC_CANCEL_W - tw) / 2,
+             r.top + (ESC_CANCEL_H - th) / 2, ESC_CANCEL_W - 8,
+             ESC_BODY_PX, ESC_BODY_SLOT, 238, 238, 238);
 }
 
 static void Esc_TextPanel(void* surf, RECT* p)
@@ -1356,7 +1551,8 @@ static void Esc_TextPanel(void* surf, RECT* p)
                         Esc_DrawValueRow(surf, rowL, y, rowW, bodyH,
                                          s_TextLabel[item],
                                          MsgText_GetOption(num->opt),
-                                         num->min, num->max);
+                                         num->min, num->max,
+                                         Esc_EditIs(EDIT_PAGE_TEXT, item));
                 }
                 else if (kind == EG_CHOICE)
                     Esc_DrawSegRow(surf, rowL, y, rowW, bodyH,
@@ -1450,7 +1646,8 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
             Esc_DrawSortRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
         else if (kind == EG_ROWS)
             Esc_DrawValueRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item],
-                             SWS_MaxRows(), ESC_ROWS_MIN, ESC_ROWS_MAX);
+                             SWS_MaxRows(), ESC_ROWS_MIN, ESC_ROWS_MAX,
+                             Esc_EditIs(EDIT_PAGE_GUI, GUI_ITEM_ROWS));
         else if (kind == EG_COLOR)
             Esc_DrawColorRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
         else if (kind == EG_SKIN)
@@ -1492,6 +1689,8 @@ static void Esc_DrawPanels(void* surf, HWND hDlg)
         Esc_TextPanel(surf, &b);
     else
         Esc_Panel(surf, &b, s_RightTitle, rightRows, 2);
+    if (s_Sel == 0 || s_Sel == 1)
+        Esc_DrawCancel(surf, &b);
 }
 
 /* ---------------- input ---------------- */
@@ -1711,8 +1910,8 @@ static int Esc_WriteIniRaw(const char* section, const char* key,
     return 1;
 }
 
-/* 延迟写入: 设置页面内点击只改内存并排队, 离开页面 (切页或关闭菜单) 时
- * 统一落盘。同一 section+key 只保留最后一次, 避免反复重写文件。 */
+/* 延迟写入: 设置页面内点击只改内存并排队, 关闭菜单时统一落盘; 切页不写,
+ * 这样取消能丢掉整次设置。同一 section+key 只保留最后一次, 避免反复重写。 */
 #define ESC_PENDING_MAX 40
 typedef struct {
     char section[24];
@@ -1760,6 +1959,58 @@ static void Esc_QueueValue(const char* section, const char* key, int value)
     val[0] = 0;
     UtoA((unsigned)value, val);
     Esc_QueueRaw(section, key, val);
+}
+
+static void Esc_ApplyNum(int page, int item, int value)
+{
+    const EscTextNum* num;
+
+    if (page == EDIT_PAGE_GUI)
+    {
+        SWS_SetMaxRows(value);
+        Esc_QueueValue("SWSidebar", "MaxRows", value);
+    }
+    else if ((num = Esc_TextNumFind(item)) != NULL)
+    {
+        MsgText_SetOption(num->opt, value);
+        Esc_QueueValue("MsgText", num->key, value);
+    }
+}
+
+/* 步进按钮直接改值; 点中间进入编辑; 其余点击仍吞掉。 */
+static void Esc_StepOrEdit(HWND hDlg, const RECT* right, int mx, int page,
+                           int item, int value, int minValue, int maxValue,
+                           int step)
+{
+    if (Esc_StepHit(right, mx, &value, minValue, maxValue, step))
+    {
+        Esc_ApplyNum(page, item, value);
+        Esc_Redraw(hDlg);
+    }
+    else if (Esc_StepMid(right, mx))
+        Esc_EditBegin(hDlg, right, mx, page, item, value, minValue, maxValue);
+}
+
+/* 快照打开设置页时的运行期值; 取消时恢复, INI 队列直接丢弃。 */
+static void Esc_SaveSettings(void)
+{
+#define ESC_GET(n, g, s) s_Saved.n = g();
+    ESC_SETTING_LIST(ESC_GET)
+#undef ESC_GET
+    s_Saved.color = PlayerColor_Current();
+    MsgText_SaveOptions();
+    s_SavedOk = 1;
+}
+
+static void Esc_RestoreSettings(void)
+{
+    if (!s_SavedOk) return;
+    MsgText_RestoreOptions();
+#define ESC_SET(n, g, s) s(s_Saved.n);
+    ESC_SETTING_LIST(ESC_SET)
+#undef ESC_SET
+    SidebarSkin_Poll();
+    if (s_Saved.color >= 0) PlayerColor_Set(s_Saved.color);
 }
 
 static int Esc_HitLeft(const RECT* a, int mx, int my, int* index)
@@ -1861,12 +2112,9 @@ static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx,
         Esc_QueueValue("SWSidebar", "FillMode", value);
         break;
     case GUI_ITEM_ROWS:
-        value = SWS_MaxRows();
-        if (!Esc_StepHit(right, mx, &value, ESC_ROWS_MIN, ESC_ROWS_MAX, 1))
-            return;
-        SWS_SetMaxRows(value);
-        Esc_QueueValue("SWSidebar", "MaxRows", value);
-        break;
+        Esc_StepOrEdit(hDlg, right, mx, EDIT_PAGE_GUI, GUI_ITEM_ROWS,
+                       SWS_MaxRows(), ESC_ROWS_MIN, ESC_ROWS_MAX, 1);
+        return;
     case GUI_ITEM_SKIN:
     {
         int pick = Esc_PickSeg(s_GuiSkinName, ESC_SKIN_N, right, mx);
@@ -1932,8 +2180,7 @@ static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx,
         return;
     }
 
-    InvalidateRect(hDlg, NULL, FALSE);
-    UpdateWindow(hDlg);
+    Esc_Redraw(hDlg);
 }
 
 static int Esc_TextHitRight(const RECT* b, int mx, int my, int* index)
@@ -2003,10 +2250,11 @@ static void Esc_TextApply(HWND hDlg, const RECT* right, int index, int mx)
     case TX_HINT_WIDTH:
     {
         const EscTextNum* num = Esc_TextNumFind(index);
-        if (!num || !Esc_TextNumStep(right, mx, num, &value)) return;
-        MsgText_SetOption(num->opt, value);
-        Esc_QueueValue("MsgText", num->key, value);
-        break;
+        if (!num) return;
+        Esc_StepOrEdit(hDlg, right, mx, EDIT_PAGE_TEXT, index,
+                       MsgText_GetOption(num->opt), num->min, num->max,
+                       num->step);
+        return;
     }
     case TX_CAMP_POS:
     {
@@ -2077,8 +2325,69 @@ static void Esc_TextApply(HWND hDlg, const RECT* right, int index, int mx)
         return;
     }
 
-    InvalidateRect(hDlg, NULL, FALSE);
-    UpdateWindow(hDlg);
+    Esc_Redraw(hDlg);
+}
+
+static void Esc_EditEnd(HWND hDlg)
+{
+    if (!s_EditOn) return;
+    if (s_EditHost) KillTimer(s_EditHost, ESC_EDIT_TIMER);
+    s_EditOn = 0;
+    Esc_Redraw(hDlg);
+}
+
+static void Esc_EditCommit(HWND hDlg)
+{
+    int value = 0, i;
+
+    if (!s_EditOn) return;
+    for (i = 0; i < s_EditLen; i++)
+        value = value * 10 + (s_EditBuf[i] - L'0');
+    if (s_EditLen > 0)
+    {
+        if (value < s_EditMin) value = s_EditMin;
+        if (value > s_EditMax) value = s_EditMax;
+        Esc_ApplyNum(s_EditPage, s_EditItem, value);
+    }
+    Esc_EditEnd(hDlg);
+}
+
+static void Esc_EditPoll(HWND hDlg)
+{
+    unsigned now = GetTickCount();
+    DWORD fgProc = 0, hostProc = 0;
+    HWND fg;
+    int i, changed = 0;
+
+    if (!s_EditOn) return;
+    fg = GetForegroundWindow();
+    if (fg) GetWindowThreadProcessId(fg, &fgProc);
+    GetWindowThreadProcessId(hDlg, &hostProc);
+    if (fgProc != hostProc) return;
+
+    for (i = 0; i < (int)(sizeof(s_EditKeys) / sizeof(s_EditKeys[0])); i++)
+    {
+        LiKey* k = &s_EditKeys[i];
+        wchar_t ch;
+
+        if (!LiKeyFire(k, now)) continue;
+        if (k->vk == VK_RETURN) { Esc_EditCommit(hDlg); return; }
+        if (k->vk == VK_ESCAPE) { Esc_EditEnd(hDlg); return; }
+        if (k->vk == VK_BACK)
+            LiBackspace(s_EditBuf, &s_EditLen, &s_EditCur);
+        else if (k->vk == VK_DELETE)
+            LiDelete(s_EditBuf, &s_EditLen, &s_EditCur);
+        else if (k->vk == VK_LEFT || k->vk == VK_RIGHT ||
+                 k->vk == VK_HOME || k->vk == VK_END)
+            LiMove(k->vk, &s_EditCur, s_EditLen);
+        else if (LiDigit(k->vk, &ch))
+            LiInsert(s_EditBuf, ESC_EDIT_CAP, &s_EditLen, &s_EditCur, ch,
+                     s_EditMaxLen);
+        else
+            continue;
+        changed = 1;
+    }
+    if (changed) Esc_Redraw(hDlg);
 }
 
 static void Esc_ApplyLang(HWND hDlg, int seg)
@@ -2087,18 +2396,16 @@ static void Esc_ApplyLang(HWND hDlg, int seg)
     Lang_SetMode(s_LangMode[seg]);
     EscMenu_ReloadLang();
     MsgText_ReloadLang();
-    InvalidateRect(hDlg, NULL, FALSE);
-    UpdateWindow(hDlg);
+    Esc_Redraw(hDlg);
 }
 
 static void Esc_Select(HWND hDlg, int index)
 {
     if (index == s_Sel) return;
-    Esc_FlushPending();
+    Esc_EditCommit(hDlg);
     s_Sel = index;
     if (index != 1) s_TextScroll = 0;
-    InvalidateRect(hDlg, NULL, FALSE);
-    UpdateWindow(hDlg);
+    Esc_Redraw(hDlg);
 }
 
 static int Esc_TextWheel(HWND h, WPARAM wp, LPARAM lp)
@@ -2121,11 +2428,7 @@ static int Esc_TextWheel(HWND h, WPARAM wp, LPARAM lp)
     old = s_TextScroll;
     s_TextScroll = Esc_TextSnap(s_TextScroll - (delta / 120) * ESC_ROW_H * 3);
     Esc_TextClampScroll(&b);
-    if (s_TextScroll != old)
-    {
-        InvalidateRect(h, NULL, FALSE);
-        UpdateWindow(h);
-    }
+    if (s_TextScroll != old) Esc_Redraw(h);
     return 1;
 }
 
@@ -2136,6 +2439,45 @@ static LRESULT Esc_CallOld(HWND h, WNDPROC old, UINT msg, WPARAM wp, LPARAM lp)
                    : DefWindowProcW(h, msg, wp, lp);
     return old ? CallWindowProcA(old, h, msg, wp, lp)
                : DefWindowProcA(h, msg, wp, lp);
+}
+
+static int Esc_EditClick(HWND hDlg, const RECT* right, int mx, int my)
+{
+    int index = -1;
+
+    if (!s_EditOn || !Esc_StepMid(right, mx)) return 0;
+    if (s_EditPage == EDIT_PAGE_GUI)
+    {
+        if (!Esc_HitRight(right, mx, my, &index, NULL)) return 0;
+    }
+    else if (s_EditPage == EDIT_PAGE_TEXT)
+    {
+        if (!Esc_TextHitRight(right, mx, my, &index)) return 0;
+    }
+    else return 0;
+    if (index != s_EditItem) return 0;
+
+    s_EditCur = Esc_EditCurAt(right, mx, s_EditBuf, s_EditLen);
+    Esc_Redraw(hDlg);
+    return 1;
+}
+
+static void Esc_Cancel(HWND hDlg)
+{
+    HWND back;
+
+    if (GetCapture() == hDlg) ReleaseCapture();
+    s_CancelDown = 0;
+    Esc_EditEnd(NULL);
+    Esc_RestoreSettings();
+    s_PendN = 0;
+    Esc_Redraw(hDlg);
+    back = GetDlgItem(hDlg, ESC_ID_BACK);
+    if (back)
+        PostMessage(hDlg, WM_COMMAND,
+                    MAKEWPARAM(ESC_ID_BACK, BN_CLICKED), (LPARAM)back);
+    else
+        PostMessage(hDlg, WM_COMMAND, IDCANCEL, 0);
 }
 
 static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
@@ -2149,9 +2491,22 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         int my = (int)(short)HIWORD(lp);
         int index = -1, rowY = 0;
         RECT a, b;
+
         if (Esc_Layout(h, &a, &b))
         {
-            int seg = Esc_LangHit(&a, mx, my);
+            int seg;
+
+            if ((s_Sel == 0 || s_Sel == 1) &&
+                Esc_CancelHit(&b, mx, my))
+            {
+                s_CancelDown = 1;
+                SetCapture(h);
+                Esc_Redraw(h);
+                return 0;
+            }
+            if (Esc_EditClick(h, &b, mx, my)) return 0;
+            if (s_EditOn) Esc_EditCommit(h);
+            seg = Esc_LangHit(&a, mx, my);
             if (seg >= 0)
             {
                 Esc_ApplyLang(h, seg);
@@ -2173,14 +2528,54 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 return 0;
             }
         }
+        else if (s_EditOn) Esc_EditCommit(h);
     }
+
+    if (msg == WM_LBUTTONUP && h == s_Host && s_CancelDown)
+    {
+        int mx = (int)(short)LOWORD(lp);
+        int my = (int)(short)HIWORD(lp);
+        RECT a, b;
+
+        if (Esc_Layout(h, &a, &b) && (s_Sel == 0 || s_Sel == 1) &&
+            Esc_CancelHit(&b, mx, my))
+            Esc_Cancel(h);
+        else
+        {
+            s_CancelDown = 0;
+            if (GetCapture() == h) ReleaseCapture();
+            Esc_Redraw(h);
+        }
+        return 0;
+    }
+
+    if (msg == WM_CAPTURECHANGED && h == s_Host && s_CancelDown)
+    {
+        s_CancelDown = 0;
+        Esc_Redraw(h);
+    }
+
+    if (msg == WM_TIMER && wp == ESC_EDIT_TIMER && h == s_Host)
+    {
+        Esc_EditPoll(h);
+        return 0;
+    }
+
+    if (msg == WM_KILLFOCUS && h == s_Host && s_EditOn)
+        Esc_EditCommit(h);
 
     if (msg == WM_MOUSEWHEEL && h == s_Host && Esc_TextWheel(h, wp, lp))
         return 0;
 
     /* 隐藏/销毁 ESC 菜单都视为离开设置页, 统一落盘。 */
     if (msg == WM_SHOWWINDOW && !wp && h == s_Host)
+    {
+        s_CancelDown = 0;
+        if (GetCapture() == h) ReleaseCapture();
+        Esc_EditCommit(h);
         Esc_FlushPending();
+        Esc_SaveSettings();
+    }
 
     r = Esc_CallOld(h, old, msg, wp, lp);
 
@@ -2189,6 +2584,8 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         RemovePropW(h, ESC_PROP_OLD_PROC);
         if (h == s_Host)
         {
+            s_CancelDown = 0;
+            Esc_EditCommit(NULL);
             Esc_FlushPending();
             s_Host = NULL;
         }
@@ -2221,7 +2618,10 @@ static void Esc_OnShow(HWND hDlg)
 
     if (s_Host != hDlg)
     {
+        s_CancelDown = 0;
+        Esc_EditEnd(NULL);
         Esc_FlushPending();
+        Esc_SaveSettings();
         s_Host = hDlg;
     }
     Esc_Subclass(hDlg);

@@ -124,6 +124,8 @@ typedef struct {
 } MsgTextConfig;
 
 static MsgTextConfig g_Cfg;
+static MsgTextConfig s_SavedCfg;
+static int s_HaveSavedCfg = 0;
 
 static wchar_t g_CampFace[FONT_FACE_MAX];
 static wchar_t g_HintFace[FONT_FACE_MAX];
@@ -683,6 +685,19 @@ void MsgText_SetOption(int id, int value)
     default:
         break;
     }
+}
+
+void MsgText_SaveOptions(void)
+{
+    MsgText_EnsureInit();
+    s_SavedCfg = g_Cfg;
+    s_HaveSavedCfg = 1;
+}
+
+void MsgText_RestoreOptions(void)
+{
+    MsgText_EnsureInit();
+    if (s_HaveSavedCfg) g_Cfg = s_SavedCfg;
 }
 
 static const char* const kRadarNameDef[RADAR_NAME_N] =
