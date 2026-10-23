@@ -41,6 +41,7 @@
 #include "PiP.h"
 #include "EscMenu.h"
 #include "SidebarSkin.h"
+#include "PvpNotice.h"
 #include "MOExperience.h"
 #include "MOEVersion.h"
 
@@ -211,6 +212,7 @@ void MOE_EnsureInit(void)
     PiP_EnsureInit();  /* 画中画: 读 [PiP] (第二摄像机小窗) */
     SidebarSkin_EnsureInit(); /* 阵营 UI 皮肤: 读 [Sidebar] SkinSide */
     EscMenu_EnsureInit(); /* ESC 菜单自定义页: 读 [EscMenu] */
+    PvpNotice_EnsureInit(); /* 无 AI 对局自动聊天声明: 选文本 (硬编码, 无配置) */
 }
 
 /* ---------------- 渲染回退原因统计 ----------------
@@ -254,12 +256,18 @@ static void StatTick(unsigned frame, int kind)
 
 void* g_PrepareTramp = NULL;
 
+/* 每循环 prepare 重入闸: 聊天广播块 (PvpNotice 复用的 0x55EDBF) 内部会再调一次
+ * 0x4F42F0, 那不是新的一轮 prepare。让过, 否则各模块一次循环跑两遍。 */
+static int g_InPrepare = 0;
+
 static void PowerDrawBoth(void)
 {
     /* PiP 离屏渲染期间引擎会在内部再次走到 prepare (0x4F42F0): FM_Poll 会把
      * ViewBounds 改回主视图, SB_Poll 会按主视图重建并释放 ZBuffer/大面 (PiP 正
      * 引用它们 → 野指针崩溃)。整体跳过。 */
     if (PiP_InRender()) return;
+    if (g_InPrepare) return;
+    g_InPrepare = 1;
     AirWay_Poll();
     BuildQueue_Poll();
     PatrolCircle_Poll();
@@ -310,6 +318,10 @@ static void PowerDrawBoth(void)
     /* 阵营 UI: InitGUI/setDims 内只登记, 等本循环所有视口/侧栏消费者都跑完,
      * 在稳定点换资源; 否则会在 applyview 阶段换掉侧栏 SHP 导致绘制崩溃。 */
     SidebarSkin_Poll();
+    /* 没有 AI 的对局: 每 30s 用引擎的聊天广播声明"非纯净版本"。放最后 —— 它内部
+     * 会重入本函数 (被上面的闸挡掉), 不能让别的模块半截被打断。 */
+    PvpNotice_Poll();
+    g_InPrepare = 0;
 }
 
 static void* g_CallPrepare = (void*)PowerDrawBoth;

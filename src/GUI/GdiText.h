@@ -13,7 +13,10 @@ typedef struct { int X, Y; } Point2D;
 typedef struct { int X, Y, Width, Height; } RectangleStruct;
 typedef struct { unsigned char R, G, B; } ColorStruct;
 
-/* ---------------- 无 CRT 工具 (定义在 GdiText.cpp, 全 DLL 一份) ---------------- */
+/* ---------------- 无 CRT 工具 (定义在 GdiText.cpp, 全 DLL 一份) ----------------
+ * 注意返回值口径不同, 混用会静默把后续内容写到字符串外 (日志被截断):
+ *   UtoA/HtoA(v, p)            写到 p 处, 返回**写入长度**  → pos += UtoA(...)
+ *   AppendCStr/Ch/Int(dst,pos) 返回**新的绝对位置**        → pos =  AppendCStr(...) */
 unsigned UtoA(unsigned v, char* p);
 unsigned HtoA(unsigned v, char* p);
 unsigned AppendCStr(char* dst, unsigned pos, const char* src, unsigned cap);
