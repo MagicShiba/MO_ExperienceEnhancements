@@ -1409,6 +1409,59 @@ static unsigned MOE_DumpWords(char* buf, unsigned p, unsigned base, int n,
     return p;
 }
 
+/* 8 位大写十六进制 (无前缀), 崩溃日志里给模块内偏移用。 */
+static void MOE_Hex(char* b, unsigned v)
+{
+    static const char* d = "0123456789ABCDEF";
+    int i;
+    for (i = 0; i < 8; i++) b[i] = d[(v >> ((7 - i) * 4)) & 15u];
+    b[8] = 0;
+}
+
+/* [addr, addr+len) 是否整段可读 (已提交、非 GUARD/NOACCESS)。
+ * 崩溃过滤器里读别人的指针必须走这道门 —— 工具链是 MinGW, 没有 __try。 */
+static int MOE_Readable(unsigned addr, unsigned len)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    unsigned end;
+    if (addr < 0x10000u) return 0;
+    end = addr + len;
+    if (end < addr) return 0;
+    while (addr < end)
+    {
+        if (!VirtualQuery((LPCVOID)(size_t)addr, &mbi, sizeof(mbi))) return 0;
+        if (mbi.State != MEM_COMMIT) return 0;
+        if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
+        addr = (unsigned)((size_t)mbi.BaseAddress + mbi.RegionSize);
+    }
+    return 1;
+}
+
+/* 崩溃现场: 读一个引擎 BSurface 的缓冲区间 (只读, 先过 MOE_Readable)。
+ * 崩单里 tgt=0x00125CB4 这种低地址, 到底是"正在用的引擎面缓冲"还是"上一次
+ * 分辨率/读档重建后**已释放的旧面**缓冲", 光看面对象地址分不出来 ——
+ * 把 (base,size) 区间打出来跟 tgt 比才能一句话定性。 */
+static int MOE_SurfBuf(unsigned surf, unsigned* base, unsigned* size)
+{
+    unsigned vt, w, h, bpp, buf, sz;
+    *base = 0;
+    *size = 0;
+    if (!MOE_Readable(surf, 0x20u)) return 0;
+    vt = *(const unsigned*)(size_t)surf;
+    w = *(const unsigned*)(size_t)(surf + 0x04u);
+    h = *(const unsigned*)(size_t)(surf + 0x08u);
+    bpp = *(const unsigned*)(size_t)(surf + 0x10u);
+    buf = *(const unsigned*)(size_t)(surf + 0x14u);
+    sz = *(const unsigned*)(size_t)(surf + 0x18u);
+    if (vt < 0x400000u || vt >= 0x7FF00000u) return 0;   /* 虚表必须在代码段 */
+    if (w > 8192u || h > 8192u || bpp > 4u) return 0;
+    if (buf < 0x10000u || buf >= 0x7FF00000u) return 0;
+    if (sz == 0 || sz > 0x4000000u) sz = w * h * (bpp ? bpp : 2u);
+    *base = buf;
+    *size = sz;
+    return 1;
+}
+
 static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
 {
     char b1[16], buf[512];
@@ -1442,7 +1495,12 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         UtoA((unsigned)(size_t)r->ExceptionAddress, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " tid=", sizeof(buf));
         UtoA((unsigned)GetCurrentThreadId(), b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-        p = AppendCStr(buf, p, (r->NumberParameters >= 2) ? " (read)" : " (write)", sizeof(buf));
+        /* 读写方向看 ExceptionInformation[0] (0=读 1=写 8=执行);
+         * 旧代码只看 NumberParameters, 访问冲突恒为 2 → 永远打 (read)。 */
+        p = AppendCStr(buf, p,
+            (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
+             r->NumberParameters >= 1 && r->ExceptionInformation[0] == 1)
+                ? " (write)" : " (read)", sizeof(buf));
         p = AppendCStr(buf, p, " fault=", sizeof(buf));
         UtoA(r->NumberParameters ? (unsigned)(size_t)r->ExceptionInformation[0] : 0u, b1);
         p = AppendCStr(buf, p, b1, sizeof(buf));
@@ -1505,6 +1563,52 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         SB_AppendCrashSurfs(buf, &p, sizeof(buf));
         LogLine(buf);
 
+        /* 面缓冲区间 + tgt 落在哪张缓冲里 (或哪张都不在)。
+         *   tgtin=sb   → 崩在写/读**当前侧栏面**的缓冲 (面本身失效或裁剪越界)
+         *   tgtin=comp → 崩在合成面 (缩放档/全屏模式)
+         *   tgtin=none → 不是这两张面: 更可能是已释放的旧面缓冲 / 我们的块 / 第三方
+         * 这一条就是崩单里 0x00125CB4、0x1B480A 缺的那半个证据。 */
+        {
+            unsigned sbv = *(const unsigned*)(size_t)0x00887300u;
+            unsigned cpv = *(const unsigned*)(size_t)0x0088731Cu;
+            unsigned b0 = 0, s0 = 0, b2 = 0, s2 = 0, tg = 0;
+            int have0, have2;
+            if (r->NumberParameters >= 2)
+                tg = (unsigned)(size_t)r->ExceptionInformation[1];
+            have0 = MOE_SurfBuf(sbv, &b0, &s0);
+            have2 = MOE_SurfBuf(cpv, &b2, &s2);
+            p = 0;
+            p = AppendCStr(buf, p, "MOE: buf sb=", sizeof(buf));
+            if (have0) { MOE_Hex(b1, b0); p = AppendCStr(buf, p, b1, sizeof(buf));
+                         p = AppendCh(buf, p, '+', sizeof(buf));
+                         UtoA(s0, b1); p = AppendCStr(buf, p, b1, sizeof(buf)); }
+            else p = AppendCStr(buf, p, "?", sizeof(buf));
+            p = AppendCStr(buf, p, " comp=", sizeof(buf));
+            if (have2) { MOE_Hex(b1, b2); p = AppendCStr(buf, p, b1, sizeof(buf));
+                         p = AppendCh(buf, p, '+', sizeof(buf));
+                         UtoA(s2, b1); p = AppendCStr(buf, p, b1, sizeof(buf)); }
+            else p = AppendCStr(buf, p, "?", sizeof(buf));
+            p = AppendCStr(buf, p, " tgtin=", sizeof(buf));
+            if (tg && have0 && tg >= b0 && tg < b0 + s0)
+                p = AppendCStr(buf, p, "sb", sizeof(buf));
+            else if (tg && have2 && tg >= b2 && tg < b2 + s2)
+                p = AppendCStr(buf, p, "comp", sizeof(buf));
+            else p = AppendCStr(buf, p, "none", sizeof(buf));
+            LogLine(buf);
+        }
+
+        /* 数据地址归属: 落在侧栏自有缓冲里 = 我们先写坏了自己的图, 与引擎无关;
+         * none = 引擎面/第三方 dll/野指针。崩单里靠这条一眼分流。 */
+        if (r->NumberParameters >= 2)
+        {
+            p = 0;
+            p = AppendCStr(buf, p, "MOE: own=", sizeof(buf));
+            p = AppendCStr(buf, p,
+                SWS_WhoOwns((unsigned)(size_t)r->ExceptionInformation[1]),
+                sizeof(buf));
+            LogLine(buf);
+        }
+
         /* 故障点所在模块 + 前后 8 字节 (野跳转时读字节会二次异常, 先判可读)。 */
         name[0] = 0;
         mod = NULL;
@@ -1521,6 +1625,13 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         p = AppendCStr(buf, p, name, sizeof(buf));
         p = AppendCStr(buf, p, " base=", sizeof(buf));
         UtoA((unsigned)(size_t)mod, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        /* 模块内偏移 (0x 前缀): 对别人的构建拿偏移比对最省事 (基址每次不同)。 */
+        if (mod)
+        {
+            MOE_Hex(b1, (unsigned)(size_t)r->ExceptionAddress - (unsigned)(size_t)mod);
+            p = AppendCStr(buf, p, " off=0x", sizeof(buf));
+            p = AppendCStr(buf, p, b1, sizeof(buf));
+        }
         p = AppendCStr(buf, p, " at", sizeof(buf));
         for (i = 0; readable && i < 8; i++)
         {

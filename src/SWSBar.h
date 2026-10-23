@@ -21,6 +21,10 @@ extern "C" __declspec(dllexport) unsigned __cdecl SWS_ClickGate(void* regs);
 extern "C" __declspec(dllexport) int __cdecl SWS_WheelIn(int mx, int my, int dir);
 extern "C" __declspec(dllexport) int __cdecl SWS_OverBar(int mx, int my);
 
+/* 崩溃现场用: 数据地址归属 (侧栏自有缓冲 / 不是我们的)。
+ * 只比区间不解引用, 可安全地在异常处理器里调。 */
+extern "C" __declspec(dllexport) const char* __cdecl SWS_WhoOwns(unsigned addr);
+
 /* GUI 设置菜单用的运行时开关/查询。 */
 int SWS_Enabled(void);
 void SWS_SetEnabled(int enable);

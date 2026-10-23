@@ -971,7 +971,11 @@ typedef struct {
     int   money;      /* Money.Amount (int; <0 = 发射花费, 缺省 0 = 免费) */
     const char* pcxFile;
     char pcxName[64];  /* pcxFile 指向的自有缓冲 (文件名很短, 内联省一次间接) */
-    unsigned short* capPix;  /* 引擎 cameo 抓到的 60x48 像素 (优先于 pcxFile) */
+    /* 图标的唯一来源: 引擎抓的 / 扫描期从 PCX 快照的 / 扫描期用 SHP 直渲的。
+     * 绘制层只读它, 不再在渲染帧里取引擎面。 */
+    unsigned short* capPix;
+    int capOwn;        /* 1 = capPix 是自己 LocalAlloc 的 (换源时要释放); 0 = 指向 s_Cap */
+    int pcxTries;      /* PCX 快照尝试次数 (指数退避用, 见 SwsSnapPcxCap) */
     wchar_t name[24];   /* 悬停提示, 属于**类型**而非条目下标 */
 } SwsTypeCache;
 static SwsTypeCache s_TC[SWS_TCACHE];
@@ -998,6 +1002,8 @@ static SwsTypeCache* SwsTypeEntry(void* type, const char* id)
     s_TC[i].pcxFile = NULL;
     s_TC[i].pcxName[0] = 0;
     s_TC[i].capPix = NULL;
+    s_TC[i].capOwn = 0;
+    s_TC[i].pcxTries = 0;
     s_TC[i].name[0] = 0;
     return &s_TC[i];
 }
@@ -1036,8 +1042,11 @@ static void SwsFlagsOf(SwsTypeCache* tc, void* type, const char* id)
         LogS("sws: flags OFFSET? manual ", id);
 }
 
-/* 现取 surface: GetSurface 命中直接用, 未命中则 ForceLoadFile 再取。 */
-static void* SwsPcxLiveSurf(const char* file)
+/* 取 PCX 面 (GetSurface 命中直接用, 未命中则 ForceLoadFile 再取)。
+ * **只允许在扫描期 (SWS_Poll) 调**: 会往引擎的 PCX/BSurface 池里装载,
+ * 放在渲染帧里做就是"绘制途中动引擎面池" (崩单里两条都崩在贴 cameo 的最内层)。
+ * 取到的面**不得跨帧持有**, 调用方拿到就立刻拷像素 (见 SwsSnapPcxCap)。 */
+static void* SwsPcxRawSurf(const char* file)
 {
     void* pcx, *surf;
     if (!file || !file[0]) return NULL;
@@ -1335,6 +1344,43 @@ static unsigned short* SwsRenderShpCap(void* type)
                      (SIZE_T)(SWS_ICON_W * SWS_ICON_H) * sizeof(unsigned short));
     if (!dst) return NULL;
     if (!SwsRenderShp(shp, dst)) { LocalFree(dst); return NULL; }
+    return dst;
+}
+
+/* PCX 图标快照: 取面 → 立刻缩样拷进自有 60x48 缓冲 → 丢弃引擎面指针。
+ * 之后绘制层只读自有内存, SWS_Draw 里不再出现 PCX::GetSurface / ForceLoadFile,
+ * 也不会跨帧攥着 BSurface*。
+ * **不登记进 s_Cap[]**: 那张表是"引擎抓到的像素"的权威源 (地图内嵌/战役改写的
+ * PCX 会更准), 一旦占了槽位 Sws_CaptureCameo 就会因 SwsCaptured() 命中而跳过。
+ * 这里只当"引擎还没抓到时的临时图", 引擎抓到后由调用方覆盖并释放本块。
+ * 失败返回 NULL (调用方按次数退避, 不会每轮都 ForceLoadFile)。 */
+static unsigned short* SwsSnapPcxCap(const char* file)
+{
+    void* surf;
+    const unsigned short* src;
+    unsigned short* dst;
+    int w, h, bpp, r, c;
+    surf = SwsPcxRawSurf(file);
+    if (!surf || !IsPlausiblePtr(surf)) return NULL;
+    if (!IsPlausiblePtr(*(void**)surf)) return NULL;   /* 虚表必须指向代码段 */
+    w = *(int*)((char*)surf + 0x04);
+    h = *(int*)((char*)surf + 0x08);
+    bpp = *(int*)((char*)surf + 0x10);
+    src = *(const unsigned short**)((char*)surf + 0x14);
+    if (w < 1 || w > 256 || h < 1 || h > 256 || bpp != 2) return NULL;
+    if (!src || !IsPlausiblePtr((void*)src)) return NULL;
+    if (*(int*)((char*)surf + 0x18) != w * h * 2) return NULL;
+    dst = (unsigned short*)LocalAlloc(LMEM_FIXED,
+                     (SIZE_T)(SWS_ICON_W * SWS_ICON_H) * sizeof(unsigned short));
+    if (!dst) return NULL;
+    /* 缩放取样一次做完 (与 SwsCPSrc 同一套映射), 色键原样保留 (绘制层跳过)。 */
+    for (r = 0; r < SWS_ICON_H; r++)
+    {
+        const unsigned short* srow = src + (size_t)((r * h) / SWS_ICON_H) * w;
+        unsigned short* drow = dst + (size_t)r * SWS_ICON_W;
+        for (c = 0; c < SWS_ICON_W; c++)
+            drow[c] = srow[(c * w) / SWS_ICON_W];
+    }
     return dst;
 }
 
@@ -1681,12 +1727,32 @@ static void SwsScan(void)
             { rNotClean++; }
         }
         /* 图标每次扫描重挂 (s_Cap[] 会随解锁/切战役重抓, 不认第一次)。
-         * 引擎抓的一律优先 (PCX/地图内嵌声明); 无 SidebarPCX 的走 SHP 直渲,
-         * 不必等引擎画过一次防御页 (否则图标要切防御栏才出现)。 */
+         * 引擎抓的一律优先 (PCX/地图内嵌声明); 无抓取的走两条扫描期造图的路:
+         * SidebarPCX= 快照 / 无 pcx 的直接 SHP 渲。三条产物都是自有内存,
+         * 绘制帧里不再碰引擎面 (见 SwsSnapPcxCap 上方说明)。 */
         {
             unsigned short* eng = SwsCaptured(type);
-            if (eng) tc->capPix = eng;
-            else if (!tc->capPix && !tc->pcxFile) tc->capPix = SwsRenderShpCap(type);
+            if (eng)
+            {
+                /* 引擎抓到的覆盖临时图, 并释放我们那份 (capOwn 才敢 Free)。 */
+                if (tc->capOwn && tc->capPix && tc->capPix != eng) LocalFree(tc->capPix);
+                tc->capPix = eng;
+                tc->capOwn = 0;
+            }
+            else if (!tc->capPix)
+            {
+                if (tc->pcxFile)
+                {
+                    /* 退避: 每 8 轮扫描试一次 (约 2s), 别每轮都 ForceLoadFile。
+                     * 不设"放弃"上限 —— 读档/切阵营后同一类型可能才变得可读。 */
+                    tc->pcxTries = (tc->pcxTries + 1) & 7;
+                    if (tc->pcxTries == 1 &&
+                        (tc->capPix = SwsSnapPcxCap(tc->pcxFile)) != NULL)
+                        tc->capOwn = 1;
+                }
+                else if ((tc->capPix = SwsRenderShpCap(type)) != NULL)
+                    tc->capOwn = 1;
+            }
         }
         /* 显示门 (与防御页一致): !hide && manual && show。
          * 不拿 ShowTimers 当清单 (那只是"正在计时"的子集)。 */
@@ -2185,9 +2251,10 @@ static void SwsDefenseRepair(void)
             (unsigned)TAB_DEFENSE * OFF_STRIP_STRIDE;
     cnt = *(int*)(s_TabCam + (unsigned)TAB_DEFENSE * DVEC_SIZE + DVEC_OFF_COUNT);
     /* Ares 维护两份计数: 容器 Count (只改这份) 与 StripClass::CameoCount
-     * (页签布局按它算)。两份都要跟上, 否则页签按旧计数画、点到空位。 */
-    if (SwsStripCameoCount(TAB_DEFENSE) >= 0)
-        *(int*)(strip + OFF_STRIP_CAMCOUNT) = cnt;
+     * (页签布局按它算)。两份都要跟上, 否则页签按旧计数画、点到空位。
+     * 无条件写: 上面与 SwsDedupRemove 都已确认容器自洽, 这里不写就退化成
+     * "容器删了、页签还按旧数画" —— 崩单里贴 cameo 时的野下标就是这么来的。 */
+    *(int*)(strip + OFF_STRIP_CAMCOUNT) = cnt;
     if (cnt > 0)
     {
         ((int (__thiscall *)(void*))(void*)ADDR_UPDSCROLLBTN)(sb);
@@ -2317,14 +2384,16 @@ static int SwsSidebarShowing(int swIdx)
 }
 
 /* 侧栏此刻画得出图标吗? 无图标的条目先留在防御页上等抓取 (搬出单向, 搬走后
- * 钩子永远抓不到, 变"两边都没有"; 重复显示几秒比永久空格子好, 抓到后复查搬走)。 */
+ * 钩子永远抓不到, 变"两边都没有"; 重复显示几秒比永久空格子好, 抓到后复查搬走)。
+ * 判据只看 capPix: 绘制层现在只认它 (PCX 快照也在扫描期落成 capPix),
+ * 光有 pcxFile 不等于画得出来。 */
 static int SwsSidebarHasIcon(int swIdx)
 {
     int k;
     if (s_ItemN <= 0 || s_ItemN > SWS_CAP) return 0;
     for (k = 0; k < s_ItemN; k++)
         if (s_Items[k].swIdx == swIdx)
-            return (s_Items[k].capPix || s_Items[k].pcxFile) ? 1 : 0;
+            return s_Items[k].capPix ? 1 : 0;
     return 0;
 }
 
@@ -2343,10 +2412,13 @@ static int SwsDedupRemove(void)
     vec = s_TabCam + (unsigned)TAB_DEFENSE * DVEC_SIZE;
     cnt = *(int*)(vec + DVEC_OFF_COUNT);
     /* CameoCount 是权威上限 (它会剔除已消失的 Cameo), 而增删路径没有反向同步,
-     * 所以只信它 —— 下面要按 cnt 原地搬 0x34 字节的条目, cnt 偏大就越界写。*/
+     * 所以只信它 —— 下面要按 cnt 原地搬 0x34 字节的条目, cnt 偏大就越界写。
+     * 读不到就整轮停手 (fail-closed): 少删一条只是"这轮没搬", 按不可信长度
+     * 原地搬条目 = 踩引擎的堆, 修复代价远大于晚一轮去重。 */
     {
         int lim = SwsStripCameoCount(TAB_DEFENSE);
-        if (lim >= 0 && lim < cnt) cnt = lim;
+        if (lim < 0) return -1;
+        if (lim < cnt) cnt = lim;
     }
     if (cnt <= 0) return 0;
     items = *(unsigned char**)(vec + DVEC_OFF_ITEMS);
@@ -2377,6 +2449,8 @@ static int SwsDedupRemove(void)
         removed++;
     }
     if (removed) *(int*)(vec + DVEC_OFF_COUNT) = cnt;
+    /* 页签的 CameoCount 由调用方收尾: SwsDedupSync 在 r>0 时**必然**紧接着调
+     * SwsDefenseRepair, 那里会把这个值写回去 (两份计数对齐只需一处)。 */
     return removed;
 }
 
@@ -2500,7 +2574,7 @@ static void SwsNudgePaint(void)
     int i;
     if (s_ItemN <= 0 || s_NudgeLeft <= 0) return;
     for (i = 0; i < s_ItemN; i++)
-        if (!s_Items[i].capPix && !s_Items[i].pcxFile) break;
+        if (!s_Items[i].capPix) break;
     if (i >= s_ItemN) return;          /* 图标都齐了, 不用再催 */
     s_NudgeLeft--;
     /* 与 SwsDedupRestore 同一条路: 补 cameo (自带查重) 后重画防御页。
@@ -3063,6 +3137,40 @@ static void SwsInvalidateCache(void)
     s_CchOK = 0;
 }
 
+/* 崩溃现场用: 判断某个数据地址是不是我们分配的缓冲 (只比区间, **零解引用**)。
+ * 崩单里 tgt=0x00125CB4 / 0x1B480A 这种低地址既可能是引擎面缓冲, 也可能是
+ * 我们 LocalAlloc 的块 —— 分不清就丢掉最关键的归属证据。
+ * 返回 "cache"(侧栏离屏缓存) / "cacheA"(覆盖率面) / "icon"(s_Cap 图标) /
+ *      "typeblk"(类型图标的独立块) / "none"(不是我们的)。 */
+extern "C" __declspec(dllexport) const char* __cdecl SWS_WhoOwns(unsigned addr)
+{
+    unsigned lo;
+    int i;
+    if (s_CchC)
+    {
+        lo = (unsigned)(size_t)s_CchC;
+        if (addr >= lo && addr < lo + (unsigned)s_CchCap * 2u) return "cache";
+    }
+    if (s_CchA)
+    {
+        lo = (unsigned)(size_t)s_CchA;
+        if (addr >= lo && addr < lo + (unsigned)s_CchCap) return "cacheA";
+    }
+    for (i = 0; i < s_CapN && i < SWS_ICON_CAP; i++)
+    {
+        if (!s_Cap[i].pix) continue;
+        lo = (unsigned)(size_t)s_Cap[i].pix;
+        if (addr >= lo && addr < lo + SWS_ICON_W * SWS_ICON_H * 2u) return "icon";
+    }
+    for (i = 0; i < s_TCN && i < SWS_TCACHE; i++)
+    {
+        if (!s_TC[i].capPix) continue;
+        lo = (unsigned)(size_t)s_TC[i].capPix;
+        if (addr >= lo && addr < lo + SWS_ICON_W * SWS_ICON_H * 2u) return "typeblk";
+    }
+    return "none";
+}
+
 /* 8 位 RGB -> 目标位深的 16 位色 (与 Blend16 同一套移位/掩码) */
 static unsigned short SwsPack(unsigned char r, unsigned char g, unsigned char b)
 {
@@ -3257,31 +3365,6 @@ static void SwsCPSrcPart(int x, int y, int dw, int dh,
             if (c == PCX_TRANS_PARENT) continue;
             SwsOver(crow + xx, arow + xx, c, a8);
         }
-    }
-}
-
-static void SwsCPcx(int x, int y, int dw, int dh, void* psurf, int opaque)
-{
-    int pw, ph, bpp;
-    const unsigned short* src;
-    static int s_BadLogged = 0;
-    if (!psurf || !IsPlausiblePtr(psurf)) return;
-    if (!IsPlausiblePtr(*(void**)psurf)) return;   /* 虚表必须指向代码段 */
-    pw = *(int*)((char*)psurf + 0x04);
-    ph = *(int*)((char*)psurf + 0x08);
-    bpp = *(int*)((char*)psurf + 0x10);
-    src = *(const unsigned short**)((char*)psurf + 0x14);
-    /* 占位面尺寸离谱 (1x1/0), 这几道校验挡它。 */
-    if (pw < 1 || pw > 256 || ph < 1 || ph > 256 || bpp != 2) goto bad;
-    if (!src || !IsPlausiblePtr((void*)src)) goto bad;
-    if (*(int*)((char*)psurf + 0x18) != pw * ph * 2) goto bad;
-    SwsCPSrc(x, y, dw, dh, src, pw, ph, opaque);
-    return;
-bad:
-    if (!s_BadLogged)
-    {
-        s_BadLogged = 1;
-        LogLine("sws: pcx surface layout bad, icons skipped");
     }
 }
 
@@ -3998,24 +4081,15 @@ static void SwsRebuild(int w, int h, int mx, int my, int curSel,
         int isHover = (i == hover);
         int drawn = 0;
         if (it->x < 0) continue;              /* 被滚动裁掉 */
-        /* 图标来源 (都拿不到则空着, 条目/边框/百分比照旧):
-         *   1) 引擎抓到的 (优先, 战役改写/地图内嵌声明的一律对);
-         *   2) SidebarPCX= 自己读 (基础规则 ini, 改写过的可能是旧值)。
-         * 两条都空 = 空格子。 */
+        /* 图标来源只有一个: it->capPix (自有内存, 扫描期备好)。
+         * 以前这里还有一条"现取 SidebarPCX 面直接贴"的兜底 —— 那会在渲染帧里
+         * 往引擎的 PCX/BSurface 池装载, 崩单里两条都崩在贴 cameo 的最内层,
+         * 现在统一挪到扫描期快照 (SwsSnapPcxCap)。取不到就是空格子。 */
         if (it->capPix)
         {
             SwsCPSrc(it->x, it->y, SWS_ICON_W, SWS_ICON_H,
                      it->capPix, SWS_ICON_W, SWS_ICON_H, isHover);
             drawn = 1;
-        }
-        else if (it->pcxFile)
-        {
-            void* ps = SwsPcxLiveSurf(it->pcxFile);
-            if (ps)
-            {
-                SwsCPcx(it->x, it->y, SWS_ICON_W, SWS_ICON_H, ps, isHover);
-                drawn = 1;
-            }
         }
         if (drawn)
         {
@@ -4231,6 +4305,17 @@ void SWS_Draw(void* surf, int w, int h, int pitch)
         else           SwsRebuildCollapsed(w, h, sig, fr, btnHov);
     }
     if (!s_CchOK) return;
+    /* 行距以引擎面自己的 GetPitch 为准: 锁出来的缓冲必须按它算行首, 传进来的
+     * pitch 在 cnc-ddraw / 虚拟分辨率 / 上采样面下不一定等于面本身的行距,
+     * 一旦偏大就是逐行错位 + 写穿缓冲尾部。取不到才回退传入值。
+     * (只读虚表槽, 不解引用面数据。) */
+    {
+        int sp = GtSurfGet(surf, GtVT_GET_PITCH);
+        if (sp >= w * 2 && sp <= 65536) pitch = sp;
+    }
+    /* 行距装不下一行 / 离谱就整帧不画 (宁可空着也不越界写)。pitch 只在
+     * SwsCacheBlit 里按行走, 校验收在这一个入口, 内层不再重复。 */
+    if (pitch < w * 2 || pitch > 65536) return;
     /* 每帧唯一一次锁面 + 带 alpha 拷贝。 */
     vt = *(unsigned char**)surf;
     if (!vt || !IsPlausiblePtr(vt)) return;
