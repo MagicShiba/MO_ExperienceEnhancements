@@ -11,6 +11,7 @@
 #include "ScaleBar.h"
 #include "PiP.h"
 #include "MOExperience.h"
+#include "FrameCap.h"
 
 #define VC_MAXW 32
 #define VC_MAXH 32
@@ -1107,14 +1108,17 @@ int __fastcall VecPrintEntry(void* t, void* e,
 static int VecSWTextKind(int slot, const wchar_t** out)
 {
     const wchar_t* s;
-    unsigned c;
+    unsigned c, lim;
     int k;
     if (!IsPlausiblePtr((void*)slot)) return -1;
+    /* EDX 是猜出来的指针, 先确认真的可读 (最多看 9 个 wchar)。 */
+    lim = MemReadableBytes((void*)(size_t)slot, 18);
+    if (lim < 2) return -1;
     s = (const wchar_t*)slot;
     c = (unsigned)s[0] & 0xFFFFu;
     if ((c >= 0x2E80u && c < 0xA000u) ||
         (c >= 0xFF00u && c < 0xFFF0u)) { *out = s; return 0; }
-    for (k = 0; k < 8; k++)
+    for (k = 0; k < 8 && (unsigned)(k * 2 + 1) < lim; k++)
     {
         c = (unsigned)s[k] & 0xFFFFu;
         if (!c) break;
@@ -1269,11 +1273,15 @@ static void DimStore(const void* t, const void* idata, const wchar_t* s,
     d->maxW = maxW; d->oh = oh; d->ok = ok;
 }
 
+/* 野指针兜底日志计数 (最多记 8 条) */
+static int s_BadStrN = 0;
+
 int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
                               int* w, int* h, int maxW)
 {
     int ow = 0, oh = 0, r;
     int px, i, tot, n = 0;
+    unsigned lim;
     void* idata;
     (void)e;
     if (!g_OrigGetDim) return 0;
@@ -1282,8 +1290,19 @@ int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
     if (!t || !IsPlausiblePtr(t) || !s || !IsPlausiblePtr((void*)s) ||
         !w)
         return g_OrigGetDim(t, e, s, w, h, maxW);
+    /* 野指针兜底: 引擎在部分对话框绘制路径上会传进不可读的 s (实测
+     * 0x32AC8010, 读第一个 wchar 就页错误 —— 原版函数 0x433D1F 的
+     * `mov di,[ebx]` 同一位置也会读它, 转发回去同样是崩)。按空串返回。 */
+    lim = MemReadableBytes(s, 512);
+    if (lim < 2)
+    {
+        if (g_Log && s_BadStrN < 8) { s_BadStrN++; LogLine("vtext: getdim bad str, skipped"); }
+        *w = 0;
+        if (h) *h = 0;
+        return 0;
+    }
     idata = *(void**)((char*)t + 4);
-    for (i = 0; i < 256; i++) { if (!s[i]) break; n++; }
+    for (i = 0; i < 256 && (unsigned)(i * 2 + 1) < lim; i++) { if (!s[i]) break; n++; }
     if (i >= 256) return g_OrigGetDim(t, e, s, w, h, maxW);
     /* 记忆命中。 */
     {
@@ -2410,6 +2429,10 @@ void VecText_EnsureInit(void)
     LogLine(buf);
 }
 
+/* ---------------- 渲染帧钩 (Render 尾) ----------------
+ * Ares 的 FPS 计数器画在这里; 同时它是限帧的必经过点之一 (ESC 菜单打开时
+ * 场景仍在每帧渲染)。限速/放行判定在 FrameCap.cpp。 */
+
 /* ---------------- FPS 钉住绘制 (Render 尾, Ares 之后) ----------------
  * 本帧 Simple_ 收到的计数器串, 以固定字号画到固定位 (x=0, 底上 32,
  * 与 Ares 同锚点), 任何档位都是 1x。只画窗口面, 大面跳过。 */
@@ -2420,6 +2443,10 @@ static void VecFpsPinDraw(void)
     unsigned char* locked;
     RectangleStruct rc;
     ColorStruct black;
+    /* 限帧: 每个渲染帧一次。ESC 菜单打开时这里是必经过点之一
+     * (菜单关着时 FrameCap 内部完全放行)。必须在下面的早退判断之前,
+     * 否则 Ares 计数器没串时限速也跟着失效。 */
+    FrameCap_Frame();
     if (!s_FpsHave || !g_VT.Render) { s_FpsHave = 0; return; }
     s_FpsHave = 0;
     if (s_FpsN <= 0) return;
@@ -2518,7 +2545,9 @@ void VecText_LateInstall(void)
                 g_OrigScoreDlgProc = NULL;
         }
     }
-    if (!g_VT.Enable) { g_LateHooksDone = 1; return; }
+    /* FPS 钉住钩同时是主循环限帧点 (FrameCap_Frame), 所以文本接管关了也照样要装。 */
+    if (!g_VT.Enable && !FrameCap_Enabled())
+    { g_LateHooksDone = 1; return; }
     /* FPS 钉住钩 (0x4F4589, GScreenClass::Render 尾): 计数器固定位 1x。 */
     if (BytesSame((unsigned char*)0x4F4589u, kWantFpsPin, 5))
     {

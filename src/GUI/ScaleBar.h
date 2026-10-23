@@ -66,6 +66,15 @@ void SB_NoteWindowSurface(void* surf, int w, int h);
 /* 当前档要写进 ViewBounds 的视口矩形；返回 0 = 不缩放 (用 A 本身)。 */
 int SB_GetViewRect(RectangleStruct* out, double scale);
 
+/* 截图用：本帧"未缩放的视口原图"所在面 + 该面里视口 R 的矩形 (16bpp)。
+ * 须在消息帧钩 SB_RenderSwapOut 之后、任何 UI 叠加与缩放呈现之前调。
+ *   1x     -> 窗口 Composite 的 R (= A)
+ *   放大档 -> 窗口 Composite 的 R (放大之前那一块, 分辨率 < 视图区)
+ *   缩小档 -> 缩小档大面 (s_LastFinal) 的整面 R (分辨率 > 视图区)
+ * 返回 1 = 可用 (rect 已按面尺寸夹过, 并已裁掉地图外那圈图外底色); 0 = 本帧取不到。
+ * 只读, 联机安全。 */
+int SB_RawView(void** surf, int* x, int* y, int* w, int* h);
+
 /* 三趟之后、UI 之前把 R 放大覆盖回 A。返回 1 = 做过放大。 */
 int SB_CompositeMagnify(void);
 

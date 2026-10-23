@@ -19,7 +19,7 @@ if /i "%~1"=="/clean" (
 
 set NEEDFULL=0
 if not exist obj mkdir obj
-for %%N in (MOExperience SyringeHooks GdiText Lang MsgText SWPanel PowerDisplay VecText ToolTip ChatEdit FullMap ScaleBar PauseView PiP GridView SideScroll EscMenu PlayerColor SidebarSkin TypeSelect AirWay BuildQueue PatrolCircle RallyPath SmartOrder TreeChop FuzzyAttack AttackMove SmartArea OrderUtil MindSelect Observer DeployPreview WeaponRange SWSBar RepairAll PlaceScatter PlacementPreview OrderThrottle WaypointCap MegaListCap NoApproach PvpNotice Aggressive Icon PcxImage) do (
+for %%N in (MOExperience SyringeHooks GdiText Lang MsgText SWPanel PowerDisplay VecText ToolTip ChatEdit FullMap ScaleBar PauseView Shot FrameCap PiP GridView SideScroll EscMenu PlayerColor SidebarSkin TypeSelect AirWay BuildQueue PatrolCircle RallyPath SmartOrder TreeChop FuzzyAttack AttackMove SmartArea OrderUtil MindSelect Observer DeployPreview WeaponRange SWSBar RepairAll PlaceScatter PlacementPreview OrderThrottle WaypointCap MegaListCap NoApproach PvpNotice Aggressive Icon PcxImage) do (
   if not exist "obj\%%N.o" set NEEDFULL=1
 )
 if not exist "obj\icons.res.o" set NEEDFULL=1
@@ -57,6 +57,10 @@ for /f "usebackq delims=" %%F in ("obj\stale.txt") do (
   )
 )
 
+rem Language files live in dist\MOExperienceResources: a key that is missing in the
+rem game dir renders as an EMPTY menu line, so deploy them every build.
+xcopy /Y /D /Q /I dist\MOExperienceResources\*.ini ..\MOExperienceResources\ >nul
+
 if not exist obj\compiled.flag (
   echo [fast] nothing changed - skip
   del obj\stale.txt >nul 2>nul
@@ -65,9 +69,9 @@ if not exist obj\compiled.flag (
 )
 
 echo [ld] linking
-g++ -shared -o dist\MOExperience.dll obj\MOExperience.o obj\SyringeHooks.o obj\GdiText.o obj\Lang.o obj\MsgText.o obj\SWPanel.o obj\PowerDisplay.o obj\VecText.o obj\TypeSelect.o obj\AirWay.o obj\BuildQueue.o obj\PatrolCircle.o obj\RallyPath.o obj\SmartOrder.o obj\TreeChop.o obj\FuzzyAttack.o obj\AttackMove.o obj\SmartArea.o obj\OrderUtil.o obj\MindSelect.o obj\Observer.o obj\DeployPreview.o obj\WeaponRange.o obj\ToolTip.o obj\ChatEdit.o obj\FullMap.o obj\ScaleBar.o obj\PauseView.o obj\PiP.o obj\GridView.o obj\SideScroll.o obj\SWSBar.o obj\RepairAll.o obj\PlaceScatter.o obj\PlacementPreview.o obj\OrderThrottle.o obj\WaypointCap.o obj\MegaListCap.o obj\NoApproach.o obj\PvpNotice.o obj\Aggressive.o obj\EscMenu.o obj\PlayerColor.o obj\SidebarSkin.o obj\Icon.o obj\PcxImage.o obj\icons.res.o ^
+g++ -shared -o dist\MOExperience.dll obj\MOExperience.o obj\SyringeHooks.o obj\GdiText.o obj\Lang.o obj\MsgText.o obj\SWPanel.o obj\PowerDisplay.o obj\VecText.o obj\TypeSelect.o obj\AirWay.o obj\BuildQueue.o obj\PatrolCircle.o obj\RallyPath.o obj\SmartOrder.o obj\TreeChop.o obj\FuzzyAttack.o obj\AttackMove.o obj\SmartArea.o obj\OrderUtil.o obj\MindSelect.o obj\Observer.o obj\DeployPreview.o obj\WeaponRange.o obj\ToolTip.o obj\ChatEdit.o obj\FullMap.o obj\ScaleBar.o obj\PauseView.o obj\Shot.o obj\FrameCap.o obj\PiP.o obj\GridView.o obj\SideScroll.o obj\SWSBar.o obj\RepairAll.o obj\PlaceScatter.o obj\PlacementPreview.o obj\OrderThrottle.o obj\WaypointCap.o obj\MegaListCap.o obj\NoApproach.o obj\PvpNotice.o obj\Aggressive.o obj\EscMenu.o obj\PlayerColor.o obj\SidebarSkin.o obj\Icon.o obj\PcxImage.o obj\icons.res.o ^
   -nostdlib -lkernel32 -luser32 -lgdi32 -limm32 -lgcc ^
-  -Wl,--enable-stdcall-fixup -Wl,--no-insert-timestamp -Wl,--entry,_DllMain@12
+  -Wl,--enable-stdcall-fixup -Wl,--no-insert-timestamp -Wl,--entry,_DllMain@12 -Wl,-Map=obj\MOExperience.map
 if errorlevel 1 exit /b 1
 
 del obj\stale.txt >nul 2>nul

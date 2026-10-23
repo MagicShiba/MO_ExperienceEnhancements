@@ -6,6 +6,7 @@
  * (0=用过一次才显示, 1=常显)。
  * 格网按钮 (暂停键左侧第三块, # 图标): 与暂停按钮同显同隐 (用过一次 F5 才出现),
  * 默认关闭, 点按才画灰色格网。使用率低故不配热键 (G 是原版警戒键, 会冲突)。
+ * 截图键 (Shot 模块) 显示时紧贴刻度条, 本模块三键整体左移一格让位。
  * 格网实现见 GridView.cpp (本文件只调 GV_ 接口)。
  * 绘制只落在视图区 A 内 (侧栏/底栏不画)。只读 + 渲染面写入,
  * 联机或未开局恒放行。
@@ -18,6 +19,8 @@
 #include "FullMap.h"
 #include "PauseView.h"
 #include "GridView.h"
+#include "Shot.h"
+#include "FrameCap.h"
 
 #define PV_SECTION "BottomBar"
 
@@ -148,25 +151,29 @@ static int PV_HotkeyEdge(void)
     return edge;
 }
 
-/* ---------------- 按钮几何 (刻度条左侧三小方块: 格网/暂停/步进) ---------------- */
+/* ---------------- 按钮几何 (刻度条左侧: 截图/步进/暂停/格网) ---------------- */
 
-#define PV_BS 22      /* 方块边长 */
 #define PV_GAPB 6     /* 两块之间 */
 #define PV_GAPBAR 10  /* 与刻度条之间 */
 
-/* x0/y0=格网键 (最左), x1/y1=暂停键, x2/y2=步进键。 */
-static int PV_Geom(int* x0, int* y0, int* x1, int* y1, int* x2, int* y2)
+/* 截图键占位 = 方块 + 间隔; 它不显示时不占位。 */
+static int PV_ShotReserve(void)
+{
+    int w = Shot_ButtonWidth();
+    return w ? w + PV_GAPB : 0;
+}
+
+/* 底栏按钮槽: 0=格网 1=暂停 2=步进 3=截图。
+ * 截图键 (Shot 模块) 恒占最右一槽 = 紧贴刻度条; 它显示时本模块三键整体左移一格。 */
+int PV_SlotGeom(int slot, int* x, int* y)
 {
     int bx, by, bw, bh;
     int gw = GtGameW(), gh = GtGameH();
-    int sbw;
-    int right;
-    int gy;
+    int sbw, right, gy, px;
     if (gw < 200 || gh < 200) return 0;
     if (SB_BarGeom(&bx, &by, &bw, &bh))
     {
         right = bx - PV_GAPBAR;
-        *x2 = right - PV_BS;
         gy = by + bh - PV_BS - 2;
     }
     else
@@ -175,15 +182,29 @@ static int PV_Geom(int* x0, int* y0, int* x1, int* y1, int* x2, int* y2)
         sbw = *(volatile int*)(size_t)ADDR_SIDEBAR_W;
         if (sbw < 64 || sbw > 512) sbw = 168;
         right = gw - sbw - 32;
-        *x2 = right - PV_BS;
         gy = gh - 4 - PV_BS;
     }
-    *y2 = gy;
-    *x1 = *x2 - PV_GAPB - PV_BS;
-    *y1 = gy;
-    *x0 = *x1 - PV_GAPB - PV_BS;
-    *y0 = gy;
-    if (*x0 < 0 || gy < 0 || *x2 + PV_BS > gw || gy + PV_BS > gh) return 0;
+    if (slot >= 3)
+    {
+        if (!PV_ShotReserve()) return 0;   /* 截图键没显示 ⇒ 该槽不存在 */
+        *x = right - PV_BS;
+    }
+    else
+    {
+        px = right - PV_ShotReserve();
+        *x = px - PV_BS - (2 - slot) * (PV_BS + PV_GAPB);
+    }
+    *y = gy;
+    if (*x < 0 || gy < 0 || *x + PV_BS > gw || gy + PV_BS > gh) return 0;
+    return 1;
+}
+
+/* x0/y0=格网键 (最左), x1/y1=暂停键, x2/y2=步进键。 */
+static int PV_Geom(int* x0, int* y0, int* x1, int* y1, int* x2, int* y2)
+{
+    if (!PV_SlotGeom(0, x0, y0)) return 0;
+    if (!PV_SlotGeom(1, x1, y1)) return 0;
+    if (!PV_SlotGeom(2, x2, y2)) return 0;
     return 1;
 }
 
@@ -328,6 +349,7 @@ static void PV_MiniLoop(void)
 extern "C" __declspec(dllexport) DWORD __cdecl PV_MainGate(void* regs)
 {
     PV_EnsureInit();
+    FrameCap_Frame();  /* 限帧: 与渲染尾/消息泵共用一次等待预算 (见 FrameCap.cpp) */
     if (!PV_CanRun()) return 0;
     if (!s_Paused) return 0;
     if (s_Step > 0) { s_Step--; return 0; }   /* 步进帧: 走原循环 */

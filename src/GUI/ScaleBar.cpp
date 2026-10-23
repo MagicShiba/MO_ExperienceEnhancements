@@ -1390,6 +1390,95 @@ int SB_CompositeDemagnify(void)
     return 1;
 }
 
+/* 整行/整列是否全为图外底色。 */
+static int Sb_RowIs(unsigned char* base, int pitch, int x0, int x1, int y,
+                    unsigned short px)
+{
+    const unsigned short* row = (const unsigned short*)(base + (size_t)y * pitch);
+    int i;
+    for (i = x0; i < x1; i++) if (row[i] != px) return 0;
+    return 1;
+}
+
+static int Sb_ColIs(unsigned char* base, int pitch, int x0, int y0, int y1,
+                    unsigned short px)
+{
+    int j;
+    for (j = y0; j < y1; j++)
+        if (((const unsigned short*)(base + (size_t)j * pitch))[x0] != px) return 0;
+    return 1;
+}
+
+/* 截图前裁掉图外底色: 视口伸到地图外时 Sb_PaintVoidOn 会按"大面矩形 - 地图矩形"
+ * 铺 [ScaleBar] Void, 那是补边不是画面 (MAX 档恒有一边留余量)。先按地图矩形裁,
+ * 再削掉引擎地图矩形自带 -5/+135 余量留下的整行/整列底色, 各方向最多削一半。 */
+static void Sb_CropVoid(void* s, RectangleStruct* r)
+{
+    int ml, mt, mw, mh, ox, oy, vw, vh;
+    int x0, y0, x1, y1, limx, limy, pitch;
+    unsigned char* base;
+    unsigned short px;
+
+    if (!SB_MapPx(&ml, &mt, &mw, &mh) || !Sb_ViewPx(&ox, &oy, &vw, &vh)) return;
+    x0 = r->X; y0 = r->Y;
+    x1 = x0 + r->Width; y1 = y0 + r->Height;
+    /* 地图矩形在视口系里的位置。 */
+    if (ml - ox > x0) x0 = ml - ox;
+    if (mt - oy > y0) y0 = mt - oy;
+    if (ml - ox + mw < x1) x1 = ml - ox + mw;
+    if (mt - oy + mh < y1) y1 = mt - oy + mh;
+    if (x1 - x0 < 64 || y1 - y0 < 64) return;   /* 地图读歪: 保留整幅 */
+
+    pitch = GtSurfGet(s, GtVT_GET_PITCH);
+    base = GtLock(s);
+    if (base)
+    {
+        px = Sb_VoidPixel();
+        limx = (x1 - x0) / 2;
+        limy = (y1 - y0) / 2;
+        if (limx < 64) limx = 64;
+        if (limy < 64) limy = 64;
+        while (y1 - y0 > limy && Sb_RowIs(base, pitch, x0, x1, y0, px)) y0++;
+        while (y1 - y0 > limy && Sb_RowIs(base, pitch, x0, x1, y1 - 1, px)) y1--;
+        while (x1 - x0 > limx && Sb_ColIs(base, pitch, x0, y0, y1, px)) x0++;
+        while (x1 - x0 > limx && Sb_ColIs(base, pitch, x1 - 1, y0, y1, px)) x1--;
+        GtUnlock(s);
+    }
+    r->X = x0; r->Y = y0;
+    r->Width = x1 - x0; r->Height = y1 - y0;
+}
+
+/* 截图用：本帧未缩放的视口原图在哪 (见 ScaleBar.h)。 */
+int SB_RawView(void** surf, int* x, int* y, int* w, int* h)
+{
+    RectangleStruct a, r;
+    void* s;
+    int bpp, sw, sh;
+    FM_GetViewRects(&a, &r);
+    if (r.Width < 16 || r.Height < 16) return 0;
+    /* 缩小档: 原图在刚渲染完的大面上 (s_LastFinal, 与降采样同源), 整面 R。
+     * 其它档: 原图就在窗口 Composite 里 —— 放大档取放大之前那块 R (R ⊆ A),
+     * 1x 时 R == A。取这里而不是 Primary, 是为了拿"未缩放"的像素。 */
+    if (SB_Out() && s_SurfActive && s_LastFinal && IsPlausiblePtr(s_LastFinal))
+        s = s_LastFinal;
+    else
+        s = *(void**)ADDR_SURF_COMPOSITE;
+    if (!IsPlausiblePtr(s)) return 0;
+    bpp = GtSurfGet(s, GtVT_GET_BPP);
+    sw = GtSurfGet(s, GtVT_GET_WIDTH);
+    sh = GtSurfGet(s, GtVT_GET_HEIGHT);
+    if (bpp != 2 || sw < 16 || sh < 16) return 0;
+    Sb_ClipR(&r, sw, sh);          /* R 恒从 (0,0) 起, 只需夹右下 */
+    if (r.Width < 16 || r.Height < 16) return 0;
+    Sb_CropVoid(s, &r);
+    *surf = s;
+    *x = r.X;
+    *y = r.Y;
+    *w = r.Width;
+    *h = r.Height;
+    return 1;
+}
+
 /* 主画布判定 (窗口面 + 自建大面)。 */
 int SB_IsBigSurface(void* s)
 {

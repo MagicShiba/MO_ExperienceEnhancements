@@ -38,6 +38,8 @@
 #include "WeaponRange.h"
 #include "ScaleBar.h"
 #include "PauseView.h"
+#include "FrameCap.h"
+#include "Shot.h"
 #include "PiP.h"
 #include "EscMenu.h"
 #include "SidebarSkin.h"
@@ -209,6 +211,7 @@ void MOE_EnsureInit(void)
     FM_EnsureInit();
     SB_EnsureInit();   /* 底栏: 读 [BottomBar] (缩放档位/几何); ScaleEnable=0 时缩放空转 */
     PV_EnsureInit();   /* 底栏: 读 [BottomBar] (暂停按钮 PauseEnable/PauseHotkey) */
+    FrameCap_EnsureInit(); /* 限帧: 读 [FrameCap], 并挂 PeekMessageA 导入表钩 */
     PiP_EnsureInit();  /* 画中画: 读 [PiP] (第二摄像机小窗) */
     SidebarSkin_EnsureInit(); /* 阵营 UI 皮肤: 读 [Sidebar] SkinSide */
     EscMenu_EnsureInit(); /* ESC 菜单自定义页: 读 [EscMenu] */
@@ -304,6 +307,8 @@ static void PowerDrawBoth(void)
     /* 单机暂停/步进: F5 边沿 + 底栏两按钮点击 (暂停中经迷你循环的 Mark 钩
      * 照样跑到这里)。 */
     PV_Poll();
+    /* 视口原图截图: 相机按钮悬停/点击 (只排队, 真正取图在消息帧钩里)。 */
+    Shot_Poll();
     /* 运行期后装避让钩 (结算显示 0x5C9720/0x6C8E80 / FPS 钉住 0x4F4589):
      * 这些地址可能与外部模块 Syringe 钩同址, 等对方就位后再装 (见 VecText.cpp)。 */
     VecText_LateInstall();
@@ -1252,6 +1257,9 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     /* 缩小档: 渲染期 Composite/地图面被换成了 R 大的离屏面, 这里必须**先**还原成
      * 窗口面, 后面取到的 surf 才是 UI 该画的那张 (窗口面)。1x/放大档恒空操作。*/
     SB_RenderSwapOut();
+    /* 截图: 此刻各档原图都齐了且还没画任何 UI (侧栏/底栏/刻度条/战役框/
+     * 画中画/tooltip 都在后面), 队列为空时是空操作。 */
+    Shot_CapturePending();
 
     tick = GtTickNow();
 
@@ -1312,6 +1320,8 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     if (SB_DrawToComposite()) drew = 1;
     /* 暂停/步进/格网三按钮 (刻度条左侧, 启用后按过一次 F5 才画; 格网另带灰线)。 */
     if (PV_DrawToComposite()) drew = 1;
+    /* 截图键 (刻度条左侧最外一格, 与暂停三键同为底栏按钮)。 */
+    if (Shot_DrawToComposite()) drew = 1;
 
     if (!drew) { StatTick(tick, 1); return 0; }
     StatTick(tick, 0);    if (s_firstDraw)

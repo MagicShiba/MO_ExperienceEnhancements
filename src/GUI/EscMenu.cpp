@@ -8,6 +8,7 @@
 #include "ScaleBar.h"
 #include "PauseView.h"
 #include "GridView.h"
+#include "Shot.h"
 #include "SWSBar.h"
 #include "BuildQueue.h"
 #include "PlaceScatter.h"
@@ -20,6 +21,7 @@
 #include "EscMenu.h"
 #include "PlayerColor.h"
 #include "SidebarSkin.h"
+#include "FrameCap.h"
 
 #define ESC_SECTION          "EscMenu"
 #define ESC_REG_ESI          0x0Cu          /* Syringe REGISTERS: ESI */
@@ -58,7 +60,7 @@
 #define ESC_TEXT_SS          2
 #define ESC_LABEL_CAP        96
 #define ESC_LEFT_ROWS        2
-#define ESC_GUI_DISPLAY      18
+#define ESC_GUI_DISPLAY      20
 #define ESC_SEP_H            14
 #define ESC_SKIN_N           5
 #define ESC_SCATTER_N        3
@@ -107,6 +109,7 @@ enum {
     GUI_ITEM_SCALE = 0,
     GUI_ITEM_PAUSE,
     GUI_ITEM_GRID,
+    GUI_ITEM_SHOT,
     GUI_ITEM_SWS,
     GUI_ITEM_SORT,
     GUI_ITEM_ROWS,
@@ -117,6 +120,7 @@ enum {
     GUI_ITEM_SIDE_SCROLL,
     GUI_ITEM_SIDE_HIDE,
     GUI_ITEM_SWS_SIDE,
+    GUI_ITEM_FPS,
     GUI_ITEM_COUNT
 };
 
@@ -219,7 +223,7 @@ static int Esc_EditIs(int page, int item)
 }
 
 typedef struct {
-    int scale, pause, grid, sws, fill, rows, skin, color;
+    int scale, pause, grid, shot, sws, fill, rows, skin, color;
     int bq, scatter, sideScroll, hide, swsSide;
     int chatEdit, chatName;
 } EscSavedSettings;
@@ -228,6 +232,7 @@ typedef struct {
     X(scale, SB_Enabled, SB_SetEnabled) \
     X(pause, PV_ButtonsEnabled, PV_SetButtonsEnabled) \
     X(grid, GV_IsOn, GV_SetOn) \
+    X(shot, Shot_Visible, Shot_SetVisible) \
     X(sws, SWS_Enabled, SWS_SetEnabled) \
     X(fill, SWS_FillMode, SWS_SetFillMode) \
     X(rows, SWS_MaxRows, SWS_SetMaxRows) \
@@ -298,6 +303,7 @@ static void Esc_LoadAllText(void)
     Esc_GuiText("GuiScale", s_GuiLabel[GUI_ITEM_SCALE], ESC_LABEL_CAP);
     Esc_GuiText("GuiPause", s_GuiLabel[GUI_ITEM_PAUSE], ESC_LABEL_CAP);
     Esc_GuiText("GuiGrid", s_GuiLabel[GUI_ITEM_GRID], ESC_LABEL_CAP);
+    Esc_GuiText("GuiShot", s_GuiLabel[GUI_ITEM_SHOT], ESC_LABEL_CAP);
     Esc_GuiText("GuiSws", s_GuiLabel[GUI_ITEM_SWS], ESC_LABEL_CAP);
     Esc_GuiText("GuiSort", s_GuiLabel[GUI_ITEM_SORT], ESC_LABEL_CAP);
     Esc_GuiText("GuiRows", s_GuiLabel[GUI_ITEM_ROWS], ESC_LABEL_CAP);
@@ -308,6 +314,7 @@ static void Esc_LoadAllText(void)
     Esc_GuiText("GuiSideScroll", s_GuiLabel[GUI_ITEM_SIDE_SCROLL], ESC_LABEL_CAP);
     Esc_GuiText("GuiSideHide", s_GuiLabel[GUI_ITEM_SIDE_HIDE], ESC_LABEL_CAP);
     Esc_GuiText("GuiSwsSide", s_GuiLabel[GUI_ITEM_SWS_SIDE], ESC_LABEL_CAP);
+    Esc_GuiText("GuiFps", s_GuiLabel[GUI_ITEM_FPS], ESC_LABEL_CAP);
     Esc_GuiText("GuiOn", s_GuiOn, 16);
     Esc_GuiText("GuiOff", s_GuiOff, 16);
     Esc_GuiText("GuiSortFaction", s_GuiFaction, 32);
@@ -546,10 +553,12 @@ static const EscGuiRowInfo s_GuiLayout[ESC_GUI_DISPLAY] = {
     { EG_SWITCH, GUI_ITEM_SCALE },
     { EG_SWITCH, GUI_ITEM_PAUSE },
     { EG_SWITCH, GUI_ITEM_GRID },
+    { EG_SWITCH, GUI_ITEM_SHOT },
     { EG_GROUP,  GUI_GROUP_SIDEBAR },
     { EG_SWITCH, GUI_ITEM_SIDE_SCROLL },
     { EG_CHOICE, GUI_ITEM_SIDE_HIDE },
     { EG_GROUP,  GUI_GROUP_MISC },
+    { EG_SWITCH, GUI_ITEM_FPS },
     { EG_COLOR,  GUI_ITEM_COLOR },
     { EG_SKIN,   GUI_ITEM_SKIN }
 };
@@ -1635,9 +1644,11 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
             case GUI_ITEM_SCALE:       on = SB_Enabled(); break;
             case GUI_ITEM_PAUSE:       on = PV_ButtonsEnabled(); break;
             case GUI_ITEM_GRID:        on = GV_IsOn(); break;
+            case GUI_ITEM_SHOT:        on = Shot_Visible(); break;
             case GUI_ITEM_SWS:         on = SWS_Enabled(); break;
             case GUI_ITEM_BUILD_QUEUE: on = BQ_Enabled(); break;
             case GUI_ITEM_SIDE_SCROLL: on = SS_Enabled(); break;
+            case GUI_ITEM_FPS:         on = FrameCap_Enabled(); break;
             }
             Esc_DrawSwitchRow(surf, rowL, y, rowW, bodyH,
                               s_GuiLabel[item], on);
@@ -2100,6 +2111,16 @@ static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx,
         value = GV_IsOn() ? 0 : 1;
         GV_SetOn(value);
         Esc_QueueValue("BottomBar", "GridEnable", value);
+        break;
+    case GUI_ITEM_SHOT:
+        value = Shot_Visible() ? 0 : 1;
+        Shot_SetVisible(value);
+        Esc_QueueValue("BottomBar", "ShotEnable", value);
+        break;
+    case GUI_ITEM_FPS:
+        value = FrameCap_Enabled() ? 0 : 1;
+        FrameCap_SetEnabled(value);
+        Esc_QueueValue("FrameCap", "Enable", value);
         break;
     case GUI_ITEM_SWS:
         value = SWS_Enabled() ? 0 : 1;
@@ -2582,6 +2603,10 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_NCDESTROY)
     {
         RemovePropW(h, ESC_PROP_OLD_PROC);
+        /* 子页销毁时回退到首页 (首页可能还开着), 否则菜单会被误判为关闭 */
+        if (FrameCap_ActiveDlg() == (void*)(size_t)h)
+            FrameCap_SetActiveDlg((s_Host && s_Host != h && IsWindow(s_Host))
+                                  ? (void*)s_Host : NULL);
         if (h == s_Host)
         {
             s_CancelDown = 0;
@@ -2612,6 +2637,14 @@ static void Esc_OnShow(HWND hDlg)
 {
     EscMenu_EnsureInit();
     if (!s_Enable) return;
+
+    /* 所有 ESC 对话框 (首页 + 各级子页) 都要做两件事:
+     *   1) 告诉限帧模块"菜单开着" —— 只有这时才限速, 菜单关掉立刻放行
+     *   2) 子类化 —— 面板自绘/编辑框轮询
+     * 面板自绘只对首页 (s_Host) 做。 */
+    FrameCap_SetActiveDlg(hDlg);
+    Esc_Subclass(hDlg);
+
     if (OU_IsMP()) return;
     /* Only the ESC home page has the Game Controls button; 3003 sub-pages do not. */
     if (!GetDlgItem(hDlg, ESC_ID_GAMECONTROLS)) return;
@@ -2624,7 +2657,6 @@ static void Esc_OnShow(HWND hDlg)
         Esc_SaveSettings();
         s_Host = hDlg;
     }
-    Esc_Subclass(hDlg);
 }
 
 /* 0x4F1140: dialog created (ESI=HWND), before ShowWindow.

@@ -23,6 +23,10 @@ unsigned AppendCStr(char* dst, unsigned pos, const char* src, unsigned cap);
 unsigned AppendCh(char* dst, unsigned pos, char c, unsigned cap);
 unsigned AppendInt(char* dst, unsigned pos, unsigned cap, int v);
 int IsPlausiblePtr(const void* p);
+/* 从 p 起**真的**可安全读取的字节数 (最多 maxBytes, 0 = 不可读)。
+ * IsPlausiblePtr 只查范围/对齐, 引擎偶尔会传进野指针 (实测 0x32AC8010,
+ * 读第一个 wchar 就页错误), 解引用外来指针前用它兜一层。 */
+unsigned MemReadableBytes(const void* p, unsigned maxBytes);
 
 /* ---------------- 日志 ---------------- */
 extern HANDLE g_Log;

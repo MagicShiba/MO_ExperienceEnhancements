@@ -57,6 +57,22 @@ int IsPlausiblePtr(const void* p)
     return (u >= 0x00010000u && u < 0x7FF00000u && (u & 3u) == 0);
 }
 
+/* 真实可读长度 (见 .h 说明)。只做一次 VirtualQuery, 取该区剩余可读字节。 */
+unsigned MemReadableBytes(const void* p, unsigned maxBytes)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    unsigned long long left;
+
+    if (!IsPlausiblePtr(p) || !maxBytes) return 0;
+    if (VirtualQuery(p, &mbi, sizeof(mbi)) != sizeof(mbi)) return 0;
+    if (mbi.State != MEM_COMMIT) return 0;
+    if (!mbi.Protect) return 0;
+    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
+    left = (unsigned long long)(size_t)mbi.BaseAddress + mbi.RegionSize -
+           (unsigned long long)(size_t)p;
+    return (left > maxBytes) ? maxBytes : (unsigned)left;
+}
+
 /* 无 CRT: 编译器可能把拷贝/清零循环优化成 memcpy/memset 调用, 自备实现。
  * 注意: 实现体必须用 volatile, 否则 -O2 会把函数体自身再认作标准语义、
  * 优化成一次对自己的调用 (实测 ToolTip 假对象清零因此死循环)。 */
