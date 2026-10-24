@@ -15,6 +15,7 @@
  * 引擎事实见 notes/路径点上限.md §MegaMissionList。 */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "MegaListCap.h"
@@ -23,7 +24,6 @@
 
 #define ML_N 0x1000u           /* 4096 (掩码 0xFFF, 与 WaypointCap 上限对齐) */
 #define ML_MASK 0xFFFu
-#define ADDR_FRAME 0xA8ED84u   /* Unsorted::CurrentFrame */
 
 static int g_MlInit = 0;
 static int g_MlDone = 0;

@@ -35,6 +35,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "OrderThrottle.h"
@@ -45,15 +46,9 @@
 
 /* ---------------- 只读地址 ---------------- */
 
-#define ADDR_BLD_ARR   0xA8EB40u
-#define ADDR_FRAME     0xA8ED84u
 #define ARR_ITEMS(base) (*(void***)((base) + 4u))
 #define ARR_COUNT(base) (*(int*)((base) + 16u))
 
-#define OFF_ISALIVE 0x90u
-#define OFF_INLIMBO 0x81u
-#define OFF_HEALTH  0x6Cu
-#define OFF_OWNER   0x21Cu
 
 #define VT_GETMISSION (0x184u / 4u)
 
@@ -419,8 +414,7 @@ static int AG_Fire(int houseIdx, int srcID, unsigned char srcRtti, int mission,
                    void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, mission,
             tgtID, (unsigned)tgtRtti, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = 0;

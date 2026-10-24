@@ -13,6 +13,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "ScaleBar.h"
@@ -27,9 +28,6 @@
 
 #define ADDR_SESSION_MODE  0x00A8B238u /* SessionClass 首成员 = GameMode */
 #define ADDR_SCENARIO_PTR  0x00A8B230u /* ScenarioClass::Instance (换图看它) */
-#define ADDR_SCEN_STARTED  0x00A8ED5Cu /* Unsorted::ScenarioStarted */
-#define ADDR_FRAME         0x00A8ED84u /* 当前帧号 (倒退=新开/读档) */
-#define ADDR_SIDEBAR_W     0x007F5BF8u /* 侧栏列宽 168 (按钮 fallback 锚点用) */
 
 #define GAME_LAN 3
 #define GAME_INTERNET 4
@@ -39,13 +37,10 @@
 /* 迷你循环出口: MainLoop 尾 ret (Phobos 同值, 见 FrameByFrame.cpp)。 */
 #define PV_LOOP_EXIT 0x0055DEDBu
 
-#define ADDR_ISACTIVE  0x00A8E9A0u /* Game::IsActive (bool, YRpp Unsorted.h) */
 #define ADDR_ISFOCUSED 0x00A8ED80u /* Game::IsFocused (bool) */
 #define ADDR_SPECDLG   0x00A8EDA0u /* Game::SpecialDialog (int) */
 #define ADDR_MAP       0x0087F7E8u /* MapClass::Instance (=Display, 同对象) */
-#define ADDR_TACTICAL  0x00887324u /* TacticalClass::Instance (指针) */
 
-#define REG_OFF_EAX 0x24u   /* YRpp Syringe.h REGISTERS (见 TypeSelect.cpp 注释) */
 
 /* ---------------- 配置 ---------------- */
 static int s_Init = 0;
@@ -355,10 +350,10 @@ static void PV_MiniLoop(void)
     PV_IdleWait();
 }
 
-extern "C" __declspec(dllexport) DWORD __cdecl PV_MainGate(void* regs)
+/* 主循环门的实体 (Perf 探针把整段和 FrameCap/GameSpeed 分开计时)。 */
+static DWORD PV_MainGateBody(void* regs)
 {
-    PV_EnsureInit();
-    FrameCap_Gate();   /* 限帧节拍: 主循环还活着时由这里计时 (见 FrameCap.cpp) */
+    long long tSeg;
     if (!PV_CanRun()) return 0;
 
     /* 暂停中不推进游戏帧: 这时候不能限速(没帧可限)。只同步一下原版速度页,
@@ -372,13 +367,30 @@ extern "C" __declspec(dllexport) DWORD __cdecl PV_MainGate(void* regs)
         return PV_LOOP_EXIT;
     }
 
+    tSeg = Perf_Now();
     GameSpeed_Frame(); /* >60 的自建毫秒节拍 + 原版速度页同步 (见 GameSpeed.cpp) */
+    Perf_Add(PF_GS, tSeg);
     if (!s_Paused) return 0;
     if (s_Step > 0) { s_Step--; return 0; }   /* 步进帧: 走原循环 */
     PV_MiniLoop();
     if (regs) *(DWORD*)((char*)regs + REG_OFF_EAX) =
         *(volatile unsigned char*)(size_t)ADDR_ISACTIVE ? 0 : 1;
     return PV_LOOP_EXIT;
+}
+
+extern "C" __declspec(dllexport) DWORD __cdecl PV_MainGate(void* regs)
+{
+    long long tPf, tSeg;
+    DWORD rc;
+
+    PV_EnsureInit();
+    tPf = Perf_Now();
+    tSeg = tPf;
+    FrameCap_Gate();   /* 限帧节拍: 主循环还活着时由这里计时 (见 FrameCap.cpp) */
+    Perf_Add(PF_FC, tSeg);
+    rc = PV_MainGateBody(regs);
+    Perf_Add(PF_GATE, tPf);
+    return rc;
 }
 
 /* ---------------- 绘制 ---------------- */

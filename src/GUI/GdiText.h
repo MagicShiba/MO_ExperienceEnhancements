@@ -4,6 +4,7 @@
  */#pragma once
 
 #include <windows.h>
+#include "EngineAddr.h"
 
 #define MAX_PATH_LEN 260
 #define LOG_LINE_MAX 1024
@@ -41,6 +42,69 @@ int GtMouseGameXY(int* x, int* y);
 /* 详细日志总开关: 0=只记关键事件 (默认, 日志小); 1=逐字/逐帧普查 */
 extern int g_LogDetail;
 
+/* ---------------- 帧内耗时探针 ([Log] Perf=1) ----------------
+ * 只在主线程用; 关掉时 Perf_Now 直接返回 0, Perf_Add 见 0 立刻返回 (每帧几十次
+ * 调用也只是几十条 if), 对帧率无可测影响。每 2s 往日志写一行 us/帧。
+ * 用法: t = Perf_Now(); ...干活...; Perf_Add(PF_XXX, t);
+ * Perf_Frame 每帧末调一次 (消息帧钩尾部), 负责累计帧数与结算。 */
+enum
+{
+    PF_GATE = 0,    /* PV_MainGate 整段 */
+    PF_FC,          /* FrameCap_Gate */
+    PF_GS,          /* GameSpeed_Frame */
+    PF_PREPARE,     /* 每循环 prepare (PowerDrawBoth) 整段 */
+    PF_PREP_FM,     /* 其内 FM_Poll */
+    PF_PREP_SB,     /* 其内 SB_Poll */
+    PF_PREP_SS,     /* 其内 SS_Poll */
+    /* prepare 里逐个 Poll (A 段: 输入/战斗类) */
+    PF_A_AW, PF_A_BQ, PF_A_PC, PF_A_SO, PF_A_RP, PF_A_TC, PF_A_FA, PF_A_AM,
+    PF_A_SA, PF_A_DP, PF_A_MS, PF_A_OT, PF_A_WPC, PF_A_MLC, PF_A_SWS,
+    PF_A_RA, PF_A_PS, PF_A_AG, PF_A_OB,
+    /* prepare 后段 (B 段: 底栏/绘制类) */
+    PF_B_PV, PF_B_SHOT, PF_B_VTS, PF_B_PUB, PF_B_MHK, PF_B_PWR, PF_B_PIPB,
+    PF_B_SKIN, PF_B_PVP,
+    PF_MSG,         /* 消息帧钩整段 */
+    PF_MSG_TEXT,    /* MsgText_DrawFrame */
+    PF_MSG_SWP,     /* SWPanel_Draw */
+    PF_MSG_DRAWS,   /* 其余各 *_Draw + FM_DrawRadarTo */
+    PF_MSG_TAIL,    /* ChatEdit + 底电 + 条带/按钮/截图 */
+    PF_BLITSB,      /* 侧栏呈现入口钩 */
+    PF_AFTERMAP,    /* 三趟地图后的钩 */
+    PF_RENDERIN,    /* Render 入口钩 */
+    PF_VECBLIT,     /* VecText_BlitHook 累计 (每次一个字) */
+    PF_VECGETDIM,   /* VecText 字宽度量钩累计 (每次一次度量) */
+    PF_PLACEPREV,   /* 放置预览绘制钩 0x6D528A */
+    PF_SHROUD,      /* 迷雾 DrawPixelEffects 入口钩 */
+    /* ---- 钩子频率普查已结束 (结论见 notes/性能.md: 全部 ≤14 次/帧, 无高频钩子陷阱),
+     * 那 14 个只计次的槽位连同 38 处 Perf_Hit 调用已删除。别再往事件型钩子里
+     * 加纯计次的埋点: 想要数值就给 Perf_Add 计时, 想查频次用临时开关。 ---- */
+    /* SWPanel 内部细分 (找 200us 花在哪: 量宽 / 底板 / 文字) */
+    PF_SWP_MEAS, PF_SWP_BG, PF_SWP_TXT,
+    PF_H_PRINT, PF_H_SIMPLE,   /* VecText 的 Print / Simple_ 入口 (含被拦截的串) */
+    PF_H_PRTO, PF_H_SMPO,      /* 上面两者里"放行给引擎原版"那部分 */
+    PF_H_VB1, PF_H_VB2,        /* BlitBody: 入口→VecMeasure 完 / Measure→返回 */
+    PF_H_CLAER,                /* 侧栏面整条抹黑 (Fm_ClearStripExceptRadar) */
+    /* ---- 第三轮: 调用时机账 (谁在每帧重复跑 / 谁在空转) ---- */
+    PF_SB_SS, PF_SB_PWR, PF_SB_PIP, PF_SB_FM,   /* BlitSb 入口四段 (含与 prepare 重复的两段) */
+    PF_D_SWS, PF_D_SO, PF_D_PC, PF_D_RP, PF_D_FA, PF_D_SA, PF_D_TC, PF_D_DP,
+    PF_D_WR, PF_D_AG, PF_D_RADAR,               /* msgdraw 里 10 个 *_Draw + 雷达上屏 */
+    PF_T_CE, PF_T_PWR, PF_T_SB, PF_T_PV, PF_T_SHOT,  /* msgtail 五段 */
+    PF_VHIT, PF_VMISS,         /* VecGlyph 字形缓存 命中/未命中 (未命中 = 一次 GDI 光栅) */
+    PF_LOCK,                   /* 全部 GtLock+GtUnlock 的 vtable 调用累计 */
+    PF_SB2_SETUP, PF_SB2_FILL, PF_SB2_LBL,   /* 刻度条: 取面/布局 / 填充 / 档位文字 */
+    PF_SWS_BUILD, PF_SWS_BLIT,  /* 超武侧栏: 重建缓存 (节流 15 帧) / 每帧带 alpha 贴层 */
+    PF_COUNT
+};
+long long Perf_Now(void);
+void Perf_Add(int slot, long long t0);
+/* 只计次 (不做 QPC): 放钩子最前面, 用来普查调用频率。关探针时两三条指令返回。 */
+void Perf_Hit(int slot);
+void Perf_AddDelta(int slot, long long dt);   /* 直接累加时间差 (分段算差值用) */
+void Perf_Frame(void);
+void Perf_EnsureInit(void);
+/* VecText 最近一次字形缓存未命中的原因码 (1=首次 2=字符 3=idata 4=px 5=adv 6=h 7=nat) */
+extern int g_VecMissWhy;
+
 /* ---------------- 画面底座 (引擎 DSURFACE 虚表, 全 DLL 共用) ----------------
  * 引擎面对象首成员是虚表指针, 槽号见下; 全部只读调用 + 渲染面写入, 联机安全。 */
 #define GtVT_FILL_RECT        0x14
@@ -53,9 +117,6 @@ extern int g_LogDetail;
 #define GtVT_GET_WIDTH        0x7C
 #define GtVT_GET_HEIGHT       0x80
 
-#define ADDR_SURF_COMPOSITE   0x0088731Cu
-#define ADDR_SURF_SIDEBAR     0x00887300u
-#define ADDR_SURF_PRIMARY     0x00887308u
 #define ADDR_SURF_TEMP        0x00887314u
 #define ADDR_SURF_VIEWBOUNDS  0x00886FA0u
 #define ADDR_BITFONT_INSTANCE 0x0089C4D0u
@@ -109,6 +170,11 @@ void Calibrate(void);     /* 幂等: Temp 面填纯红回读, 判定 565/555 */
 extern unsigned char g_ExpR[32], g_ExpG[64], g_ExpB[32];
 extern int g_ExpReady;
 void GtBuildExpand(void);
+/* 5 位 alpha 快速混合: TB[inv][dst] = dst*inv/31, inv = 31 - (alpha>>3)。
+ * 与前景色无关 (前景部分按字现建), 供逐字光栅那条热循环用。 */
+extern unsigned char g_BlendR[32][32], g_BlendG[32][64];
+extern int g_BlendReady;
+void GtBuildBlend5(void);
 /* 16 位混合: dst = fg*a + dst*(1-a), fg 为 8 位, a=0..255。热路径内联。
  * 压位按比例 ((v*N+127)/255), 不是移位。 */
 static __inline unsigned short Blend16(unsigned short dst, unsigned fr,

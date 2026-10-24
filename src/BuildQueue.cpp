@@ -95,6 +95,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 
 #define BQ_SECTION "Features"
@@ -110,8 +111,6 @@
 #define ABS_BUILDINGTYPE 7u
 #define EVT_PRODUCE 0xEu
 
-#define ADDR_CURPLAYER 0xA83D4Cu
-#define OFF_HOUSE_INDEX 0x30u
 #define OFF_TT_NAVAL 0xCCEu
 #define OFF_TT_BUILDLIMIT 0x3B8u
 #define OFF_BT_ARRAYINDEX 0xDF8u
@@ -127,8 +126,6 @@
 #define ADDR_OUT_NEXT 0xA802D0u
 #define ADDR_OUT_BUF 0xA802D4u
 #define ADDR_OUT_PAR 0xA83A54u
-#define EVT_SIZE 111u
-#define EVT_CAP 0x80u
 
 #define ADDR_FACARR_ITEMS 0xA83E34u
 #define ADDR_FACARR_COUNT 0xA83E40u

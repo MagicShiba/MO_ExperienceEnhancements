@@ -259,7 +259,7 @@ static int PS_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
     cs.X = (short)dstX; cs.Y = (short)dstY;
     FN_PS_TGTCELL(dstB, &cs);
     dstID = *(int*)(dstB + 0); dstR = (unsigned char)dstB[4];
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
             0, 0, dstID, (unsigned)dstR, 0, 0);
     ev[OFF_PLANFLAG] = 0;

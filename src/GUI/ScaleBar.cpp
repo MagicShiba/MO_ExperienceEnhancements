@@ -2,6 +2,7 @@
  * 纯本地摄像机 + 渲染面写入, 联机安全。 */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "FullMap.h"
 #include "MsgText.h"
@@ -13,8 +14,6 @@
 #define SB_SECTION "BottomBar"
 
 /* ---------------- 地址 (反汇编实证) ---------------- */
-#define ADDR_SURF_COMPOSITE  0x0088731Cu
-#define ADDR_SURF_MAP        0x008872FCu   /* 渲染时与 Composite 互换的持久地图面 */
 #define ADDR_DSURF_CTOR      0x004BA5A0u   /* DSurface::DSurface(this,w,h,f1,f2) */
 #define ADDR_OP_NEW          0x007C8E17u   /* 引擎的 operator new (cdecl, 1 参) */
 #define ADDR_OP_DELETE       0x007C8B3Du   /* 引擎的 operator delete (cdecl, 1 参) */
@@ -33,8 +32,6 @@
 #define ADDR_TACTICAL_SB     0x00887324u   /* TacticalClass::Instance */
 #define ADDR_REG_DIRTY_SB    0x006D2790u   /* TacticalClass::RegisterDirtyArea */
 #define ADDR_CUR_SURF_SB     0x00887314u   /* 引擎"当前绘制面" (Render 入口 = Composite) */
-#define ADDR_VIEWBOUNDS      0x00886FA0u   /* ViewBounds (缩放档 = R) */
-#define ADDR_SIDEBAR_W       0x007F5BF8u   /* 侧栏列宽 (168) */
 /* chrome 脏缓存: [0xB0CD44] 为 0 ⇒ 引擎下帧重画整个 chrome。 */
 #define SB_CHROME_DIRTY_N 0xB0CD44u
 
@@ -844,7 +841,6 @@ static int Sb_IsBigSurf(void* s)
 }
 
 /* 载入门：进度屏载入中地图半成品，缩小档按 1x 退回。 */
-#define ADDR_LOAD_PHASE   0x00A9FAB0u
 #define ADDR_LOAD_RENDER  0x00A9FA94u
 
 static int s_LoadGate = 0;
@@ -2002,14 +1998,13 @@ static void Sb_Fill(unsigned char* base, int pitch, int W, int H,
 static long s_BarSig = -1;
 
 /* 条的全部像素 (无底板/边框)。ox/oy = 原点偏移。 */
-static void Sb_Paint(unsigned char* base, int pitch, int W, int H, int ox, int oy)
+static void Sb_PaintFills(unsigned char* base, int pitch, int W, int H, int ox, int oy)
 {
     int bx = s_BarX + ox, by = s_BarY + oy;   /* by = 控件顶 = 文字带顶 */
     int rowY = by + s_TextH + SB_TEXT_GAP;    /* 滑条带顶 */
     int lineY = rowY + SB_SLIDER_H - SB_LINE_H;  /* 贯穿横线, 贴控件底 */
-    int dx, i, tw, n, th;
+    int dx, i;
     int ga = Sb_Gx0(), gb = Sb_Gx1(), gn = s_NLev > 1 ? s_NLev - 1 : 1;
-    wchar_t buf[10];
     int gx0 = Sb_Gx0() + ox, gx1 = Sb_Gx1() + ox;
     long sig;
 
@@ -2041,6 +2036,14 @@ static void Sb_Paint(unsigned char* base, int pitch, int W, int H, int ox, int o
     dx = Sb_DetentX(s_Level, ga, gb, gn) + ox;
     Sb_Fill(base, pitch, W, H, dx - 4, rowY + SB_KNOB_DY, 8, SB_KNOB_H, 12, 13, 16, 255);
     Sb_Fill(base, pitch, W, H, dx - 3, rowY + SB_KNOB_DY, 6, SB_KNOB_H, 250, 214, 80, 255);
+}
+
+static void Sb_PaintLabels(unsigned char* base, int pitch, int W, int H, int ox, int oy)
+{
+    int by = s_BarY + oy;
+    int i, tw, n, th;
+    int ga = Sb_Gx0(), gb = Sb_Gx1(), gn = s_NLev > 1 ? s_NLev - 1 : 1;
+    wchar_t buf[10];
     /* 档位文字：只在文字带里。常显 4x / 1x / 0.5x，其余悬停才画。 */
     if (!GdiEnsure(s_FontPx, VecText_Bold(), 7, VecText_FontFace())) return;
     th = g_G->adv;
@@ -2061,11 +2064,22 @@ static void Sb_Paint(unsigned char* base, int pitch, int W, int H, int ox, int o
     }
 }
 
+static void Sb_Paint(unsigned char* base, int pitch, int W, int H, int ox, int oy)
+{
+    long long t = Perf_Now();
+    Sb_PaintFills(base, pitch, W, H, ox, oy);
+    Perf_Add(PF_SB2_FILL, t);
+    t = Perf_Now();
+    Sb_PaintLabels(base, pitch, W, H, ox, oy);
+    Perf_Add(PF_SB2_LBL, t);
+}
+
 /* 锁面 + 调 Sb_Paint 的共用壳。bpp 是字节数 (16 位色 = 2)。 */
 static int Sb_PaintSurface(void* surf)
 {
     unsigned char* base;
     int pitch, w, h, bpp;
+    long long t = Perf_Now();
     if (!s_Enable || !surf || !IsPlausiblePtr(surf)) return 0;
     pitch = GtSurfGet(surf, GtVT_GET_PITCH);
     w = GtSurfGet(surf, GtVT_GET_WIDTH);
@@ -2096,6 +2110,7 @@ static int Sb_PaintSurface(void* surf)
         }
         return 0;
     }
+    Perf_Add(PF_SB2_SETUP, t);
     Sb_Paint(base, pitch, w, h, 0, 0);
     GtUnlock(surf);
     return 1;

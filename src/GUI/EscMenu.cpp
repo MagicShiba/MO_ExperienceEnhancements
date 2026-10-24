@@ -173,8 +173,6 @@ static const wchar_t* s_MissingNotice = ESC_MISSING_NOTICE_EN;
 static HWND s_Host = NULL;
 static wchar_t s_LeftTitle[ESC_LABEL_CAP];
 static wchar_t s_LeftItem[ESC_LEFT_ROWS][ESC_LABEL_CAP];
-static wchar_t s_RightTitle[ESC_LABEL_CAP];
-static wchar_t s_RightItem[2][ESC_LABEL_CAP];
 static wchar_t s_GuiTitle[ESC_LABEL_CAP];
 static wchar_t s_GuiGroup[GUI_GROUP_COUNT][ESC_LABEL_CAP];
 static wchar_t s_GuiLabel[GUI_ITEM_COUNT][ESC_LABEL_CAP];
@@ -265,7 +263,7 @@ static int s_SavedOk = 0;
 static int s_CancelDown = 0;
 static int s_SlideDrag = 0;   /* 拖动条按住中 (游戏速度) */
 
-static const wchar_t* const s_LangLabel[ESC_LANG_N] = { L"ZH", L"EN", L"AUTO" };
+static wchar_t s_LangLabel[ESC_LANG_N][32] = { L"ZH", L"EN", L"AUTO" };
 static const int s_LangMode[ESC_LANG_N] = {
     LANG_MODE_ZH, LANG_MODE_EN, LANG_MODE_AUTO
 };
@@ -287,6 +285,61 @@ static void Esc_TextText(const char* key, wchar_t* out, int cap)
     if (!Esc_LoadText(key, out, cap)) s_TextMissing = 1;
 }
 
+/* 一组标签的键名表: 下标与对应 enum / 槽位同序, 增删要两处一起改。
+ * NULL = 这一项没有文案 (文本页的两个分隔条)。 */
+static const char* const kGroupKey[GUI_GROUP_COUNT] = {
+    "GuiGroupGeneral", "GuiGroupBottom", "GuiGroupSws",
+    "GuiGroupGameCtrl", "GuiGroupMisc", "GuiGroupSidebar"
+};
+static const char* const kLabelKey[GUI_ITEM_COUNT] = {
+    "GuiScale", "GuiPause", "GuiGrid", "GuiShot", "GuiSws", "GuiSort",
+    "GuiRows", "GuiSkin", "GuiColor", "GuiBuildQueue", "GuiScatter",
+    "GuiSideScroll", "GuiSideHide", "GuiSwsSide", "GuiGameSpeedOn",
+    "GuiGameSpeed", "GuiFps"
+};
+static const char* const kSkinKey[ESC_SKIN_N] = {
+    "GuiSkinDefault", "GuiSkin1", "GuiSkin2", "GuiSkin3", "GuiSkin4"
+};
+static const char* const kScatterKey[ESC_SCATTER_N] = {
+    "GuiScatterOff", "GuiScatterOnPlace", "GuiScatterAuto"
+};
+static const char* const kHideKey[ESC_HIDE_N] = {
+    "GuiSideHideOff", "GuiSideHideFull", "GuiSideHideRadar", "GuiSideHideBare"
+};
+static const char* const kSwsSideKey[ESC_SWS_SIDE_N] = {
+    "GuiSwsSideRight", "GuiSwsSideLeft"
+};
+static const char* const kTextKey[TX_COUNT] = {
+    "TextGroupCamp", "TextCampEnable", "TextCampLines", "TextCampOpacity",
+    "TextCampPos", "TextCampAlign", "TextCampWidth", "TextCampAnim",
+    "TextCampBar", NULL, "TextGroupChat", "TextChatEdit", "TextChatName",
+    NULL, "TextGroupHint", "TextHintShow", "TextHintColor", "TextHintLines",
+    "TextHintWidth", "TextHintBar", "TextHintRadar"
+};
+static const char* const kPosKey[2] = { "TextCampPosBottom", "TextCampPosTop" };
+static const char* const kAlignKey[2] = { "TextAlignLeft", "TextAlignCenter" };
+static const char* const kBarKey[3] = { "TextBarNone", "TextBarLeft", "TextBarRight" };
+static const char* const kColorKey[2] = { "TextColorWhite", "TextColorPlayer" };
+
+/* 按表读一组标签; 缺文案时按 text 落到对应页的缺失标志。 */
+static void Esc_LoadFam(const char* const* keys, wchar_t* dst, int cap, int n,
+                        int text)
+{
+    int i;
+    for (i = 0; i < n; i++, dst += cap)
+    {
+        if (!keys[i]) continue;
+        if (text) Esc_TextText(keys[i], dst, cap);
+        else      Esc_GuiText(keys[i], dst, cap);
+    }
+}
+
+/* 项数/每项宽度都从数组本身算 (标签恒为 wchar_t[N] 的二维数组) */
+#define ESC_LOAD_FAM(keys, arr, text)                                        \
+    Esc_LoadFam((keys), &(arr)[0][0],                                        \
+                (int)(sizeof((arr)[0]) / sizeof(wchar_t)),                    \
+                (int)(sizeof(arr) / sizeof((arr)[0])), (text))
+
 static void Esc_LoadAllText(void)
 {
     if (Lang_IsChinese())
@@ -303,87 +356,30 @@ static void Esc_LoadAllText(void)
     Esc_LoadText("LeftTitle", s_LeftTitle, ESC_LABEL_CAP);
     Esc_LoadText("LeftItem1", s_LeftItem[0], ESC_LABEL_CAP);
     Esc_LoadText("LeftItem2", s_LeftItem[1], ESC_LABEL_CAP);
-    Esc_LoadText("RightTitle", s_RightTitle, ESC_LABEL_CAP);
-    Esc_LoadText("RightItem1", s_RightItem[0], ESC_LABEL_CAP);
-    Esc_LoadText("RightItem2", s_RightItem[1], ESC_LABEL_CAP);
     if (!Esc_LoadText("Cancel", s_Cancel, 32))
         lstrcpynW(s_Cancel, Lang_IsChinese() ? L"取消" : L"Cancel", 32);
 
-    s_GuiMissing = 0;
+    s_GuiMissing = s_TextMissing = 0;
     Esc_GuiText("GuiTitle", s_GuiTitle, ESC_LABEL_CAP);
-    Esc_GuiText("GuiGroupGeneral", s_GuiGroup[GUI_GROUP_GENERAL], ESC_LABEL_CAP);
-    Esc_GuiText("GuiGroupBottom", s_GuiGroup[GUI_GROUP_BOTTOM], ESC_LABEL_CAP);
-    Esc_GuiText("GuiGroupSws", s_GuiGroup[GUI_GROUP_SWS], ESC_LABEL_CAP);
-    Esc_GuiText("GuiGroupGameCtrl", s_GuiGroup[GUI_GROUP_GAMECTRL], ESC_LABEL_CAP);
-    Esc_GuiText("GuiGroupMisc", s_GuiGroup[GUI_GROUP_MISC], ESC_LABEL_CAP);
-    Esc_GuiText("GuiGroupSidebar", s_GuiGroup[GUI_GROUP_SIDEBAR], ESC_LABEL_CAP);
-    Esc_GuiText("GuiScale", s_GuiLabel[GUI_ITEM_SCALE], ESC_LABEL_CAP);
-    Esc_GuiText("GuiPause", s_GuiLabel[GUI_ITEM_PAUSE], ESC_LABEL_CAP);
-    Esc_GuiText("GuiGrid", s_GuiLabel[GUI_ITEM_GRID], ESC_LABEL_CAP);
-    Esc_GuiText("GuiShot", s_GuiLabel[GUI_ITEM_SHOT], ESC_LABEL_CAP);
-    Esc_GuiText("GuiSws", s_GuiLabel[GUI_ITEM_SWS], ESC_LABEL_CAP);
-    Esc_GuiText("GuiSort", s_GuiLabel[GUI_ITEM_SORT], ESC_LABEL_CAP);
-    Esc_GuiText("GuiRows", s_GuiLabel[GUI_ITEM_ROWS], ESC_LABEL_CAP);
-    Esc_GuiText("GuiSkin", s_GuiLabel[GUI_ITEM_SKIN], ESC_LABEL_CAP);
-    Esc_GuiText("GuiColor", s_GuiLabel[GUI_ITEM_COLOR], ESC_LABEL_CAP);
-    Esc_GuiText("GuiBuildQueue", s_GuiLabel[GUI_ITEM_BUILD_QUEUE], ESC_LABEL_CAP);
-    Esc_GuiText("GuiScatter", s_GuiLabel[GUI_ITEM_SCATTER], ESC_LABEL_CAP);
-    Esc_GuiText("GuiSideScroll", s_GuiLabel[GUI_ITEM_SIDE_SCROLL], ESC_LABEL_CAP);
-    Esc_GuiText("GuiSideHide", s_GuiLabel[GUI_ITEM_SIDE_HIDE], ESC_LABEL_CAP);
-    Esc_GuiText("GuiSwsSide", s_GuiLabel[GUI_ITEM_SWS_SIDE], ESC_LABEL_CAP);
-    Esc_GuiText("GuiGameSpeedOn", s_GuiLabel[GUI_ITEM_GAMESPEED_ON], ESC_LABEL_CAP);
-    Esc_GuiText("GuiGameSpeed", s_GuiLabel[GUI_ITEM_GAMESPEED], ESC_LABEL_CAP);
-    Esc_GuiText("GuiFps", s_GuiLabel[GUI_ITEM_FPS], ESC_LABEL_CAP);
+    ESC_LOAD_FAM(kGroupKey, s_GuiGroup, 0);
+    ESC_LOAD_FAM(kLabelKey, s_GuiLabel, 0);
     Esc_GuiText("GuiOn", s_GuiOn, 16);
     Esc_GuiText("GuiOff", s_GuiOff, 16);
     Esc_GuiText("GuiSortFaction", s_GuiFaction, 32);
     Esc_GuiText("GuiSortFill", s_GuiFill, 32);
-    Esc_GuiText("GuiSkinDefault", s_GuiSkinName[0], 32);
-    Esc_GuiText("GuiSkin1", s_GuiSkinName[1], 32);
-    Esc_GuiText("GuiSkin2", s_GuiSkinName[2], 32);
-    Esc_GuiText("GuiSkin3", s_GuiSkinName[3], 32);
-    Esc_GuiText("GuiSkin4", s_GuiSkinName[4], 32);
-    Esc_GuiText("GuiScatterOff", s_GuiScatter[0], 32);
-    Esc_GuiText("GuiScatterOnPlace", s_GuiScatter[1], 32);
-    Esc_GuiText("GuiScatterAuto", s_GuiScatter[2], 32);
-    Esc_GuiText("GuiSideHideOff", s_GuiHide[0], 32);
-    Esc_GuiText("GuiSideHideFull", s_GuiHide[1], 32);
-    Esc_GuiText("GuiSideHideRadar", s_GuiHide[2], 32);
-    Esc_GuiText("GuiSideHideBare", s_GuiHide[3], 32);
-    Esc_GuiText("GuiSwsSideRight", s_GuiSwsSide[0], 32);
-    Esc_GuiText("GuiSwsSideLeft", s_GuiSwsSide[1], 32);
+    ESC_LOAD_FAM(kSkinKey, s_GuiSkinName, 0);
+    ESC_LOAD_FAM(kScatterKey, s_GuiScatter, 0);
+    ESC_LOAD_FAM(kHideKey, s_GuiHide, 0);
+    ESC_LOAD_FAM(kSwsSideKey, s_GuiSwsSide, 0);
 
-    s_TextMissing = 0;
     Esc_TextText("TextTitle", s_TextTitle, ESC_LABEL_CAP);
-    Esc_TextText("TextGroupCamp", s_TextLabel[TX_GROUP_CAMP], ESC_LABEL_CAP);
-    Esc_TextText("TextCampEnable", s_TextLabel[TX_CAMP_ENABLE], ESC_LABEL_CAP);
-    Esc_TextText("TextCampLines", s_TextLabel[TX_CAMP_LINES], ESC_LABEL_CAP);
-    Esc_TextText("TextCampOpacity", s_TextLabel[TX_CAMP_OPACITY], ESC_LABEL_CAP);
-    Esc_TextText("TextCampPos", s_TextLabel[TX_CAMP_POS], ESC_LABEL_CAP);
-    Esc_TextText("TextCampAlign", s_TextLabel[TX_CAMP_ALIGN], ESC_LABEL_CAP);
-    Esc_TextText("TextCampWidth", s_TextLabel[TX_CAMP_WIDTH], ESC_LABEL_CAP);
-    Esc_TextText("TextCampAnim", s_TextLabel[TX_CAMP_ANIM], ESC_LABEL_CAP);
-    Esc_TextText("TextCampBar", s_TextLabel[TX_CAMP_BAR], ESC_LABEL_CAP);
-    Esc_TextText("TextGroupChat", s_TextLabel[TX_GROUP_CHAT], ESC_LABEL_CAP);
-    Esc_TextText("TextChatEdit", s_TextLabel[TX_CHAT_EDIT], ESC_LABEL_CAP);
-    Esc_TextText("TextChatName", s_TextLabel[TX_CHAT_NAME], ESC_LABEL_CAP);
-    Esc_TextText("TextGroupHint", s_TextLabel[TX_GROUP_HINT], ESC_LABEL_CAP);
-    Esc_TextText("TextHintShow", s_TextLabel[TX_HINT_SHOW], ESC_LABEL_CAP);
-    Esc_TextText("TextHintColor", s_TextLabel[TX_HINT_COLOR], ESC_LABEL_CAP);
-    Esc_TextText("TextHintLines", s_TextLabel[TX_HINT_LINES], ESC_LABEL_CAP);
-    Esc_TextText("TextHintWidth", s_TextLabel[TX_HINT_WIDTH], ESC_LABEL_CAP);
-    Esc_TextText("TextHintBar", s_TextLabel[TX_HINT_BAR], ESC_LABEL_CAP);
-    Esc_TextText("TextHintRadar", s_TextLabel[TX_HINT_RADAR], ESC_LABEL_CAP);
-    Esc_TextText("TextCampPosBottom", s_TextPos[0], 32);
-    Esc_TextText("TextCampPosTop", s_TextPos[1], 32);
-    Esc_TextText("TextAlignLeft", s_TextAlign[0], 32);
-    Esc_TextText("TextAlignCenter", s_TextAlign[1], 32);
-    Esc_TextText("TextBarNone", s_TextBar[0], 32);
-    Esc_TextText("TextBarLeft", s_TextBar[1], 32);
-    Esc_TextText("TextBarRight", s_TextBar[2], 32);
-    Esc_TextText("TextColorWhite", s_TextColor[0], 32);
-    Esc_TextText("TextColorPlayer", s_TextColor[1], 32);
+    ESC_LOAD_FAM(kTextKey, s_TextLabel, 1);
+    ESC_LOAD_FAM(kPosKey, s_TextPos, 1);
+    ESC_LOAD_FAM(kAlignKey, s_TextAlign, 1);
+    ESC_LOAD_FAM(kBarKey, s_TextBar, 1);
+    ESC_LOAD_FAM(kColorKey, s_TextColor, 1);
 }
+
 
 void EscMenu_EnsureInit(void)
 {
@@ -479,11 +475,13 @@ static int Esc_TextHeight(int px, int slot)
     return (g_G->adv + ESC_TEXT_SS - 1) / ESC_TEXT_SS;
 }
 
-static int Esc_ContentTop(const RECT* p)
+/* 行区起点 (标题 + 分隔线之后); 该页缺文案时再让开一条提示的高度。 */
+static int Esc_ContentTop(const RECT* p, int missing)
 {
-    return p->top + ESC_PAD
-           + Esc_TextHeight(ESC_TITLE_PX, ESC_TITLE_SLOT)
-           + ESC_TITLE_GAP + ESC_SEP_GAP;
+    int y = p->top + ESC_PAD + Esc_TextHeight(ESC_TITLE_PX, ESC_TITLE_SLOT)
+            + ESC_TITLE_GAP + ESC_SEP_GAP;
+
+    return missing ? y + ESC_WARN_H + ESC_WARN_GAP : y;
 }
 
 static void Esc_IntToW(wchar_t* dst, unsigned value, int cap)
@@ -493,6 +491,12 @@ static void Esc_IntToW(wchar_t* dst, unsigned value, int cap)
     if ((int)n > cap - 1) n = (unsigned)(cap - 1);
     for (i = 0; i < n; i++) dst[i] = (wchar_t)b[i];
     dst[n] = 0;
+}
+
+/* 点是否落在矩形内 (右/下开区间, 各处命中判定统一口径) */
+static int EscIn(int x, int y, int w, int h, int mx, int my)
+{
+    return mx >= x && mx < x + w && my >= y && my < y + h;
 }
 
 static void Esc_Redraw(HWND hDlg)
@@ -611,68 +615,61 @@ static const EscGuiRowInfo s_TextLayout[TX_COUNT] = {
     { EG_SWITCH, TX_HINT_RADAR }
 };
 
-static int Esc_GuiContentTop(const RECT* p)
+/* 一页的行表 + 全局行距参数; 绘制/命中/滚动都按它走。 */
+typedef struct {
+    const EscGuiRowInfo* rows;
+    int n;
+    int groupH;
+    int gap;
+    int scrollable;
+    void (*draw)(void* surf, int rowL, int rowY, int rowW, int rh, int bodyH,
+                 int kind, int item);
+} EscPage;
+
+static int Esc_RowH(const RECT* p, const EscGuiRowInfo* rows, int i, int groupH)
 {
-    int y = Esc_ContentTop(p);
-    if (s_GuiMissing) y += ESC_WARN_H + ESC_WARN_GAP;
-    return y;
-}
+    int kind = rows[i].kind;
 
-static int Esc_GuiRowH(const RECT* p, int index)
-{
-    int rows;
-
-    if (s_GuiLayout[index].kind == EG_GROUP) return ESC_GUI_GROUP_H;
-    if (s_GuiLayout[index].kind != EG_COLOR) return ESC_ROW_H;
-
-    rows = Esc_ColorRows((p->right - p->left) - ESC_PAD * 2);
-    return ESC_ROW_H + (rows - 1) * (ESC_COLOR_SW + ESC_COLOR_GAP);
-}
-
-static int Esc_TextContentTop(const RECT* p)
-{
-    int y = Esc_ContentTop(p);
-    if (s_TextMissing) y += ESC_WARN_H + ESC_WARN_GAP;
-    return y;
-}
-
-static int Esc_TextRowH(int index)
-{
-    int kind = s_TextLayout[index].kind;
-    if (kind == EG_GROUP) return ESC_GROUP_H;
+    if (kind == EG_GROUP) return groupH;
     if (kind == EG_SEP) return ESC_SEP_H;
+    if (kind == EG_COLOR)
+        return ESC_ROW_H + (Esc_ColorRows((p->right - p->left) - ESC_PAD * 2) - 1)
+                            * (ESC_COLOR_SW + ESC_COLOR_GAP);
     return ESC_ROW_H;
 }
 
-static int Esc_TextTotalH(void)
-{
-    int i, h = 0;
-    for (i = 0; i < TX_COUNT; i++)
-    {
-        if (s_TextLayout[i].kind == EG_GROUP && s_TextLayout[i].item != 0)
-            h += ESC_BLOCK_GAP;
-        h += Esc_TextRowH(i);
-    }
-    return h;
-}
-
-/* 吸附到行顶: 滚动量只取行起始位置, 避免整行被上下裁剪。 */
-static int Esc_TextSnap(int scroll)
+/* 走一遍文本页的行表: *total 写出总高, 返回 <= scroll 的最近行顶
+ * (滚动吸附到行顶, 避免整行被上下裁剪)。 */
+static int Esc_TextWalk(int scroll, int* total)
 {
     int i, y = 0, best = 0;
+
     for (i = 0; i < TX_COUNT; i++)
     {
         if (s_TextLayout[i].kind == EG_GROUP && s_TextLayout[i].item != 0)
             y += ESC_BLOCK_GAP;
         if (y <= scroll) best = y;
-        y += Esc_TextRowH(i);
+        y += Esc_RowH(NULL, s_TextLayout, i, ESC_GROUP_H);
     }
+    if (total) *total = y;
     return best;
+}
+
+static int Esc_TextTotalH(void)
+{
+    int total = 0;
+    Esc_TextWalk(-1, &total);
+    return total;
+}
+
+static int Esc_TextSnap(int scroll)
+{
+    return Esc_TextWalk(scroll, NULL);
 }
 
 static int Esc_TextViewH(const RECT* p)
 {
-    int h = p->bottom - ESC_PAD - Esc_TextContentTop(p);
+    int h = p->bottom - ESC_PAD - Esc_ContentTop(p, s_TextMissing);
     return h > 0 ? h : 0;
 }
 
@@ -725,23 +722,13 @@ static void Esc_Fill(void* surf, int x, int y, int w, int h,
     if (a == 0) return;
     base = Esc_LockRect(surf, &x, &y, &w, &h, &pitch);
     if (!base) return;
-
-    if (a >= 255)
+    col = Blend16(0, r, g, b, 255);
+    for (j = 0; j < h; j++)
     {
-        col = Blend16(0, r, g, b, 255);
-        for (j = 0; j < h; j++)
-        {
-            unsigned short* row = (unsigned short*)(base + (size_t)(y + j) * pitch + (size_t)x * 2);
-            for (i = 0; i < w; i++) row[i] = col;
-        }
-    }
-    else
-    {
-        for (j = 0; j < h; j++)
-        {
-            unsigned short* row = (unsigned short*)(base + (size_t)(y + j) * pitch + (size_t)x * 2);
-            for (i = 0; i < w; i++) row[i] = Blend16(row[i], r, g, b, a);
-        }
+        unsigned short* row = (unsigned short*)(base + (size_t)(y + j) * pitch
+                                                + (size_t)x * 2);
+        if (a >= 255) for (i = 0; i < w; i++) row[i] = col;
+        else          for (i = 0; i < w; i++) row[i] = Blend16(row[i], r, g, b, a);
     }
     GtUnlock(surf);
 }
@@ -839,7 +826,7 @@ static int Esc_TextWidth(const wchar_t* s, int px, int slot)
 static void Esc_DrawMissingNotice(void* surf, const RECT* p, int bodyH,
                                   int rowL, int rowW)
 {
-    int y = Esc_ContentTop(p);
+    int y = Esc_ContentTop(p, 0);
 
     Esc_Fill(surf, rowL, y, rowW, ESC_WARN_H, 88, 30, 30, 220);
     Esc_Text(surf, s_MissingNotice, rowL + ESC_TEXT_INSET,
@@ -868,7 +855,7 @@ static void Esc_Capsule(void* surf, int x, int y, int w, int h,
 {
     unsigned char* base;
     int W, H, pitch, rad, px, py, sx, sy;
-    int x0, x1, y0, y1, radS, cyS;
+    int x0, x1, y0, y1, radS, cyS, wS;
 
     if (!surf || w <= 0 || h <= 0 || a == 0) return;
     rad = h / 2;
@@ -878,18 +865,17 @@ static void Esc_Capsule(void* surf, int x, int y, int w, int h,
     pitch = GtSurfGet(surf, GtVT_GET_PITCH);
     if (W < 1 || H < 1 || pitch < W * 2) return;
 
-    x0 = x; x1 = x + w;
-    y0 = y; y1 = y + h;
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > W) x1 = W;
-    if (y1 > H) y1 = H;
+    x0 = x < 0 ? 0 : x;
+    y0 = y < 0 ? 0 : y;
+    x1 = x + w > W ? W : x + w;
+    y1 = y + h > H ? H : y + h;
     if (x1 <= x0 || y1 <= y0) return;
-
     base = GtLock(surf);
     if (!base) return;
 
+    /* 8x8 子采样求覆盖率: 中间直段整格算, 两端按到圆心距判 */
     radS = rad * ESC_AA_SCALE;
+    wS = w * ESC_AA_SCALE;
     cyS = (h * ESC_AA_SCALE) / 2;
     for (py = y0; py < y1; py++)
     {
@@ -899,74 +885,13 @@ static void Esc_Capsule(void* surf, int x, int y, int w, int h,
             int cov = 0;
             for (sy = 0; sy < ESC_AA_SS; sy++)
             {
-                int yy = (py - y) * ESC_AA_SCALE + sy * 2 + 1;
-                int dy = yy - cyS;
+                int dy = (py - y) * ESC_AA_SCALE + sy * 2 + 1 - cyS;
                 for (sx = 0; sx < ESC_AA_SS; sx++)
                 {
-                    int xx = (px - x) * ESC_AA_SCALE + sx * 2 + 1;
-                    int dx;
-                    if (xx < radS)
-                        dx = xx - radS;
-                    else if (xx > w * ESC_AA_SCALE - radS)
-                        dx = xx - (w * ESC_AA_SCALE - radS);
-                    else
-                    {
-                        cov++;
-                        continue;
-                    }
-                    if (dx * dx + dy * dy <= radS * radS) cov++;
-                }
-            }
-            if (cov)
-            {
-                unsigned aa = (a * (unsigned)cov + ESC_AA_COV / 2) / ESC_AA_COV;
-                if (aa) row[px - x0] = Blend16(row[px - x0], r, g, b, aa);
-            }
-        }
-    }
-    GtUnlock(surf);
-}
-
-static void Esc_Disc(void* surf, int cx, int cy, int rad,
-                     unsigned r, unsigned g, unsigned b, unsigned a)
-{
-    unsigned char* base;
-    int W, H, pitch, px, py, sx, sy;
-    int x0, x1, y0, y1, radS, cxS, cyS;
-
-    if (!surf || rad <= 0 || a == 0) return;
-
-    W = GtSurfGet(surf, GtVT_GET_WIDTH);
-    H = GtSurfGet(surf, GtVT_GET_HEIGHT);
-    pitch = GtSurfGet(surf, GtVT_GET_PITCH);
-    if (W < 1 || H < 1 || pitch < W * 2) return;
-
-    x0 = cx - rad; x1 = cx + rad;
-    y0 = cy - rad; y1 = cy + rad;
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > W) x1 = W;
-    if (y1 > H) y1 = H;
-    if (x1 <= x0 || y1 <= y0) return;
-
-    base = GtLock(surf);
-    if (!base) return;
-
-    radS = rad * ESC_AA_SCALE;
-    cxS = cx * ESC_AA_SCALE;
-    cyS = cy * ESC_AA_SCALE;
-    for (py = y0; py < y1; py++)
-    {
-        unsigned short* row = (unsigned short*)(base + (size_t)py * pitch) + x0;
-        for (px = x0; px < x1; px++)
-        {
-            int cov = 0;
-            for (sy = 0; sy < ESC_AA_SS; sy++)
-            {
-                int dy = py * ESC_AA_SCALE + sy * 2 + 1 - cyS;
-                for (sx = 0; sx < ESC_AA_SS; sx++)
-                {
-                    int dx = px * ESC_AA_SCALE + sx * 2 + 1 - cxS;
+                    int dx = (px - x) * ESC_AA_SCALE + sx * 2 + 1;
+                    if (dx < radS) dx -= radS;
+                    else if (dx > wS - radS) dx -= wS - radS;
+                    else { cov++; continue; }
                     if (dx * dx + dy * dy <= radS * radS) cov++;
                 }
             }
@@ -988,9 +913,11 @@ static void Esc_Switch(void* surf, int x, int y, int on)
     Esc_Capsule(surf, x + 1, y + 1, ESC_SW_W - 2, ESC_SW_H - 2,
                 on ? 123u : 70u, on ? 32u : 70u, on ? 123u : 70u, 255);
 
+    /* 圆把手 = 两端各半圆、直段为空的胶囊 (宽 = 高 = 2*半径) */
     knob = ESC_SW_H / 2 - 3;
     cx = on ? x + ESC_SW_W - ESC_SW_H / 2 : x + ESC_SW_H / 2;
-    Esc_Disc(surf, cx, y + ESC_SW_H / 2, knob, shade, shade, shade, 255);
+    Esc_Capsule(surf, cx - knob, y + ESC_SW_H / 2 - knob, knob * 2, knob * 2,
+                shade, shade, shade, 255);
 }
 
 static int Esc_PanelFrame(void* surf, RECT* p, const wchar_t* title)
@@ -1034,7 +961,7 @@ static void Esc_Panel(void* surf, RECT* p, const wchar_t* title,
 
     rowL = p->left + ESC_PAD;
     rowW = w - ESC_PAD * 2;
-    rowY = Esc_ContentTop(p);
+    rowY = Esc_ContentTop(p, 0);
     for (i = 0; i < n; i++, rowY += ESC_ROW_H)
     {
         if (rowY + ESC_ROW_H > p->bottom - ESC_PAD) break;
@@ -1059,23 +986,31 @@ static int Esc_RowCtlX(int rowRight)
     return rowRight - ESC_CTL_RIGHT - ESC_STEP_W;
 }
 
-static void Esc_SegLayout(wchar_t names[][32], int n,
-                          int rowL, int rowW, int* xs, int* ws)
+/* 一排等间距标签的版式: 右端对齐 right, 返回总宽。
+ * 分段选择行 (Esc_DrawSegRow / Esc_SegmentAt) 与标题栏语言切换共用。 */
+static int Esc_SegLayoutAt(wchar_t (*names)[32], int n, int right, int gap,
+                           int* xs, int* ws)
 {
     int i, total = 0, x;
 
     for (i = 0; i < n; i++)
     {
         ws[i] = Esc_TextWidth(names[i], ESC_BODY_PX, ESC_BODY_SLOT);
-        total += ws[i];
-        if (i) total += ESC_SKIN_GAP;
+        total += ws[i] + (i ? gap : 0);
     }
-    x = rowL + rowW - ESC_CTL_RIGHT - total;
+    x = right - total;
     for (i = 0; i < n; i++)
     {
         xs[i] = x;
-        x += ws[i] + ESC_SKIN_GAP;
+        x += ws[i] + gap;
     }
+    return total;
+}
+
+static void Esc_SegLayout(wchar_t names[][32], int n,
+                          int rowL, int rowW, int* xs, int* ws)
+{
+    Esc_SegLayoutAt(names, n, rowL + rowW - ESC_CTL_RIGHT, ESC_SKIN_GAP, xs, ws);
 }
 
 static int Esc_SegmentAt(wchar_t names[][32], int n,
@@ -1095,49 +1030,141 @@ static int Esc_PickSeg(wchar_t names[][32], int n, const RECT* right, int mx)
                          (right->right - right->left) - ESC_PAD * 2, mx);
 }
 
-static wchar_t (*Esc_ChoiceNames(int item))[32]
+/* ---- 表驱动的行控件 ----
+ * 三张表 (GUI 开关 / GUI 分段 / 文本页开关与分段) 把"取反 -> 写回 -> 排队落盘"
+ * 这套重复动作收成一份; 新加一个开关只需加一行, 不用改 apply 的 switch。 */
+static void Esc_QueueRaw(const char* section, const char* key, const char* value);
+static void Esc_QueueValue(const char* section, const char* key, int value);
+
+typedef struct {
+    unsigned char item;
+    const char* section;
+    const char* key;
+    int (*get)(void);
+    void (*set)(int);
+} EscToggle;
+
+static const EscToggle s_Toggle[] = {
+    { GUI_ITEM_SCALE,        "BottomBar", "ScaleEnable",  SB_Enabled,        SB_SetEnabled },
+    { GUI_ITEM_PAUSE,        "BottomBar", "PauseEnable",  PV_ButtonsEnabled, PV_SetButtonsEnabled },
+    { GUI_ITEM_GRID,         "BottomBar", "GridEnable",   GV_IsOn,           GV_SetOn },
+    { GUI_ITEM_SHOT,         "BottomBar", "ShotEnable",   Shot_Visible,      Shot_SetVisible },
+    { GUI_ITEM_FPS,          "FrameCap",  "Enable",       FrameCap_Enabled,  FrameCap_SetEnabled },
+    { GUI_ITEM_SWS,          "SWSidebar", "Enable",       SWS_Enabled,       SWS_SetEnabled },
+    { GUI_ITEM_SORT,         "SWSidebar", "FillMode",     SWS_FillMode,      SWS_SetFillMode },
+    { GUI_ITEM_GAMESPEED_ON, "GameSpeed", "Enable",       GameSpeed_Enabled, GameSpeed_SetEnabled },
+    { GUI_ITEM_BUILD_QUEUE,  "Features",  "BuildQueue",   BQ_Enabled,        BQ_SetEnabled },
+    { GUI_ITEM_SIDE_SCROLL,  "Sidebar",   "ScrollEnable", SS_Enabled,        SS_SetEnabled }
+};
+
+/* 行控件表的 item 都是首字段, 五张表的查找长得一样, 用宏生成。 */
+#define ESC_FINDER(fn, T, tab)                                               \
+    static const T* fn(int item)                                             \
+    {                                                                        \
+        int i;                                                               \
+        for (i = 0; i < (int)(sizeof(tab) / sizeof((tab)[0])); i++)           \
+            if ((tab)[i].item == item) return &(tab)[i];                      \
+        return NULL;                                                         \
+    }
+
+ESC_FINDER(Esc_ToggleFind, EscToggle, s_Toggle)
+
+/* 分段选择行: 显示值可能与底层开关反相 (右/左、下/上)。 */
+typedef struct {
+    unsigned char item;
+    wchar_t (*names)[32];
+    unsigned char n;
+    unsigned char invert;
+    int (*get)(void);
+    void (*apply)(int pick);
+} EscChoice;
+
+static void EscChoiceScatter(int pick)
 {
-    if (item == GUI_ITEM_SIDE_HIDE) return s_GuiHide;
-    if (item == GUI_ITEM_SWS_SIDE) return s_GuiSwsSide;
-    return s_GuiScatter;
+    PS_SetMode(pick);
+    Esc_QueueValue("PlaceScatter", "Mode", pick);
 }
 
-static int Esc_ChoiceN(int item)
+static void EscChoiceHide(int pick)
 {
-    if (item == GUI_ITEM_SIDE_HIDE) return ESC_HIDE_N;
-    if (item == GUI_ITEM_SWS_SIDE) return ESC_SWS_SIDE_N;
-    return ESC_SCATTER_N;
+    FM_SetHideState(pick);
+    Esc_QueueValue("Sidebar", "HideEnable", pick ? 1 : 0);
+    if (pick) Esc_QueueValue("Sidebar", "Mode", pick - 1);
 }
 
-static int Esc_ChoiceValue(int item)
+static void EscChoiceSwsSide(int pick)
 {
-    if (item == GUI_ITEM_SIDE_HIDE) return FM_HideState();
-    if (item == GUI_ITEM_SWS_SIDE) return SWS_SideRight() ? 0 : 1;
-    return PS_Mode();
+    SWS_SetSideRight(pick == 0);
+    Esc_QueueRaw("SWSidebar", "Side", pick ? "left" : "right");
 }
 
-static wchar_t (*Esc_TextChoiceNames(int item))[32]
+static const EscChoice s_Choice[] = {
+    { GUI_ITEM_SCATTER,   s_GuiScatter, ESC_SCATTER_N,  0, PS_Mode,       EscChoiceScatter },
+    { GUI_ITEM_SIDE_HIDE, s_GuiHide,    ESC_HIDE_N,     0, FM_HideState,  EscChoiceHide },
+    { GUI_ITEM_SWS_SIDE,  s_GuiSwsSide, ESC_SWS_SIDE_N, 1, SWS_SideRight, EscChoiceSwsSide }
+};
+
+ESC_FINDER(Esc_ChoiceFind, EscChoice, s_Choice)
+
+static int Esc_ChoiceValue(const EscChoice* c)
 {
-    if (item == TX_CAMP_POS) return s_TextPos;
-    if (item == TX_CAMP_ALIGN) return s_TextAlign;
-    if (item == TX_HINT_COLOR) return s_TextColor;
-    return s_TextBar;
+    return c->invert ? !c->get() : c->get();
 }
 
-static int Esc_TextChoiceN(int item)
+typedef struct {
+    unsigned char item;
+    wchar_t (*names)[32];
+    unsigned char n;
+    unsigned char invert;
+    unsigned char opt;      /* MSG_OPT_* */
+    const char* key;        /* [MsgText] 键 */
+} EscTextChoice;
+
+static const EscTextChoice s_TChoice[] = {
+    { TX_CAMP_POS,   s_TextPos,   2, 1, MSG_OPT_CAMP_BOTTOM,   "CampBottom" },
+    { TX_CAMP_ALIGN, s_TextAlign, 2, 0, MSG_OPT_CAMP_CENTERED, "CampCentered" },
+    { TX_CAMP_BAR,   s_TextBar,   3, 0, MSG_OPT_CAMP_BAR,      "CampBarSide" },
+    { TX_HINT_COLOR, s_TextColor, 2, 0, MSG_OPT_HINT_COLOR,    "HintColorFollow" },
+    { TX_HINT_BAR,   s_TextBar,   3, 0, MSG_OPT_HINT_BAR,      "HintBarSide" }
+};
+
+ESC_FINDER(Esc_TChoiceFind, EscTextChoice, s_TChoice)
+
+static int Esc_TChoiceValue(const EscTextChoice* c)
 {
-    if (item == TX_CAMP_BAR || item == TX_HINT_BAR) return 3;
-    return 2;
+    int v = MsgText_GetOption(c->opt);
+    return c->invert ? !v : v;
 }
 
-static int Esc_TextChoiceValue(int item)
+/* 文本页开关: opt >= 0 走 MsgText 选项, 否则走自己的 get/set。 */
+typedef struct {
+    signed char item;
+    signed char opt;
+    int (*get)(void);
+    void (*set)(int);
+    const char* key;
+} EscTextToggle;
+
+static const EscTextToggle s_TToggle[] = {
+    { TX_CAMP_ENABLE, MSG_OPT_CAMP_ENABLE, NULL, NULL, "CampEnable" },
+    { TX_CAMP_ANIM,   MSG_OPT_CAMP_ANIM,   NULL, NULL, "CampAnim" },
+    { TX_HINT_SHOW,   MSG_OPT_HINT_SHOW,   NULL, NULL, "HintShow" },
+    { TX_HINT_RADAR,  MSG_OPT_HINT_RADAR,  NULL, NULL, "HintRadarShow" },
+    { TX_CHAT_EDIT,   -1, ChatEdit_Enabled,    ChatEdit_SetEnabled,    "ChatEdit" },
+    { TX_CHAT_NAME,   -1, ChatEdit_ShowNameSP, ChatEdit_SetShowNameSP, "ChatNameSP" }
+};
+
+ESC_FINDER(Esc_TToggleFind, EscTextToggle, s_TToggle)
+
+static int Esc_TToggleVal(const EscTextToggle* t)
 {
-    if (item == TX_CAMP_POS) return MsgText_GetOption(MSG_OPT_CAMP_BOTTOM) ? 0 : 1;
-    if (item == TX_CAMP_ALIGN) return MsgText_GetOption(MSG_OPT_CAMP_CENTERED) ? 1 : 0;
-    if (item == TX_CAMP_BAR) return MsgText_GetOption(MSG_OPT_CAMP_BAR);
-    if (item == TX_HINT_COLOR) return MsgText_GetOption(MSG_OPT_HINT_COLOR);
-    if (item == TX_HINT_BAR) return MsgText_GetOption(MSG_OPT_HINT_BAR);
-    return 0;
+    return t->opt >= 0 ? MsgText_GetOption(t->opt) : t->get();
+}
+
+static void Esc_TTogglePut(const EscTextToggle* t, int v)
+{
+    if (t->opt >= 0) MsgText_SetOption(t->opt, v);
+    else t->set(v);
 }
 
 typedef struct {
@@ -1155,13 +1182,7 @@ static const EscTextNum s_TextNum[] = {
     { TX_HINT_WIDTH,   MSG_OPT_HINT_WIDTH,   "HintMaxWidth", 100,          1600,         20 }
 };
 
-static const EscTextNum* Esc_TextNumFind(int item)
-{
-    int i;
-    for (i = 0; i < (int)(sizeof(s_TextNum) / sizeof(s_TextNum[0])); i++)
-        if (s_TextNum[i].item == item) return &s_TextNum[i];
-    return NULL;
-}
+ESC_FINDER(Esc_TextNumFind, EscTextNum, s_TextNum)
 
 static void Esc_ColorCell(int i, int per, int rowL, int* px, int* py)
 {
@@ -1307,7 +1328,7 @@ static int Esc_CancelHit(const RECT* p, int mx, int my)
     RECT r;
 
     Esc_CancelRect(p, &r);
-    return mx >= r.left && mx < r.right && my >= r.top && my < r.bottom;
+    return EscIn(r.left, r.top, ESC_CANCEL_W, ESC_CANCEL_H, mx, my);
 }
 
 static int Esc_EditCurAt(const RECT* right, int mx, const wchar_t* s, int len,
@@ -1393,20 +1414,8 @@ static void Esc_DrawSortRow(void* surf, int rowL, int rowY, int rowW,
 
 static int Esc_LangLayout(const RECT* p, int* xs, int* ws)
 {
-    int i, total = 0, x;
-    for (i = 0; i < ESC_LANG_N; i++)
-    {
-        ws[i] = Esc_TextWidth(s_LangLabel[i], ESC_BODY_PX, ESC_BODY_SLOT);
-        total += ws[i];
-        if (i) total += ESC_LANG_GAP;
-    }
-    x = p->right - ESC_PAD - ESC_TEXT_INSET - total;
-    for (i = 0; i < ESC_LANG_N; i++)
-    {
-        xs[i] = x;
-        x += ws[i] + ESC_LANG_GAP;
-    }
-    return total;
+    return Esc_SegLayoutAt(s_LangLabel, ESC_LANG_N,
+                           p->right - ESC_PAD - ESC_TEXT_INSET, ESC_LANG_GAP, xs, ws);
 }
 
 static int Esc_LangHitX(const RECT* p, int mx)
@@ -1427,25 +1436,35 @@ static int Esc_LangHit(const RECT* p, int mx, int my)
     return Esc_LangHitX(p, mx);
 }
 
+/* 一排可选标签: 选中的提亮成金色并在 ulY 画下划线 (value<0 = 都没选中)。 */
+static void Esc_DrawSegs(void* surf, const int* xs, const int* ws,
+                         wchar_t (*names)[32], int n, int value, int ty, int ulY)
+{
+    int i, on;
+
+    for (i = 0; i < n; i++)
+    {
+        on = (i == value);
+        Esc_Text(surf, names[i], xs[i], ty, ws[i] + 2,
+                 ESC_BODY_PX, ESC_BODY_SLOT,
+                 on ? 245 : 145, on ? 225 : 145, on ? 170 : 145);
+    }
+    if (value >= 0 && value < n)
+        Esc_Fill(surf, xs[value], ulY, ws[value], 2, 208, 160, 64, 255);
+}
+
 static void Esc_DrawLangTitle(void* surf, const RECT* p)
 {
     int xs[ESC_LANG_N], ws[ESC_LANG_N];
-    int mode = Lang_GetMode(), i;
+    int mode = Lang_GetMode(), i, value = -1;
     int titleH = Esc_TextHeight(ESC_TITLE_PX, ESC_TITLE_SLOT);
     int bodyH = Esc_TextHeight(ESC_BODY_PX, ESC_BODY_SLOT);
     int ty = p->top + ESC_PAD + (titleH - bodyH) / 2;
 
-    Esc_LangLayout(p, xs, ws);
     for (i = 0; i < ESC_LANG_N; i++)
-    {
-        int on = (s_LangMode[i] == mode);
-        Esc_Text(surf, s_LangLabel[i], xs[i], ty, ws[i] + 2,
-                 ESC_BODY_PX, ESC_BODY_SLOT,
-                 on ? 245 : 145, on ? 225 : 145, on ? 170 : 145);
-        if (on)
-            Esc_Fill(surf, xs[i], ty + bodyH + 2, ws[i], 2,
-                     208, 160, 64, 255);
-    }
+        if (s_LangMode[i] == mode) value = i;
+    Esc_LangLayout(p, xs, ws);
+    Esc_DrawSegs(surf, xs, ws, s_LangLabel, ESC_LANG_N, value, ty, ty + bodyH + 2);
 }
 
 static void Esc_DrawSegRow(void* surf, int rowL, int rowY, int rowW,
@@ -1453,23 +1472,12 @@ static void Esc_DrawSegRow(void* surf, int rowL, int rowY, int rowW,
                            wchar_t names[][32], int n, int value)
 {
     int xs[ESC_SEG_MAX], ws[ESC_SEG_MAX];
-    int i, ty;
 
     if (value < 0 || value >= n) value = 0;
-    ty = rowY + (ESC_ROW_H - bodyH) / 2;
-
     Esc_SegLayout(names, n, rowL, rowW, xs, ws);
     Esc_RowLabel(surf, rowL, rowY, xs[0], bodyH, label);
-
-    for (i = 0; i < n; i++)
-    {
-        int on = (i == value);
-        Esc_Text(surf, names[i], xs[i], ty, ws[i] + 2,
-                 ESC_BODY_PX, ESC_BODY_SLOT,
-                 on ? 245 : 145, on ? 225 : 145, on ? 170 : 145);
-    }
-    Esc_Fill(surf, xs[value], rowY + ESC_ROW_H - 6, ws[value], 2,
-             208, 160, 64, 255);
+    Esc_DrawSegs(surf, xs, ws, names, n, value,
+                 rowY + (ESC_ROW_H - bodyH) / 2, rowY + ESC_ROW_H - 6);
 }
 
 static void Esc_DrawColorRow(void* surf, int rowL, int rowY, int rowW,
@@ -1528,17 +1536,27 @@ static void Esc_DrawNumText(void* surf, int boxX, int boxY, int boxW,
     }
 }
 
+/* 数值框: 底 + 边框 (编辑中换成金色) + 数字与光标。 */
+static void Esc_DrawEditBox(void* surf, int x, int y, int w, int textY,
+                            int value, int editing, const wchar_t* text)
+{
+    unsigned bg = editing ? 40u : 24u;
+    unsigned r = editing ? 208u : 0x7Bu;
+    unsigned g = editing ? 160u : 0x79u;
+    unsigned b = editing ? 64u : 0x7Bu;
+    unsigned a = editing ? 255u : 150u;
+
+    Esc_Fill(surf, x, y, w, ESC_STEP_BTN_H, bg, bg, bg, 230);
+    Esc_Outline(surf, x, y, w, ESC_STEP_BTN_H, r, g, b, a, 1);
+    Esc_DrawNumText(surf, x, y, w, textY, value, editing, text);
+}
+
 static void Esc_DrawValueRow(void* surf, int rowL, int rowY, int rowW,
                              int bodyH, const wchar_t* label, int value,
                              int minValue, int maxValue, int editing,
                              const wchar_t* text)
 {
     int ctlX, btnY, boxX, boxW;
-    unsigned bg = editing ? 40u : 24u;
-    unsigned border = editing ? 208u : 0x7Bu;
-    unsigned borderG = editing ? 160u : 0x79u;
-    unsigned borderB = editing ? 64u : 0x7Bu;
-    unsigned borderA = editing ? 255u : 150u;
 
     ctlX = Esc_RowCtlX(rowL + rowW);
     btnY = rowY + (ESC_ROW_H - ESC_STEP_BTN_H) / 2;
@@ -1549,11 +1567,7 @@ static void Esc_DrawValueRow(void* surf, int rowL, int rowY, int rowW,
                    value < maxValue);
 
     Esc_StepBox(ctlX, &boxX, &boxW);
-    Esc_Fill(surf, boxX, btnY, boxW, ESC_STEP_BTN_H, bg, bg, bg, 230);
-    Esc_Outline(surf, boxX, btnY, boxW, ESC_STEP_BTN_H,
-                border, borderG, borderB, borderA, 1);
-
-    Esc_DrawNumText(surf, boxX, btnY, boxW, rowY + (ESC_ROW_H - bodyH) / 2,
+    Esc_DrawEditBox(surf, boxX, btnY, boxW, rowY + (ESC_ROW_H - bodyH) / 2,
                     value, editing, text);
 }
 
@@ -1564,11 +1578,6 @@ static void Esc_DrawSlideRow(void* surf, int rowL, int rowY, int rowW,
 {
     int trkX, trkW, numX, numW;
     int knobX, ty, ky, btnY;
-    unsigned bg = editing ? 40u : 24u;
-    unsigned bR = editing ? 208u : 0x7Bu;
-    unsigned bG = editing ? 160u : 0x79u;
-    unsigned bB = editing ? 64u : 0x7Bu;
-    unsigned bA = editing ? 255u : 150u;
 
     Esc_SlideGeom(rowL, rowW, &trkX, &trkW, &numX, &numW);
     Esc_RowLabel(surf, rowL, rowY, trkX, bodyH, label);
@@ -1593,27 +1602,9 @@ static void Esc_DrawSlideRow(void* surf, int rowL, int rowY, int rowW,
     Esc_Outline(surf, knobX - ESC_SLIDE_KNOB_W / 2, ky,
                 ESC_SLIDE_KNOB_W, ESC_SLIDE_KNOB_H, 20, 20, 20, 220, 1);
 
-    /* 数值框 */
     btnY = rowY + (ESC_ROW_H - ESC_STEP_BTN_H) / 2;
-    Esc_Fill(surf, numX, btnY, numW, ESC_STEP_BTN_H, bg, bg, bg, 230);
-    Esc_Outline(surf, numX, btnY, numW, ESC_STEP_BTN_H, bR, bG, bB, bA, 1);
-
-    Esc_DrawNumText(surf, numX, btnY, numW, rowY + (ESC_ROW_H - bodyH) / 2,
+    Esc_DrawEditBox(surf, numX, btnY, numW, rowY + (ESC_ROW_H - bodyH) / 2,
                     value, editing, text);
-}
-
-static int Esc_TextSwitchValue(int item)
-{
-    switch (item)
-    {
-    case TX_CAMP_ENABLE: return MsgText_GetOption(MSG_OPT_CAMP_ENABLE);
-    case TX_CAMP_ANIM:   return MsgText_GetOption(MSG_OPT_CAMP_ANIM);
-    case TX_CHAT_EDIT:   return ChatEdit_Enabled();
-    case TX_CHAT_NAME:   return ChatEdit_ShowNameSP();
-    case TX_HINT_SHOW:   return MsgText_GetOption(MSG_OPT_HINT_SHOW);
-    case TX_HINT_RADAR:  return MsgText_GetOption(MSG_OPT_HINT_RADAR);
-    default:             return 0;
-    }
 }
 
 static void Esc_DrawCancel(void* surf, const RECT* p)
@@ -1637,78 +1628,140 @@ static void Esc_DrawCancel(void* surf, const RECT* p)
              ESC_BODY_PX, ESC_BODY_SLOT, 238, 238, 238);
 }
 
-static void Esc_TextPanel(void* surf, RECT* p)
+static void Esc_GroupRow(void* surf, int rowL, int rowW, int y, int rh,
+                         int bodyH, const wchar_t* label)
+{
+    Esc_Fill(surf, rowL, y + (rh - ESC_BODY_PX) / 2, 3, ESC_BODY_PX,
+             208, 160, 64, 255);
+    Esc_Text(surf, label, rowL + ESC_TEXT_INSET, y + (rh - bodyH) / 2,
+             rowW - ESC_TEXT_INSET - 6, ESC_BODY_PX, ESC_BODY_SLOT, 250, 220, 160);
+}
+
+/* 行底板: 颜色行比普通行高 (色块换行), 多出来的部分也要铺底, 再压一条行线。 */
+static void Esc_RowPlate(void* surf, int rowL, int rowW, int y, int rh)
+{
+    Esc_RowBg(surf, rowL, y, rowW);
+    if (rh > ESC_ROW_H)
+        Esc_Fill(surf, rowL, y + ESC_ROW_H, rowW, rh - ESC_ROW_H, 32, 32, 32, 120);
+    Esc_Fill(surf, rowL, y + rh - 1, rowW, 1, 0x7B, 0x79, 0x7B, 80);
+}
+
+/* 设置页一行的控件。开关项查 s_Toggle 拿当前值, 分段项查 s_Choice. */
+static void Esc_DrawGuiRow(void* surf, int rowL, int rowY, int rowW, int rh,
+                           int bodyH, int kind, int item)
+{
+    const EscToggle* t;
+    const EscChoice* c;
+    int cur;
+
+    if (kind == EG_SWITCH)
+    {
+        t = Esc_ToggleFind(item);
+        Esc_DrawSwitchRow(surf, rowL, rowY, rowW, bodyH, s_GuiLabel[item],
+                          t ? t->get() : 0);
+    }
+    else if (kind == EG_SORT)
+        Esc_DrawSortRow(surf, rowL, rowY, rowW, bodyH, s_GuiLabel[item]);
+    else if (kind == EG_ROWS)
+        Esc_DrawValueRow(surf, rowL, rowY, rowW, bodyH, s_GuiLabel[item],
+                         SWS_MaxRows(), ESC_ROWS_MIN, ESC_ROWS_MAX,
+                         Esc_EditIs(EDIT_PAGE_GUI, GUI_ITEM_ROWS), NULL);
+    else if (kind == EG_SLIDE)
+    {
+        cur = GameSpeed_GetFps();
+        Esc_DrawSlideRow(surf, rowL, rowY, rowW, bodyH, s_GuiLabel[item], cur,
+                         Esc_EditIs(EDIT_PAGE_GUI, item),
+                         cur > ESC_SPEED_MAX ? L"MAX" : NULL);
+    }
+    else if (kind == EG_COLOR)
+        Esc_DrawColorRow(surf, rowL, rowY, rowW, bodyH, s_GuiLabel[item]);
+    else if (kind == EG_SKIN)
+        Esc_DrawSegRow(surf, rowL, rowY, rowW, bodyH, s_GuiLabel[item],
+                       s_GuiSkinName, ESC_SKIN_N, SidebarSkin_Get());
+    else if ((c = Esc_ChoiceFind(item)) != NULL)
+        Esc_DrawSegRow(surf, rowL, rowY, rowW, bodyH, s_GuiLabel[item],
+                       c->names, c->n, Esc_ChoiceValue(c));
+}
+
+/* 文本页一行的控件。 */
+static void Esc_DrawTextRow(void* surf, int rowL, int rowY, int rowW, int rh,
+                            int bodyH, int kind, int item)
+{
+    const EscTextNum* num;
+    const EscTextChoice* c;
+    const EscTextToggle* t;
+
+    if (kind == EG_SWITCH)
+    {
+        t = Esc_TToggleFind(item);
+        Esc_DrawSwitchRow(surf, rowL, rowY, rowW, bodyH, s_TextLabel[item],
+                          t ? Esc_TToggleVal(t) : 0);
+    }
+    else if (kind == EG_VALUE)
+    {
+        num = Esc_TextNumFind(item);
+        if (num)
+            Esc_DrawValueRow(surf, rowL, rowY, rowW, bodyH, s_TextLabel[item],
+                             MsgText_GetOption(num->opt), num->min, num->max,
+                             Esc_EditIs(EDIT_PAGE_TEXT, item), NULL);
+    }
+    else if ((c = Esc_TChoiceFind(item)) != NULL)
+        Esc_DrawSegRow(surf, rowL, rowY, rowW, bodyH, s_TextLabel[item],
+                       c->names, c->n, Esc_TChoiceValue(c));
+}
+
+static const EscPage kGuiPage = { s_GuiLayout, ESC_GUI_DISPLAY, ESC_GUI_GROUP_H,
+                                  ESC_GUI_GAP, 0, Esc_DrawGuiRow };
+static const EscPage kTextPage = { s_TextLayout, TX_COUNT, ESC_GROUP_H,
+                                   ESC_BLOCK_GAP, 1, Esc_DrawTextRow };
+
+/* 两页共用的行循环: 组标题 / 分隔条 / 行底板在这里, 控件交给 page->draw。
+ * 文本页整行裁剪 (滚出视野的行不画但仍占位), 设置页放不下就直接收尾。 */
+static void Esc_RowsPanel(void* surf, RECT* p, const wchar_t* title,
+                          const EscPage* pg, const wchar_t (*labels)[ESC_LABEL_CAP],
+                          int missing)
 {
     int w, bodyH, rowL, rowW, i, y, rh, kind, item;
-    int clipTop, clipBottom, maxScroll;
+    int clipTop, clipBottom, maxScroll = 0;
 
-    if (!Esc_PanelFrame(surf, p, s_TextTitle)) return;
+    if (!Esc_PanelFrame(surf, p, title)) return;
 
     w = p->right - p->left;
     bodyH = Esc_TextHeight(ESC_BODY_PX, ESC_BODY_SLOT);
     if (bodyH > ESC_ROW_H) bodyH = ESC_ROW_H;
-
     rowL = p->left + ESC_PAD;
     rowW = w - ESC_PAD * 2;
-    clipTop = Esc_TextContentTop(p);
+    clipTop = Esc_ContentTop(p, missing);
     clipBottom = p->bottom - ESC_PAD;
-    maxScroll = Esc_TextClampScroll(p);
+    if (pg->scrollable) maxScroll = Esc_TextClampScroll(p);
 
-    if (s_TextMissing)
+    if (missing)
         Esc_DrawMissingNotice(surf, p, bodyH, rowL, rowW);
 
-    for (i = 0, y = clipTop - s_TextScroll; i < TX_COUNT; i++)
+    y = pg->scrollable ? clipTop - s_TextScroll : clipTop;
+    for (i = 0; i < pg->n; i++)
     {
-        kind = s_TextLayout[i].kind;
-        item = s_TextLayout[i].item;
+        kind = pg->rows[i].kind;
+        item = pg->rows[i].item;
 
-        if (kind == EG_GROUP && item != 0) y += ESC_BLOCK_GAP;
-        rh = Esc_TextRowH(i);
+        if (kind == EG_GROUP && item != 0) y += pg->gap;
+        rh = Esc_RowH(p, pg->rows, i, pg->groupH);
 
-        if (y >= clipTop && y + rh <= clipBottom)
+        if (pg->scrollable)
         {
-            if (kind == EG_SEP)
-            {
-                int sy = y + rh / 2;
-                Esc_Fill(surf, rowL + ESC_TEXT_INSET, sy,
-                         rowW - ESC_TEXT_INSET * 2, 1, 0x7B, 0x79, 0x7B, 160);
-            }
-            else if (kind == EG_GROUP)
-            {
-                Esc_Fill(surf, rowL, y + (rh - ESC_BODY_PX) / 2, 3,
-                         ESC_BODY_PX, 208, 160, 64, 255);
-                Esc_Text(surf, s_TextLabel[item], rowL + ESC_TEXT_INSET,
-                         y + (rh - bodyH) / 2, rowW - ESC_TEXT_INSET - 6,
-                         ESC_BODY_PX, ESC_BODY_SLOT, 250, 220, 160);
-            }
-            else
-            {
-                Esc_RowBg(surf, rowL, y, rowW);
-                Esc_Fill(surf, rowL, y + rh - 1, rowW, 1,
-                         0x7B, 0x79, 0x7B, 80);
+            if (y < clipTop || y + rh > clipBottom) { y += rh; continue; }
+        }
+        else if (y + rh > clipBottom) break;
 
-                if (kind == EG_SWITCH)
-                    Esc_DrawSwitchRow(surf, rowL, y, rowW, bodyH,
-                                      s_TextLabel[item],
-                                      Esc_TextSwitchValue(item));
-                else if (kind == EG_VALUE)
-                {
-                    const EscTextNum* num = Esc_TextNumFind(item);
-                    if (num)
-                        Esc_DrawValueRow(surf, rowL, y, rowW, bodyH,
-                                         s_TextLabel[item],
-                                         MsgText_GetOption(num->opt),
-                                         num->min, num->max,
-                                         Esc_EditIs(EDIT_PAGE_TEXT, item),
-                                         NULL);
-                }
-                else if (kind == EG_CHOICE)
-                    Esc_DrawSegRow(surf, rowL, y, rowW, bodyH,
-                                   s_TextLabel[item],
-                                   Esc_TextChoiceNames(item),
-                                   Esc_TextChoiceN(item),
-                                   Esc_TextChoiceValue(item));
-            }
+        if (kind == EG_SEP)
+            Esc_Fill(surf, rowL + ESC_TEXT_INSET, y + rh / 2,
+                     rowW - ESC_TEXT_INSET * 2, 1, 0x7B, 0x79, 0x7B, 160);
+        else if (kind == EG_GROUP)
+            Esc_GroupRow(surf, rowL, rowW, y, rh, bodyH, labels[item]);
+        else
+        {
+            Esc_RowPlate(surf, rowL, rowW, y, rh);
+            pg->draw(surf, rowL, y, rowW, rh, bodyH, kind, item);
         }
         y += rh;
     }
@@ -1732,102 +1785,22 @@ static void Esc_TextPanel(void* surf, RECT* p)
     }
 }
 
+static void Esc_TextPanel(void* surf, RECT* p)
+{
+    Esc_RowsPanel(surf, p, s_TextTitle, &kTextPage, s_TextLabel, s_TextMissing);
+}
+
 static void Esc_SettingsPanel(void* surf, RECT* p)
 {
-    int w, bodyH, rowL, rowW, i, y, rh, kind, item;
-
-    if (!Esc_PanelFrame(surf, p, s_GuiTitle)) return;
-
     /* 菜单开着时主循环停摆, GameSpeed_Frame 不会被调; 在这里补一次同步,
      * 否则拖过原版速度页的滑块再回来, 这一行显示的还是旧值。 */
     GameSpeed_Poll();
-
-    w = p->right - p->left;
-    bodyH = Esc_TextHeight(ESC_BODY_PX, ESC_BODY_SLOT);
-    if (bodyH > ESC_ROW_H) bodyH = ESC_ROW_H;
-
-    rowL = p->left + ESC_PAD;
-    rowW = w - ESC_PAD * 2;
-
-    if (s_GuiMissing)
-        Esc_DrawMissingNotice(surf, p, bodyH, rowL, rowW);
-
-    for (i = 0, y = Esc_GuiContentTop(p); i < ESC_GUI_DISPLAY; i++)
-    {
-        kind = s_GuiLayout[i].kind;
-        item = s_GuiLayout[i].item;
-
-        if (kind == EG_GROUP && item != 0) y += ESC_GUI_GAP;
-        rh = Esc_GuiRowH(p, i);
-        if (y + rh > p->bottom - ESC_PAD) break;
-
-        if (kind == EG_GROUP)
-        {
-            Esc_Fill(surf, rowL, y + (rh - ESC_BODY_PX) / 2, 3, ESC_BODY_PX,
-                     208, 160, 64, 255);
-            Esc_Text(surf, s_GuiGroup[item], rowL + ESC_TEXT_INSET,
-                     y + (rh - bodyH) / 2, rowW - ESC_TEXT_INSET - 6,
-                     ESC_BODY_PX, ESC_BODY_SLOT, 250, 220, 160);
-            y += rh;
-            continue;
-        }
-
-        Esc_RowBg(surf, rowL, y, rowW);
-        if (rh > ESC_ROW_H)
-            Esc_Fill(surf, rowL, y + ESC_ROW_H, rowW, rh - ESC_ROW_H,
-                     32, 32, 32, 120);
-        Esc_Fill(surf, rowL, y + rh - 1, rowW, 1,
-                 0x7B, 0x79, 0x7B, 80);
-
-        if (kind == EG_SWITCH)
-        {
-            int on = 0;
-            switch (item)
-            {
-            case GUI_ITEM_SCALE:       on = SB_Enabled(); break;
-            case GUI_ITEM_PAUSE:       on = PV_ButtonsEnabled(); break;
-            case GUI_ITEM_GRID:        on = GV_IsOn(); break;
-            case GUI_ITEM_SHOT:        on = Shot_Visible(); break;
-            case GUI_ITEM_SWS:         on = SWS_Enabled(); break;
-            case GUI_ITEM_BUILD_QUEUE: on = BQ_Enabled(); break;
-            case GUI_ITEM_SIDE_SCROLL: on = SS_Enabled(); break;
-            case GUI_ITEM_FPS:         on = FrameCap_Enabled(); break;
-            case GUI_ITEM_GAMESPEED_ON: on = GameSpeed_Enabled(); break;
-            }
-            Esc_DrawSwitchRow(surf, rowL, y, rowW, bodyH,
-                              s_GuiLabel[item], on);
-        }
-        else if (kind == EG_SORT)
-            Esc_DrawSortRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
-        else if (kind == EG_ROWS)
-            Esc_DrawValueRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item],
-                             SWS_MaxRows(), ESC_ROWS_MIN, ESC_ROWS_MAX,
-                             Esc_EditIs(EDIT_PAGE_GUI, GUI_ITEM_ROWS), NULL);
-        else if (kind == EG_SLIDE)
-        {
-            int cur = GameSpeed_GetFps();
-
-            Esc_DrawSlideRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item],
-                             cur, Esc_EditIs(EDIT_PAGE_GUI, item),
-                             cur > ESC_SPEED_MAX ? L"MAX" : NULL);
-        }
-        else if (kind == EG_COLOR)
-            Esc_DrawColorRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
-        else if (kind == EG_SKIN)
-            Esc_DrawSegRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item],
-                           s_GuiSkinName, ESC_SKIN_N, SidebarSkin_Get());
-        else if (kind == EG_CHOICE)
-            Esc_DrawSegRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item],
-                           Esc_ChoiceNames(item), Esc_ChoiceN(item),
-                           Esc_ChoiceValue(item));
-        y += rh;
-    }
+    Esc_RowsPanel(surf, p, s_GuiTitle, &kGuiPage, s_GuiLabel, s_GuiMissing);
 }
 
 static void Esc_DrawPanels(void* surf, HWND hDlg)
 {
     EscRow leftRows[ESC_LEFT_ROWS];
-    EscRow rightRows[2];
     RECT a, b;
     int i;
 
@@ -1836,24 +1809,13 @@ static void Esc_DrawPanels(void* surf, HWND hDlg)
         leftRows[i].text = s_LeftItem[i];
         leftRows[i].selected = (s_Sel == i);
     }
-    for (i = 0; i < 2; i++)
-    {
-        rightRows[i].text = s_RightItem[i];
-        rightRows[i].selected = 0;
-    }
-
     if (!Esc_Layout(hDlg, &a, &b)) return;
 
     Esc_Panel(surf, &a, s_LeftTitle, leftRows, ESC_LEFT_ROWS);
     Esc_DrawLangTitle(surf, &a);
-    if (s_Sel == 0)
-        Esc_SettingsPanel(surf, &b);
-    else if (s_Sel == 1)
-        Esc_TextPanel(surf, &b);
-    else
-        Esc_Panel(surf, &b, s_RightTitle, rightRows, 2);
-    if (s_Sel == 0 || s_Sel == 1)
-        Esc_DrawCancel(surf, &b);
+    if (s_Sel == 0) Esc_SettingsPanel(surf, &b);
+    else            Esc_TextPanel(surf, &b);
+    Esc_DrawCancel(surf, &b);
 }
 
 /* ---------------- input ---------------- */
@@ -1920,7 +1882,7 @@ static int Esc_IniLocate(const unsigned char* d, DWORD size,
 
     while (i < size)
     {
-        DWORD ls = i, le;
+        DWORD ls = i, le, p;
         while (i < size && d[i] != '\n') i++;
         le = i;
         if (le > ls && d[le - 1] == '\r') le--;
@@ -1933,15 +1895,9 @@ static int Esc_IniLocate(const unsigned char* d, DWORD size,
             insert = i;
             continue;
         }
-        {
-            DWORD p = ls;
-            while (p < le && (d[p] == ' ' || d[p] == '\t')) p++;
-            if (p < le && d[p] == '[')
-            {
-                target = 0;
-                continue;
-            }
-        }
+        p = ls;
+        while (p < le && (d[p] == ' ' || d[p] == '\t')) p++;
+        if (p < le && d[p] == '[') { target = 0; continue; }
         if (target)
         {
             insert = i;
@@ -1970,107 +1926,87 @@ static unsigned Esc_PutText(unsigned char* out, unsigned pos, const char* s)
     return pos;
 }
 
+static unsigned Esc_PutEol(unsigned char* out, unsigned pos)
+{
+    out[pos++] = '\r';
+    out[pos++] = '\n';
+    return pos;
+}
+
+/* 写一行 `key=value` + 换行 */
+static unsigned Esc_PutKeyVal(unsigned char* out, unsigned pos, const char* key,
+                              const char* value)
+{
+    pos = Esc_PutText(out, pos, key);
+    out[pos++] = '=';
+    pos = Esc_PutText(out, pos, value);
+    return Esc_PutEol(out, pos);
+}
+
+/* 原样改写 ini 的一行 (保留文件其余字节, 不改 ini 写入器的键序)。
+ * Esc_IniLocate 给三种情况: 1=换值, 0=插到该节末尾, -1=连节都不存在。 */
 static int Esc_WriteIniRaw(const char* section, const char* key,
                            const char* value)
 {
     HANDLE h;
-    DWORD size, got, put, need, vs = 0, ve = 0, insertAt = 0;
-    unsigned char* d;
-    unsigned char* out;
-    unsigned vlen, keyLen, pos;
-    int loc;
+    DWORD size, got, put, vs = 0, ve = 0, insertAt = 0, tail;
+    unsigned char* d = NULL;
+    unsigned char* out = NULL;
+    unsigned vlen, keyLen, secLen, pos;
+    int loc, ok = 0;
 
     h = CreateFileA(g_IniPath, GENERIC_READ | GENERIC_WRITE,
                     FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
                     FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return 0;
     size = GetFileSize(h, NULL);
-    if (size == INVALID_FILE_SIZE)
-    {
-        CloseHandle(h);
-        return 0;
-    }
+    if (size == INVALID_FILE_SIZE) goto done;
     d = (unsigned char*)LocalAlloc(LPTR, size + 1);
-    if (!d)
-    {
-        CloseHandle(h);
-        return 0;
-    }
-    if (!ReadFile(h, d, size, &got, NULL) || got != size)
-    {
-        LocalFree(d);
-        CloseHandle(h);
-        return 0;
-    }
+    if (!d || !ReadFile(h, d, size, &got, NULL) || got != size) goto done;
 
     vlen = (unsigned)lstrlenA(value);
     keyLen = (unsigned)lstrlenA(key);
+    secLen = (unsigned)lstrlenA(section);
 
     loc = Esc_IniLocate(d, size, section, key, &vs, &ve, &insertAt);
+    out = (unsigned char*)LocalAlloc(LPTR, size + keyLen + vlen + secLen + 16);
+    if (!out) goto done;
+
+    /* 三段只有"从哪里分叉"不同, 尾巴都是把 d 剩下的字节原样搬过去 */
     if (loc == 1)
     {
-        need = size - (ve - vs) + vlen + 1;
-        out = (unsigned char*)LocalAlloc(LPTR, need);
-        if (!out) { LocalFree(d); CloseHandle(h); return 0; }
         pos = Esc_PutBytes(out, 0, d, vs);
         pos = Esc_PutText(out, pos, value);
-        pos = Esc_PutBytes(out, pos, d + ve, size - ve);
-        need = pos;
+        tail = ve;
     }
     else if (loc == 0)
     {
-        need = size + keyLen + vlen + 8;
-        out = (unsigned char*)LocalAlloc(LPTR, need);
-        if (!out) { LocalFree(d); CloseHandle(h); return 0; }
         pos = Esc_PutBytes(out, 0, d, insertAt);
-        if (pos > 0 && out[pos - 1] != '\n')
-        {
-            out[pos++] = '\r';
-            out[pos++] = '\n';
-        }
-        pos = Esc_PutText(out, pos, key);
-        out[pos++] = '=';
-        pos = Esc_PutText(out, pos, value);
-        out[pos++] = '\r';
-        out[pos++] = '\n';
-        pos = Esc_PutBytes(out, pos, d + insertAt, size - insertAt);
-        need = pos;
+        if (pos > 0 && out[pos - 1] != '\n') pos = Esc_PutEol(out, pos);
+        pos = Esc_PutKeyVal(out, pos, key, value);
+        tail = insertAt;
     }
     else
     {
-        unsigned secLen = (unsigned)lstrlenA(section);
-        need = size + secLen + keyLen + vlen + 9;
-        out = (unsigned char*)LocalAlloc(LPTR, need);
-        if (!out) { LocalFree(d); CloseHandle(h); return 0; }
         pos = Esc_PutBytes(out, 0, d, size);
-        out[pos++] = '\r';
-        out[pos++] = '\n';
+        pos = Esc_PutEol(out, pos);
         out[pos++] = '[';
         pos = Esc_PutText(out, pos, section);
         out[pos++] = ']';
-        out[pos++] = '\r';
-        out[pos++] = '\n';
-        pos = Esc_PutText(out, pos, key);
-        out[pos++] = '=';
-        pos = Esc_PutText(out, pos, value);
-        out[pos++] = '\r';
-        out[pos++] = '\n';
-        need = pos;
+        pos = Esc_PutEol(out, pos);
+        pos = Esc_PutKeyVal(out, pos, key, value);
+        tail = size;
     }
+    pos = Esc_PutBytes(out, pos, d + tail, size - tail);
 
     SetFilePointer(h, 0, NULL, FILE_BEGIN);
-    if (!WriteFile(h, out, need, &put, NULL) || put != need)
-    {
-        LocalFree(out);
-        LocalFree(d);
-        CloseHandle(h);
-        return 0;
-    }
-    SetEndOfFile(h);
+    ok = WriteFile(h, out, pos, &put, NULL) && put == pos;
+    if (ok) SetEndOfFile(h);
+done:
+    if (out) LocalFree(out);
+    if (d) LocalFree(d);
     CloseHandle(h);
-    LocalFree(out);
-    LocalFree(d);
-    return 1;
+    return ok;
 }
 
 /* 延迟写入: 设置页面内点击只改内存并排队, 关闭菜单时统一落盘; 切页不写,
@@ -2186,135 +2122,140 @@ static void Esc_RestoreSettings(void)
 
 static int Esc_HitLeft(const RECT* a, int mx, int my, int* index)
 {
-    int i, rowY, rowL, rowW;
-    rowL = a->left + ESC_PAD;
-    rowW = (a->right - a->left) - ESC_PAD * 2;
-    rowY = Esc_ContentTop(a);
-    for (i = 0; i < ESC_LEFT_ROWS; i++, rowY += ESC_ROW_H)
+    int i, rowY, rowL = a->left + ESC_PAD;
+    int rowW = (a->right - a->left) - ESC_PAD * 2;
+
+    for (i = 0, rowY = Esc_ContentTop(a, 0); i < ESC_LEFT_ROWS; i++, rowY += ESC_ROW_H)
     {
         if (rowY + ESC_ROW_H > a->bottom - ESC_PAD) break;
-        if (mx >= rowL && mx < rowL + rowW &&
-            my >= rowY && my < rowY + ESC_ROW_H)
-        {
-            *index = i;
-            return 1;
-        }
+        if (EscIn(rowL, rowY, rowW, ESC_ROW_H, mx, my)) { *index = i; return 1; }
     }
     return 0;
 }
 
-static int Esc_HitRight(const RECT* b, int mx, int my, int* index,
-                        int* rowTop)
+/* 行表命中: 鼠标落在哪一行 (返回行表下标, *rowY 写出该行顶)。
+ * clipTop 与 top 分开传: 文本页 top 是滚过之后的起点, 可见性仍按 clipTop 判。 */
+static int Esc_RowAt(const RECT* b, const EscPage* pg, int top, int clipTop,
+                     int mx, int my, int* row, int* rowY)
 {
-    int i, rowY, rowL, rowW, rh;
-    if (s_Sel != 0) return 0;
+    int i, y, rh, kind;
+    int rowL = b->left + ESC_PAD;
+    int rowW = (b->right - b->left) - ESC_PAD * 2;
+    int clipBottom = b->bottom - ESC_PAD;
 
-    rowL = b->left + ESC_PAD;
-    rowW = (b->right - b->left) - ESC_PAD * 2;
-    for (i = 0, rowY = Esc_GuiContentTop(b); i < ESC_GUI_DISPLAY; i++)
+    for (i = 0, y = top; i < pg->n; i++)
     {
-        int kind = s_GuiLayout[i].kind;
-
-        if (kind == EG_GROUP && s_GuiLayout[i].item != 0) rowY += ESC_GUI_GAP;
-        rh = Esc_GuiRowH(b, i);
-        if (rowY + rh > b->bottom - ESC_PAD) break;
-        if (mx >= rowL && mx < rowL + rowW &&
-            my >= rowY && my < rowY + rh)
+        kind = pg->rows[i].kind;
+        if (kind == EG_GROUP && pg->rows[i].item != 0) y += pg->gap;
+        rh = Esc_RowH(b, pg->rows, i, pg->groupH);
+        if (pg->scrollable ? (y < clipTop || y + rh > clipBottom)
+                           : (y + rh > clipBottom))
         {
-            if (kind == EG_GROUP) return 0;
-            if (kind == EG_SWITCH)
-            {
-                int sx = rowL + rowW - ESC_CTL_RIGHT - ESC_SW_W;
-                int sy = rowY + (rh - ESC_SW_H) / 2;
-                if (mx < sx || mx >= sx + ESC_SW_W ||
-                    my < sy || my >= sy + ESC_SW_H)
-                    return 0;
-            }
-            if (kind == EG_SKIN &&
-                Esc_SegmentAt(s_GuiSkinName, ESC_SKIN_N, rowL, rowW, mx) < 0)
-                return 0;
-            if (kind == EG_CHOICE &&
-                Esc_SegmentAt(Esc_ChoiceNames(s_GuiLayout[i].item),
-                              Esc_ChoiceN(s_GuiLayout[i].item),
-                              rowL, rowW, mx) < 0)
-                return 0;
-            if (kind == EG_SLIDE)
-            {
-                int trkX, trkW, numX, numW;
-
-                Esc_SlideGeom(rowL, rowW, &trkX, &trkW, &numX, &numW);
-                if (mx < trkX || mx >= numX + numW) return 0;
-            }
-            if (kind == EG_COLOR &&
-                Esc_ColorSegmentAt(rowL, rowW, rowY, mx, my) < 0)
-                return 0;
-            *index = s_GuiLayout[i].item;
-            if (rowTop) *rowTop = rowY;
+            if (!pg->scrollable) break;
+            y += rh;
+            continue;
+        }
+        if (EscIn(rowL, y, rowW, rh, mx, my))
+        {
+            *row = i;
+            if (rowY) *rowY = y;
             return 1;
         }
-        rowY += rh;
+        y += rh;
     }
     return 0;
+}
+
+/* 行内控件的精确命中: 只有真点在控件上才算 (names 非空 = 这一行是分段选择)。 */
+static int Esc_CtlHit(int kind, int rowL, int rowW, int rowY, int rh,
+                      int mx, int my, wchar_t (*names)[32], int n)
+{
+    if (kind == EG_GROUP || kind == EG_SEP) return 0;
+    if (kind == EG_SWITCH)
+    {
+        int sx = rowL + rowW - ESC_CTL_RIGHT - ESC_SW_W;
+        return EscIn(sx, rowY + (rh - ESC_SW_H) / 2, ESC_SW_W, ESC_SW_H, mx, my);
+    }
+    if (kind == EG_VALUE)
+    {
+        int ctlX = Esc_RowCtlX(rowL + rowW);
+        return mx >= ctlX && mx < ctlX + ESC_STEP_W;
+    }
+    if (names) return Esc_SegmentAt(names, n, rowL, rowW, mx) >= 0;
+    if (kind == EG_SLIDE)
+    {
+        int trkX, trkW, numX, numW;
+        Esc_SlideGeom(rowL, rowW, &trkX, &trkW, &numX, &numW);
+        return mx >= trkX && mx < numX + numW;
+    }
+    if (kind == EG_COLOR)
+        return Esc_ColorSegmentAt(rowL, rowW, rowY, mx, my) >= 0;
+    return 1;
+}
+
+static int Esc_HitRight(const RECT* b, int mx, int my, int* index, int* rowTop)
+{
+    const EscChoice* c;
+    int row, rowY = 0, kind, rowL, rowW, top;
+
+    if (s_Sel != 0) return 0;
+    rowL = b->left + ESC_PAD;
+    rowW = (b->right - b->left) - ESC_PAD * 2;
+    top = Esc_ContentTop(b, s_GuiMissing);
+    if (!Esc_RowAt(b, &kGuiPage, top, top, mx, my, &row, &rowY)) return 0;
+
+    kind = s_GuiLayout[row].kind;
+    c = Esc_ChoiceFind(s_GuiLayout[row].item);
+    if (!Esc_CtlHit(kind, rowL, rowW, rowY,
+                    Esc_RowH(b, s_GuiLayout, row, ESC_GUI_GROUP_H), mx, my,
+                    kind == EG_SKIN ? s_GuiSkinName : (c ? c->names : NULL),
+                    kind == EG_SKIN ? ESC_SKIN_N : (c ? c->n : 0)))
+        return 0;
+    *index = s_GuiLayout[row].item;
+    if (rowTop) *rowTop = rowY;
+    return 1;
 }
 
 static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx,
                          int my, int rowTop)
 {
-    int value;
+    const EscToggle* t = Esc_ToggleFind(index);
+    const EscChoice* c = Esc_ChoiceFind(index);
+    int value, rowL, rowW, pick;
+
+    /* 纯开关 (s_Toggle) 与分段选择 (s_Choice) 都在表里, 这里只剩特例。 */
+    if (t)
+    {
+        value = t->get() ? 0 : 1;
+        t->set(value);
+        Esc_QueueValue(t->section, t->key, value);
+        Esc_Redraw(hDlg);
+        return;
+    }
+    if (c)
+    {
+        pick = Esc_PickSeg(c->names, c->n, right, mx);
+        if (pick < 0) return;
+        value = c->invert ? !pick : pick;
+        if (value == c->get()) return;
+        c->apply(pick);
+        Esc_Redraw(hDlg);
+        return;
+    }
 
     switch (index)
     {
-    case GUI_ITEM_SCALE:
-        value = SB_Enabled() ? 0 : 1;
-        SB_SetEnabled(value);
-        Esc_QueueValue("BottomBar", "ScaleEnable", value);
-        break;
-    case GUI_ITEM_PAUSE:
-        value = PV_ButtonsEnabled() ? 0 : 1;
-        PV_SetButtonsEnabled(value);
-        Esc_QueueValue("BottomBar", "PauseEnable", value);
-        break;
-    case GUI_ITEM_GRID:
-        value = GV_IsOn() ? 0 : 1;
-        GV_SetOn(value);
-        Esc_QueueValue("BottomBar", "GridEnable", value);
-        break;
-    case GUI_ITEM_SHOT:
-        value = Shot_Visible() ? 0 : 1;
-        Shot_SetVisible(value);
-        Esc_QueueValue("BottomBar", "ShotEnable", value);
-        break;
-    case GUI_ITEM_FPS:
-        value = FrameCap_Enabled() ? 0 : 1;
-        FrameCap_SetEnabled(value);
-        Esc_QueueValue("FrameCap", "Enable", value);
-        break;
-    case GUI_ITEM_SWS:
-        value = SWS_Enabled() ? 0 : 1;
-        SWS_SetEnabled(value);
-        Esc_QueueValue("SWSidebar", "Enable", value);
-        break;
-    case GUI_ITEM_SORT:
-        value = SWS_FillMode() ? 0 : 1;
-        SWS_SetFillMode(value);
-        Esc_QueueValue("SWSidebar", "FillMode", value);
-        break;
     case GUI_ITEM_ROWS:
         Esc_StepOrEdit(hDlg, right, mx, EDIT_PAGE_GUI, GUI_ITEM_ROWS,
                        SWS_MaxRows(), ESC_ROWS_MIN, ESC_ROWS_MAX, 1);
         return;
-    case GUI_ITEM_GAMESPEED_ON:
-        value = GameSpeed_Enabled() ? 0 : 1;
-        GameSpeed_SetEnabled(value);
-        Esc_QueueValue("GameSpeed", "Enable", value);
-        break;
     case GUI_ITEM_GAMESPEED:
     {
-        int rowL = right->left + ESC_PAD;
-        int rowW = (right->right - right->left) - ESC_PAD * 2;
         int trkX, trkW, numX, numW;
         int cur = GameSpeed_GetFps();
 
+        rowL = right->left + ESC_PAD;
+        rowW = (right->right - right->left) - ESC_PAD * 2;
         Esc_SlideGeom(rowL, rowW, &trkX, &trkW, &numX, &numW);
         if (mx >= numX)          /* 点数值框: 直接输数字 (可输非 5 的倍数) */
         {
@@ -2327,219 +2268,79 @@ static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx,
                      Esc_SlideValueAt(mx, trkX, trkW));
         s_SlideDrag = 1;
         if (hDlg) SetCapture(hDlg);
-        Esc_Redraw(hDlg);
-        return;
+        break;
     }
     case GUI_ITEM_SKIN:
-    {
-        int pick = Esc_PickSeg(s_GuiSkinName, ESC_SKIN_N, right, mx);
-
+        pick = Esc_PickSeg(s_GuiSkinName, ESC_SKIN_N, right, mx);
         if (pick < 0 || pick == SidebarSkin_Get()) return;
         SidebarSkin_Set(pick);
         SidebarSkin_Poll();
         Esc_QueueValue("Sidebar", "SkinSide", pick);
         break;
-    }
     case GUI_ITEM_COLOR:
-    {
-        int rowL = right->left + ESC_PAD;
-        int rowW = (right->right - right->left) - ESC_PAD * 2;
-        int pick = Esc_ColorSegmentAt(rowL, rowW, rowTop, mx, my);
-
+        rowL = right->left + ESC_PAD;
+        rowW = (right->right - right->left) - ESC_PAD * 2;
+        pick = Esc_ColorSegmentAt(rowL, rowW, rowTop, mx, my);
         if (pick < 0 || pick == PlayerColor_Current()) return;
         if (!PlayerColor_Set(pick)) return;
         break;
-    }
-    case GUI_ITEM_BUILD_QUEUE:
-        value = BQ_Enabled() ? 0 : 1;
-        BQ_SetEnabled(value);
-        Esc_QueueValue("Features", "BuildQueue", value);
-        break;
-    case GUI_ITEM_SCATTER:
-    {
-        int pick = Esc_PickSeg(s_GuiScatter, ESC_SCATTER_N, right, mx);
-
-        if (pick < 0 || pick == PS_Mode()) return;
-        PS_SetMode(pick);
-        Esc_QueueValue("PlaceScatter", "Mode", pick);
-        break;
-    }
-    case GUI_ITEM_SIDE_SCROLL:
-        value = SS_Enabled() ? 0 : 1;
-        SS_SetEnabled(value);
-        Esc_QueueValue("Sidebar", "ScrollEnable", value);
-        break;
-    case GUI_ITEM_SIDE_HIDE:
-    {
-        int pick = Esc_PickSeg(s_GuiHide, ESC_HIDE_N, right, mx);
-
-        if (pick < 0 || pick == FM_HideState()) return;
-        FM_SetHideState(pick);
-        Esc_QueueValue("Sidebar", "HideEnable", pick ? 1 : 0);
-        if (pick) Esc_QueueValue("Sidebar", "Mode", pick - 1);
-        break;
-    }
-    case GUI_ITEM_SWS_SIDE:
-    {
-        int pick = Esc_PickSeg(s_GuiSwsSide, ESC_SWS_SIDE_N, right, mx);
-        int rightSide;
-
-        if (pick < 0) return;
-        rightSide = (pick == 0);
-        if (rightSide == (SWS_SideRight() != 0)) return;
-        SWS_SetSideRight(rightSide);
-        Esc_QueueRaw("SWSidebar", "Side", rightSide ? "right" : "left");
-        break;
-    }
     default:
         return;
     }
-
     Esc_Redraw(hDlg);
 }
 
 static int Esc_TextHitRight(const RECT* b, int mx, int my, int* index)
 {
-    int i, y, rh, kind, item;
-    int rowL = b->left + ESC_PAD;
-    int rowW = (b->right - b->left) - ESC_PAD * 2;
-    int clipTop = Esc_TextContentTop(b);
-    int clipBottom = b->bottom - ESC_PAD;
+    const EscTextChoice* c;
+    int row, rowY = 0, clipTop;
 
     if (s_Sel != 1) return 0;
     Esc_TextClampScroll(b);
+    clipTop = Esc_ContentTop(b, s_TextMissing);
+    if (!Esc_RowAt(b, &kTextPage, clipTop - s_TextScroll, clipTop, mx, my,
+                   &row, &rowY))
+        return 0;
 
-    y = clipTop - s_TextScroll;
-    for (i = 0; i < TX_COUNT; i++)
-    {
-        kind = s_TextLayout[i].kind;
-        item = s_TextLayout[i].item;
-
-        if (kind == EG_GROUP && item != 0) y += ESC_BLOCK_GAP;
-        rh = Esc_TextRowH(i);
-        if (y >= clipTop && y + rh <= clipBottom &&
-            mx >= rowL && mx < rowL + rowW &&
-            my >= y && my < y + rh)
-        {
-            if (kind == EG_GROUP || kind == EG_SEP) return 0;
-            if (kind == EG_SWITCH)
-            {
-                int sx = rowL + rowW - ESC_CTL_RIGHT - ESC_SW_W;
-                int sy = y + (rh - ESC_SW_H) / 2;
-                if (mx < sx || mx >= sx + ESC_SW_W ||
-                    my < sy || my >= sy + ESC_SW_H)
-                    return 0;
-            }
-            if (kind == EG_VALUE)
-            {
-                int ctlX = Esc_RowCtlX(rowL + rowW);
-                if (mx < ctlX || mx >= ctlX + ESC_STEP_W) return 0;
-            }
-            if (kind == EG_CHOICE &&
-                Esc_SegmentAt(Esc_TextChoiceNames(item),
-                              Esc_TextChoiceN(item), rowL, rowW, mx) < 0)
-                return 0;
-            *index = item;
-            return 1;
-        }
-        y += rh;
-    }
-    return 0;
+    c = Esc_TChoiceFind(s_TextLayout[row].item);
+    if (!Esc_CtlHit(s_TextLayout[row].kind, b->left + ESC_PAD,
+                    (b->right - b->left) - ESC_PAD * 2, rowY,
+                    Esc_RowH(b, s_TextLayout, row, ESC_GROUP_H), mx, my,
+                    c ? c->names : NULL, c ? c->n : 0))
+        return 0;
+    *index = s_TextLayout[row].item;
+    return 1;
 }
 
+/* 文本页的点击处理: 开关/分段/数值三类, 全靠 s_TToggle / s_TChoice / s_TextNum。 */
 static void Esc_TextApply(HWND hDlg, const RECT* right, int index, int mx)
 {
-    int value;
+    const EscTextToggle* t = Esc_TToggleFind(index);
+    const EscTextChoice* c = Esc_TChoiceFind(index);
+    const EscTextNum* num = Esc_TextNumFind(index);
+    int value, pick;
 
-    switch (index)
+    if (t)
     {
-    case TX_CAMP_ENABLE:
-        value = MsgText_GetOption(MSG_OPT_CAMP_ENABLE) ? 0 : 1;
-        MsgText_SetOption(MSG_OPT_CAMP_ENABLE, value);
-        Esc_QueueValue("MsgText", "CampEnable", value);
-        break;
-    case TX_CAMP_LINES:
-    case TX_CAMP_OPACITY:
-    case TX_CAMP_WIDTH:
-    case TX_HINT_LINES:
-    case TX_HINT_WIDTH:
+        value = Esc_TToggleVal(t) ? 0 : 1;
+        Esc_TTogglePut(t, value);
+        Esc_QueueValue("MsgText", t->key, value);
+    }
+    else if (c)
     {
-        const EscTextNum* num = Esc_TextNumFind(index);
-        if (!num) return;
+        pick = Esc_PickSeg(c->names, c->n, right, mx);
+        if (pick < 0) return;
+        value = c->invert ? !pick : pick;
+        MsgText_SetOption(c->opt, value);
+        Esc_QueueValue("MsgText", c->key, value);
+    }
+    else if (num)
+    {
         Esc_StepOrEdit(hDlg, right, mx, EDIT_PAGE_TEXT, index,
-                       MsgText_GetOption(num->opt), num->min, num->max,
-                       num->step);
+                       MsgText_GetOption(num->opt), num->min, num->max, num->step);
         return;
     }
-    case TX_CAMP_POS:
-    {
-        int pick = Esc_PickSeg(s_TextPos, 2, right, mx);
-        if (pick < 0) return;
-        MsgText_SetOption(MSG_OPT_CAMP_BOTTOM, pick == 0 ? 1 : 0);
-        Esc_QueueValue("MsgText", "CampBottom", pick == 0 ? 1 : 0);
-        break;
-    }
-    case TX_CAMP_ALIGN:
-    {
-        int pick = Esc_PickSeg(s_TextAlign, 2, right, mx);
-        if (pick < 0) return;
-        MsgText_SetOption(MSG_OPT_CAMP_CENTERED, pick);
-        Esc_QueueValue("MsgText", "CampCentered", pick);
-        break;
-    }
-    case TX_CAMP_ANIM:
-        value = MsgText_GetOption(MSG_OPT_CAMP_ANIM) ? 0 : 1;
-        MsgText_SetOption(MSG_OPT_CAMP_ANIM, value);
-        Esc_QueueValue("MsgText", "CampAnim", value);
-        break;
-    case TX_CAMP_BAR:
-    {
-        int pick = Esc_PickSeg(s_TextBar, 3, right, mx);
-        if (pick < 0) return;
-        MsgText_SetOption(MSG_OPT_CAMP_BAR, pick);
-        Esc_QueueValue("MsgText", "CampBarSide", pick);
-        break;
-    }
-    case TX_CHAT_EDIT:
-        value = ChatEdit_Enabled() ? 0 : 1;
-        ChatEdit_SetEnabled(value);
-        Esc_QueueValue("MsgText", "ChatEdit", value);
-        break;
-    case TX_CHAT_NAME:
-        value = ChatEdit_ShowNameSP() ? 0 : 1;
-        ChatEdit_SetShowNameSP(value);
-        Esc_QueueValue("MsgText", "ChatNameSP", value);
-        break;
-    case TX_HINT_SHOW:
-        value = MsgText_GetOption(MSG_OPT_HINT_SHOW) ? 0 : 1;
-        MsgText_SetOption(MSG_OPT_HINT_SHOW, value);
-        Esc_QueueValue("MsgText", "HintShow", value);
-        break;
-    case TX_HINT_COLOR:
-    {
-        int pick = Esc_PickSeg(s_TextColor, 2, right, mx);
-        if (pick < 0) return;
-        MsgText_SetOption(MSG_OPT_HINT_COLOR, pick);
-        Esc_QueueValue("MsgText", "HintColorFollow", pick);
-        break;
-    }
-    case TX_HINT_BAR:
-    {
-        int pick = Esc_PickSeg(s_TextBar, 3, right, mx);
-        if (pick < 0) return;
-        MsgText_SetOption(MSG_OPT_HINT_BAR, pick);
-        Esc_QueueValue("MsgText", "HintBarSide", pick);
-        break;
-    }
-    case TX_HINT_RADAR:
-        value = MsgText_GetOption(MSG_OPT_HINT_RADAR) ? 0 : 1;
-        MsgText_SetOption(MSG_OPT_HINT_RADAR, value);
-        Esc_QueueValue("MsgText", "HintRadarShow", value);
-        break;
-    default:
-        return;
-    }
-
+    else return;
     Esc_Redraw(hDlg);
 }
 
@@ -2634,8 +2435,7 @@ static int Esc_TextWheel(HWND h, WPARAM wp, LPARAM lp)
     pt.y = (int)(short)HIWORD(lp);
     if (!ScreenToClient(h, &pt)) return 0;
     if (!Esc_Layout(h, &a, &b)) return 0;
-    if (pt.x < b.left || pt.x >= b.right ||
-        pt.y < b.top || pt.y >= b.bottom)
+    if (!EscIn(b.left, b.top, b.right - b.left, b.bottom - b.top, pt.x, pt.y))
         return 0;
 
     delta = (int)(short)HIWORD(wp);
@@ -2699,66 +2499,42 @@ static void Esc_Cancel(HWND hDlg)
 static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     WNDPROC old = (WNDPROC)GetPropW(h, ESC_PROP_OLD_PROC);
+    int mx = (int)(short)LOWORD(lp);
+    int my = (int)(short)HIWORD(lp);
+    int index = -1, rowY = 0;
+    RECT a, b;
     LRESULT r;
 
-    if ((msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) && h == s_Host)
+    /* 面板自绘只对首页 (s_Host) 做; 其余消息一律原样交给原过程。 */
+    if (h == s_Host) switch (msg)
     {
-        int mx = (int)(short)LOWORD(lp);
-        int my = (int)(short)HIWORD(lp);
-        int index = -1, rowY = 0;
-        RECT a, b;
-
-        if (Esc_Layout(h, &a, &b))
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDBLCLK:
+        if (!Esc_Layout(h, &a, &b)) { if (s_EditOn) Esc_EditCommit(h); break; }
+        if (Esc_CancelHit(&b, mx, my))
         {
-            int seg;
-
-            if ((s_Sel == 0 || s_Sel == 1) &&
-                Esc_CancelHit(&b, mx, my))
-            {
-                s_CancelDown = 1;
-                SetCapture(h);
-                Esc_Redraw(h);
-                return 0;
-            }
-            if (Esc_EditClick(h, &b, mx, my)) return 0;
-            if (s_EditOn) Esc_EditCommit(h);
-            seg = Esc_LangHit(&a, mx, my);
-            if (seg >= 0)
-            {
-                Esc_ApplyLang(h, seg);
-                return 0;
-            }
-            if (Esc_HitLeft(&a, mx, my, &index))
-            {
-                Esc_Select(h, index);
-                return 0;   /* consume only the list click */
-            }
-            if (Esc_HitRight(&b, mx, my, &index, &rowY))
-            {
-                Esc_ApplyGui(h, &b, index, mx, my, rowY);
-                return 0;
-            }
-            if (Esc_TextHitRight(&b, mx, my, &index))
-            {
-                Esc_TextApply(h, &b, index, mx);
-                return 0;
-            }
+            s_CancelDown = 1;
+            SetCapture(h);
+            Esc_Redraw(h);
+            return 0;
         }
-        else if (s_EditOn) Esc_EditCommit(h);
-    }
-
-    /* 拖动速度条: 按住期间随鼠标横坐标改值 */
-    if (msg == WM_MOUSEMOVE && h == s_Host && s_SlideDrag && s_Sel == 0)
-    {
-        RECT a, b;
-
+        if (Esc_EditClick(h, &b, mx, my)) return 0;
+        if (s_EditOn) Esc_EditCommit(h);
+        index = Esc_LangHit(&a, mx, my);
+        if (index >= 0) { Esc_ApplyLang(h, index); return 0; }
+        if (Esc_HitLeft(&a, mx, my, &index)) { Esc_Select(h, index); return 0; }
+        if (Esc_HitRight(&b, mx, my, &index, &rowY))
+        { Esc_ApplyGui(h, &b, index, mx, my, rowY); return 0; }
+        if (Esc_TextHitRight(&b, mx, my, &index))
+        { Esc_TextApply(h, &b, index, mx); return 0; }
+        break;
+    case WM_MOUSEMOVE:
+        if (!s_SlideDrag || s_Sel != 0) break;      /* 按住拖动速度条 */
         if (Esc_Layout(h, &a, &b))
         {
-            int mx = (int)(short)LOWORD(lp);
             int rowL = b.left + ESC_PAD;
             int rowW = (b.right - b.left) - ESC_PAD * 2;
-            int trkX, trkW, numX, numW;
-            int v;
+            int trkX, trkW, numX, numW, v;
 
             Esc_SlideGeom(rowL, rowW, &trkX, &trkW, &numX, &numW);
             v = Esc_SlideValueAt(mx, trkX, trkW);
@@ -2769,23 +2545,15 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             }
         }
         return 0;
-    }
-
-    if (msg == WM_LBUTTONUP && h == s_Host && s_SlideDrag)
-    {
-        s_SlideDrag = 0;
-        if (GetCapture() == h) ReleaseCapture();
-        return 0;
-    }
-
-    if (msg == WM_LBUTTONUP && h == s_Host && s_CancelDown)
-    {
-        int mx = (int)(short)LOWORD(lp);
-        int my = (int)(short)HIWORD(lp);
-        RECT a, b;
-
-        if (Esc_Layout(h, &a, &b) && (s_Sel == 0 || s_Sel == 1) &&
-            Esc_CancelHit(&b, mx, my))
+    case WM_LBUTTONUP:
+        if (s_SlideDrag)
+        {
+            s_SlideDrag = 0;
+            if (GetCapture() == h) ReleaseCapture();
+            return 0;
+        }
+        if (!s_CancelDown) break;
+        if (Esc_Layout(h, &a, &b) && Esc_CancelHit(&b, mx, my))
             Esc_Cancel(h);
         else
         {
@@ -2794,35 +2562,31 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             Esc_Redraw(h);
         }
         return 0;
-    }
-
-    if (msg == WM_CAPTURECHANGED && h == s_Host)
-    {
+    case WM_CAPTURECHANGED:
         s_SlideDrag = 0;
         if (s_CancelDown) { s_CancelDown = 0; Esc_Redraw(h); }
-    }
-
-    if (msg == WM_TIMER && wp == ESC_EDIT_TIMER && h == s_Host)
-    {
-        Esc_EditPoll(h);
-        return 0;
-    }
-
-    if (msg == WM_KILLFOCUS && h == s_Host && s_EditOn)
-        Esc_EditCommit(h);
-
-    if (msg == WM_MOUSEWHEEL && h == s_Host && Esc_TextWheel(h, wp, lp))
-        return 0;
-
-    /* 隐藏/销毁 ESC 菜单都视为离开设置页, 统一落盘。 */
-    if (msg == WM_SHOWWINDOW && !wp && h == s_Host)
-    {
+        break;
+    case WM_TIMER:
+        if (wp == ESC_EDIT_TIMER) { Esc_EditPoll(h); return 0; }
+        break;
+    case WM_KILLFOCUS:
+        if (s_EditOn) Esc_EditCommit(h);
+        break;
+    case WM_MOUSEWHEEL:
+        if (Esc_TextWheel(h, wp, lp)) return 0;
+        break;
+    case WM_SHOWWINDOW:
+        /* 隐藏 ESC 菜单 = 离开设置页, 统一落盘。 */
+        if (wp) break;
         s_CancelDown = 0;
         s_SlideDrag = 0;
         if (GetCapture() == h) ReleaseCapture();
         Esc_EditCommit(h);
         Esc_FlushPending();
         Esc_SaveSettings();
+        break;
+    default:
+        break;
     }
 
     r = Esc_CallOld(h, old, msg, wp, lp);

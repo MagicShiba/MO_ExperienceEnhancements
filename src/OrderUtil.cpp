@@ -2,11 +2,11 @@
  * 只读查询 + 标准事件入队; 单机单位令直写 DoList, 联机只走 OutList。 */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "ScaleBar.h"
 
-#define ADDR_FRAME 0xA8ED84u   /* Unsorted::CurrentFrame */
 
 int OU_WhatAmI(void* p)
 {
@@ -101,6 +101,56 @@ int OU_DirectToDoList(const char* ev)
     *(unsigned*)ADDR_DO_NEXT = (next + 1u) & DO_MASK;
     *(unsigned*)ADDR_DO_COUNT = count + 1u;
     return 1;
+}
+
+/* 事件缓冲清零 (无 CRT)。 */
+void OU_EvClear(void* ev)
+{
+    unsigned char* p = (unsigned char*)ev;
+    unsigned i;
+    if (!p) return;
+    for (i = 0; i < EVT_SIZE; i++) p[i] = 0;
+}
+
+/* ---------------- Surface 锁定 ---------------- */
+
+typedef void* (__fastcall *OuLockFn)(void*, void*, int, int);
+typedef void  (__fastcall *OuUnlockFn)(void*, void*);
+
+unsigned char* OU_SurfLock(void* surf)
+{
+    unsigned char* vt;
+    OuLockFn fn;
+    unsigned char* locked;
+    if (!surf || !IsPlausiblePtr(surf)) return 0;
+    vt = *(unsigned char**)surf;
+    if (!vt || !IsPlausiblePtr(vt)) return 0;
+    fn = (OuLockFn)(*(void**)(vt + 0x5Cu));
+    if (!fn || !IsPlausiblePtr((const void*)fn)) return 0;
+    locked = (unsigned char*)fn(surf, NULL, 0, 0);
+    if (!locked || !IsPlausiblePtr(locked)) return 0;
+    return locked;
+}
+
+void OU_SurfUnlock(void* surf)
+{
+    unsigned char* vt;
+    OuUnlockFn fn;
+    if (!surf || !IsPlausiblePtr(surf)) return;
+    vt = *(unsigned char**)surf;
+    if (!vt || !IsPlausiblePtr(vt)) return;
+    fn = (OuUnlockFn)(*(void**)(vt + 0x60u));
+    if (fn && IsPlausiblePtr((const void*)fn)) fn(surf, NULL);
+}
+
+/* PlanCommit 事件 (路径点收尾) 构造 + 入队。 */
+typedef void* __attribute__((thiscall)) (*Fn_PlanCommitCtor)(void* ev, int houseIdx, int evtType);
+int OU_FirePlanCommit(int houseIdx)
+{
+    char ev[EVT_SIZE];
+    OU_EvClear(ev);
+    ((Fn_PlanCommitCtor)(void*)0x4C66C0u)(ev, houseIdx, EVT_PLANCOMMIT);
+    return OU_Enqueue(ev);
 }
 
 int OU_Enqueue(char ev[EVT_SIZE])
@@ -472,40 +522,62 @@ int OU_CellSurfaceZ(int cx, int cy, int* zOut)
                           0, 1, zOut);
 }
 
-void OU_ThinLine(unsigned char* locked, int w, int h, int pitch,
-                 int x0, int y0, int x1, int y1,
-                 unsigned r, unsigned g, unsigned b, unsigned a,
-                 int thick)
+/* ---------------- 手绘几何 (16 位面, 逐像素 Blend16) ----------------
+ * 这三件事原来在 8 个模块里各写了一份 (Bresenham / 画点 / 实心方块, 合计 300+
+ * 行), 彼此只差颜色与线宽 —— 而且线宽的纵向外扩方向还不统一 (多数居中, 本文件
+ * 原来往下补)。现在只此一份, 统一为**居中**外扩 (thick=3 即 y-1/y/y+1)。
+ *
+ * clip 传 NULL 表示不裁剪; 否则只画 [x0,x1) × [y0,y1) 内的像素 (GridView 用)。
+ * 调用方给的 locked/w/h/pitch 是当前锁定的 16 位面, 与本文件其它绘制同口径。 */
+
+int OU_Put(unsigned char* locked, int w, int h, int pitch,
+           const OuClip* clip, int x, int y,
+           unsigned r, unsigned g, unsigned b, unsigned a)
 {
-    int dx, dy, sx, sy, err, e2, x, y, n, t;
-    unsigned short* dstRow;
+    unsigned short* row;
+    if (!locked || x < 0 || y < 0 || x >= w || y >= h) return 0;
+    if (clip && (x < clip->x0 || x >= clip->x1 ||
+                 y < clip->y0 || y >= clip->y1)) return 0;
+    row = (unsigned short*)(locked + (size_t)y * pitch);
+    row[x] = Blend16(row[x], r, g, b, a);
+    return 1;
+}
+
+void OU_Line(unsigned char* locked, int w, int h, int pitch,
+             const OuClip* clip, int x0, int y0, int x1, int y1,
+             unsigned r, unsigned g, unsigned b, unsigned a, int thick)
+{
+    int dx, dy, sx, sy, err, e2, x, y, n, k, lo;
     if (!locked || !IsPlausiblePtr(locked)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;
     if (thick < 1) thick = 1;
-    if (thick > 4) thick = 4;
+    if (thick > 8) thick = 8;
+    lo = -((thick - 1) / 2);              /* 居中: thick=1 → +0, 3 → -1..+1 */
     dx = x1 - x0; dy = y1 - y0;
     sx = (dx >= 0) ? 1 : -1;
     sy = (dy >= 0) ? 1 : -1;
     dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
     err = dx - dy;
     x = x0; y = y0;
-    for (n = 0; n < 4096; n++)
+    for (n = 0; n < 8192; n++)            /* 上限防呆: 远超屏幕对角, 防脏坐标死循环 */
     {
-        if (x >= 0 && y >= 0 && x < w && y < h)
-        {
-            dstRow = (unsigned short*)(locked + y * pitch);
-            dstRow[x] = Blend16(dstRow[x], r, g, b, a);
-            for (t = 1; t < thick; t++)       /* 加粗: 往下补 thick-1 行 */
-                if (y + t < h)
-                    ((unsigned short*)(locked + (y + t) * pitch))[x] =
-                        Blend16(((unsigned short*)(locked + (y + t) * pitch))[x],
-                                r, g, b, a);
-        }
+        for (k = 0; k < thick; k++)
+            OU_Put(locked, w, h, pitch, clip, x, y + lo + k, r, g, b, a);
         if (x == x1 && y == y1) break;
         e2 = err * 2;
         if (e2 > -dy) { err -= dy; x += sx; }
         if (e2 < dx) { err += dx; y += sy; }
     }
+}
+
+void OU_Box(unsigned char* locked, int w, int h, int pitch,
+            const OuClip* clip, int cx, int cy, int m,
+            unsigned r, unsigned g, unsigned b, unsigned a)
+{
+    int k, j;
+    for (k = -m; k <= m; k++)
+        for (j = -m; j <= m; j++)
+            OU_Put(locked, w, h, pitch, clip, cx + k, cy + j, r, g, b, a);
 }
 
 /* 虚线: 沿线段每 (dash+gap) 像素画 dash 段实线, 其余留空 (风格贴近引擎聚集点线)。 */
@@ -589,7 +661,7 @@ void OU_PrevDraw(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, i
         int ux, uy, tx, ty;
         if (!OU_ProjWorld(buf[k].ulx, buf[k].uly, buf[k].ulz, &ux, &uy)) continue;
         if (!OU_ProjWorld(buf[k].tlx, buf[k].tly, buf[k].tlz, &tx, &ty)) continue;
-        OU_ThinLine(locked, w, h, pitch, ux, uy, tx, ty, r, g, b, a, thick);
+        OU_Line(locked, w, h, pitch, 0, ux, uy, tx, ty, r, g, b, a, thick);
     }
 }
 
@@ -745,10 +817,28 @@ int OU_ParseHotkey(const char* spec, OU_Hotkey* out)
     return 1;
 }
 
+/* 帧内缓存: GetAsyncKeyState 是 user32 系统调用 (~1us), 而一帧里十来个 Draw
+ * 各查一遍 Ctrl/Shift/中键就是十几 us 白烧 (实测 sm/msgtail 段)。同一游戏帧
+ * 内同一键只问一次系统; 暂停时帧号冻结 (迷你循环), 用 16ms 墙钟兜底重查,
+ * 保证 F5 之类在暂停中照样灵敏。 */
+static unsigned s_KeyFr[256];
+static unsigned s_KeyTick = 0;
+static unsigned char s_KeyDown[256];
+
 int OU_KeyDown(unsigned vk)
 {
+    unsigned fr, now;
+    int d;
     if (!vk || vk > 255) return 0;
-    return (GetAsyncKeyState((int)vk) & 0x8000) ? 1 : 0;
+    fr = *(volatile unsigned*)(size_t)0x00A8ED84u;   /* 引擎帧号 */
+    now = GetTickCount();
+    if (s_KeyFr[vk] == fr && (now - s_KeyTick) < 16u)
+        return s_KeyDown[vk] ? 1 : 0;
+    d = (GetAsyncKeyState((int)vk) & 0x8000) ? 1 : 0;
+    s_KeyFr[vk] = fr;
+    s_KeyTick = now;
+    s_KeyDown[vk] = (unsigned char)d;
+    return d;
 }
 
 int OU_ModsDown(unsigned mods)

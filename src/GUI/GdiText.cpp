@@ -197,6 +197,178 @@ void LogLine(const char* body)
     WriteFile(g_Log, buf, n, &written, NULL);
 }
 
+/* ---------------- 帧内耗时探针 ----------------
+ * 定位"开了 MOE 掉一半帧"这类问题时, 只知道总帧率没用, 得知道每帧这 2~5ms 花在
+ * 哪一段。这里按段累计 QPC, 每 2s 输出一次 us/帧 (除以帧数, 所以与帧率无关)。
+ * 关闭时 Perf_Now 返回 0, 全部调用点立刻短路, 常驻无成本。 */
+static int       s_PfInit = 0;
+static int       s_PfOn = 0;
+static int       s_PfFps = 0;   /* 1 = Perf_Frame 结算帧率 (Perf=1/2 都开) */
+static long long s_PfQpf = 0;
+static long long s_PfAcc[PF_COUNT];
+static unsigned  s_PfCnt[PF_COUNT];
+static long long s_PfLast = 0;
+static unsigned  s_PfFrames = 0;
+/* 帧间隔直方图 (50us 一档, 0~20ms): 用来报"中位帧率"。
+ * 1 秒窗口的帧数 f= 会被载入/GC 之类的一次性卡顿拉低 (窗口内有几个 60ms 的尖峰
+ * 就掉 10 帧), 同一台机器两轮读数能差 20 —— 中位数不受这些尖峰影响, 是可比的口径。
+ * 只增一个 int, 可忽略。 */
+#define PF_HIST_N 400
+static unsigned s_PfHist[PF_HIST_N];
+static long long s_PfLastFrame = 0;
+
+/* 槽位名表必须与枚举逐项对齐。数组故意不写长度, 下面用一句编译期断言卡数量:
+ * 漏一项会让后面的名字整体错位, 日志就会张冠李戴, 而这种错不会报错。 */
+static const char* const kPfName[] =
+{
+    "gate", "fc", "gs", "prep", "fm", "sb", "ss",
+    "aw", "bq", "pc", "so", "rp", "tc", "fa", "am",
+    "sa", "dp", "ms", "ot", "wpc", "mlc", "sws",
+    "ra", "ps", "ag", "ob",
+    "pv", "shot", "vts", "pub", "mhk", "pwr", "pipb",
+    "skin", "pvp",
+    "msg", "msgtext", "msgswp", "msgdraw", "msgtail",
+    "blitsb", "aftermap", "renderin", "vecblit", "vecgdim", "pprev", "shroud",
+    "swpm", "swpb", "swpt",
+    "vprint", "vsimple", "vprtO", "vsmpO", "vb1", "vb2", "clr",
+    "sbSS", "sbPWR", "sbPIP", "sbFM",
+    "dSWS", "dSO", "dPC", "dRP", "dFA", "dSA", "dTC", "dDP", "dWR", "dAG", "dRAD",
+    "tCE", "tPWR", "tSB", "tPV", "tSHOT",
+    "vhit", "vmiss", "lock", "sbSet", "sbFill", "sbLbl",
+    "swsB", "swsL"
+};
+typedef char kPfName_align_check[
+    (sizeof(kPfName) / sizeof(kPfName[0]) == (unsigned)PF_COUNT) ? 1 : -1];
+
+void Perf_EnsureInit(void)
+{
+    LARGE_INTEGER f;
+    int i;
+    if (s_PfInit) return;
+    s_PfInit = 1;
+    if (!g_IniPath[0]) BuildPaths();
+    /* 1 = 全量分段账; 2 = 只记帧率 (几乎零开销, 平时判断"掉没掉帧"用它)。 */
+    {
+        int mode = GetPrivateProfileIntA("Log", "Perf", 0, g_IniPath);
+        s_PfOn = (mode == 1) ? 1 : 0;
+        s_PfFps = (mode >= 1) ? 1 : 0;
+    }
+    if (!s_PfFps) return;
+    if (QueryPerformanceFrequency(&f) && f.QuadPart > 0) s_PfQpf = f.QuadPart;
+    for (i = 0; i < PF_COUNT; i++) s_PfAcc[i] = 0;
+    LogLine(s_PfOn ? "perf: probe ON (us/frame, 2s window)"
+                   : "perf: fps only (no per-segment timing)");
+}
+
+long long Perf_Now(void)
+{
+    LARGE_INTEGER t;
+    if (!s_PfOn) return 0;
+    QueryPerformanceCounter(&t);
+    return t.QuadPart;
+}
+
+void Perf_Add(int slot, long long t0)
+{
+    LARGE_INTEGER t;
+    if (!t0 || slot < 0 || slot >= PF_COUNT) return;
+    QueryPerformanceCounter(&t);
+    s_PfAcc[slot] += t.QuadPart - t0;
+    if (slot < (int)PF_COUNT) s_PfCnt[slot]++;
+}
+
+void Perf_AddDelta(int slot, long long dt)
+{
+    if (!s_PfOn || slot < 0 || slot >= PF_COUNT || dt <= 0) return;
+    s_PfAcc[slot] += dt;
+    s_PfCnt[slot]++;
+}
+
+void Perf_Hit(int slot)
+{
+    if (!s_PfOn || slot < 0 || slot >= PF_COUNT) return;
+    s_PfCnt[slot]++;
+}
+
+void Perf_Frame(void)
+{
+    LARGE_INTEGER t;
+    long long now, dt;
+    unsigned i, ms;
+    char buf[LOG_LINE_MAX], b1[16];
+    unsigned p = 0;
+
+    if (!s_PfFps || !s_PfQpf) return;
+    QueryPerformanceCounter(&t);
+    now = t.QuadPart;
+    s_PfFrames++;
+    /* 直方图: 本帧距上一帧的 us / 50 (钳到最后一档)。 */
+    if (s_PfLastFrame)
+    {
+        unsigned us = (unsigned)((now - s_PfLastFrame) * 1000000ll / s_PfQpf);
+        unsigned b = us / 50u;
+        if (b >= PF_HIST_N) b = PF_HIST_N - 1;
+        s_PfHist[b]++;
+    }
+    s_PfLastFrame = now;
+    if (!s_PfLast) { s_PfLast = now; return; }
+    dt = now - s_PfLast;
+    if (dt < s_PfQpf) return;                     /* 不满 1s 不结算 */
+
+    ms = (unsigned)(dt * 1000 / s_PfQpf);
+    p = AppendCStr(buf, p, "perf: ms=", sizeof(buf));
+    UtoA(ms, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    p = AppendCStr(buf, p, " f=", sizeof(buf));
+    UtoA(s_PfFrames, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+    /* 中位帧率 (50us 粒度档): 抗尖峰, 与上面 f= 对照看。 */
+    {
+        unsigned tot = 0, half, acc = 0, i2, med = 0;
+        for (i2 = 0; i2 < PF_HIST_N; i2++) tot += s_PfHist[i2];
+        half = tot / 2;
+        for (i2 = 0; i2 < PF_HIST_N; i2++)
+        {
+            acc += s_PfHist[i2];
+            if (acc >= half) { med = (i2 + 1) * 50u; break; }
+        }
+        p = AppendCStr(buf, p, " fmed=", sizeof(buf));
+        UtoA(med ? 1000000u / med : 0, b1);
+        p = AppendCStr(buf, p, b1, sizeof(buf));
+        for (i2 = 0; i2 < PF_HIST_N; i2++) s_PfHist[i2] = 0;
+    }
+    /* 每帧 prepare 被调用几次 (0x4F42F0 有上百个调用点, 正常应接近 1)。 */
+    p = AppendCStr(buf, p, " prepN=", sizeof(buf));
+    UtoA(s_PfFrames ? s_PfCnt[PF_PREPARE] / s_PfFrames : 0, b1);
+    p = AppendCStr(buf, p, b1, sizeof(buf));
+    for (i = 0; s_PfOn && i < PF_COUNT; i++)
+    {
+        /* us/帧 = acc * 1e6 / qpf / frames; cnt = 次数/帧 */
+        long long us = s_PfFrames ? (s_PfAcc[i] * 1000000ll / s_PfQpf / (long long)s_PfFrames) : 0;
+        if (!s_PfAcc[i] && !s_PfCnt[i]) continue;
+        p = AppendCh(buf, p, ' ', sizeof(buf));
+        p = AppendCStr(buf, p, kPfName[i], sizeof(buf));
+        p = AppendCh(buf, p, '=', sizeof(buf));
+        UtoA((unsigned)(us < 0 ? 0 : us), b1);
+        p = AppendCStr(buf, p, b1, sizeof(buf));
+        if (s_PfCnt[i])
+        {
+            p = AppendCh(buf, p, '/', sizeof(buf));
+            UtoA(s_PfFrames ? s_PfCnt[i] / s_PfFrames : s_PfCnt[i], b1);
+            p = AppendCStr(buf, p, b1, sizeof(buf));
+        }
+        s_PfAcc[i] = 0;
+        s_PfCnt[i] = 0;
+    }
+    if (s_PfOn)
+    {
+        p = AppendCStr(buf, p, " vwhy=", sizeof(buf));
+        UtoA((unsigned)g_VecMissWhy, b1);
+        p = AppendCStr(buf, p, b1, sizeof(buf));
+    }
+    LogLine(buf);
+    s_PfFrames = 0;
+    s_PfLast = now;
+}
+
 /* ---------------- 字体查找 ---------------- */
 
 void CopyFace(wchar_t* dst, const wchar_t* src)
@@ -562,18 +734,24 @@ unsigned char* GtLock(void* surf)
 {
     GtLockFn fn = (GtLockFn)GtVtable(surf, GtVT_LOCK);
     unsigned char* p;
+    long long t;
     if (!fn) return NULL;
     if (!IsPlausiblePtr((const void*)fn)) return NULL;
+    t = Perf_Now();
     p = (unsigned char*)fn(surf, NULL, 0, 0);
+    Perf_Add(PF_LOCK, t);
     return (p && IsPlausiblePtr(p)) ? p : NULL;
 }
 
 void GtUnlock(void* surf)
 {
     GtUnlockFn fn = (GtUnlockFn)GtVtable(surf, GtVT_UNLOCK);
+    long long t;
     if (!fn) return;
     if (!IsPlausiblePtr((const void*)fn)) return;
+    t = Perf_Now();
     fn(surf, NULL);
+    Perf_Add(PF_LOCK, t);
 }
 
 void GtDrawOutline(void* surf, int x, int y, int w, int h,
@@ -645,6 +823,8 @@ int g_Calibrated = 0;
 /* 位深展开表, 混合查表用。Calibrate 后清零重建。 */
 unsigned char g_ExpR[32], g_ExpG[64], g_ExpB[32];
 int g_ExpReady = 0;
+unsigned char g_BlendR[32][32], g_BlendG[32][64];
+int g_BlendReady = 0;
 
 void GtBuildExpand(void)
 {
@@ -659,7 +839,25 @@ void GtBuildExpand(void)
         unsigned v = (unsigned)((i * 255 + gN / 2) / gN);
         g_ExpG[i] = (unsigned char)(v > 255u ? 255u : v);
     }
+    GtBuildBlend5();
     g_ExpReady = 1;
+}
+
+/* 5 位 alpha 的"目标乘数"表: TB[inv][dst] = dst * inv / 31 (inv=31-aq)。
+ * 与前景色无关, 所以全局建一次; 前景部分按字建 32 项 (见 VecRender)。
+ * 精度: alpha 8 位 -> 5 位 (丢 3 位), 与 8 位混合相比每个通道最多差 1 个色阶,
+ * 18px 抗锯齿边缘看不出来; 换来的是每像素 3 次小表查 + 3 次加, 没有乘法/除法。 */
+void GtBuildBlend5(void)
+{
+    int inv, d;
+    for (inv = 0; inv < 32; inv++)
+    {
+        for (d = 0; d < 32; d++)
+            g_BlendR[inv][d] = (unsigned char)(((unsigned)d * (unsigned)inv + 15u) / 31u);
+        for (d = 0; d < 64; d++)
+            g_BlendG[inv][d] = (unsigned char)(((unsigned)d * (unsigned)inv + 15u) / 31u);
+    }
+    g_BlendReady = 1;
 }
 
 void Calibrate(void)
@@ -981,26 +1179,28 @@ int RenderLine(const wchar_t* text, int len)
 {
     SIZE sz;
     RowCE* e;
+    int fit, keyLen = len;
     if (!g_G->dc || len <= 0) return 0;
-    /* 精确限宽: 按实际字形 fit DIB (之前 len*24 粗估, 16px 下只画 42 字,
-     * 聊天长文尾部直接被砍还留黑盒; CharsFit 同 dc 同字体, 精确无浪费) */
-    {
-        int fit = CharsFit(text, len, DIB_W - 8);
-        if (fit < 0) fit = 0;
-        if (fit < len) len = fit;
-        if (len <= 0) return 0;
-    }
-    if (RowCE_Get(text, len, &e))
+    /* 命中优先: 缓存里已有本串的像素, 连 CharsFit 那次 GDI 度量都省掉
+     * (刻度条档位字/超武面板行都是同串反复画, 原来每帧 4 次 Extent 调用)。
+     * 键用**原始 len** (限宽只影响画多宽, 不影响这是哪一串)。 */
+    if (RowCE_Get(text, keyLen, &e))
     {
         RowCE_Blit(e);
         return e->w;
     }
+    /* 精确限宽: 按实际字形 fit DIB (之前 len*24 粗估, 16px 下只画 42 字,
+     * 聊天长文尾部直接被砍还留黑盒; CharsFit 同 dc 同字体, 精确无浪费) */
+    fit = CharsFit(text, len, DIB_W - 8);
+    if (fit < 0) fit = 0;
+    if (fit < len) len = fit;
+    if (len <= 0) return 0;
     if (!GetTextExtentPoint32W(g_G->dc, text, len, &sz)) return 0;
     if (sz.cx > DIB_W - 8) sz.cx = DIB_W - 8;
     if (g_G->adv < 1) ClearDibRect(sz.cx + 8, DIB_H);
     else ClearDibRect(sz.cx + 8, g_G->adv + 8);
     ExtTextOutW(g_G->dc, 0, 0, 0, NULL, text, (UINT)len, NULL);
-    RowCE_Put(text, len, sz.cx, g_G->adv);
+    RowCE_Put(text, keyLen, sz.cx, g_G->adv);
     return sz.cx;
 }
 

@@ -25,6 +25,10 @@ extern "C" __declspec(dllexport) int __cdecl SWS_OverBar(int mx, int my);
  * 只比区间不解引用, 可安全地在异常处理器里调。 */
 extern "C" __declspec(dllexport) const char* __cdecl SWS_WhoOwns(unsigned addr);
 
+/* 自动化回归用 (SWSTest.cpp): 动作号 2~5 = 收起/展开/关去重/开去重,
+ * 与按钮/热键改的是同一批状态。0/1 (总开关) 直接用 SWS_SetEnabled。 */
+void SWS_TestAction(int a);
+
 /* GUI 设置菜单用的运行时开关/查询。 */
 int SWS_Enabled(void);
 void SWS_SetEnabled(int enable);

@@ -14,6 +14,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "FullMap.h"
 #include "OrderUtil.h"
@@ -31,23 +32,17 @@ extern int g_Calibrated;
 
 /* Syringe REGISTERS 布局见 YRpp Syringe.h, 落点格问 OU_MouseCell (见 RP_Gate)。 */
 #define REG_OFF_EDI 0x08u
-#define REG_OFF_ESI 0x0Cu
 
 /* ---------------- 字段偏移 (gamemd 实测) ---------------- */
 
-#define OFF_BLD_TYPE      0x520u   /* BuildingClass::Type */
 #define OFF_BLD_OWNER     0x21Cu   /* TechnoClass::Owner -> HouseClass* (归属判定) */
 #define OFF_TYP_UNDEPLOY  0x16B9u  /* BuildingTypeClass::UndeploysInto */
 #define VT_ISUNITFACTORY  0x284u   /* TechnoClass::IsUnitFactory() */
-#define OFF_INLIMBO       0x81u    /* ObjectClass::InLimbo */
 #define OFF_BLD_ARCHIVE   0x218u   /* TechnoClass::ArchiveTarget: 引擎画聚集点线读的目标
                                     * 指针, 无聚集点 = NULL。只判空, 绝不解引用 (脏值会崩) */
 
 /* 规划点 token (与 PatrolCircle 同): Techno+0x514 = PlanningToken,
  * token+0x08 = 节点数组, token+0x14 = 节点数。 */
-#define OFF_TECH_TOKEN 0x514u
-#define OFF_TOK_NODES  0x08u
-#define OFF_TOK_NCOUNT 0x14u
 #define OFF_TOK_FLAG   0x1Cu  /* 提交中标记, 非 0 时提交空转 */
 #define OFF_TOK_CURSOR 0x8Cu  /* 规划游标, 提交只推游标 == 0 的 token */
 /* PlanningTokenClass::Array (DynamicVectorClass<PlanningTokenClass*> @0xAC4C78)。
@@ -65,12 +60,9 @@ typedef int __attribute__((thiscall)) (*Fn_IsUnitFactory)(void* self);
 typedef void* __attribute__((thiscall)) (*Fn_PlanCommitCtor)(void* ev,
                                                             int houseIdx, int evtType);
 #define FN_PLANCOMMIT ((Fn_PlanCommitCtor)(void*)0x4C66C0u)
-#define EVT_PLANCOMMIT 0x2Bu   /* EventType::PlanCommit (YRpp GeneralDefinitions.h) */
 
 /* ---------------- 私有常量 ---------------- */
 
-#define ADDR_SCENARIO  0xA8B230u  /* ScenarioClass::Instance (换图代号) */
-#define ADDR_FRAME     0xA8ED84u  /* Unsorted::CurrentFrame = 逻辑帧号 */
 
 #define RP_TAB_CAP   128   /* 折线表上限 (静态数组) */
 #define RP_NODE_MAX  16    /* 单条折线段数上限 (ini MaxNodes 2~16) */
@@ -587,7 +579,7 @@ static int RP_FireNode(int houseIdx, void* unit, int uid, int idxOk, int cx, int
     unsigned i;
     int srcID, dstID;
     unsigned char srcR, dstR;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     for (i = 0; i < 8; i++) srcB[i] = dstB[i] = 0;
     cs.X = (short)cx; cs.Y = (short)cy;
     FN_TGT_CELL(dstB, &cs);
@@ -602,11 +594,7 @@ static int RP_FireNode(int houseIdx, void* unit, int uid, int idxOk, int cx, int
 
 static int RP_FireCommit(int houseIdx)
 {
-    char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
-    FN_PLANCOMMIT(ev, houseIdx, EVT_PLANCOMMIT);
-    return OU_Enqueue(ev);
+    return OU_FirePlanCommit(houseIdx);
 }
 
 static void RP_WalkShiftDown(int i)
@@ -791,12 +779,6 @@ void RallyPath_Poll(void)
 
 /* ---------------- 渲染期折线 (只读 + 渲染面写入) ---------------- */
 
-typedef void* (__fastcall *RP_LockFn)(void*, void*, int, int);
-typedef int (__fastcall *RP_UnlockFn)(void*, void*);
-
-#define VT_RP_LOCK   0x5C
-#define VT_RP_UNLOCK 0x60
-
 /* 格 → 世界坐标 (格心 + 地面高度)。 */
 static int RP_CellWorld(int cx, int cy, int* lx, int* ly, int* lz)
 {
@@ -810,9 +792,6 @@ static int RP_CellWorld(int cx, int cy, int* lx, int* ly, int* lz)
 
 void RallyPath_Draw(void* surf, int w, int h, int pitch)
 {
-    unsigned char* vt;
-    RP_LockFn lockFn;
-    RP_UnlockFn unlockFn;
     unsigned char* locked;
     void** items;
     OU_PrevLine buf[OU_PREV_CAP]; /* 多选工厂每家一条线, 按全表上限给 */
@@ -828,13 +807,8 @@ void RallyPath_Draw(void* surf, int w, int h, int pitch)
     if (selN <= 0 || !items || !IsPlausiblePtr(items)) return;
     zDown = OU_KeyDown('Z');
 
-    vt = *(unsigned char**)surf;
-    if (!vt || !IsPlausiblePtr(vt)) return;
-    lockFn = (RP_LockFn)(*(void**)(vt + VT_RP_LOCK));
-    unlockFn = (RP_UnlockFn)(*(void**)(vt + VT_RP_UNLOCK));
-    if (!lockFn || !unlockFn) return;
-    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
-    if (!locked || !IsPlausiblePtr(locked)) return;
+    locked = OU_SurfLock(surf);
+    if (!locked) return;
 
     n = 0;
     for (i = 0; i < selN; i++)
@@ -879,5 +853,5 @@ void RallyPath_Draw(void* surf, int w, int h, int pitch)
         if (!RP_HouseColor(&cr, &cg, &cb)) { cr = 255; cg = 255; cb = 0; }
         OU_PrevDrawDash(buf, n, locked, w, h, pitch, cr, cg, cb, 220, 2, 6, 4);
     }
-    unlockFn(surf, NULL);
+    OU_SurfUnlock(surf);
 }

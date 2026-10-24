@@ -26,18 +26,12 @@ typedef void* __attribute__((thiscall)) (*Fn_WRGetWeapon)(void* type, int idx);
 typedef int __attribute__((thiscall)) (*Fn_WRThreats)(void* weaponType);
 typedef int __attribute__((thiscall)) (*Fn_WRC2C)(void* tac,
     const CoordStruct* c, Point2D* out);
-typedef void* (__fastcall *WR_LockFn)(void*, void*, int, int);
-typedef int (__fastcall *WR_UnlockFn)(void*, void*);
-
 #define FN_WR_WEAPON ((Fn_WRGetWeapon)(void*)0x7177C0u)
 #define FN_WR_ELITEWEAPON ((Fn_WRGetWeapon)(void*)0x7177E0u)
 #define FN_WR_THREATS ((Fn_WRThreats)(void*)0x772A90u)
 #define FN_WR_C2C ((Fn_WRC2C)(void*)0x6D2140u)
 #define WR_TAC_INSTANCE 0x887324u
 #define WR_THREAT_AIR 0x4
-
-#define VT_WR_LOCK   0x5C
-#define VT_WR_UNLOCK 0x60
 
 /* ---------------- 配置 ---------------- */
 
@@ -626,33 +620,12 @@ static WRInfo WR_Resolve(void* u)
 static unsigned char* s_WrLocked = 0;
 static int s_WrW = 0, s_WrH = 0, s_WrPitch = 0;
 
-static void WR_Plot(int x, int y, int cr, int cg, int cb, unsigned a)
-{
-    unsigned short* dstRow;
-    if (x < 0 || y < 0 || x >= s_WrW || y >= s_WrH) return;
-    dstRow = (unsigned short*)(s_WrLocked + y * s_WrPitch);
-    dstRow[x] = Blend16(dstRow[x], (unsigned)cr, (unsigned)cg, (unsigned)cb, a);
-}
-
-/* 1px 细线 (Bresenham, 自带裁剪)。 */
+/* 1px 细线 (公共实现: OrderUtil 的 OU_Line)。 */
 static void WR_ThinLine(int x0, int y0, int x1, int y1,
                         int cr, int cg, int cb, unsigned a)
 {
-    int dx, dy, sx, sy, err, e2, x, y, n;
-    dx = x1 - x0; dy = y1 - y0;
-    sx = (dx >= 0) ? 1 : -1;
-    sy = (dy >= 0) ? 1 : -1;
-    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
-    err = dx - dy;
-    x = x0; y = y0;
-    for (n = 0; n < 4096; n++)
-    {
-        WR_Plot(x, y, cr, cg, cb, a);
-        if (x == x1 && y == y1) break;
-        e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
-    }
+    OU_Line(s_WrLocked, s_WrW, s_WrH, s_WrPitch, 0, x0, y0, x1, y1,
+            (unsigned)cr, (unsigned)cg, (unsigned)cb, a, 1);
 }
 
 /* 世界点 → 屏像素 (DeployPreview 同系: CoordsToClient + 缩放折算)。 */
@@ -703,9 +676,6 @@ static void WR_Circle(int cx, int cy, int cz, int radius,
 
 void WeaponRange_Draw(void* surf, int w, int h, int pitch)
 {
-    unsigned char* vt;
-    WR_LockFn lockFn;
-    WR_UnlockFn unlockFn;
     unsigned char* locked;
     void** items;
     int selN;
@@ -725,13 +695,8 @@ void WeaponRange_Draw(void* surf, int w, int h, int pitch)
     if (!u || !IsPlausiblePtr(u)) return;
     r = WR_Resolve(u);
     if (!r.ok) return;
-    vt = *(unsigned char**)surf;
-    if (!vt || !IsPlausiblePtr(vt)) return;
-    lockFn = (WR_LockFn)(*(void**)(vt + VT_WR_LOCK));
-    unlockFn = (WR_UnlockFn)(*(void**)(vt + VT_WR_UNLOCK));
-    if (!lockFn || !unlockFn) return;
-    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
-    if (!locked || !IsPlausiblePtr(locked)) return;
+    locked = OU_SurfLock(surf);
+    if (!locked) return;
     s_WrLocked = locked; s_WrW = w; s_WrH = h; s_WrPitch = pitch;
     /* 地面蓝圈 (当前武器) + 最小红圈 (0 不画) + 空中青虚线圈
      * + 隐形探测黄圈 + 间谍识别紫圈 (后两者 0 不画)。 */
@@ -751,5 +716,5 @@ void WeaponRange_Draw(void* surf, int w, int h, int pitch)
     if (r.disRange >= 256)
         WR_Circle(r.center.X, r.center.Y, r.center.Z, r.disRange, 180, 100, 255, 230, 0);
     s_WrLocked = 0;
-    unlockFn(surf, NULL);
+    OU_SurfUnlock(surf);
 }

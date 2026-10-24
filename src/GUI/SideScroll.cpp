@@ -24,6 +24,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "FullMap.h"
 #include "SideScroll.h"
@@ -35,12 +36,10 @@
 #define OFF_ACTIVE_TAB     0x539Cu
 #define OFF_TABS           0x1544u
 #define OFF_TAB_STRIDE     0x0F94u
-#define OFF_STRIP_TOPROW   0x44u
 #define OFF_STRIP_TARGET   0x48u
 #define OFF_STRIP_PIXOFF   0x4Cu
 #define OFF_STRIP_DIR      0x3Eu
 #define OFF_STRIP_ANIM     0x3Fu
-#define OFF_STRIP_CAMCOUNT 0x54u
 
 #define ADDR_SB_X          0x00886F90u  /* SidebarBounds */
 #define ADDR_SB_Y          0x00886F94u
@@ -48,13 +47,8 @@
 #define ADDR_SB_H          0x00886F9Cu
 #define ADDR_CAM_TOP       0x00B0B4F8u  /* cameo 区上缘 Y */
 #define ADDR_CAM_H         0x00B0B504u  /* cameo 区高 */
-#define ADDR_SB_REDRAW     0x00B0B518u  /* 侧栏脏标记 */
-#define ADDR_SB_NEEDBG     0x00884B8Fu  /* this+0x53A7 页签底图重画 */
 
-#define ADDR_SCENARIO      0x00A8B230u
 #define ADDR_STARTED       0x00A8ED5Cu
-#define ADDR_ISACTIVE      0x00A8E9A0u
-#define ADDR_FRAME         0x00A8ED84u
 
 /* 可见 cameo 数: 无参、不读 ecx、结尾 ret 不清栈 ⇒ __cdecl。签名猜错 = 栈被清错 =
  * 崩溃而不是返回错值。返回的是 **cameo 数** (行数*2), 不是行数。 */

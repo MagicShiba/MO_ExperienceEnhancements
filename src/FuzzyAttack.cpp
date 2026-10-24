@@ -30,6 +30,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "OrderThrottle.h"
@@ -38,16 +39,9 @@
 
 /* ---------------- 模糊攻击私有地址 (共享部分见 OrderUtil.h) ---------------- */
 
-#define OFF_NEXT_OBJ 0x30u    /* ObjectClass.NextObject (YRpp 成员顺序) */
 
 /* CellClass::FindObjectOfType (0x47C4D0, ECX=格, 栈 abs+alt): 返回链头或空。 */
 typedef void* __attribute__((thiscall)) (*Fn_FindObjType)(void* cell, int abs, int alt);
-typedef void* (__fastcall *FA_LockFn)(void*, void*, int, int);
-typedef int (__fastcall *FA_UnlockFn)(void*, void*);
-
-#define VT_FA_LOCK   0x5C
-#define VT_FA_UNLOCK 0x60
-
 #define FN_FINDOBJTYPE ((Fn_FindObjType)(void*)0x47C4D0u)
 
 /* ---------------- 配置 ---------------- */
@@ -107,8 +101,7 @@ static int FA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
                          void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
             tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
     ev[OFF_PLANFLAG] = 0;
@@ -499,43 +492,17 @@ static void FA_BoxSample(void)
 static unsigned char* s_FaLocked = 0;
 static int s_FaW = 0, s_FaH = 0, s_FaPitch = 0;
 
-static void FA_Plot(int x, int y, unsigned a)
-{
-    unsigned short* dstRow;
-    if (x < 0 || y < 0 || x >= s_FaW || y >= s_FaH) return;
-    dstRow = (unsigned short*)(s_FaLocked + y * s_FaPitch);
-    dstRow[x] = Blend16(dstRow[x], 255, 255, 255, a);
-}
-
-/* 3px 线 (Bresenham + 上下各 1px, 零依赖)。 */
+/* 3px 白线 / 实心方块 (公共实现: OrderUtil 的 OU_Line / OU_Box)。 */
 static void FA_Line(int x0, int y0, int x1, int y1, unsigned a)
 {
-    int dx, dy, sx, sy, err, e2, x, y, n;
-    dx = x1 - x0; dy = y1 - y0;
-    sx = (dx >= 0) ? 1 : -1;
-    sy = (dy >= 0) ? 1 : -1;
-    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
-    err = dx - dy;
-    x = x0; y = y0;
-    for (n = 0; n < 4096; n++)
-    {
-        FA_Plot(x, y, a);
-        FA_Plot(x, y - 1, a);
-        FA_Plot(x, y + 1, a);
-        if (x == x1 && y == y1) break;
-        e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
-    }
+    OU_Line(s_FaLocked, s_FaW, s_FaH, s_FaPitch, 0,
+            x0, y0, x1, y1, 255, 255, 255, a, 3);
 }
 
-/* 实心方块标记 (半边 m)。 */
 static void FA_Mark(int cx, int cy, int m, unsigned a)
 {
-    int k, j;
-    for (k = -m; k <= m; k++)
-        for (j = -m; j <= m; j++)
-            FA_Plot(cx + k, cy + j, a);
+    OU_Box(s_FaLocked, s_FaW, s_FaH, s_FaPitch, 0,
+           cx, cy, m, 255, 255, 255, a);
 }
 
 /* 格块角 → 像素 (参考点 + 固定等距差)。 */
@@ -548,9 +515,6 @@ static void FA_BoxCorner(int ccx, int ccy, int* px, int* py)
 
 void FuzzyAttack_Draw(void* surf, int w, int h, int pitch)
 {
-    unsigned char* vt;
-    FA_LockFn lockFn;
-    FA_UnlockFn unlockFn;
     unsigned char* locked;
     int lo, hi, x0, y0, x1, y1, x2, y2, x3, y3;
     extern int g_Calibrated;
@@ -561,13 +525,8 @@ void FuzzyAttack_Draw(void* surf, int w, int h, int pitch)
     if (!g_Calibrated) return;
     if (!surf || !IsPlausiblePtr(surf)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;
-    vt = *(unsigned char**)surf;
-    if (!vt || !IsPlausiblePtr(vt)) return;
-    lockFn = (FA_LockFn)(*(void**)(vt + VT_FA_LOCK));
-    unlockFn = (FA_UnlockFn)(*(void**)(vt + VT_FA_UNLOCK));
-    if (!lockFn || !unlockFn) return;
-    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
-    if (!locked || !IsPlausiblePtr(locked)) return;
+    locked = OU_SurfLock(surf);
+    if (!locked) return;
     s_FaLocked = locked; s_FaW = w; s_FaH = h; s_FaPitch = pitch;
     /* 生效格块 (参考格为块中心锚点, 与 Find 一致) 菱形框 + 四角标记。
      * 注: 中键拖动平移镜头时参考点按轮更新, 帧间小漂, 与各家线同 caveat。 */
@@ -588,5 +547,5 @@ void FuzzyAttack_Draw(void* surf, int w, int h, int pitch)
     /* 规划线 (红色细线, 单位中心→分到的敌中心, 含高度, 只在按住时存在)。 */
     OU_PrevDraw(s_FaPrevBuf, s_FaPrevN, locked, w, h, pitch, 255, 0, 0, 255, 1);
     s_FaLocked = 0;
-    unlockFn(surf, NULL);
+    OU_SurfUnlock(surf);
 }

@@ -6,6 +6,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "Icon.h"
 #include "FullMap.h"
@@ -194,6 +195,7 @@ void MOE_EnsureInit(void)
     if (g_InitDone) return;
     g_InitDone = 1;
     GtEnsureLog();
+    Perf_EnsureInit();   /* [Log] Perf=1: 帧内耗时探针 (定位掉帧), 默认关 */
     if (!g_Log) return;
     if (!MOE_HostIsGame()) return;   /* 非游戏宿主: MOE_LogHost 已留带 skipped 的行, 这里不再初始化各模块 */
     LogLine("=====");
@@ -263,70 +265,148 @@ void* g_PrepareTramp = NULL;
  * 0x4F42F0, 那不是新的一轮 prepare。让过, 否则各模块一次循环跑两遍。 */
 static int g_InPrepare = 0;
 
+/* 0x4F42F0 是"渲染前 prepare", 但**不是每帧一次**: 它有上百个静态调用点, 多处
+ * 在逐对象循环里, 实测每帧被调 160+ 次 (见 perf 日志 prepN)。原来这里每个 Poll
+ * 都跟着跑 160 遍 —— v0.2.472 实测 prep 1.85ms/帧, 其中 PiP 侧栏按钮 0.85ms、
+ * 底部电量 0.21ms、RallyPath/MindSelect/RepairAll 峰值各 0.1~0.17ms, 全是重复。
+ *
+ * 门控 = "帧号变了 或 距上次 >= 16ms": 前者把同一帧里的重复调用压成一次, 后者
+ * 保证暂停/步进时 (帧号冻结, 迷你循环里 prepare 照跑) 输入照样被采样。
+ * 必须每循环跑的 (视口撑满 + 侧栏 gadget 重挂) 不入门控, 见下面分组。 */
+static int      s_PrepFrame = -1;
+static unsigned s_PrepMs = 0;
+
+static int PrepDue(void)
+{
+    int fr = *(volatile int*)(size_t)ADDR_FRAME_NO;
+    unsigned now = GetTickCount();
+
+    if (fr != s_PrepFrame || (unsigned)(now - s_PrepMs) >= 16u)
+    {
+        s_PrepFrame = fr;
+        s_PrepMs = now;
+        return 1;
+    }
+    return 0;
+}
+
+/* 侧栏呈现入口 (BlitSbEntryDraw) 每帧都会补画底部电量与画中画按钮 —— 它们必须
+ * 落在**侧栏面**上才跟着条带上屏。prepare 里那两次只是"侧栏不呈现"时的兜底:
+ * 侧栏在呈现的那些帧, prepare 再画一遍纯属重复 (实测 pwr 3us + pipb 7us)。
+ * 判据用墙钟而不是帧号: 暂停时帧号冻结, 侧栏照样在呈现。 */
+static unsigned s_BlitSbTick = 0;
+
 static void PowerDrawBoth(void)
 {
+    long long tPf, tSeg;
+    int due;
     /* PiP 离屏渲染期间引擎会在内部再次走到 prepare (0x4F42F0): FM_Poll 会把
      * ViewBounds 改回主视图, SB_Poll 会按主视图重建并释放 ZBuffer/大面 (PiP 正
      * 引用它们 → 野指针崩溃)。整体跳过。 */
     if (PiP_InRender()) return;
     if (g_InPrepare) return;
     g_InPrepare = 1;
-    AirWay_Poll();
-    BuildQueue_Poll();
-    PatrolCircle_Poll();
-    SmartOrder_Poll();
+    tPf = Perf_Now();
+
+    due = PrepDue();
+    if (due)
+    {
+    tSeg = Perf_Now(); AirWay_Poll();     Perf_Add(PF_A_AW, tSeg);
+    tSeg = Perf_Now(); BuildQueue_Poll(); Perf_Add(PF_A_BQ, tSeg);
+    tSeg = Perf_Now(); PatrolCircle_Poll(); Perf_Add(PF_A_PC, tSeg);
+    tSeg = Perf_Now(); SmartOrder_Poll(); Perf_Add(PF_A_SO, tSeg);
     /* 兵营/重工聚集点折线 (Z 点多段, 出厂追单排空)。 */
-    RallyPath_Poll();
-    TreeChop_Poll();
-    FuzzyAttack_Poll();
-    AttackMove_Poll();
-    SmartArea_Poll();
-    DeployPreview_Poll();
-    MindSelect_Poll();
-    OrderThrottle_Poll();
-    WpCap_Poll();
-    MlCap_Poll();
-    SWS_Poll();
-    RepairAll_Poll();
+    tSeg = Perf_Now(); RallyPath_Poll();  Perf_Add(PF_A_RP, tSeg);
+    tSeg = Perf_Now(); TreeChop_Poll();   Perf_Add(PF_A_TC, tSeg);
+    tSeg = Perf_Now(); FuzzyAttack_Poll(); Perf_Add(PF_A_FA, tSeg);
+    tSeg = Perf_Now(); AttackMove_Poll(); Perf_Add(PF_A_AM, tSeg);
+    tSeg = Perf_Now(); SmartArea_Poll();  Perf_Add(PF_A_SA, tSeg);
+    tSeg = Perf_Now(); DeployPreview_Poll(); Perf_Add(PF_A_DP, tSeg);
+    tSeg = Perf_Now(); MindSelect_Poll(); Perf_Add(PF_A_MS, tSeg);
+    tSeg = Perf_Now(); OrderThrottle_Poll(); Perf_Add(PF_A_OT, tSeg);
+    tSeg = Perf_Now(); WpCap_Poll();      Perf_Add(PF_A_WPC, tSeg);
+    tSeg = Perf_Now(); MlCap_Poll();      Perf_Add(PF_A_MLC, tSeg);
+    tSeg = Perf_Now(); SWS_Poll();        Perf_Add(PF_A_SWS, tSeg);
+    tSeg = Perf_Now(); RepairAll_Poll();  Perf_Add(PF_A_RA, tSeg);
     /* 侧栏放建筑时驱散地基上的自家单位 (只读+标准 Move 事件)。 */
-    PlaceScatter_Poll();
+    tSeg = Perf_Now(); PlaceScatter_Poll(); Perf_Add(PF_A_PS, tSeg);
     /* 侵略模式: Alt+A 切换标记, 闲置单位自动打警戒范围内的敌方建筑。 */
-    Aggressive_Poll();
+    tSeg = Perf_Now(); Aggressive_Poll(); Perf_Add(PF_A_AG, tSeg);
     /* 多观战修复 + 观战面板排序 (联机安全, 见 Observer.cpp)。 */
-    Observer_Poll();
+    tSeg = Perf_Now(); Observer_Poll();   Perf_Add(PF_A_OB, tSeg);
+    }
     if (!g_InitDone) MOE_EnsureInit();
     /* 撑满视口 + 摘侧栏 gadget (隐藏原版建造栏时必须每循环都跑, 引擎每次
      * 切页/改视口都会把按钮重新挂回去)。 */
+    tSeg = Perf_Now();
     FM_Poll();
+    Perf_Add(PF_PREP_FM, tSeg);
     /* 原版侧栏滚动条 (拖滑块定滚动位置)。必须在 FM_Poll 之后 —— 它靠
      * FM_SidebarVisible() 判断侧栏列此刻归谁 (态1/2 那一列是地图的)。 */
+    tSeg = Perf_Now();
     SS_Poll();
+    Perf_Add(PF_PREP_SS, tSeg);
     /* 缩放刻度条: 探整图 / 建档位表 / 摆条 / 点选滚轮换档。必须在 FM_Poll 之后
      * —— 落位要用 FM_Poll 刚刷新出来的视口矩形。 */
+    tSeg = Perf_Now();
     SB_Poll();
-    /* 单机暂停/步进: F5 边沿 + 底栏两按钮点击 (暂停中经迷你循环的 Mark 钩
-     * 照样跑到这里)。 */
+    Perf_Add(PF_PREP_SB, tSeg);
+    /* 单机暂停/步进 + 截图按钮 + 鼠标钩重试: 都是"输入采样", 一帧采一次足够
+     * (门控的后半句 16ms 保证暂停时帧号冻结也照采, 恢复不失灵)。 */
+    if (due)
+    {
+    tSeg = Perf_Now();
     PV_Poll();
+    Perf_Add(PF_B_PV, tSeg);
     /* 视口原图截图: 相机按钮悬停/点击 (只排队, 真正取图在消息帧钩里)。 */
+    tSeg = Perf_Now();
     Shot_Poll();
+    Perf_Add(PF_B_SHOT, tSeg);
+    }
+    if (due)
+    {
+    /* 鼠标源头折算 (缩放): 注入可能早于 WWMouse 构造, 没装上就在这里重试。
+     * 放进门控里 —— 161 次/循环的空检查 + 计时要 4us/帧, 装上了就不必每遍问。 */
+    tSeg = Perf_Now();
+    if (!g_MouseHookDone) MOE_InstallMousePosHook();
+    Perf_Add(PF_B_MHK, tSeg);
     /* 运行期后装避让钩 (结算显示 0x5C9720/0x6C8E80 / FPS 钉住 0x4F4589):
      * 这些地址可能与外部模块 Syringe 钩同址, 等对方就位后再装 (见 VecText.cpp)。 */
+    tSeg = Perf_Now();
     VecText_LateInstall();
+    Perf_Add(PF_B_VTS, tSeg);
     /* CCToolTip 选面/量宽用的矩形影子 = 满视图区 A (见 ScaleBar.cpp)。*/
+    tSeg = Perf_Now();
     SB_PublishAView();
-    /* 鼠标源头折算 (缩放): 注入可能早于 WWMouse 构造, 没装上就在这里每循环重试。*/
-    if (!g_MouseHookDone) MOE_InstallMousePosHook();
+    Perf_Add(PF_B_PUB, tSeg);
     /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;
-     * 侧栏不呈现时 BlitSidebar 不跑, 字不会冒出来。 */
-    PowerDisplay_DrawSb();
-    PiP_DrawButton();
+     * 侧栏不呈现时 BlitSidebar 不跑, 字不会冒出来。
+     * 每帧一次就够 (呈现前 BlitSbEntryDraw 里还有一次兜底), 不必跟着 prepare
+     * 跑 160 遍 —— 这是实测最大的一笔白烧 (0.85ms + 0.21ms/帧)。 */
+    /* 兜底 (只在侧栏最近 100ms 没呈现时跑): 没接管/未呈现时侧栏面没人刷,
+     * 这两样必须自己画, 否则底电与画中画按钮整帧不更新。 */
+    if ((unsigned)(GetTickCount() - s_BlitSbTick) > 100u)
+    {
+        tSeg = Perf_Now();
+        PowerDisplay_DrawSb();
+        Perf_Add(PF_B_PWR, tSeg);
+        tSeg = Perf_Now();
+        PiP_DrawButton();
+        Perf_Add(PF_B_PIPB, tSeg);
+    }
     /* 阵营 UI: InitGUI/setDims 内只登记, 等本循环所有视口/侧栏消费者都跑完,
      * 在稳定点换资源; 否则会在 applyview 阶段换掉侧栏 SHP 导致绘制崩溃。 */
+    tSeg = Perf_Now();
     SidebarSkin_Poll();
+    Perf_Add(PF_B_SKIN, tSeg);
     /* 没有 AI 的对局: 每 30s 用引擎的聊天广播声明"非纯净版本"。放最后 —— 它内部
      * 会重入本函数 (被上面的闸挡掉), 不能让别的模块半截被打断。 */
+    tSeg = Perf_Now();
     PvpNotice_Poll();
+    Perf_Add(PF_B_PVP, tSeg);
+    }
     g_InPrepare = 0;
+    Perf_Add(PF_PREPARE, tPf);
 }
 
 static void* g_CallPrepare = (void*)PowerDrawBoth;
@@ -355,14 +435,19 @@ void* g_BlitSbTramp = NULL;
 static void BlitSbEntryDraw(void)
 {
     void* tramp;
+    long long tPf = Perf_Now(), tOne;
     MOE_EnsureInit();
     MOE_SetPhase(MP_BLITSIDEBAR);
     /* 侧栏滚动条要在**呈现之前**画进侧栏面 (侧栏面靠 BlitSidebar 带上屏);
      * 排在 PowerDisplay 之后 = 层级最上, 不被底电那行字盖住。 */
-    SS_Draw();
-    PowerDisplay_DrawSb();   /* 先画字再上屏, 否则晚一帧闪烁。 */
-    PiP_DrawButton();
+    tOne = Perf_Now(); SS_Draw();               Perf_Add(PF_SB_SS, tOne);
+    s_BlitSbTick = GetTickCount();   /* 上面那两样已由本次呈现代画, prepare 兜底可跳过 */
+    tOne = Perf_Now(); PowerDisplay_DrawSb();   Perf_Add(PF_SB_PWR, tOne);  /* 与 prepare 里那次重复? */
+    tOne = Perf_Now(); PiP_DrawButton();        Perf_Add(PF_SB_PIP, tOne);  /* 与 prepare 里那次重复? */
+    tOne = Perf_Now();
     tramp = (void*)(size_t)FM_BlitSb();   /* 0 = 不接管, 返回引擎跳板 */
+    Perf_Add(PF_SB_FM, tOne);
+    Perf_Add(PF_BLITSB, tPf);
     if (tramp) g_BlitSbTramp = tramp;
 }
 
@@ -412,13 +497,15 @@ void* g_RenderTramp = NULL;
 
 static void RenderEntrySwap(void)
 {
+    long long tPf = Perf_Now();
     /* PiP 离屏渲染期间引擎可能再走一次主渲染入口; 此时主视图换面/截胡一律跳过。*/
-    if (PiP_InRender()) return;
+    if (PiP_InRender()) { Perf_Add(PF_RENDERIN, tPf); return; }
     /* 聚焦时小地图跳转"截胡": 必须在主视图渲染之前退回主相机 (见 PiP)。*/
     PiP_PreRender();
     /* 必须在引擎动 R 之前 (SwapIn 那一步会把 [0x88731C] 换成大面)。*/
     SB_ViewPreRender();
     SB_RenderSwapIn();
+    Perf_Add(PF_RENDERIN, tPf);
 }
 static void* g_CallRender = (void*)RenderEntrySwap;
 __attribute__((naked)) void MOExperience_RenderEntry(void)
@@ -520,9 +607,11 @@ void* g_AfterMapTramp = NULL;
 
 static void AfterMapC(void)
 {
+    long long tPf = Perf_Now();
     MOE_EnsureInit();
     SB_RenderAfterMap();
     PiP_AfterMap();
+    Perf_Add(PF_AFTERMAP, tPf);
 }
 static void* g_CallAfterMap = (void*)AfterMapC;
 __attribute__((naked)) void MOExperience_AfterMapEntry(void)
@@ -738,7 +827,12 @@ __attribute__((naked)) void MOExperience_RadarClampEntry(void)
  * 挂函数入口 (跳回 0x6D7845), 不挂 E8 调用点。引擎自己还原。 */
 void* g_ShroudTramp = NULL;
 
-static void ShroudC(void) { SB_ShroudGuard(); }
+static void ShroudC(void)
+{
+    long long tPf = Perf_Now();
+    SB_ShroudGuard();
+    Perf_Add(PF_SHROUD, tPf);
+}
 static void* g_CallShroud = (void*)ShroudC;
 
 __attribute__((naked)) void MOExperience_ShroudEntry(void)
@@ -966,7 +1060,6 @@ __attribute__((naked)) void MOExperience_TipPreDrawEntry(void)
 
 /* 引擎看到的鼠标位置 (源头折算): 折虚表 +0x34 (11 个消费点一次覆盖),
  * gadget/光标/雷达走别的槽不受影响。1x 恒等。 */
-#define ADDR_WWMOUSE        0x00887640u
 #define WWMOUSE_VT_GETPOS   0x34u
 #define WWMOUSE_OFF_X       0x1C
 #define WWMOUSE_OFF_Y       0x20
@@ -1210,23 +1303,35 @@ int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch,
     /* inband 门判据先给: MsgText 提前 return 会跳过, 原版名单就盖不住。 */
     g_SWCompW = surfW; g_SWCompH = surfH;
     g_MapRight = FM_MapRightEdge();
-    rc = MsgText_DrawFrame(surf, lh, sw, surfW, surfH, surfPitch);
+    {
+        long long tSeg = Perf_Now();
+        rc = MsgText_DrawFrame(surf, lh, sw, surfW, surfH, surfPitch);
+        Perf_Add(PF_MSG_TEXT, tSeg);
+    }
     if (rc < 0) return drew;
     if (rc == 1) { drew = 1; if (pMsgDrew) *pMsgDrew = 1; }
-    rc = SWPanel_Draw(surf, lh, surfW, surfH, surfPitch);
+    {
+        long long tSeg = Perf_Now();
+        rc = SWPanel_Draw(surf, lh, surfW, surfH, surfPitch);
+        Perf_Add(PF_MSG_SWP, tSeg);
+    }
     if (rc < 0) return drew;
     if (rc == 1) drew = 1;
-    SWS_Draw(surf, surfW, surfH, surfPitch);
-    SmartOrder_Draw(surf, surfW, surfH, surfPitch);
-    PatrolCircle_Draw(surf, surfW, surfH, surfPitch);
-    RallyPath_Draw(surf, surfW, surfH, surfPitch);
-    FuzzyAttack_Draw(surf, surfW, surfH, surfPitch);
-    SmartArea_Draw(surf, surfW, surfH, surfPitch);
-    TreeChop_Draw(surf, surfW, surfH, surfPitch);
-    DeployPreview_Draw(surf, surfW, surfH, surfPitch);
-    WeaponRange_Draw(surf, surfW, surfH, surfPitch);
-    Aggressive_Draw(surf, surfW, surfH, surfPitch);
-    if (FM_DrawRadarTo(surf)) drew = 1;
+    {
+    long long tSeg = Perf_Now(), tOne;
+    tOne = Perf_Now(); SWS_Draw(surf, surfW, surfH, surfPitch);            Perf_Add(PF_D_SWS, tOne);
+    tOne = Perf_Now(); SmartOrder_Draw(surf, surfW, surfH, surfPitch);     Perf_Add(PF_D_SO, tOne);
+    tOne = Perf_Now(); PatrolCircle_Draw(surf, surfW, surfH, surfPitch);   Perf_Add(PF_D_PC, tOne);
+    tOne = Perf_Now(); RallyPath_Draw(surf, surfW, surfH, surfPitch);      Perf_Add(PF_D_RP, tOne);
+    tOne = Perf_Now(); FuzzyAttack_Draw(surf, surfW, surfH, surfPitch);    Perf_Add(PF_D_FA, tOne);
+    tOne = Perf_Now(); SmartArea_Draw(surf, surfW, surfH, surfPitch);      Perf_Add(PF_D_SA, tOne);
+    tOne = Perf_Now(); TreeChop_Draw(surf, surfW, surfH, surfPitch);       Perf_Add(PF_D_TC, tOne);
+    tOne = Perf_Now(); DeployPreview_Draw(surf, surfW, surfH, surfPitch);  Perf_Add(PF_D_DP, tOne);
+    tOne = Perf_Now(); WeaponRange_Draw(surf, surfW, surfH, surfPitch);    Perf_Add(PF_D_WR, tOne);
+    tOne = Perf_Now(); Aggressive_Draw(surf, surfW, surfH, surfPitch);     Perf_Add(PF_D_AG, tOne);
+    tOne = Perf_Now(); if (FM_DrawRadarTo(surf)) drew = 1;                 Perf_Add(PF_D_RADAR, tOne);
+    Perf_Add(PF_MSG_DRAWS, tSeg);
+    }
     return drew;
 }
 
@@ -1239,7 +1344,7 @@ int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch,
  *   4 智能中键    橡皮线/范围框 (armed/按住时才画)
  *   5 PowerDisplay 底部电量 (只写侧栏面, 层级在鼠标之下)
  *   6 ChatEdit   自定义聊天输入框 (顶层, 压住原生输入行) */
-extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void* regs)
+static DWORD MsgDrawBody(void* regs)
 {
     void* surf;
     unsigned tick;
@@ -1300,28 +1405,36 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
 
     drew = MOE_DrawUILayers(surf, surfW, surfH, surfPitch, &bitLineH, &screenW, NULL);
 
+    {
+    long long tSeg = Perf_Now(), tOne;
     /* 聊天输入框 (顶层)。ce_Active/CE_NoteSent 只由它驱动, 不接则颜色丢失。 */
+    tOne = Perf_Now();
     {
         int ce;
         ce = ChatEdit_Frame(surf, bitLineH, screenW,
                             surfW, surfH, surfPitch);
         if (ce == 1) drew = 1;
     }
+    Perf_Add(PF_T_CE, tOne);
 
     /* 底部电量: 只画侧栏面 (总开关 PowerBottom=0 即关)。 */
+    tOne = Perf_Now();
     {
         int pwr = PowerDisplay_DrawSb();
-        if (pwr < 0) { StatTick(tick, pwr == -1 ? 2 : 4); return 0; }
+        if (pwr < 0) { StatTick(tick, pwr == -1 ? 2 : 4); Perf_Add(PF_T_PWR, tOne); Perf_Add(PF_MSG_TAIL, tSeg); return 0; }
         if (pwr == 1) drew = 1;
     }
+    Perf_Add(PF_T_PWR, tOne);
 
     /* 刻度条: 画在视图区之外的底部工具栏带子上 (A 之外 ⇒ 引擎的 blit 不会把它
      * 缩放, 也跟着一起上屏)。 */
-    if (SB_DrawToComposite()) drew = 1;
+    tOne = Perf_Now(); if (SB_DrawToComposite()) drew = 1;   Perf_Add(PF_T_SB, tOne);
     /* 暂停/步进/格网三按钮 (刻度条左侧, 启用后按过一次 F5 才画; 格网另带灰线)。 */
-    if (PV_DrawToComposite()) drew = 1;
+    tOne = Perf_Now(); if (PV_DrawToComposite()) drew = 1;   Perf_Add(PF_T_PV, tOne);
     /* 截图键 (刻度条左侧最外一格, 与暂停三键同为底栏按钮)。 */
-    if (Shot_DrawToComposite()) drew = 1;
+    tOne = Perf_Now(); if (Shot_DrawToComposite()) drew = 1;  Perf_Add(PF_T_SHOT, tOne);
+    Perf_Add(PF_MSG_TAIL, tSeg);
+    }
 
     if (!drew) { StatTick(tick, 1); return 0; }
     StatTick(tick, 0);    if (s_firstDraw)
@@ -1350,6 +1463,18 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
      * 未接管才放行原版。 */
     if (MsgText_Enabled()) return ADDR_AFTER_MSGLIST_DRAW;
     return 0;
+}
+
+/* 每帧消息渲染的导出入口: 只做 Perf 计时 + 帧计数, 原逻辑在 MsgDrawBody。
+ * Perf_Frame 放这里是因为它每帧必过且只过一次 (MsgListEntry 兜底那条直接调
+ * body, 不重复计数)。 */
+extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void* regs)
+{
+    long long tPf = Perf_Now();
+    DWORD rc = MsgDrawBody(regs);
+    Perf_Add(PF_MSG, tPf);
+    Perf_Frame();
+    return rc;
 }
 
 /* 消息帧兜底入口: 链表空时 0x5D4A94 走不到, 这里代跑整条链路。 */

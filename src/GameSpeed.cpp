@@ -19,15 +19,13 @@
  * 配置: MOExperience.ini [GameSpeed] Enable / FPS / FixEngineFps
  */
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "GameSpeed.h"
 
 #define ADDR_GAMESPEED   0x00A8EB60u  /* GameOptionsClass::Instance.GameSpeed */
-#define ADDR_GAMEMODE    0x00A8B238u  /* SessionClass::Instance 首成员 = GameMode */
 
 /* YRpp Syringe.h REGISTERS 里的寄存器偏移 */
-#define REG_OFF_ESI      0x0Cu
-#define REG_OFF_EAX      0x24u
 
 #define GS_INI_SECTION   "GameSpeed"
 

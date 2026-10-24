@@ -25,6 +25,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "Lang.h"
 #include "MOEVersion.h"
@@ -32,19 +33,12 @@
 
 /* ---------------- 引擎地址 ---------------- */
 
-#define ADDR_SESSION       0xA8B238u  /* SessionClass::Instance, +0 = GameMode */
-#define ADDR_SCEN_STARTED  0xA8ED5Cu  /* Unsorted::ScenarioStarted: 开局才为 1 */
 #define ADDR_MSGLIST       0xA8BC60u  /* MessageListClass::Instance */
 #define OFF_ML_EDITBUF     0x28u
 #define OFF_ML_INITPOS     0x2B4u     /* EditInitialPos */
-#define ADDR_HOUSES_ITEMS  0xA8022Cu  /* HouseClass::Array items */
-#define ADDR_HOUSES_COUNT  0xA80238u  /* HouseClass::Array count */
 #define ADDR_CHAT_MODE     0xABCE18u  /* 聊天目标模式: 1=玩家 / 2=同盟 / 3=全部 */
 #define ADDR_CHAT_MASK     0xA8D667u  /* 本次实际投递目标掩码, 0 = 只本地回声 */
 #define ADDR_NET_FLAG      0xA8DBA0u  /* 0 = 逐连接直发, 非 0 = 汇总成一条广播 */
-#define OFF_HOUSE_TYPE     0x34u      /* HouseClass::Type */
-#define OFF_IS_HUMAN       0x1ECu     /* HouseClass::IsHumanPlayer */
-#define OFF_HTYPE_PASSIVE  0x1A6u     /* HouseTypeClass::MultiplayPassive (中立=1) */
 
 #define GM_LAN      3
 #define GM_INTERNET 4

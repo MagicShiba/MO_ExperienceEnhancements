@@ -19,6 +19,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "FullMap.h"
@@ -29,10 +30,8 @@
 
 /* ---------------- 地址 (反汇编实证) ---------------- */
 
-#define ADDR_VIEWBOUNDS       0x00886FA0u
 #define ADDR_SIDEBARBOUNDS    0x00886F90u
 #define ADDR_WINDOWBOUNDS     0x00886FB0u
-#define ADDR_SIDEBAR_W        0x007F5BF8u   /* 168 */
 #define ADDR_ISNOD_SIDEBAR    0x00A8EB7Cu   /* byte: 1=侧栏在右(苏联), 0=在左(盟军) */
 #define ADDR_ARMAGEDDON       0x00A8ED6Bu   /* byte: 末日模式 (视口 X 偏移也不加 168) */
 #define ADDR_RADAR_RECT       0x008809F4u   /* RadarClass+0x120C: 雷达绘制矩形(侧栏面内) */
@@ -42,11 +41,6 @@
 #define ADDR_SIDEBAR_NEEDRD   0x00884B8Eu   /* byte (单例+0x53A6) */
 #define ADDR_SIDEBAR_BGNEEDRD 0x00884B8Fu   /* byte (this+0x53A7) */
 #define ADDR_GAME_HWND        0x00B73550u
-#define ADDR_WWMOUSE          0x00887640u
-#define ADDR_SURF_SIDEBAR     0x00887300u
-#define ADDR_SURF_PRIMARY     0x00887308u
-#define ADDR_SURF_MAP         0x008872FCu   /* 地图面 (Render 拿它当 CopyFromPart 的源) */
-#define ADDR_SURF_COMPOSITE   0x0088731Cu
 /* Set_View_Dimensions 按 ViewBounds 重建的两个"可见区裁剪器"。两者结构相同:
  * +0..+0x0F 就是那个矩形, +0x28/+0x2C 是 W/H。鼠标→格换算与 Render 的
  * Clip() 都走它们 —— 与 ViewBounds 不同源就会判错。*/
@@ -93,7 +87,6 @@
  *  返回 0x6925FC 即原函数的"未处理"出口
  *  (pop edi/esi/ebp / xor al,al / pop ebx / add esp,0x18 / ret 0x18),
  *  栈形在该落点上完全对齐。做法与 SWSBar 的 SWS_ClickGate 同一套路。 */
-#define ADDR_CLICKGATE_SKIP  0x006925FCu
 
 #define VT_COPY_FROM_PART 0x08   /* DSurface::CopyFromPart */
 #define VT_FILL_RECT      0x14   /* DSurface::FillRect */
@@ -380,7 +373,11 @@ static void Fm_ClearStripOnce(const RectangleStruct* keep, int sw, int sh)
     int fr = *(int*)(size_t)ADDR_FRAME_COUNT;
     if (fr == s_ClearFrame) return;
     s_ClearFrame = fr;
-    Fm_ClearStripExceptRadar(keep, sw, sh);
+    {
+        long long t = Perf_Now();
+        Fm_ClearStripExceptRadar(keep, sw, sh);
+        Perf_Add(PF_H_CLAER, t);
+    }
 }
 
 /* 客户区屏幕原点: 与原版 BlitSidebar 完全相同的算法 (GetClientRect +
@@ -1662,7 +1659,12 @@ unsigned long FM_BlitSb(void)
         /* 原版 blit 前那笔光标烙印: 横坐标基准必须与上面的 blit 目标同源,
          * 所以只能排在 colX 算出来之后 (原版本来也在 blit 之前)。*/
         Fm_CursorStampStrip(mouse, strip, colX);
-        if (fn) fn(prim, &dst, strip, &src, 0, 1);
+        /* 小地图上屏**不再在这里做**: 同一块矩形每帧已经由 FM_DrawRadarTo 画进
+         * Composite (消息帧链路里), 而 present 会把 Composite 整幅送上屏 —— 这里
+         * 再 blit 一次到 Primary 是纯重复 (实测 32~40us/帧), 且两面相同时更是
+         * 逐像素重写。脏标记/抹黑/光标烙印这些副作用照做 (它们和呈现语义绑定),
+         * 只省掉 CopyFromPart 那一趟。回退: 把下面这行 fn(...) 的注释去掉。 */
+        (void)fn;
     }
     else if (!s_Warned && !Fm_ModeBare())
     {
@@ -1672,6 +1674,7 @@ unsigned long FM_BlitSb(void)
     return (unsigned long)(size_t)Fm_Ret4;
 }
 /* 小地图画进 Composite (不再依赖侧栏上屏时机, 构造上不闪)。 */
+static int s_RadarDupLogged = 0;
 int FM_DrawRadarTo(void* surf)
 {
     RectangleStruct src, dst;
@@ -1683,6 +1686,19 @@ int FM_DrawRadarTo(void* surf)
 
     if (!s_Enable || !Fm_ModeKeep()) return 0;
     if (!surf || !IsPlausiblePtr(surf)) return 0;
+    /* 同一块小地图每帧被 blit 两次: 一次进 Composite (这里), 一次进 Primary
+     * (FM_BlitSb 的侧栏呈现)。实测 32us/帧, 占整帧 1%。
+     * 两面相同 (全屏 1:1) 时是逐像素重复, 直接省掉;
+     * 两面不同时 present 会把 Composite 整幅送上屏, 侧栏那一次的落点被覆盖,
+     * 所以这里画的才是留下的那一份 —— 两种情形都只需保留本函数。 */
+    if (!s_RadarDupLogged)
+    {
+        s_RadarDupLogged = 1;
+        if (surf == *(void**)(size_t)ADDR_SURF_PRIMARY)
+            LogLine("fullmap: composite==primary, radar blit in blitsb is redundant");
+        else
+            LogLine("fullmap: composite!=primary, radar blit in blitsb is overwritten by present");
+    }
     strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
     if (!strip || !IsPlausiblePtr(strip)) return 0;
     if (!Fm_KeepRect(&src, &stripW, &stripH)) return 0;

@@ -42,6 +42,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include <math.h>
 #include "GdiText.h"
 #include "OrderUtil.h"
@@ -53,12 +54,8 @@
 /* ---------------- 巡逻圈私有地址/事件 (共享部分见 OrderUtil.h) ---------------- */
 
 #define EVT_PLANCONNECT 0x2Au
-#define EVT_PLANCOMMIT  0x2Bu
 
-#define OFF_TECH_TOKEN 0x514u  /* Techno PlanningToken (0x705D20 实证) */
 #define OFF_TOK_LOOPN 0x90u   /* PlanningToken ClosedLoopNodeCount */
-#define OFF_TOK_NODES 0x8u    /* PlanningToken PlanningNodes 数组 */
-#define OFF_TOK_NCOUNT 0x14u  /* PlanningToken 节点数 */
 
 typedef void* __attribute__((thiscall)) (*Fn_TargetFromCell)(void* tgt, const CellStruct* cell);
 /* MegaMission ctor (0x4C6860, ECX=ev111, 栈 0x28):
@@ -73,12 +70,6 @@ typedef void* __attribute__((thiscall)) (*Fn_PlanCommitCtor)(void* ev, int house
 /* UI 关闭函数 0x639740 (fastcall ECX=单位, EDX=节点):
  * 故意不用 (只改本机模拟状态, 不广播, 联机必不同步)。
  * 关环一律走合环 Connect 事件 (原生对照, pev 实证)。 */
-typedef void* (__fastcall *PC_LockFn)(void*, void*, int, int);
-typedef int (__fastcall *PC_UnlockFn)(void*, void*);
-
-#define VT_PC_LOCK   0x5C
-#define VT_PC_UNLOCK 0x60
-
 #define FN_TGT_CELL   ((Fn_TargetFromCell)(void*)0x6E6B20u)
 #define FN_PLANCONNECT ((Fn_PlanConnectCtor)(void*)0x4C6780u)
 #define FN_PLANCOMMIT ((Fn_PlanCommitCtor)(void*)0x4C66C0u)
@@ -152,8 +143,7 @@ static int PC_FireMega(int houseIdx, int srcID, unsigned char srcRtti,
                        void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     /* 原生对照 (pev 抓包): 每单位每节点各一 Mega, Follow=Dst 格
      * (Follow 空会导致关环语义缺失, 联机不同步的根因之一)。 */
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
@@ -164,11 +154,7 @@ static int PC_FireMega(int houseIdx, int srcID, unsigned char srcRtti,
 
 static int PC_FireCommit(int houseIdx)
 {
-    char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
-    FN_PLANCOMMIT(ev, houseIdx, EVT_PLANCOMMIT);
-    return OU_Enqueue(ev);
+    return OU_FirePlanCommit(houseIdx);
 }
 
 /* PlanConnect (单位挂已有节点, 不建新节点): src=单位 Whom, dst=角格。 */
@@ -177,8 +163,7 @@ static int PC_FireConnect(int houseIdx, int srcID, unsigned char srcRtti,
                           void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_PLANCONNECT(ev, houseIdx, EVT_PLANCONNECT,
                    srcID, (unsigned)srcRtti, dstID, (unsigned)dstRtti);
     return OT_Fire(ev, unit, uid, idxOk);
@@ -193,7 +178,6 @@ static int PC_FireConnect(int houseIdx, int srcID, unsigned char srcRtti,
 /* 触发即突发, OutList (上限 0x80) 满则 drip 跨帧续发; Mega 逐点全员,
  * Connect 合环, 跨帧不影响。 */
 
-#define ADDR_FRAME 0xA8ED84u       /* 当前帧 (事件 Frame 戳源; 排空后看它推进) */
 #define PC_WAIT_FRAMES 30          /* 真失败兜底: 30 逻辑帧还不满才关已有 */
 #define PC_WAIT_POLLCAP 3000       /* 冻结防挂: 帧不动时 polls 到此放行 */
 #define PC_CLOSEC_FRAMES 6         /* close 落地上限 (之后提交, 开环也提交) */
@@ -808,50 +792,21 @@ void PatrolCircle_Poll(void)
 static unsigned char* s_PcLocked = 0;
 static int s_PcW = 0, s_PcH = 0, s_PcPitch = 0;
 
-static void PC_Plot(int x, int y, unsigned a)
-{
-    unsigned short* dstRow;
-    if (x < 0 || y < 0 || x >= s_PcW || y >= s_PcH) return;
-    dstRow = (unsigned short*)(s_PcLocked + y * s_PcPitch);
-    dstRow[x] = Blend16(dstRow[x], 255, 255, 255, a);
-}
-
-/* 3px 线 (Bresenham + 上下各 1px, 零依赖)。 */
+/* 3px 白线 / 实心方块 (公共实现: OrderUtil 的 OU_Line / OU_Box)。 */
 static void PC_Line(int x0, int y0, int x1, int y1, unsigned a)
 {
-    int dx, dy, sx, sy, err, e2, x, y, n;
-    dx = x1 - x0; dy = y1 - y0;
-    sx = (dx >= 0) ? 1 : -1;
-    sy = (dy >= 0) ? 1 : -1;
-    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
-    err = dx - dy;
-    x = x0; y = y0;
-    for (n = 0; n < 4096; n++)
-    {
-        PC_Plot(x, y, a);
-        PC_Plot(x, y - 1, a);
-        PC_Plot(x, y + 1, a);
-        if (x == x1 && y == y1) break;
-        e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
-    }
+    OU_Line(s_PcLocked, s_PcW, s_PcH, s_PcPitch, 0,
+            x0, y0, x1, y1, 255, 255, 255, a, 3);
 }
 
-/* 实心方块标记 (半边 m)。 */
 static void PC_Mark(int cx, int cy, int m, unsigned a)
 {
-    int k, j;
-    for (k = -m; k <= m; k++)
-        for (j = -m; j <= m; j++)
-            PC_Plot(cx + k, cy + j, a);
+    OU_Box(s_PcLocked, s_PcW, s_PcH, s_PcPitch, 0,
+           cx, cy, m, 255, 255, 255, a);
 }
 
 void PatrolCircle_Draw(void* surf, int w, int h, int pitch)
 {
-    unsigned char* vt;
-    PC_LockFn lockFn;
-    PC_UnlockFn unlockFn;
     unsigned char* locked;
     int x0, y0, x1, y1;
     extern int g_Calibrated;
@@ -862,13 +817,8 @@ void PatrolCircle_Draw(void* surf, int w, int h, int pitch)
     if (w <= 0 || h <= 0 || pitch <= 0) return;
     if (!GtMouseGameXY(&x1, &y1)) return;
     x0 = g_PcPx; y0 = g_PcPy;
-    vt = *(unsigned char**)surf;
-    if (!vt || !IsPlausiblePtr(vt)) return;
-    lockFn = (PC_LockFn)(*(void**)(vt + VT_PC_LOCK));
-    unlockFn = (PC_UnlockFn)(*(void**)(vt + VT_PC_UNLOCK));
-    if (!lockFn || !unlockFn) return;
-    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
-    if (!locked || !IsPlausiblePtr(locked)) return;
+    locked = OU_SurfLock(surf);
+    if (!locked) return;
     s_PcLocked = locked; s_PcW = w; s_PcH = h; s_PcPitch = pitch;
     /* 节点折线 (采样时刻实测像素) + 橡皮尾巴 (末节点→当前鼠标)。
      * 与 SmartOrder 同 caveat: 中键拖动平移镜头, 节点像素跨镜头帧会漂;
@@ -891,5 +841,5 @@ void PatrolCircle_Draw(void* surf, int w, int h, int pitch)
         PC_Mark(x1, y1, 2, 255); /* 当前 5x5 */
     }
     s_PcLocked = 0;
-    unlockFn(surf, NULL);
+    OU_SurfUnlock(surf);
 }

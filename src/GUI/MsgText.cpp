@@ -17,6 +17,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "Lang.h"
 #include "OrderUtil.h"
@@ -27,7 +28,6 @@
 
 #define ADDR_COLORSCHEME_ARRAY   0x00B054D0u
 #define ADDR_SCHEME_TO_COLOR     0x00517440u
-#define ADDR_SESSION             0x00A8B238u /* SessionClass::Instance, 首成员即 GameMode */
 
 /* 雷达事件 (RadarEventClass) 活对象表: 引擎 Create 成功才往里挂。
  * 反汇编实证 (Create 0x65FA70 → ctor 0x65FB80 尾部 0x65FCD5 起):
@@ -42,7 +42,6 @@
 #define RE_MAX_SCAN              48          /* 一帧最多扫几个 (引擎容量 10 起, 会长) */
 
 /* 视口跳转: 见下面 MsgText_JumpToCell。 */
-#define ADDR_TACTICAL            0x00887324u  /* TacticalClass::Instance */
 #define ADDR_SET_TACTICAL_POS    0x006D6070u  /* TacticalClass::SetTacticalPosition(CoordStruct*) */
 #define ADDR_MAP_INSTANCE        0x0087F7E8u  /* MapClass::Instance */
 #define ADDR_MAP_GET_CELL        0x005657A0u  /* CellClass* MapClass::GetCellAt(CellStruct*) */
@@ -50,7 +49,6 @@
 #define ADDR_Z_TO_SCREEN         0x006D20E0u  /* int TacticalClass::ZToScreen(int z) */
 
 /* 点击门落点: ProcessClickCoords (0x692300) 的"未处理"出口, 栈形对齐。 */
-#define ADDR_CLICKGATE_SKIP      0x006925FCu
 
 #define OFF_REG_ESP              0x14
 #define STK_ARG_NAME             0x04

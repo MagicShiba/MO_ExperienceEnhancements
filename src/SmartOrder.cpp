@@ -29,6 +29,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include <math.h>
 #include "GdiText.h"
 #include "SmartOrder.h"
@@ -42,20 +43,12 @@
 /* ---------------- 散开私有地址 (共享部分见 OrderUtil.h) ---------------- */
 
 #define ADDR_TYPARRAY 0xA8EB00u
-#define OFF_VEC_ITEMS 4u
-#define OFF_VEC_COUNT 16u
 #define SO_CAP 1024         /* 快照单位上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */
 #define SO_PEND_CAP 1024    /* 待发上限 (同上) */
 #define SO_DRAIN_PER_POLL 128
 #define FN_TGT_CELL ((Fn_TargetFromCell)(void*)0x6E6B20u)
 
 typedef void* __attribute__((thiscall)) (*Fn_TargetFromCell)(void* tgt, const CellStruct* cell);
-typedef void* (__fastcall *SO_LockFn)(void*, void*, int, int);
-typedef int (__fastcall *SO_UnlockFn)(void*, void*);
-
-#define VT_SO_LOCK   0x5C
-#define VT_SO_UNLOCK 0x60
-
 /* ---------------- 配置 ---------------- */
 
 static int g_SoInit = 0;
@@ -353,8 +346,7 @@ static int SO_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
                        void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = 0;
@@ -377,8 +369,7 @@ static int SO_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
                          void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
             tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
     ev[OFF_PLANFLAG] = 0;
@@ -390,8 +381,7 @@ static int SO_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
                        void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, mission,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = 0;
@@ -1044,50 +1034,21 @@ void SmartOrder_Poll(void)
 static unsigned char* s_AsLocked = 0;
 static int s_AsW = 0, s_AsH = 0, s_AsPitch = 0;
 
-static void SO_Plot(int x, int y, unsigned a)
-{
-    unsigned short* dstRow;
-    if (x < 0 || y < 0 || x >= s_AsW || y >= s_AsH) return;
-    dstRow = (unsigned short*)(s_AsLocked + y * s_AsPitch);
-    dstRow[x] = Blend16(dstRow[x], 255, 255, 255, a);
-}
-
-/* 3px 线 (Bresenham + 上下各 1px, 零依赖)。 */
+/* 3px 白线 / 实心方块 (公共实现: OrderUtil 的 OU_Line / OU_Box)。 */
 static void SO_Line(int x0, int y0, int x1, int y1, unsigned a)
 {
-    int dx, dy, sx, sy, err, e2, x, y, n;
-    dx = x1 - x0; dy = y1 - y0;
-    sx = (dx >= 0) ? 1 : -1;
-    sy = (dy >= 0) ? 1 : -1;
-    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
-    err = dx - dy;
-    x = x0; y = y0;
-    for (n = 0; n < 4096; n++)
-    {
-        SO_Plot(x, y, a);
-        SO_Plot(x, y - 1, a);
-        SO_Plot(x, y + 1, a);
-        if (x == x1 && y == y1) break;
-        e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
-    }
+    OU_Line(s_AsLocked, s_AsW, s_AsH, s_AsPitch, 0,
+            x0, y0, x1, y1, 255, 255, 255, a, 3);
 }
 
-/* 实心方块标记 (半边 m)。 */
 static void SO_Mark(int cx, int cy, int m, unsigned a)
 {
-    int k, j;
-    for (k = -m; k <= m; k++)
-        for (j = -m; j <= m; j++)
-            SO_Plot(cx + k, cy + j, a);
+    OU_Box(s_AsLocked, s_AsW, s_AsH, s_AsPitch, 0,
+           cx, cy, m, 255, 255, 255, a);
 }
 
 void SmartOrder_Draw(void* surf, int w, int h, int pitch)
 {
-    unsigned char* vt;
-    SO_LockFn lockFn;
-    SO_UnlockFn unlockFn;
     unsigned char* locked;
     int x0, y0, x1, y1;
     extern int g_Calibrated;
@@ -1097,13 +1058,8 @@ void SmartOrder_Draw(void* surf, int w, int h, int pitch)
     if (w <= 0 || h <= 0 || pitch <= 0) return;
     if (!GtMouseGameXY(&x1, &y1)) return;
     x0 = g_SoPx; y0 = g_SoPy;
-    vt = *(unsigned char**)surf;
-    if (!vt || !IsPlausiblePtr(vt)) return;
-    lockFn = (SO_LockFn)(*(void**)(vt + VT_SO_LOCK));
-    unlockFn = (SO_UnlockFn)(*(void**)(vt + VT_SO_UNLOCK));
-    if (!lockFn || !unlockFn) return;
-    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
-    if (!locked || !IsPlausiblePtr(locked)) return;
+    locked = OU_SurfLock(surf);
+    if (!locked) return;
     s_AsLocked = locked; s_AsW = w; s_AsH = h; s_AsPitch = pitch;
     /* 节点折线 (全用采样时刻实测像素, 弧形保真) + 橡皮尾巴 (末节点→当前鼠标)。
      * 注: 中键拖动会平移镜头, 前后节点像素不在同一镜头帧, 大位移拖动线会
@@ -1127,5 +1083,5 @@ void SmartOrder_Draw(void* surf, int w, int h, int pitch)
     /* 绿线预览 (单位中心→预估落点/目标中心, 含高度, 只在按住时存在)。 */
     OU_PrevDraw(s_SoPrevBuf, s_SoPrevN, locked, w, h, pitch, 0, 255, 0, 255, 1);
     s_AsLocked = 0;
-    unlockFn(surf, NULL);
+    OU_SurfUnlock(surf);
 }

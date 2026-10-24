@@ -15,6 +15,7 @@
  * 不新增 Syringe hook。 */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "FullMap.h"
 #include "OrderUtil.h"
@@ -23,10 +24,7 @@
 #define SK_SECTION          "Sidebar"
 #define SK_KEY              "SkinSide"
 
-#define ADDR_SCENARIO       0x00A8B230u
 #define OFF_PLAYER_SIDE     0x34B8u
-#define ADDR_SB_REDRAW      0x00B0B518u
-#define ADDR_SB_NEEDBG      0x00884B8Fu
 #define ADDR_SIDEBAR        0x0087F7E8u
 #define ADDR_UI_LIVE_FLAG   0x00A8ED6Bu
 #define ADDR_PAL_FREE_JZ    0x006A586Du

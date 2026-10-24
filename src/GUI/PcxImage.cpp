@@ -5,11 +5,11 @@
  * 1 plane 8bpp -> 索引面 (文本覆盖率); 3 plane 24bpp -> 16 位真彩面。
  * 只读; 不改模拟状态。 */
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "IconRes.h"
 #include "PcxImage.h"
 
-#define ADDR_PCX_INSTANCE 0xAC4848u
 
 typedef void* (__thiscall *PcxGetSurfFn)(void* pcx, const char* name, void* pal);
 /* 引擎返回 bool (al), 用 unsigned char 读。 */

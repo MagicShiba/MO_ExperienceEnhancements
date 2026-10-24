@@ -7,6 +7,7 @@
  * 只读查询 + 标准事件, 不写模拟内存。 */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "OrderThrottle.h"
@@ -17,17 +18,9 @@
 /* 砍树私有地址 (共享部分见 OrderUtil.h) */
 
 #define ADDR_TERRAINTYPES 0xA8E318u  /* TerrainType 数组 (DynamicVector) */
-#define OFF_VEC_ITEMS 4u
-#define OFF_VEC_COUNT 16u
 
 /* CellClass::GetTerrain (0x47C550): 返回格上地形或空。 */
 typedef void* __attribute__((thiscall)) (*Fn_GetTerrain)(void* cell, int alt);
-typedef void* (__fastcall *TC_LockFn)(void*, void*, int, int);
-typedef int (__fastcall *TC_UnlockFn)(void*, void*);
-
-#define VT_TC_LOCK   0x5C
-#define VT_TC_UNLOCK 0x60
-
 #define FN_GETTERRAIN ((Fn_GetTerrain)(void*)0x47C550u)
 
 /* 配置 */
@@ -72,8 +65,7 @@ static int TC_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
                          void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
             tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
     ev[OFF_PLANFLAG] = 1;
@@ -495,50 +487,20 @@ void TreeChop_Poll(void)
 static unsigned char* s_TcLocked = 0;
 static int s_TcW = 0, s_TcH = 0, s_TcPitch = 0;
 
-static void TC_Plot(int x, int y, unsigned a)
-{
-    unsigned short* dstRow;
-    if (x < 0 || y < 0 || x >= s_TcW || y >= s_TcH) return;
-    dstRow = (unsigned short*)(s_TcLocked + y * s_TcPitch);
-    dstRow[x] = Blend16(dstRow[x], 255, 255, 255, a);
-}
-
-/* 3px 线。 */
+/* 3px 白线 / 实心方块 (公共实现: OrderUtil 的 OU_Line / OU_Box)。 */
 static void TC_Line(int x0, int y0, int x1, int y1, unsigned a)
 {
-    int dx, dy, sx, sy, err, e2, x, y, n;
-    dx = x1 - x0; dy = y1 - y0;
-    sx = (dx >= 0) ? 1 : -1;
-    sy = (dy >= 0) ? 1 : -1;
-    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
-    err = dx - dy;
-    x = x0; y = y0;
-    for (n = 0; n < 4096; n++)
-    {
-        TC_Plot(x, y, a);
-        TC_Plot(x, y - 1, a);
-        TC_Plot(x, y + 1, a);
-        if (x == x1 && y == y1) break;
-        e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
-    }
+    OU_Line(s_TcLocked, s_TcW, s_TcH, s_TcPitch, 0,
+            x0, y0, x1, y1, 255, 255, 255, a, 3);
 }
 
-/* 实心标记 (半边 m)。 */
 static void TC_Mark(int cx, int cy, int m, unsigned a)
 {
-    int k, j;
-    for (k = -m; k <= m; k++)
-        for (j = -m; j <= m; j++)
-            TC_Plot(cx + k, cy + j, a);
+    OU_Box(s_TcLocked, s_TcW, s_TcH, s_TcPitch, 0, cx, cy, m, 255, 255, 255, a);
 }
 
 void TreeChop_Draw(void* surf, int w, int h, int pitch)
 {
-    unsigned char* vt;
-    TC_LockFn lockFn;
-    TC_UnlockFn unlockFn;
     unsigned char* locked;
     int lo, hi, x0, y0, x1, y1, x2, y2, x3, y3;
     int ccx, ccy, clz, z0, z1, z2, z3;
@@ -563,13 +525,8 @@ void TreeChop_Draw(void* surf, int w, int h, int pitch)
     if (!TC_GridCorner(bx0, by1, z3, &x3, &y3)) return;
     if (!surf || !IsPlausiblePtr(surf)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;
-    vt = *(unsigned char**)surf;
-    if (!vt || !IsPlausiblePtr(vt)) return;
-    lockFn = (TC_LockFn)(*(void**)(vt + VT_TC_LOCK));
-    unlockFn = (TC_UnlockFn)(*(void**)(vt + VT_TC_UNLOCK));
-    if (!lockFn || !unlockFn) return;
-    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
-    if (!locked || !IsPlausiblePtr(locked)) return;
+    locked = OU_SurfLock(surf);
+    if (!locked) return;
     s_TcLocked = locked; s_TcW = w; s_TcH = h; s_TcPitch = pitch;
     TC_Line(x0, y0, x1, y1, 230);
     TC_Line(x1, y1, x2, y2, 230);
@@ -580,5 +537,5 @@ void TreeChop_Draw(void* surf, int w, int h, int pitch)
     TC_Mark(x2, y2, 1, 230);
     TC_Mark(x3, y3, 1, 230);
     s_TcLocked = 0;
-    unlockFn(surf, NULL);
+    OU_SurfUnlock(surf);
 }

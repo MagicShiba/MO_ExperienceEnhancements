@@ -6,6 +6,7 @@
  */
 
 #include "GdiText.h"
+#include "EngineAddr.h"
 #include "Observer.h"
 
 #define OB_SECTION "Features"
@@ -14,9 +15,6 @@
 
 #define ADDR_CURRENT      0xA83D4Cu  /* HouseClass::CurrentPlayer，本机量，可写 */
 #define ADDR_OBSERVER     0xAC1198u  /* HouseClass::Observer，只读 */
-#define ADDR_SCENARIO     0xA8B230u  /* Scenario::Instance */
-#define ADDR_HOUSES_ITEMS 0xA8022Cu  /* HouseClass::Array items */
-#define ADDR_HOUSES_COUNT 0xA80238u  /* HouseClass::Array count */
 #define ADDR_NODES_ITEMS  0xA8DA78u  /* 联机节点表 items */
 #define ADDR_NODES_COUNT  0xA8DA84u  /* 联机节点表 count */
 #define ADDR_PANEL_TABLE  0x884B94u  /* 面板名单 HouseClass* 表 */
@@ -24,10 +22,6 @@
 #define PANEL_MAX_SLOTS   64u        /* 房数上限，防越界 */
 
 #define OFF_HOUSEINDICES  0x1180u    /* Scenario::HouseIndices[16] */
-#define OFF_HOUSE_INDEX   0x30u      /* HouseClass::ArrayIndex */
-#define OFF_HOUSE_TYPE    0x34u      /* HouseClass::Type */
-#define OFF_IS_HUMAN      0x1ECu     /* HouseClass::IsHumanPlayer */
-#define OFF_HTYPE_PASSIVE 0x1A6u     /* HouseTypeClass::MultiplayPassive，中立为 1 */
 #define OFF_NODE_SPECT    0x6Bu      /* NodeNameType::SpectatorFlag，-1 为观战 */
 #define OFF_NODE_HOUSEIDX 0x6Fu      /* NodeNameType::HouseIndex */
 

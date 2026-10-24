@@ -58,10 +58,6 @@ typedef void* __attribute__((thiscall)) (*Fn_DPDeployCtor)(void* ev, int houseId
 #define FN_DP_DEPLOY ((Fn_DPDeployCtor)(void*)0x4C65E0u)
 #define EVT_DP_DEPLOY 0x9
 
-typedef void* (__fastcall *DP_LockFn)(void*, void*, int, int);
-typedef int (__fastcall *DP_UnlockFn)(void*, void*);
-#define VT_DP_LOCK   0x5C
-#define VT_DP_UNLOCK 0x60
 
 /* ---------------- 配置 ---------------- */
 
@@ -386,8 +382,7 @@ static int DP_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
                        void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = 0;
@@ -399,8 +394,7 @@ static int DP_FireDeploy(int houseIdx, int id, unsigned char rtti,
                          void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_DP_DEPLOY(ev, houseIdx, EVT_DP_DEPLOY, id, (unsigned)rtti);
     return OT_Fire(ev, unit, uid, idxOk);
 }
@@ -1109,64 +1103,26 @@ void DeployPreview_Poll(void)
 static unsigned char* s_DpLocked = 0;
 static int s_DpW = 0, s_DpH = 0, s_DpPitch = 0;
 
-/* 3px 粗线 (Bresenham + 上下各 1px, 与 SmartOrder 同风格零依赖)。
+/* 3px 粗线 / 细线 / 方块 (公共实现: OrderUtil 的 OU_Line / OU_Box)。
  * 黄=房框/预览, 白=认领态轨迹 (SmartOrder 熄火时补上)。 */
-static void DP_PlotC(int x, int y, int r, int g, int b, unsigned a)
-{
-    unsigned short* dstRow;
-    if (x < 0 || y < 0 || x >= s_DpW || y >= s_DpH) return;
-    dstRow = (unsigned short*)(s_DpLocked + y * s_DpPitch);
-    dstRow[x] = Blend16(dstRow[x], r, g, b, a);
-}
-
 static void DP_LineC(int x0, int y0, int x1, int y1,
                      int r, int g, int b, unsigned a)
 {
-    int dx, dy, sx, sy, err, e2, x, y, n;
-    dx = x1 - x0; dy = y1 - y0;
-    sx = (dx >= 0) ? 1 : -1;
-    sy = (dy >= 0) ? 1 : -1;
-    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
-    err = dx - dy;
-    x = x0; y = y0;
-    for (n = 0; n < 8192; n++)
-    {
-        DP_PlotC(x, y, r, g, b, a);
-        DP_PlotC(x, y - 1, r, g, b, a);
-        DP_PlotC(x, y + 1, r, g, b, a);
-        if (x == x1 && y == y1) break;
-        e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
-    }
+    OU_Line(s_DpLocked, s_DpW, s_DpH, s_DpPitch, 0, x0, y0, x1, y1,
+            (unsigned)r, (unsigned)g, (unsigned)b, a, 3);
 }
 
 static void DP_MarkC(int cx, int cy, int m, int r, int g, int b, unsigned a)
 {
-    int k, j;
-    for (k = -m; k <= m; k++)
-        for (j = -m; j <= m; j++)
-            DP_PlotC(cx + k, cy + j, r, g, b, a);
+    OU_Box(s_DpLocked, s_DpW, s_DpH, s_DpPitch, 0, cx, cy, m,
+           (unsigned)r, (unsigned)g, (unsigned)b, a);
 }
 
-/* 细线 (Bresenham 单像素, 目标格描边用; PlotC 自带裁剪)。 */
+/* 细线 (目标格描边用)。 */
 static void DP_ThinLine(int x0, int y0, int x1, int y1, unsigned a)
 {
-    int dx, dy, sx, sy, err, e2, x, y, n;
-    dx = x1 - x0; dy = y1 - y0;
-    sx = (dx >= 0) ? 1 : -1;
-    sy = (dy >= 0) ? 1 : -1;
-    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
-    err = dx - dy;
-    x = x0; y = y0;
-    for (n = 0; n < 8192; n++)
-    {
-        DP_PlotC(x, y, 255, 255, 0, a);
-        if (x == x1 && y == y1) break;
-        e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
-    }
+    OU_Line(s_DpLocked, s_DpW, s_DpH, s_DpPitch, 0, x0, y0, x1, y1,
+            255, 255, 0, a, 1);
 }
 
 /* 缓存单位仍在选中数组里才用 (避免死指针)。 */
@@ -1212,12 +1168,12 @@ static int DP_DrawGhostPlot(void* surf, int bx, int by, void* bld,
     return used;
 }
 
-/* 锁渲染面并设手绘全局 (DP_PlotC 等用)。失败回 0。 */
-static int DP_LockSurface(void* surf, DP_LockFn lockFn, int w, int h, int pitch)
+/* 锁渲染面并设手绘全局 (DP_LineC 等用)。失败回 0。 */
+static int DP_LockSurface(void* surf, int w, int h, int pitch)
 {
     unsigned char* locked;
-    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
-    if (!locked || !IsPlausiblePtr(locked)) return 0;
+    locked = OU_SurfLock(surf);
+    if (!locked) return 0;
     s_DpLocked = locked;
     s_DpW = w;
     s_DpH = h;
@@ -1227,9 +1183,6 @@ static int DP_LockSurface(void* surf, DP_LockFn lockFn, int w, int h, int pitch)
 
 void DeployPreview_Draw(void* surf, int w, int h, int pitch)
 {
-    unsigned char* vt;
-    DP_LockFn lockFn;
-    DP_UnlockFn unlockFn;
     int mcx, mcy, mlz;
     int fw, fh, bx, by;
     int x0, y0, x1, y1, x2, y2, x3, y3;
@@ -1247,11 +1200,6 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
     if (fw > 2 || fh > 2) { bx = mcx - 1; by = mcy - 1; }
     else { bx = mcx; by = mcy; }
     /* 四角投影在认领分支之后算 (认领态提前返回, 省 8 次投影)。 */
-    vt = *(unsigned char**)surf;
-    if (!vt || !IsPlausiblePtr(vt)) return;
-    lockFn = (DP_LockFn)(*(void**)(vt + VT_DP_LOCK));
-    unlockFn = (DP_UnlockFn)(*(void**)(vt + VT_DP_UNLOCK));
-    if (!lockFn || !unlockFn) return;
     s_DpLocked = 0;
     s_DpGhostBudget = DP_GHOST_PIX_BUDGET;   /* 每帧重置虚影像素预算 */
     /* 认领态多框预览 (与松手执行同一套分配, 所见即所得): 起点=按下格,
@@ -1292,7 +1240,7 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
                                        s_DpDepFw, s_DpDepFh,
                                        bases, dests);
             }
-            if (!DP_LockSurface(surf, lockFn, w, h, pitch)) return;
+            if (!DP_LockSurface(surf, w, h, pitch)) return;
             /* 轨迹白线 (认领后 SmartOrder 熄火, 这里补上; 与裸中键同观感):
              * 节点格心连线 + 当前格心橡皮尾巴, 引擎投影吸格。 */
             {
@@ -1356,7 +1304,7 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
                 DP_ThinLine(qx3, qy3, qx0, qy0, 200);
             }
             s_DpLocked = 0;
-            unlockFn(surf, NULL);
+            OU_SurfUnlock(surf);
             /* 虚影最后画: 压在轨迹线与黄框之上 (缩放档内部自己锁面)。 */
             for (k = 0; k < nPlot; k++)
             {
@@ -1378,7 +1326,7 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
     if (!DP_Corner(bx + fw, by + fh, z2, &x2, &y2)) return;
     if (!DP_Corner(bx, by + fh, z3, &x3, &y3)) return;
     /* 虚影在框之上; 先锁面画完框线, 解锁后再叠虚影。 */
-    if (!DP_LockSurface(surf, lockFn, w, h, pitch)) return;
+    if (!DP_LockSurface(surf, w, h, pitch)) return;
     DP_LineC(x0, y0, x1, y1, 255, 255, 0, 255);
     DP_LineC(x1, y1, x2, y2, 255, 255, 0, 255);
     DP_LineC(x2, y2, x3, y3, 255, 255, 0, 255);
@@ -1406,7 +1354,7 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
         }
     }
     s_DpLocked = 0;
-    unlockFn(surf, NULL);
+    OU_SurfUnlock(surf);
     /* 虚影最后画: 压在框线与目标格描边之上。 */
     DP_DrawGhostPlot(surf, bx, by, s_DpBld, DP_LiveBldUnit(), mlz);
 }

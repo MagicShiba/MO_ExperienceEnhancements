@@ -9,13 +9,13 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "ScaleBar.h"
 #include "PauseView.h"
 #include "Shot.h"
 
 #define SHOT_SECTION "BottomBar"
-#define ADDR_SCEN_STARTED 0x00A8ED5Cu /* Unsorted::ScenarioStarted: 大厅/载入为 0 */
 #define SHOT_FLASH 12                 /* 截成功后描黄边的帧数 */
 
 /* ---------------- 配置 / 状态 ---------------- */

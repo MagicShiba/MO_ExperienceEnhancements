@@ -30,6 +30,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "Icon.h"
 #include "ScaleBar.h"
@@ -37,12 +38,9 @@
 
 #define TT_SECTION "Features"
 
-#define REG_OFF_ESI 0x0C
-#define REG_OFF_EAX 0x24
 #define REG_OFF_ESP 0x14
 
 #define ADDR_TOOLTIP_BUF 0xB07BC4u
-#define ADDR_CURPLAYER 0xA83D4Cu
 
 #define TO_TT_EXIT 0x006A93DEu
 
@@ -58,7 +56,6 @@
 #define VT_INFANTRY 0x7EB058u
 #define VT_UNIT 0x7F5C70u
 #define VT_AIRCRAFT 0x7E22A4u
-#define OFF_OWNER 0x21Cu
 #define OFF_T_BUILDING 0x520u
 #define OFF_T_INFANTRY 0x6C0u
 #define OFF_T_UNIT 0x6C4u
@@ -299,7 +296,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl ToolTip_Extend(void* regs)
  * 钩子经 dist/MOExperience.dll.inj: 0x478FDC = ToolTip_Clamp, 5。
  * 偷的字节无 rel, 永远返回 0 跑原指令 (铁律安全)。 */
 /* ADDR_SURF_COMPOSITE / ADDR_VIEWBOUNDS 用 GdiText.h 的共享定义 */
-#define ADDR_VIEWBOUNDS 0x886FA0u
 
 extern "C" __declspec(dllexport) DWORD __cdecl ToolTip_Clamp(void* regs)
 {

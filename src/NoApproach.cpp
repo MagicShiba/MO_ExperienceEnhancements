@@ -15,6 +15,7 @@
  * 配置 [Features] NoApproach (缺失=1, 改后重启)。 */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "NoApproach.h"
@@ -23,7 +24,6 @@
 
 /* ---------------- 只读地址 ---------------- */
 
-#define ADDR_PLANMODE       0xAC4CF4u   /* PlanningModeActive (Z 路径点/规划令) */
 #define ADDR_NOMOVE_TRUE    0x4D7CC0u   /* NoMove 处理器收尾 (AL=1, ret 0xc), 跳此即当已处理 */
 #define FN_ALLIED           0x4F9A50u   /* HouseClass::IsAlliedWith(HouseClass const*), 只读 */
 

@@ -15,13 +15,11 @@
  * 配置: [FrameCap] Enable=1。设计取舍与实测见 notes/帧率限制.md。
  */
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "FrameCap.h"
 
-#define ADDR_FRAME_NO    0x00A8ED84u /* 主循环帧号 (每帧 inc) */
-#define ADDR_LOAD_PHASE  0x00A9FAB0u /* 进度屏相位 (1/2/3 = 载入中) */
 #define ADDR_IAT_PEEK    0x007E1484u /* 导入表里 PeekMessageA 的 thunk */
-#define ADDR_GAMEMODE    0x00A8B238u /* SessionClass::Instance 首成员 = GameMode */
 
 #define FC_FPS           60
 #define FC_MENU_FREEZE   120u        /* 菜单开着但帧号这么久没动 => 已进模态循环 */

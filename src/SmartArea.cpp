@@ -35,6 +35,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "OrderThrottle.h"
@@ -45,15 +46,8 @@
 
 /* ---------------- 私有地址 (共享部分见 OrderUtil.h) ---------------- */
 
-#define OFF_NEXT_OBJ 0x30u    /* ObjectClass.NextObject (YRpp 成员顺序) */
 
 typedef void* __attribute__((thiscall)) (*Fn_FindObjType)(void* cell, int abs, int alt);
-typedef void* (__fastcall *SA_LockFn)(void*, void*, int, int);
-typedef int (__fastcall *SA_UnlockFn)(void*, void*);
-
-#define VT_SA_LOCK   0x5C
-#define VT_SA_UNLOCK 0x60
-
 #define FN_FINDOBJTYPE ((Fn_FindObjType)(void*)0x47C4D0u)
 
 /* ---------------- 配置 ---------------- */
@@ -408,8 +402,7 @@ static int SA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
                          void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
             tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
     /* 按住 Z = 路径点(排队, 按序追加不覆盖); 不按 Z 直接下令 (与手点同形)。 */
@@ -422,8 +415,7 @@ static int SA_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
                        void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, mission,
             0, 0, dstID, (unsigned)dstRtti, 0, 0);
     /* 按住 Z = 路径点(排队, 按序追加不覆盖); 不按 Z 直接下令 (与手点同形)。 */
@@ -1220,41 +1212,17 @@ static void SA_BoxSample(void)
 static unsigned char* s_SaLocked = 0;
 static int s_SaW = 0, s_SaH = 0, s_SaPitch = 0;
 
-static void SA_Plot(int x, int y, unsigned a)
-{
-    unsigned short* dstRow;
-    if (x < 0 || y < 0 || x >= s_SaW || y >= s_SaH) return;
-    dstRow = (unsigned short*)(s_SaLocked + y * s_SaPitch);
-    dstRow[x] = Blend16(dstRow[x], 255, 255, 255, a);
-}
-
+/* 3px 白线 / 实心方块 (公共实现: OrderUtil 的 OU_Line / OU_Box)。 */
 static void SA_Line(int x0, int y0, int x1, int y1, unsigned a)
 {
-    int dx, dy, sx, sy, err, e2, x, y, n;
-    dx = x1 - x0; dy = y1 - y0;
-    sx = (dx >= 0) ? 1 : -1;
-    sy = (dy >= 0) ? 1 : -1;
-    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
-    err = dx - dy;
-    x = x0; y = y0;
-    for (n = 0; n < 4096; n++)
-    {
-        SA_Plot(x, y, a);
-        SA_Plot(x, y - 1, a);
-        SA_Plot(x, y + 1, a);
-        if (x == x1 && y == y1) break;
-        e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
-    }
+    OU_Line(s_SaLocked, s_SaW, s_SaH, s_SaPitch, 0,
+            x0, y0, x1, y1, 255, 255, 255, a, 3);
 }
 
 static void SA_Mark(int cx, int cy, int m, unsigned a)
 {
-    int k, j;
-    for (k = -m; k <= m; k++)
-        for (j = -m; j <= m; j++)
-            SA_Plot(cx + k, cy + j, a);
+    OU_Box(s_SaLocked, s_SaW, s_SaH, s_SaPitch, 0,
+           cx, cy, m, 255, 255, 255, a);
 }
 
 static void SA_BoxCorner(int ccx, int ccy, int* px, int* py)
@@ -1266,9 +1234,6 @@ static void SA_BoxCorner(int ccx, int ccy, int* px, int* py)
 
 void SmartArea_Draw(void* surf, int w, int h, int pitch)
 {
-    unsigned char* vt;
-    SA_LockFn lockFn;
-    SA_UnlockFn unlockFn;
     unsigned char* locked;
     int lo, hi, x0, y0, x1, y1, x2, y2, x3, y3;
     extern int g_Calibrated;
@@ -1282,13 +1247,8 @@ void SmartArea_Draw(void* surf, int w, int h, int pitch)
     if (!g_Calibrated) return;
     if (!surf || !IsPlausiblePtr(surf)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;
-    vt = *(unsigned char**)surf;
-    if (!vt || !IsPlausiblePtr(vt)) return;
-    lockFn = (SA_LockFn)(*(void**)(vt + VT_SA_LOCK));
-    unlockFn = (SA_UnlockFn)(*(void**)(vt + VT_SA_UNLOCK));
-    if (!lockFn || !unlockFn) return;
-    locked = (unsigned char*)lockFn(surf, NULL, 0, 0);
-    if (!locked || !IsPlausiblePtr(locked)) return;
+    locked = OU_SurfLock(surf);
+    if (!locked) return;
     s_SaLocked = locked; s_SaW = w; s_SaH = h; s_SaPitch = pitch;
     if (showBox)
     {
@@ -1311,5 +1271,5 @@ void SmartArea_Draw(void* surf, int w, int h, int pitch)
     if (showLines)
         OU_PrevDraw(s_PrevBuf, s_PrevN, locked, w, h, pitch, 0, 255, 0, 255, 1);
     s_SaLocked = 0;
-    unlockFn(surf, NULL);
+    OU_SurfUnlock(surf);
 }

@@ -3,6 +3,7 @@
  * BitFont 布局: +0x0C 像素缓冲, +0x10 pitch, +0x24 默认色, +0x30..0x3C 裁剪。
  */
 #include <windows.h>
+#include <stdarg.h>             /* LogV 的变参 (编译器内建, 不依赖 CRT) */
 #include "GdiText.h"
 #include "VecText.h"
 #include "OrderUtil.h"
@@ -14,33 +15,49 @@
 
 #define VC_MAXW 32
 #define VC_MAXH 32
+#define VBUF    192             /* 日志行缓冲长度 (LogV 用) */
+
+/* 单行多字段日志: tag 之后键值交替, 末尾传 NULL。键自带分隔符, 首字节:
+ *   '#' = 值按十六进制 (不带 0x, 同 HtoA)   '-' = 值按有符号 (自带负号)
+ *   LogV("vfb:", " wch=", 0x4E00, " x=", 300, NULL);
+ * 输出与手写 "AppendCStr + UtoA" 逐字节一致; 装不下就截断, 不越界。 */
+static void LogV(const char* tag, ...)
+{
+    va_list ap;
+    const char* k;
+    char b[VBUF], n[16];
+    unsigned q = AppendCStr(b, 0, tag, VBUF);
+    va_start(ap, tag);
+    while ((k = va_arg(ap, const char*)) != NULL)
+    {
+        int v = va_arg(ap, int);
+        int hex = (*k == '#'), sgn = (*k == '-');
+        if (hex || sgn) k++;
+        q = AppendCStr(b, q, k, VBUF);
+        if (sgn) q = AppendInt(b, q, VBUF, v);
+        else
+        {
+            if (hex) HtoA((unsigned)v, n);
+            else     UtoA((unsigned)v, n);
+            q = AppendCStr(b, q, n, VBUF);
+        }
+    }
+    va_end(ap);
+    LogLine(b);
+}
 
 /* 后定义的前置声明 */
 static int VecPickPx(void* t);
+/* 要接管的入口 (跳板落点 = 地址 + 覆盖长度, 由表算出, 不再单独写 _BACK) */
 #define ADDR_BLIT        0x00434120u
 #define ADDR_BLIT_BACK   0x00434127u
-#define ADDR_GETDIM 0x00433CF0u
-#define ADDR_GETDIM_BACK 0x00433CF6u
+#define ADDR_GETDIM      0x00433CF0u
 #define ADDR_DRAWTEXT    0x00434CD0u
-#define ADDR_DRAWTEXT_BACK 0x00434CD6u
 #define ADDR_PRINT       0x00434B90u
-#define ADDR_PRINT_BACK  0x00434B9Au
 #define ADDR_SIMPLE      0x004A5EB0u
-#define ADDR_SIMPLE_BACK 0x004A5EB7u
 
-/* Blit 头 7 字节, 下钩前校验 */
+/* Blit 头 7 字节, 下钩前校验 (其余钩的原版字节见下面的 kW_* 表) */
 static const unsigned char kWantBlit[7] = { 0x83, 0xEC, 0x30, 0x53, 0x55, 0x56, 0x57 };
-/* DrawText 头 6 字节 */
-static const unsigned char kWantDrawText[6] = { 0x83, 0xEC, 0x30, 0x53, 0x55, 0x56 };
-/* Print 头 10 字节 */
-static const unsigned char kWantPrint[10] = { 0x56, 0x8B, 0x74, 0x24, 0x08,
-                                              0x57, 0x8B, 0x7C, 0x24, 0x18 };
-/* Simple_ 头 7 字节 */
-static const unsigned char kWantSimple[7] = { 0x83, 0xEC, 0x28,
-                                              0x8B, 0x44, 0x24, 0x34 };
-/* GetDim 头 6 字节 */
-static const unsigned char kWantGetDim[6] = { 0x83, 0xEC, 0x1C,
-                                              0x8B, 0x41, 0x04 };
 
 /* 场景区分只认位置条带, 不认函数。 */
 
@@ -74,6 +91,9 @@ static unsigned g_PfGlyph, g_PfMiss, g_PfGdHit, g_PfGdMiss;
 static unsigned g_PfGdUs;
 static unsigned g_PfLastLog = 0;
 static int g_PfOn = 0;
+/* 最近一次字形未命中的原因码 (1=首次 2=字符 3=idata 4=px 5=adv 6=h 7=nat)。
+ * 只有 Perf=1 时更新, 由 Perf_Frame 打到 vwhy=。 */
+int g_VecMissWhy = 0;
 
 static unsigned PfQpc(void)
 {
@@ -84,29 +104,15 @@ static unsigned PfQpc(void)
 
 static void PfTick(void)
 {
-    unsigned now = GetTickCount();
-    char b1[16], b2[16], b3[16], b4[16], buf[192];
-    unsigned q = 0, ms;
+    unsigned now = GetTickCount(), ms;
     if (!g_PfOn) return;
     if (!g_PfLastLog) { g_PfLastLog = now; return; }
     if (now - g_PfLastLog < 2000) return;
     ms = now - g_PfLastLog;
     g_PfLastLog = now;
-    q = AppendCStr(buf, q, "perf: ms=", sizeof(buf));
-    UtoA(ms, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCStr(buf, q, " glyph=", sizeof(buf));
-    UtoA(g_PfGlyph, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCStr(buf, q, " miss=", sizeof(buf));
-    UtoA(g_PfMiss, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCStr(buf, q, " gdHit=", sizeof(buf));
-    UtoA(g_PfGdHit, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCStr(buf, q, " gdMiss=", sizeof(buf));
-    UtoA(g_PfGdMiss, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
-    q = AppendCStr(buf, q, " gdUs=", sizeof(buf));
-    UtoA(g_PfGdUs, b3); q = AppendCStr(buf, q, b3, sizeof(buf));
-    q = AppendCStr(buf, q, " gpus=", sizeof(buf));
-    UtoA(ms ? g_PfGlyph * 1000u / ms : 0, b4); q = AppendCStr(buf, q, b4, sizeof(buf));
-    LogLine(buf);
+    LogV("perf:", " ms=", ms, " glyph=", g_PfGlyph, " miss=", g_PfMiss,
+         " gdHit=", g_PfGdHit, " gdMiss=", g_PfGdMiss, " gdUs=", g_PfGdUs,
+         " gpus=", ms ? g_PfGlyph * 1000u / ms : 0, NULL);
     g_PfGlyph = g_PfMiss = g_PfGdHit = g_PfGdMiss = g_PfGdUs = 0;
 }
 
@@ -297,15 +303,9 @@ static void VecBriefMark(unsigned short* buf, int pitchW, const int* LTRB,
 /* 退回引擎的一次性原因日志 (why 见下), 免得只看到"没变化"没处查。 */
 static void VecBriefWhy(int why, int v)
 {
-    char b1[16], buf[96];
-    unsigned q = 0;
     if (g_BriefWhyLogged) return;
     g_BriefWhyLogged = 1;
-    q = AppendCStr(buf, q, "brief: own skip why=", sizeof(buf));
-    UtoA((unsigned)why, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCh(buf, q, ' ', sizeof(buf));
-    UtoA((unsigned)v, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-    LogLine(buf);
+    LogV("brief: own skip why=", "", why, " ", v, NULL);
 }
 
 /* 单字格宽 = 字体前进宽 (ABC 全宽) + 字距, 与 GDI/DirectWrite 同规则。
@@ -399,12 +399,10 @@ static int VecBriefBody(void* font, const wchar_t* s, int x, int y, int w)
             if (cx > maxCx) maxCx = cx;
             continue;
         }
-        /* BriefAdv=1: 字体前进宽 + 字距; 0: 统一字号 + 字距。 */
+        /* BriefAdv=1: 字体前进宽 + 字距; 0: 统一字号 + 字距 (cw 初值就是 adv)。 */
         oa = GtCharAdv(*p);
         if (g_VT.BriefAdv && oa > 0)
             cw = VecBriefCellW(font, *p, px, tr);
-        else
-            cw = adv;
         if (cw > VC_MAXW) cw = VC_MAXW;
         if (cx + cw > x + w) { cx = x; cy += lh; }
         if (cy + lh > y + lines * lh + lh) break;
@@ -422,28 +420,10 @@ static int VecBriefBody(void* font, const wchar_t* s, int x, int y, int w)
     LTRB[0] = oldL; LTRB[1] = oldT; LTRB[2] = oldR; LTRB[3] = oldB;
     if (!g_BriefOwnLogged)
     {
-        char b1[16], b2[16], buf[128];
-        unsigned q = 0;
         g_BriefOwnLogged = 1;
-        q = AppendCStr(buf, q, "brief: own draw box=", sizeof(buf));
-        UtoA((unsigned)x, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        q = AppendCh(buf, q, ',', sizeof(buf));
-        UtoA((unsigned)y, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        q = AppendCh(buf, q, ' ', sizeof(buf));
-        UtoA((unsigned)w, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        q = AppendCh(buf, q, ' ', sizeof(buf));
-        UtoA((unsigned)lh, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        q = AppendCStr(buf, q, "px/char ", sizeof(buf));
-        UtoA((unsigned)adv, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        q = AppendCStr(buf, q, " lines=", sizeof(buf));
-        UtoA((unsigned)lines, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
-        q = AppendCStr(buf, q, " cell=", sizeof(buf));
-        UtoA((unsigned)cell, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        q = AppendCStr(buf, q, " pitch=", sizeof(buf));
-        UtoA((unsigned)pitchW, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        q = AppendCStr(buf, q, " maxY=", sizeof(buf));
-        UtoA((unsigned)maxY, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        LogLine(buf);
+        LogV("brief: own draw box=", "", x, ",", y, " ", w, " ", lh,
+             "px/char ", adv, " lines=", lines, " cell=", cell,
+             " pitch=", pitchW, " maxY=", maxY, NULL);
     }
     return 0;
 }
@@ -952,13 +932,43 @@ static int VecDimLookup(const wchar_t* s, int len)
     return 0;
 }
 
+/* 放行给引擎原版那一段单独计时 (区分"我们做的活"与"引擎本来就要做的活")。 */
+static int __fastcall VecCallOrigPrint(void* t, int a1, int a2, int a3, int a4,
+                                       int a5, int a6, int a7)
+{
+    long long q = Perf_Now();
+    int r = g_OrigPrint ? g_OrigPrint(t, NULL, a1, a2, a3, a4, a5, a6, a7) : 0;
+    Perf_Add(PF_H_PRTO, q);
+    return r;
+}
+
+static int __fastcall VecCallOrigSimple(int ecxIn, int edxIn, int a1, int a2,
+                                        int a3, int a4, int a5, int a6, int a7)
+{
+    long long q = Perf_Now();
+    int r = g_OrigSimple(ecxIn, edxIn, a1, a2, a3, a4, a5, a6, a7);
+    Perf_Add(PF_H_SMPO, q);
+    return r;
+}
+
+static int __fastcall VecPrintBody(void* t, void* e,
+    int a1, int a2, int a3, int a4, int a5, int a6, int a7);
 int __fastcall VecPrintEntry(void* t, void* e,
+    int a1, int a2, int a3, int a4, int a5, int a6, int a7)
+{
+    long long tPf = Perf_Now();
+    int r = VecPrintBody(t, e, a1, a2, a3, a4, a5, a6, a7);
+    Perf_Add(PF_H_PRINT, tPf);
+    return r;
+}
+
+static int __fastcall VecPrintBody(void* t, void* e,
     int a1, int a2, int a3, int a4, int a5, int a6, int a7)
 {
     unsigned caller = (unsigned)__builtin_return_address(0);
     int r;
     if (g_ScoreScreen)
-        return g_OrigPrint ? g_OrigPrint(t, NULL, a1, a2, a3, a4, a5, a6, a7) : 0;
+        return VecCallOrigPrint(t, a1, a2, a3, a4, a5, a6, a7);
     /* 只认世界悬浮 Print, 排除菜单/列表同字串。 */
     {
         const wchar_t* ps = (const wchar_t*)a3;
@@ -1099,7 +1109,7 @@ int __fastcall VecPrintEntry(void* t, void* e,
             return 1;
     }
     if (!g_OrigPrint) return 0;
-    r = g_OrigPrint(t, NULL, a1, a2, a3, a4, a5, a6, a7);
+    r = VecCallOrigPrint(t, a1, a2, a3, a4, a5, a6, a7);
     return r;
 }
 
@@ -1127,7 +1137,18 @@ static int VecSWTextKind(int slot, const wchar_t** out)
 }
 
 /* Simple_ 入口: 命中即收表并跳过, 空串只收表。 */
+static int __fastcall VecSimpleBody(int ecxIn, int edxIn,
+    int a1, int a2, int a3, int a4, int a5, int a6, int a7);
 int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
+    int a1, int a2, int a3, int a4, int a5, int a6, int a7)
+{
+    long long tPf = Perf_Now();
+    int r = VecSimpleBody(ecxIn, edxIn, a1, a2, a3, a4, a5, a6, a7);
+    Perf_Add(PF_H_SIMPLE, tPf);
+    return r;
+}
+
+static int __fastcall VecSimpleBody(int ecxIn, int edxIn,
     int a1, int a2, int a3, int a4, int a5, int a6, int a7)
 {
     if (!g_OrigSimple) return 0;
@@ -1149,7 +1170,7 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
         return ecxIn;
     }
     if (g_ScoreScreen)
-        return g_OrigSimple(ecxIn, edxIn, a1, a2, a3, a4, a5, a6, a7);
+        return VecCallOrigSimple(ecxIn, edxIn, a1, a2, a3, a4, a5, a6, a7);
     /* Ares FPS 计数器钉住: 收串并跳过原绘制, Render 尾固定位 1x 重画。
      * 只按内容认 ("FPS:" 前缀超武计时器永不用), 不认调用者:
      * Ares 经 Fancy 走 Simple_ (返回点 0x4A6345) 或直调 Simple_
@@ -1232,7 +1253,7 @@ int __fastcall VecSimpleEntry(int ecxIn, int edxIn,
             }
         }
     }
-    return g_OrigSimple(ecxIn, edxIn, a1, a2, a3, a4, a5, a6, a7);
+    return VecCallOrigSimple(ecxIn, edxIn, a1, a2, a3, a4, a5, a6, a7);
 }
 
 /* GetDim 宽度接管: 先走原版取高, 宽用 GDI 步进和。控制串/超长/触顶走原版。 */
@@ -1275,8 +1296,8 @@ static void DimStore(const void* t, const void* idata, const wchar_t* s,
 /* 野指针兜底日志计数 (最多记 8 条) */
 static int s_BadStrN = 0;
 
-int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
-                              int* w, int* h, int maxW)
+static int __fastcall VecGetDimBody(void* t, void* e, const wchar_t* s,
+                                    int* w, int* h, int maxW)
 {
     int ow = 0, oh = 0, r;
     int px, i, tot, n = 0;
@@ -1461,6 +1482,17 @@ fwd:
     return r;
 }
 
+/* 度量钩的导出入口: 只做 Perf 记账 (引擎每字都要量一次, 用来确认这条路径的
+ * 固定开销)。 */
+int __fastcall VecGetDimEntry(void* t, void* e, const wchar_t* s,
+                              int* w, int* h, int maxW)
+{
+    long long tPf = Perf_Now();
+    int r = VecGetDimBody(t, e, s, w, h, maxW);
+    Perf_Add(PF_VECGETDIM, tPf);
+    return r;
+}
+
 /* 引擎单字度量 (走原版)。记忆表键含行高, 失败也记。 */
 #define VM_N 1024
 typedef struct {
@@ -1550,6 +1582,14 @@ static void* g_PxIdata = NULL;
 static int g_PxPx = 19, g_PxBold = -1, g_PxPxSrc = 0;
 static const wchar_t* g_PxFace = NULL;
 
+/* 记下这次校准结果 (键 + 派生量), 下次同键直接命中。 */
+static void PxStore(void* idata, int px, int origH, int pxSrc)
+{
+    g_PxValid = 1; g_PxIdata = idata; g_PxPx = px; g_PxBold = g_VT.Bold;
+    g_PxPxSrc = pxSrc; g_FontOrigH = origH; g_BriefOrigH = origH;
+    g_PxFace = g_VTFace;
+}
+
 static int VecPxCalibrate(void* t)
 {
     void* idata;
@@ -1569,11 +1609,7 @@ static int VecPxCalibrate(void* t)
         if (px > 40) px = 40;
         origH = *(int*)((char*)idata + 0x0C);
         if (origH < 8 || origH > 40) origH = 19;
-        g_PxValid = 1; g_PxIdata = idata; g_PxPx = px; g_PxBold = g_VT.Bold;
-        g_PxPxSrc = g_VT.FontPx;
-        g_FontOrigH = origH;
-        g_PxFace = g_VTFace;
-        g_BriefOrigH = origH;
+        PxStore(idata, px, origH, g_VT.FontPx);
         return px;
     }
     origH = *(int*)((char*)idata + 0x0C);
@@ -1604,11 +1640,7 @@ static int VecPxCalibrate(void* t)
     px = (px0 * origH + inkH / 2) / inkH;
     if (px < 8) px = 8;
     if (px > 40) px = 40;
-    g_PxValid = 1; g_PxIdata = idata; g_PxPx = px; g_PxBold = g_VT.Bold;
-    g_PxPxSrc = 0;
-    g_FontOrigH = origH;
-    g_PxFace = g_VTFace;
-    g_BriefOrigH = origH;
+    PxStore(idata, px, origH, 0);   /* 0 = 自动档 (不进 FontPx 分子) */
     return px;
 }
 
@@ -1655,8 +1687,23 @@ static VCEnt* VecGlyph(void* t, wchar_t wch, int adv, int h, int px)
     if (px < 8 || px > 40) { g_VecWhy = 11; return NULL; }
     if (e->used && e->wch == wch && e->idata == idata && e->px == px &&
         e->adv == adv && e->h == h && e->nat == g_VecNat)
+    {
+        Perf_Hit(PF_VHIT);
         return e;
+    }
     if (g_PfOn) g_PfMiss++;   /* 未命中 = 一次 GDI 光栅 + DIB 清 + ABC 填充 */
+    /* 第三轮: 未命中率是"每帧每字都重光栅化"还是"只换内容才重做"的判据。
+     * 同时记下是哪个 key 字段变了 (见 Perf_Frame 的 vwhy)。 */
+    if (g_PfOn)
+    {
+        Perf_Hit(PF_VMISS);
+        g_VecMissWhy = !e->used ? 1
+                     : (e->wch != wch) ? 2
+                     : (e->idata != idata) ? 3
+                     : (e->px != px) ? 4
+                     : (e->adv != adv) ? 5
+                     : (e->h != h) ? 6 : 7;
+    }
     /* 未命中: GDI 单字光栅 (带边距), 扫出本字真实墨水盒 */
     if (!GdiEnsure(px, g_VT.Bold, VecGdiSlot(px), g_VTFace)) { g_VecWhy = 12; return NULL; }
     gw = GtRenderGlyphAt(wch, GL_M, GL_Y0, NULL);
@@ -1779,26 +1826,76 @@ static int VecRender(void* t, wchar_t wch, int adv, int h, int x, int y,
         }
     }
     dy += yOff;
-    for (y = 0; y < e->outh; y++)
+    /* 混合热循环: 5 位 alpha 查表版。
+     * 原来每像素 3 次展表 + 6 次乘除 (8 位空间混合再压位, ~50 cycles);
+     * 现在把 alpha 压到 5 位 (aq = a>>3), 目标侧用全局表 TB[inv][dst]
+     * = dst*inv/31, 前景侧按字现建 32 项, 每像素只剩 4 次小表查 + 3 次加。
+     * 边界精确: a=0 -> aq=0/inv=31 -> 结果等于原像素; a=255 -> aq=31/inv=0
+     * -> 结果等于纯色。每个通道与 8 位混合最多差 1 个色阶 (18px 字形不可见)。 */
     {
-        int sy = dy + y;
-        unsigned short* row;
-        unsigned char* cov;
-        int lo = e->rowLo[y], hi = e->rowHi[y], x0, x1;
-        if (hi < lo) continue;
-        if (sy < Tp || sy > B) continue;
-        row = buf + sy * pitchW;
-        cov = e->cov + y * VC_MAXW;
-        /* 横向只认面界, 溢出为正常 overhang。只扫有墨区间。 */
-        x0 = lo;
-        x1 = hi;
-        if (x + x0 < 0) x0 = -x;
-        if (x + x1 >= pitchW) x1 = pitchW - 1 - x;
-        for (dx = x0; dx <= x1; dx++)
+        int b6 = (g_GBits == 6);
+        unsigned char frq[32], fgq[32], fbq[32];
+        if (!g_ExpReady) GtBuildExpand();
         {
-            unsigned a = cov[dx];
-            if (!a) continue;
-            row[x + dx] = Blend16(row[x + dx], fr, fg, fb, a);
+            unsigned sr = (fr * 31u + 127u) / 255u;
+            unsigned sg = b6 ? (fg * 63u + 127u) / 255u : (fg * 31u + 127u) / 255u;
+            unsigned sb = (fb * 31u + 127u) / 255u;
+            for (dx = 0; dx < 32; dx++)
+            {
+                unsigned u = (unsigned)dx;
+                frq[dx] = (unsigned char)((sr * u + 15u) / 31u);
+                fgq[dx] = (unsigned char)((sg * u + 15u) / 31u);
+                fbq[dx] = (unsigned char)((sb * u + 15u) / 31u);
+            }
+        }
+        for (y = 0; y < e->outh; y++)
+        {
+            int sy = dy + y;
+            unsigned short* row;
+            unsigned char* cov;
+            int lo = e->rowLo[y], hi = e->rowHi[y], x0, x1;
+            unsigned short* rw;
+            if (hi < lo) continue;
+            if (sy < Tp || sy > B) continue;
+            row = buf + sy * pitchW;
+            cov = e->cov + y * VC_MAXW;
+            x0 = lo;
+            x1 = hi;
+            if (x + x0 < 0) x0 = -x;
+            if (x + x1 >= pitchW) x1 = pitchW - 1 - x;
+            rw = row + x;
+            if (b6)
+            {
+                for (dx = x0; dx <= x1; dx++)
+                {
+                    unsigned d = rw[dx];
+                    unsigned aq = (unsigned)cov[dx] >> 3;
+                    unsigned inv = 31u - aq;
+                    unsigned rr = (unsigned)frq[aq] + g_BlendR[inv][(d >> 11) & 0x1Fu];
+                    unsigned gg = (unsigned)fgq[aq] + g_BlendG[inv][(d >> 5) & 0x3Fu];
+                    unsigned bb = (unsigned)fbq[aq] + g_BlendR[inv][d & 0x1Fu];
+                    if (rr > 31u) rr = 31u;
+                    if (gg > 63u) gg = 63u;
+                    if (bb > 31u) bb = 31u;
+                    rw[dx] = (unsigned short)((rr << 11) | (gg << 5) | bb);
+                }
+            }
+            else
+            {
+                for (dx = x0; dx <= x1; dx++)
+                {
+                    unsigned d = rw[dx];
+                    unsigned aq = (unsigned)cov[dx] >> 3;
+                    unsigned inv = 31u - aq;
+                    unsigned rr = (unsigned)frq[aq] + g_BlendR[inv][(d >> 10) & 0x1Fu];
+                    unsigned gg = (unsigned)fgq[aq] + g_BlendR[inv][(d >> 5) & 0x1Fu];
+                    unsigned bb = (unsigned)fbq[aq] + g_BlendR[inv][d & 0x1Fu];
+                    if (rr > 31u) rr = 31u;
+                    if (gg > 31u) gg = 31u;
+                    if (bb > 31u) bb = 31u;
+                    rw[dx] = (unsigned short)((rr << 10) | (gg << 5) | bb);
+                }
+            }
         }
     }
     /* 步进: GDI 步进优先, 只加宽不收窄。正文盒内保持原笔位, 数字除外。 */
@@ -1959,7 +2056,9 @@ static int VecMenuRender(void* t, wchar_t wch, int adv, int h, int x, int y,
 /* 超武逐行绘制已移除: 整体接管改为 Print 入口隐藏+收集, 消息帧统一整块重绘
  * (见 MOExperience 超武面板)。 */
 
-int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y, int color)
+static long long g_BlitMeasT = 0;
+
+static int __fastcall VecText_BlitBody(void* t, void* edxUnused, int wch, int x, int y, int color)
 {
     wchar_t wc = (wchar_t)((unsigned)wch & 0xFFFFu);
     int eff, adv, h = 0, r, px;
@@ -1993,6 +2092,7 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
         return x;
     }
     adv = VecMeasure(t, wc, &h);
+    g_BlitMeasT = Perf_Now();   /* 分段探针: Measure 结束时刻 (见 BlitHook) */
     if (adv < 0)
         return g_OrigBlit(t, NULL, wch, x, y, color);
     /* 简报正文自绘 (BriefOwn=1): 面到这里已经绑好了 (引擎 0x4348F0 装的),
@@ -2014,29 +2114,19 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
                  tx <= g_LastTipX + g_TipTot + 8 &&
                  y >= g_TipY - 8 && y <= g_TipY + 8);
     {
-        /* 位置门 (颜色盲): 本 Print 的首个 Blit 落在当帧提示跨度内。
-         * 边缘出屏字会被引擎跳过 (不调 Blit), 首 Blit 未必是串首,
-         * 故按跨度 [tipx-tot-16, tipx+tot+8] 认; 不按原点 ±8。
-         * 右界 tot+8: 本串字 ENGINE x 不会超 a4+tot (账本即此)。
-         * 每批只进一次 (seen 守卫): 串内后续字的 tx 天然递增, 绝不能按"漂移"
-         * 重画盒, 否则盒跟着字走、越走越偏。单线程 Print→Blits 同步,
-         * 陈旧跨 Print 不可能, 无需漂移。 */
-        if (!g_BlitTipSeen &&
-            tx >= g_LastTipX - g_TipTot - 16 &&
-            tx <= g_LastTipX + g_TipTot + 8 &&
-            y >= g_TipY - 8 && y <= g_TipY + 8 &&
-            t && IsPlausiblePtr(t))
+        /* 位置门 (颜色盲): 本 Print 的首个 Blit 落在当帧提示跨度内 (inTip)。
+         * 边缘出屏字会被引擎跳过 (不调 Blit), 首 Blit 未必是串首, 所以按跨度
+         * [tipx-tot-16, tipx+tot+8] 认, 不按原点 ±8。
+         * seen 守卫: 每批只进一次 —— 串内后续字的 tx 天然递增, 按"漂移"重画会
+         * 让盒跟着字走、越走越偏。Print→Blits 单线程同步, 不存在跨 Print 陈旧。 */
+        if (!g_BlitTipSeen && inTip && t && IsPlausiblePtr(t))
         {
             unsigned short* bb = *(unsigned short**)((char*)t + 0x0C);
             int pp = *(int*)((char*)t + 0x10);
             g_BlitTipSeen = 1;
-            /* 出界修复 (TipBox): 定制盒。引擎窄盒 [cx-63,cx+62] 已在,
-             * 按列调映射 r=盒内/盒旁 (逐通道钳 0.15~0.95) 补两侧条带
-             * (纹理保留, 同 tone 无缝), 采样红画新边框, 字随后画上。
-             * 坐标全落在已扫描安全区内; 关游戏即无残留 (世界每帧重画)。
-             * TipBox=0 关闭。 */
-            /* 定制盒: 每批首个落点 Blit 进一次 (seen 守卫),
-             * 串内后续字不进; 锚点/几何见下, 出屏即真裁剪。 */
+            /* 出界修复 (TipBox): 引擎窄盒 [cx-63,cx+62] 已在, 这里补两侧条带
+             * (纹理保留, 同 tone 无缝)、采样顶行红画新边框, 字随后画上。
+             * 坐标全在已扫描安全区内; 世界每帧重画, 无残留。TipBox=0 关闭。 */
             if (g_VT.TipBox && g_TipTot >= 50 && g_TipTot <= 400 &&
                 bb && IsPlausiblePtr((void*)bb) &&
                 pp >= 64 && pp <= 4096)
@@ -2194,32 +2284,34 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
             if (r == VC_FAIL)
             {
                 static int nF = 0;
-                if (nF < 8)
-                {
-                    char fb1[16], ff[112];
-                    unsigned fz = 0;
-                    nF++;
-                    fz = AppendCStr(ff, fz, "vfb: wch=", sizeof(ff));
-                    fz += HtoA((unsigned)wc & 0xFFFFu, ff + fz);
-                    fz = AppendCStr(ff, fz, " x=", sizeof(ff));
-                    UtoA((unsigned)(tx + 2000), fb1);
-                    fz = AppendCStr(ff, fz, fb1, sizeof(ff));
-                    fz = AppendCStr(ff, fz, " y=", sizeof(ff));
-                    UtoA((unsigned)y, fb1);
-                    fz = AppendCStr(ff, fz, fb1, sizeof(ff));
-                    fz = AppendCStr(ff, fz, " adv=", sizeof(ff));
-                    UtoA((unsigned)adv, fb1);
-                    fz = AppendCStr(ff, fz, fb1, sizeof(ff));
-                    fz = AppendCStr(ff, fz, " why=", sizeof(ff));
-                    UtoA((unsigned)g_VecWhy, fb1);
-                    fz = AppendCStr(ff, fz, fb1, sizeof(ff));
-                    LogLine(ff);
-                }
+                if (nF++ < 8)
+                    LogV("vfb:", "# wch=", (unsigned)wc & 0xFFFFu, " x=",
+                         tx + 2000, " y=", y, " adv=", adv, " why=",
+                         g_VecWhy, NULL);
             }
             if (r != VC_FAIL) return r;   /* x == ox (本函数内 x 只读)。 */
         }
     }
     return g_OrigBlit(t, NULL, wch, ox, y, color);
+}
+
+/* 导出给钩子安装点的入口 (名字被 VecText_Install 的 JMP 钩引用): 只做 Perf 记账,
+ * 逐字累计, 用来判断"引擎每帧画字"这条路径占多少帧时间。 */
+int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y, int color)
+{
+    long long tPf = Perf_Now();
+    long long tEnd;
+    int r;
+    g_BlitMeasT = 0;
+    r = VecText_BlitBody(t, edxUnused, wch, x, y, color);
+    tEnd = Perf_Now();
+    Perf_Add(PF_VECBLIT, tPf);
+    if (g_BlitMeasT)
+    {
+        Perf_AddDelta(PF_H_VB1, g_BlitMeasT - tPf);
+        Perf_AddDelta(PF_H_VB2, tEnd - g_BlitMeasT);
+    }
+    return r;
 }
 
 /* ---------------- 下钩 ---------------- */
@@ -2311,19 +2403,18 @@ static int PatchAt(unsigned at, void* target, int n)
     return 1;
 }
 
+/* 打原版字节 (字节对不上时用: 现场只看日志就能判断是不是被别的模块改过)。 */
 static void LogBytes(const unsigned char* p)
 {
-    char b1[16], buf[128];
-    unsigned q = 0;
+    char b[96];
+    unsigned q = AppendCStr(b, 0, "vtext: got=", sizeof(b));
     int i;
-    q = AppendCStr(buf, q, "vtext: got=", sizeof(buf));
     for (i = 0; i < 7; i++)
     {
-        UtoA(p[i], b1);
-        q = AppendCStr(buf, q, b1, sizeof(buf));
-        q = AppendCh(buf, q, ' ', sizeof(buf));
+        q = AppendInt(b, q, sizeof(b), p[i]);
+        q = AppendCh(b, q, ' ', sizeof(b));
     }
-    LogLine(buf);
+    LogLine(b);
 }
 
 /* 顶栏资金字号。 */
@@ -2348,84 +2439,50 @@ int VecText_Bold(void)
 
 void VecText_EnsureInit(void)
 {
-    char b1[16], buf[192];
-    unsigned p;
+    /* [VecText] 的整型键: 键名 / 落到哪 / 默认值 / 钳制区间。lo==0&&hi==1 视为
+     * 布尔 (只归一到 0/1)。新增配置项只加一行。LogDetail 在别的节, 单独读。 */
+    static const struct { const char* k; int* p; int def, lo, hi; } kKey[] = {
+        { "Enable",     &g_VT.Enable,     1,   0, 1    },
+        { "Bold",       &g_VT.Bold,       0,   0, 1    },
+        { "FontPx",     &g_VT.FontPx,     0,   0, 40   },
+        { "CreditPx",   &g_VT.CreditPx,   0,   0, 40   },
+        { "CreditDY",   &g_VT.CreditDY,   0,  -8, 8    },
+        { "MenuTake",   &g_VT.MenuTake,   1,   0, 1    },
+        { "DigitTrack", &g_VT.DigitTrack, 0,  -8, 8    },
+        { "TipBox",     &g_VT.TipBox,     1,   0, 1    },
+        { "BriefLine",  &g_VT.BriefLine,  130, 0, 300  },
+        { "BriefOwn",   &g_VT.BriefOwn,   1,   0, 1    },
+        { "BriefTrack", &g_VT.BriefTrack, 2,   0, 12   },
+        { "BriefMark",  &g_VT.BriefMark,  1,   0, 1    },
+        { "BriefWidth", &g_VT.BriefWidth, 620, 0, 4000 },
+        { "BriefAdv",   &g_VT.BriefAdv,   1,   0, 1    },
+        { "Perf",       &g_VT.Perf,       0,   0, 1    },
+        { "Render",     &g_VT.Render,     0,   0, 1    },
+    };
+    unsigned i;
     if (g_VtInit) return;
     g_VtInit = 1;
     GtEnsureLog();
     if (!g_Log) return;
-    g_VT.Enable = GetPrivateProfileIntA(VT_SECTION, "Enable", 1, g_IniPath);
+    for (i = 0; i < sizeof(kKey) / sizeof(kKey[0]); i++)
+    {
+        int* p = kKey[i].p;
+        int v = GetPrivateProfileIntA(VT_SECTION, kKey[i].k, kKey[i].def, g_IniPath);
+        if (v < kKey[i].lo) v = kKey[i].lo;
+        if (v > kKey[i].hi) v = kKey[i].hi;
+        *p = v;
+    }
     OU_ReadString(VT_SECTION, "FontFace", "simhei.ttf",
                   g_VT.FontFace, sizeof(g_VT.FontFace));
-    g_VT.Bold = GetPrivateProfileIntA(VT_SECTION, "Bold", 0, g_IniPath);
-    g_VT.FontPx = GetPrivateProfileIntA(VT_SECTION, "FontPx", 0, g_IniPath);
-    g_VT.CreditPx = GetPrivateProfileIntA(VT_SECTION, "CreditPx", 0, g_IniPath);
-    g_VT.CreditDY = GetPrivateProfileIntA(VT_SECTION, "CreditDY", 0, g_IniPath);
-    g_VT.MenuTake = GetPrivateProfileIntA(VT_SECTION, "MenuTake", 1, g_IniPath);
-    g_VT.DigitTrack = GetPrivateProfileIntA(VT_SECTION, "DigitTrack", 0, g_IniPath);
-    g_VT.TipBox = GetPrivateProfileIntA(VT_SECTION, "TipBox", 1, g_IniPath);
-    g_VT.BriefLine = GetPrivateProfileIntA(VT_SECTION, "BriefLine", 130, g_IniPath);
-    g_VT.BriefOwn = GetPrivateProfileIntA(VT_SECTION, "BriefOwn", 1, g_IniPath);
-    g_VT.BriefTrack = GetPrivateProfileIntA(VT_SECTION, "BriefTrack", 2, g_IniPath);
-    g_VT.BriefMark = GetPrivateProfileIntA(VT_SECTION, "BriefMark", 1, g_IniPath);
-    g_VT.BriefWidth = GetPrivateProfileIntA(VT_SECTION, "BriefWidth", 620, g_IniPath);
-    g_VT.BriefAdv = GetPrivateProfileIntA(VT_SECTION, "BriefAdv", 1, g_IniPath);
     g_VT.LogDetail = GetPrivateProfileIntA("Log", "LogDetail", 0, g_IniPath);
-    g_VT.Perf = GetPrivateProfileIntA(VT_SECTION, "Perf", 0, g_IniPath);
-    g_VT.Render = GetPrivateProfileIntA(VT_SECTION, "Render", 0, g_IniPath);
-    g_VT.Enable = g_VT.Enable ? 1 : 0;
-    g_VT.Bold = g_VT.Bold ? 1 : 0;
-    if (g_VT.FontPx < 0) g_VT.FontPx = 0;
-    if (g_VT.FontPx > 40) g_VT.FontPx = 40;
-    if (g_VT.CreditPx < 0) g_VT.CreditPx = 0;
-    if (g_VT.CreditPx > 40) g_VT.CreditPx = 40;
-    if (g_VT.CreditDY < -8) g_VT.CreditDY = -8;
-    if (g_VT.CreditDY > 8) g_VT.CreditDY = 8;
-    g_VT.MenuTake = g_VT.MenuTake ? 1 : 0;
-    if (g_VT.DigitTrack < -8) g_VT.DigitTrack = -8;
-    if (g_VT.DigitTrack > 8) g_VT.DigitTrack = 8;
-    g_VT.TipBox = g_VT.TipBox ? 1 : 0;
-    g_VT.BriefOwn = g_VT.BriefOwn ? 1 : 0;
-    if (g_VT.BriefTrack < 0) g_VT.BriefTrack = 0;
-    if (g_VT.BriefTrack > 12) g_VT.BriefTrack = 12;
-    g_VT.BriefMark = g_VT.BriefMark ? 1 : 0;
-    if (g_VT.BriefWidth < 0) g_VT.BriefWidth = 0;
-    if (g_VT.BriefWidth > 4000) g_VT.BriefWidth = 4000;
-    g_VT.BriefAdv = g_VT.BriefAdv ? 1 : 0;
-    if (g_VT.BriefLine < 0) g_VT.BriefLine = 0;
-    if (g_VT.BriefLine > 300) g_VT.BriefLine = 300;
     g_VT.LogDetail = g_VT.LogDetail ? 1 : 0;
-    g_VT.Perf = g_VT.Perf ? 1 : 0;
     g_PfOn = g_VT.Perf;
     g_LogDetail = g_VT.LogDetail;
-    g_VT.Render = g_VT.Render ? 1 : 0;
     ResolveFontFace(g_VT.FontFace, "vtext", g_VTFace, L"Microsoft YaHei");
-    p = 0;
-    p = AppendCStr(buf, p, "vtext: start en=", sizeof(buf));
-    UtoA((unsigned)g_VT.Enable, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " dtail=", sizeof(buf));
-    UtoA((unsigned)g_VT.LogDetail, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " render=", sizeof(buf));
-    UtoA((unsigned)g_VT.Render, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " px=", sizeof(buf));
-    UtoA((unsigned)g_VT.FontPx, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " cred=", sizeof(buf));
-    UtoA((unsigned)g_VT.CreditPx, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " credy=", sizeof(buf));
-    {
-        int dy = g_VT.CreditDY;
-        if (dy < 0) { p = AppendCh(buf, p, '-', sizeof(buf)); dy = -dy; }
-        UtoA((unsigned)dy, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    }
-    p = AppendCStr(buf, p, " mt=", sizeof(buf));
-    UtoA((unsigned)g_VT.MenuTake, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " dt=", sizeof(buf));
-    {
-        int dtr = g_VT.DigitTrack;
-        if (dtr < 0) { p = AppendCh(buf, p, '-', sizeof(buf)); dtr = -dtr; }
-        UtoA((unsigned)dtr, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    }
-    LogLine(buf);
+    LogV("vtext: start", " en=", g_VT.Enable, " dtail=", g_VT.LogDetail,
+         " render=", g_VT.Render, " px=", g_VT.FontPx, " cred=", g_VT.CreditPx,
+         "- credy=", g_VT.CreditDY, " mt=", g_VT.MenuTake,
+         "- dt=", g_VT.DigitTrack, NULL);
 }
 
 /* ---------------- FPS 钉住绘制 (Render 尾 0x4F4589, Ares 之后) ----------------
@@ -2551,6 +2608,83 @@ void VecText_LateInstall(void)
     g_LateHooksDone = 1;
 }
 
+/* ---------------- 装钩: 表驱动 ----------------
+ * 每个钩都是同一件事: 校验原版头字节 -> 建跳板 -> 打 E9 补丁。原版字节对不上
+ * = 该地址已被别的模块改过 (Ares/CnCNet 等), 整条放弃, 只记日志不争抢。
+ * 逐个手写只是样板, 这里一张表装完; 新增钩加一行。 */
+
+typedef struct {
+    unsigned at;                 /* 挂钩地址 */
+    const unsigned char* want;   /* 原版头字节 */
+    unsigned char n;             /* 被覆盖的字节数 */
+    void* entry;                 /* 我们的入口 */
+    void** tramp;                /* 跳板落到哪 (失败清 NULL) */
+    const char* name;            /* 日志前缀, 输出 "<name> hook ON/OFF" */
+} VecHookEnt;
+
+/* 原版头字节 (对不上时 LogBytes 会把现场打出来对照) */
+static const unsigned char kW_DrawText[6]   = { 0x83, 0xEC, 0x30, 0x53, 0x55, 0x56 };
+static const unsigned char kW_Print[10]     = { 0x56, 0x8B, 0x74, 0x24, 0x08,
+                                                0x57, 0x8B, 0x7C, 0x24, 0x18 };
+static const unsigned char kW_Simple[7]     = { 0x83, 0xEC, 0x28, 0x8B, 0x44, 0x24, 0x34 };
+static const unsigned char kW_GetDim[6]     = { 0x83, 0xEC, 0x1C, 0x8B, 0x41, 0x04 };
+static const unsigned char kW_Prepare[5]    = { 0xA1, 0x24, 0x73, 0x88, 0x00 };
+static const unsigned char kW_BlitSb[6]     = { 0x83, 0xEC, 0x38, 0x53, 0x55, 0x56 };
+static const unsigned char kW_TipPre[7]     = { 0x8B, 0x11, 0x6A, 0x01, 0xFF, 0x52, 0x0C };
+static const unsigned char kW_InitGui[5]    = { 0x83, 0xEC, 0x24, 0x53, 0x55 };
+static const unsigned char kW_GadgetIn[6]   = { 0x83, 0xEC, 0x0C, 0x53, 0x55, 0x56 };
+static const unsigned char kW_Update[7]     = { 0x83, 0xEC, 0x5C, 0x8B, 0x44, 0x24, 0x60 };
+static const unsigned char kW_Render[8]     = { 0x83, 0xEC, 0x08, 0xA1, 0x1C, 0x73, 0x88, 0x00 };
+static const unsigned char kW_PreCur[5]     = { 0xA3, 0x14, 0x73, 0x88, 0x00 };
+static const unsigned char kW_Map[5]        = { 0xA1, 0x1C, 0x73, 0x88, 0x00 };
+static const unsigned char kW_ChromePre[5]  = { 0x8B, 0x16, 0x50, 0x8B, 0xCE };
+static const unsigned char kW_ChromePost[6] = { 0x8B, 0x0D, 0x1C, 0x73, 0x88, 0x00 };
+static const unsigned char kW_AfterMap[5]   = { 0xA0, 0x19, 0xB5, 0xB0, 0x00 };
+static const unsigned char kW_EdgeFix[7]    = { 0x83, 0xEC, 0x18, 0x53, 0x55, 0x56, 0x57 };
+static const unsigned char kW_ClickCoord[7] = { 0x8B, 0x44, 0x24, 0x10, 0x83, 0xEC, 0x18 };
+static const unsigned char kW_CamSet[5]     = { 0x83, 0xEC, 0x08, 0x53, 0x55 };
+static const unsigned char kW_RadarCell[6]  = { 0x8B, 0x0D, 0xA8, 0x6F, 0x88, 0x00 };
+static const unsigned char kW_BlitGuard[5]  = { 0x83, 0xEC, 0x14, 0x55, 0x56 };
+static const unsigned char kW_Shroud[5]     = { 0x83, 0xEC, 0x48, 0x56, 0x57 };
+static const unsigned char kW_WndMouse[8]   = { 0xA0, 0x78, 0xE3, 0xA8, 0x00,
+                                                0x83, 0xEC, 0x1C };
+
+/* 两段字符串拼一行日志 ("<name> hook ON" 这类)。 */
+static void LogCat(const char* a, const char* b)
+{
+    char s[96];
+    unsigned q = AppendCStr(s, 0, a, sizeof(s));
+    AppendCStr(s, q, b, sizeof(s));
+    LogLine(s);
+}
+
+/* 装一个钩。返回 1 = 装上。 */
+static int VecHookAt(const VecHookEnt* h)
+{
+    *h->tramp = NULL;
+    if (!BytesSame((const unsigned char*)h->at, h->want, (int)h->n))
+    {
+        LogCat(h->name, " bytes mismatch");
+        LogBytes((const unsigned char*)h->at);
+        return 0;
+    }
+    *h->tramp = BuildTrampAt(h->at, (int)h->n, h->at + (unsigned)h->n);
+    if (*h->tramp && PatchAt(h->at, h->entry, (int)h->n))
+    {
+        LogCat(h->name, " hook ON");
+        return 1;
+    }
+    *h->tramp = NULL;
+    LogCat(h->name, " hook OFF");
+    return 0;
+}
+
+static void VecHookRun(const VecHookEnt* t, unsigned n)
+{
+    unsigned i;
+    for (i = 0; i < n; i++) VecHookAt(&t[i]);
+}
+
 void VecText_Install(void)
 {
     VecText_EnsureInit();
@@ -2567,271 +2701,104 @@ void VecText_Install(void)
         else if (!PatchBlit()) LogLine("vtext: patch fail, hook OFF");
         else LogLine(g_VT.Render ? "vtext: blit hook ON (render)"
                                  : "vtext: blit hook ON (probe)");
-        /* DrawText/Print 上下文钩 (只记调用者)。 */
-    if (BytesSame((unsigned char*)ADDR_DRAWTEXT, kWantDrawText, 6))
-    {
-        g_OrigDrawText = (DrawTextFn)BuildTrampAt(ADDR_DRAWTEXT, 6, ADDR_DRAWTEXT_BACK);
-        if (g_OrigDrawText && PatchAt(ADDR_DRAWTEXT, (void*)(size_t)VecDrawTextEntry, 6))
-            LogLine("vtext: drawtext ctx hook ON");
-        else { LogLine("vtext: drawtext ctx hook OFF"); g_OrigDrawText = NULL; }
-    }
-    else { LogLine("vtext: drawtext bytes mismatch"); LogBytes((unsigned char*)ADDR_DRAWTEXT); }
-    if (BytesSame((unsigned char*)ADDR_PRINT, kWantPrint, 10))
-    {
-        g_OrigPrint = (PrintFn)BuildTrampAt(ADDR_PRINT, 10, ADDR_PRINT_BACK);
-        if (g_OrigPrint && PatchAt(ADDR_PRINT, (void*)(size_t)VecPrintEntry, 10))
-            LogLine("vtext: print ctx hook ON");
-        else { LogLine("vtext: print ctx hook OFF"); g_OrigPrint = NULL; }
-    }
-    else { LogLine("vtext: print bytes mismatch"); LogBytes((unsigned char*)ADDR_PRINT); }
-    /* Simple_ 收集钩 (全文本必经, 命中跳过): 字节对不上就不装 */
-    if (BytesSame((unsigned char*)ADDR_SIMPLE, kWantSimple, 7))
-    {
-        g_OrigSimple = (SimpleFn)BuildTrampAt(ADDR_SIMPLE, 7, ADDR_SIMPLE_BACK);
-        if (g_OrigSimple && PatchAt(ADDR_SIMPLE, (void*)(size_t)VecSimpleEntry, 7))
-            LogLine("vtext: simple hook ON");
-        else { LogLine("vtext: simple hook OFF"); g_OrigSimple = NULL; }
-    }
-    else { LogLine("vtext: simple bytes mismatch"); LogBytes((unsigned char*)ADDR_SIMPLE); }
-    /* GetDim 宽度接管钩 (引擎算字宽唯一入口, 一处替换处处生效) */
-    if (BytesSame((unsigned char*)ADDR_GETDIM, kWantGetDim, 6))
-    {
-        g_OrigGetDim = (GetDimFn)BuildTrampAt(ADDR_GETDIM, 6, ADDR_GETDIM_BACK);
-        if (g_OrigGetDim && PatchAt(ADDR_GETDIM, (void*)(size_t)VecGetDimEntry, 6))
-            LogLine("vtext: getdim hook ON");
-        else { LogLine("vtext: getdim hook OFF"); g_OrigGetDim = NULL; }
-    }
-    else { LogLine("vtext: getdim bytes mismatch"); LogBytes((unsigned char*)ADDR_GETDIM); }
-    /* 结算显示钩 / FPS 钉住钩改到运行期后装, 见 VecText_LateInstall():
-     * 这些地址可能与外部模块 (CnCNet-Spawner 等) 的 Syringe 钩同址, 必须
-     * 等对方就位后再装, 否则本模块自建跳板会与对方的同址钩互相破坏。 */
+        /* 文本四钩: DrawText/Print 只记上下文, Simple_ 收表并跳过, GetDim 接管宽度。 */
+        {
+            const VecHookEnt kText[] = {
+                { ADDR_DRAWTEXT, kW_DrawText, 6, (void*)VecDrawTextEntry,
+                  (void**)&g_OrigDrawText, "vtext: drawtext ctx" },
+                { ADDR_PRINT, kW_Print, 10, (void*)VecPrintEntry,
+                  (void**)&g_OrigPrint, "vtext: print ctx" },
+                { ADDR_SIMPLE, kW_Simple, 7, (void*)VecSimpleEntry,
+                  (void**)&g_OrigSimple, "vtext: simple" },
+                { ADDR_GETDIM, kW_GetDim, 6, (void*)VecGetDimEntry,
+                  (void**)&g_OrigGetDim, "vtext: getdim" },
+            };
+            VecHookRun(kText, sizeof(kText) / sizeof(kText[0]));
+        }
+        /* 结算显示钩 / FPS 钉住钩改到运行期后装, 见 VecText_LateInstall():
+         * 这些地址可能与外部模块 (CnCNet-Spawner 等) 的 Syringe 钩同址, 必须
+         * 等对方就位后再装, 否则本模块自建跳板会与对方的同址钩互相破坏。 */
     }
     else LogLine("vtext: text hooks OFF (Enable=0)");
     /* 以下共用钩与 Enable 无关。 */
     {
-        static const unsigned char kWantPrepare[5] = { 0xA1, 0x24, 0x73, 0x88, 0x00 };
-        if (BytesSame((unsigned char*)0x4F42F0u, kWantPrepare, 5))
-        {
-            g_PrepareTramp = BuildTrampAt(0x4F42F0u, 5, 0x4F42F5u);
-            if (g_PrepareTramp && PatchAt(0x4F42F0u, (void*)MOExperience_PrepareEntry, 5))
-                LogLine("vtext: prepare hook ON");
-            else { LogLine("vtext: prepare hook OFF"); g_PrepareTramp = NULL; }
-        }
-        else { LogLine("vtext: prepare bytes mismatch"); LogBytes((unsigned char*)0x4F42F0u); }
+        /* Prepare / 上屏入口 / 放大前提示框绘制改直跑。 */
+        const VecHookEnt kH1[] = {
+            { 0x4F42F0u, kW_Prepare, 5, (void*)MOExperience_PrepareEntry,
+              &g_PrepareTramp, "vtext: prepare" },
+            { 0x6A70E0u, kW_BlitSb, 6, (void*)MOExperience_BlitSbEntry,
+              &g_BlitSbTramp, "vtext: blitsb" },
+            { 0x6A7089u, kW_TipPre, 7, (void*)MOExperience_TipPreDrawEntry,
+              &g_TipPreDrawTramp, "vtext: tip-pre" },
+        };
+        VecHookRun(kH1, sizeof(kH1) / sizeof(kH1[0]));
     }
-    /* 上屏入口钩。 */
+    /* 提示框矩形改指 A 影子 (5 处立即数: 引擎画提示框时读的面几何)。 */
     {
-        static const unsigned char kWantBlitSb[6] = { 0x83, 0xEC, 0x38, 0x53, 0x55, 0x56 };
-        if (BytesSame((unsigned char*)0x6A70E0u, kWantBlitSb, 6))
+        unsigned char* p;
+        DWORD old;
+        unsigned i, n, abase = (unsigned)(size_t)SB_AViewBlock();
+        int bad = -1;
+        static const struct {
+            unsigned at; unsigned imm; unsigned off; unsigned oplen;
+            unsigned char op[2];
+        } rep[] =
         {
-            g_BlitSbTramp = BuildTrampAt(0x6A70E0u, 6, 0x6A70E6u);
-            if (g_BlitSbTramp && PatchAt(0x6A70E0u, (void*)MOExperience_BlitSbEntry, 6))
-                LogLine("vtext: blitsb hook ON");
-            else { LogLine("vtext: blitsb hook OFF"); g_BlitSbTramp = NULL; }
+            { 0x478BD1u, 2u, 0u, 2u, { 0x8B, 0x15 } },  /* mov edx,[A.X]     */
+            { 0x478BD7u, 1u, 8u, 1u, { 0xA1, 0x00 } },  /* mov eax,[A.Width] */
+            { 0x478C17u, 1u, 0u, 1u, { 0xBF, 0x00 } },  /* mov edi,A         */
+            { 0x478E4Au, 2u, 0u, 2u, { 0x8B, 0x35 } },  /* mov esi,[A.X]     */
+            { 0x478E50u, 2u, 8u, 2u, { 0x8B, 0x1D } }   /* mov ebx,[A.Width] */
+        };
+        n = (unsigned)(sizeof(rep) / sizeof(rep[0]));
+        /* 先全验再改 (半途失败会留下改了一半的现场)。 */
+        for (i = 0; i < n; i++)
+        {
+            p = (unsigned char*)rep[i].at;
+            if (p[0] != rep[i].op[0] ||
+                (rep[i].oplen > 1 && p[1] != rep[i].op[1])) { bad = (int)i; break; }
         }
-        else { LogLine("vtext: blitsb bytes mismatch"); LogBytes((unsigned char*)0x6A70E0u); }
-    }
-    /* 放大前提示框绘制改直跑。 */
-    {
-        static const unsigned char kWantTipPre[7] =
-            { 0x8B, 0x11, 0x6A, 0x01, 0xFF, 0x52, 0x0C };
-        if (BytesSame((unsigned char*)0x6A7089u, kWantTipPre, 7))
+        for (i = 0; bad < 0 && i < n; i++)
         {
-            g_TipPreDrawTramp = BuildTrampAt(0x6A7089u, 7, 0x6A7090u);
-            if (g_TipPreDrawTramp && PatchAt(0x6A7089u, (void*)MOExperience_TipPreDrawEntry, 7))
-                LogLine("vtext: tip-pre hook ON");
-            else { LogLine("vtext: tip-pre hook OFF"); g_TipPreDrawTramp = NULL; }
+            unsigned imm = rep[i].at + rep[i].imm;
+            if (!VirtualProtect((void*)imm, 4, PAGE_EXECUTE_READWRITE, &old))
+            { bad = (int)i; break; }
+            *(unsigned*)(size_t)imm = abase + rep[i].off;
+            VirtualProtect((void*)imm, 4, old, &old);
+            FlushInstructionCache(GetCurrentProcess(), (void*)imm, 4);
         }
-        else { LogLine("vtext: tip-pre bytes mismatch"); LogBytes((unsigned char*)0x6A7089u); }
-    }
-    /* 提示框矩形改指 A 影子。 */
-        {
-            unsigned char* p;
-            DWORD old;
-            unsigned i, n;
-            int bad = -1;
-            unsigned abase = (unsigned)(size_t)SB_AViewBlock();
-            static const struct {
-                unsigned at; unsigned imm; unsigned off; unsigned oplen;
-                unsigned char op[2];
-            } rep[] =
-            {
-                { 0x478BD1u, 2u, 0u, 2u, { 0x8B, 0x15 } },  /* mov edx,[A.X]     */
-                { 0x478BD7u, 1u, 8u, 1u, { 0xA1, 0x00 } },  /* mov eax,[A.Width] */
-                { 0x478C17u, 1u, 0u, 1u, { 0xBF, 0x00 } },  /* mov edi,A         */
-                { 0x478E4Au, 2u, 0u, 2u, { 0x8B, 0x35 } },  /* mov esi,[A.X]     */
-                { 0x478E50u, 2u, 8u, 2u, { 0x8B, 0x1D } }   /* mov ebx,[A.Width] */
-            };
-            n = (unsigned)(sizeof(rep) / sizeof(rep[0]));
-            /* 先全验再改。 */
-            for (i = 0; i < n; i++)
-            {
-                p = (unsigned char*)rep[i].at;
-                if (p[0] != rep[i].op[0]) { bad = (int)i; break; }
-                if (rep[i].oplen > 1 && p[1] != rep[i].op[1]) { bad = (int)i; break; }
-            }
-            if (bad < 0)
-            {
-                for (i = 0; i < n; i++)
-                {
-                    unsigned imm = rep[i].at + rep[i].imm;
-                    if (!VirtualProtect((void*)imm, 4, PAGE_EXECUTE_READWRITE, &old))
-                    { bad = (int)i; break; }
-                    *(unsigned*)(size_t)imm = abase + rep[i].off;
-                    VirtualProtect((void*)imm, 4, old, &old);
-                    FlushInstructionCache(GetCurrentProcess(), (void*)imm, 4);
-                }
-            }
-            if (bad < 0)
-                LogLine("vtext: tooltip surface rect -> A shadow");
-            else
-            {
-                char b1[16], buf[96];
-                unsigned q = 0;
-                q = AppendCStr(buf, q, "vtext: tooltip rect patch OFF at=",
-                                sizeof(buf));
-                UtoA(rep[bad].at, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-                LogLine(buf);
-            }
+        if (bad < 0) LogLine("vtext: tooltip surface rect -> A shadow");
+        else LogV("vtext: tooltip rect patch OFF at=", "", rep[bad].at, NULL);
     }
     /* UpdatePrimarySurface 两调用点字节被 Ares 改写过, 不挂功能钩, 只监听补丁存活。 */
-    /* 侧栏列纠正钩 (InitGUI 一次性布局须先纠, FM_Poll 每循环纠来不及)。 */
+    /* 其余共用钩: 侧栏列纠正 / 视口命中链 / 呈现与缩放 / 大面让出还原 /
+     * 边框 chrome 两趟 / 边缘卷屏 / ProcessClickCoords 上界。数组顺序即安装顺序。 */
     {
-        static const unsigned char kWantInitGui[5] = { 0x83, 0xEC, 0x24, 0x53, 0x55 };
-        if (BytesSame((unsigned char*)0x6ABD30u, kWantInitGui, 5))
-        {
-            g_InitGuiTramp = BuildTrampAt(0x6ABD30u, 5, 0x6ABD35u);
-            if (g_InitGuiTramp && PatchAt(0x6ABD30u, (void*)MOExperience_InitGuiEntry, 5))
-                LogLine("vtext: initgui hook ON");
-            else { LogLine("vtext: initgui hook OFF"); g_InitGuiTramp = NULL; }
-        }
-        else { LogLine("vtext: initgui bytes mismatch"); LogBytes((unsigned char*)0x6ABD30u); }
-    }
-    /* 视口 gadget 输入钩 (命中链入口, FullMap 在此收窄横跨视口的容器)。 */
-    {
-        static const unsigned char kWantGadgetInput[6] =
-            { 0x83, 0xEC, 0x0C, 0x53, 0x55, 0x56 };
-        if (BytesSame((unsigned char*)0x4E1640u, kWantGadgetInput, 6))
-        {
-            g_GadgetInputTramp = BuildTrampAt(0x4E1640u, 6, 0x4E1646u);
-            if (g_GadgetInputTramp && PatchAt(0x4E1640u, (void*)MOExperience_GadgetInputEntry, 6))
-                LogLine("vtext: gadgetinput hook ON");
-            else { LogLine("vtext: gadgetinput hook OFF"); g_GadgetInputTramp = NULL; }
-        }
-        else { LogLine("vtext: gadgetinput bytes mismatch"); LogBytes((unsigned char*)0x4E1640u); }
-    }
-/* 呈现入口钩 (缩放模块在这条路之后做放大呈现)。 */
-    {
-        static const unsigned char kWantUpdate[7] = { 0x83, 0xEC, 0x5C, 0x8B, 0x44, 0x24, 0x60 };
-        if (BytesSame((unsigned char*)0x4F4780u, kWantUpdate, 7))
-        {
-            g_UpdateTramp = BuildTrampAt(0x4F4780u, 7, 0x4F4787u);
-            if (g_UpdateTramp && PatchAt(0x4F4780u, (void*)MOExperience_UpdateEntry, 7))
-                LogLine("vtext: update hook ON");
-            else { LogLine("vtext: update hook OFF"); g_UpdateTramp = NULL; }
-        }
-    }
-/* 缩放 (缩小档): GScreenClass::Render (0x4F4480) 入口, 首8B = 83 EC 08 A1 1C 73
-     * 88 00 (sub esp,8 / mov eax,[Composite])。缩小档 (scale>1) 时把 [0x88731C]/
-     * [0x8872FC] 临时换成 SB 自建的 R 大离屏面; 渲染完消息帧钩还原 + 降采样。
-     * 安装见 MOExperience (MOExperience_RenderEntry/g_RenderTramp)。 */
-    {
-        static const unsigned char kWantRender[8] =
-            { 0x83, 0xEC, 0x08, 0xA1, 0x1C, 0x73, 0x88, 0x00 };
-        if (BytesSame((unsigned char*)0x4F4480u, kWantRender, 8))
-        {
-            g_RenderTramp = BuildTrampAt(0x4F4480u, 8, 0x4F4488u);
-            if (g_RenderTramp && PatchAt(0x4F4480u, (void*)MOExperience_RenderEntry, 8))
-                LogLine("vtext: render hook ON");
-            else { LogLine("vtext: render hook OFF"); g_RenderTramp = NULL; }
-        }
-        else { LogLine("vtext: render bytes mismatch"); LogBytes((unsigned char*)0x4F4480u); }
-    }
-/* Render 里两条 (0x4F4492 让出 / 0x4F44CB 装回): 大面暴露窗口只剩三趟地图。 */
-    {
-        static const unsigned char kWantPreCur[5] = { 0xA3, 0x14, 0x73, 0x88, 0x00 };
-        if (BytesSame((unsigned char*)0x4F4492u, kWantPreCur, 5))
-        {
-            g_PreCurTramp = BuildTrampAt(0x4F4492u, 5, 0x4F4497u);
-            if (g_PreCurTramp && PatchAt(0x4F4492u, (void*)MOExperience_PreCurEntry, 5))
-                LogLine("vtext: precur hook ON");
-            else { LogLine("vtext: precur hook OFF"); g_PreCurTramp = NULL; }
-        }
-        else { LogLine("vtext: precur bytes mismatch"); LogBytes((unsigned char*)0x4F4492u); }
-    }
-    {
-        static const unsigned char kWantMap[5] = { 0xA1, 0x1C, 0x73, 0x88, 0x00 };
-        if (BytesSame((unsigned char*)0x4F44CBu, kWantMap, 5))
-        {
-            g_MapTramp = BuildTrampAt(0x4F44CBu, 5, 0x4F44D0u);
-            if (g_MapTramp && PatchAt(0x4F44CBu, (void*)MOExperience_MapEntry, 5))
-                LogLine("vtext: mapentry hook ON");
-            else { LogLine("vtext: mapentry hook OFF"); g_MapTramp = NULL; }
-        }
-        else { LogLine("vtext: mapentry bytes mismatch"); LogBytes((unsigned char*)0x4F44CBu); }
-    }
-/* chrome pass 那趟 (窗口坐标画): 0x4F44FD 让出, 0x4F4505 装回。 */
-    {
-        static const unsigned char kWantChromePre[5] =
-            { 0x8B, 0x16, 0x50, 0x8B, 0xCE };
-        if (BytesSame((unsigned char*)0x4F44FDu, kWantChromePre, 5))
-        {
-            g_ChromePreTramp = BuildTrampAt(0x4F44FDu, 5, 0x4F4502u);
-            if (g_ChromePreTramp && PatchAt(0x4F44FDu, (void*)MOExperience_ChromePreEntry, 5))
-                LogLine("vtext: chrome-pre hook ON");
-            else { LogLine("vtext: chrome-pre hook OFF"); g_ChromePreTramp = NULL; }
-        }
-        else { LogLine("vtext: chrome-pre bytes mismatch"); LogBytes((unsigned char*)0x4F44FDu); }
-    }
-    {
-        static const unsigned char kWantChromePost[6] =
-            { 0x8B, 0x0D, 0x1C, 0x73, 0x88, 0x00 };
-        if (BytesSame((unsigned char*)0x4F4505u, kWantChromePost, 6))
-        {
-            g_ChromePostTramp = BuildTrampAt(0x4F4505u, 6, 0x4F450Bu);
-            if (g_ChromePostTramp && PatchAt(0x4F4505u, (void*)MOExperience_ChromePostEntry, 6))
-                LogLine("vtext: chrome-post hook ON");
-            else { LogLine("vtext: chrome-post hook OFF"); g_ChromePostTramp = NULL; }
-        }
-        else { LogLine("vtext: chrome-post bytes mismatch"); LogBytes((unsigned char*)0x4F4505u); }
-    }
-/* 三趟地图后、引擎 UI 前还原 + 降采样 (0x4F451B)。 */
-    {
-        static const unsigned char kWantAfterMap[5] = { 0xA0, 0x19, 0xB5, 0xB0, 0x00 };
-        if (BytesSame((unsigned char*)0x4F451Bu, kWantAfterMap, 5))
-        {
-            g_AfterMapTramp = BuildTrampAt(0x4F451Bu, 5, 0x4F4520u);
-            if (g_AfterMapTramp && PatchAt(0x4F451Bu, (void*)MOExperience_AfterMapEntry, 5))
-                LogLine("vtext: aftermap hook ON");
-            else { LogLine("vtext: aftermap hook OFF"); g_AfterMapTramp = NULL; }
-        }
-        else { LogLine("vtext: aftermap bytes mismatch"); LogBytes((unsigned char*)0x4F451Bu); }
-    }
-/* 边缘卷屏入口: 点换回物理鼠标 (0x692B60)。 */
-    {
-        static const unsigned char kWantEdgeFix[7] =
-            { 0x83, 0xEC, 0x18, 0x53, 0x55, 0x56, 0x57 };
-        if (BytesSame((unsigned char*)0x692B60u, kWantEdgeFix, 7))
-        {
-            g_EdgeFixTramp = BuildTrampAt(0x692B60u, 7, 0x692B67u);
-            if (g_EdgeFixTramp && PatchAt(0x692B60u, (void*)MOExperience_EdgeFixEntry, 7))
-                LogLine("vtext: edgefix hook ON");
-            else { LogLine("vtext: edgefix hook OFF"); g_EdgeFixTramp = NULL; }
-        }
-        else { LogLine("vtext: edgefix bytes mismatch"); LogBytes((unsigned char*)0x692B60u); }
-    }
-/* ProcessClickCoords 入口: 视口外的点拒掉 (该函数无上界判定, 见 .cpp)。 */
-    {
-        static const unsigned char kWantClickCoords[7] =
-            { 0x8B, 0x44, 0x24, 0x10, 0x83, 0xEC, 0x18 };
-        if (BytesSame((unsigned char*)0x692300u, kWantClickCoords, 7))
-        {
-            g_ClickCoordsTramp = BuildTrampAt(0x692300u, 7, 0x692307u);
-            if (g_ClickCoordsTramp && PatchAt(0x692300u, (void*)MOExperience_ClickCoordsEntry, 7))
-                LogLine("vtext: clickcoords hook ON");
-            else { LogLine("vtext: clickcoords hook OFF"); g_ClickCoordsTramp = NULL; }
-        }
-        else { LogLine("vtext: clickcoords bytes mismatch"); LogBytes((unsigned char*)0x692300u); }
+        const VecHookEnt kH2[] = {
+            { 0x6ABD30u, kW_InitGui, 5, (void*)MOExperience_InitGuiEntry,
+              &g_InitGuiTramp, "vtext: initgui" },
+            { 0x4E1640u, kW_GadgetIn, 6, (void*)MOExperience_GadgetInputEntry,
+              &g_GadgetInputTramp, "vtext: gadgetinput" },
+            { 0x4F4780u, kW_Update, 7, (void*)MOExperience_UpdateEntry,
+              &g_UpdateTramp, "vtext: update" },
+            { 0x4F4480u, kW_Render, 8, (void*)MOExperience_RenderEntry,
+              &g_RenderTramp, "vtext: render" },
+            { 0x4F4492u, kW_PreCur, 5, (void*)MOExperience_PreCurEntry,
+              &g_PreCurTramp, "vtext: precur" },
+            { 0x4F44CBu, kW_Map, 5, (void*)MOExperience_MapEntry,
+              &g_MapTramp, "vtext: mapentry" },
+            { 0x4F44FDu, kW_ChromePre, 5, (void*)MOExperience_ChromePreEntry,
+              &g_ChromePreTramp, "vtext: chrome-pre" },
+            { 0x4F4505u, kW_ChromePost, 6, (void*)MOExperience_ChromePostEntry,
+              &g_ChromePostTramp, "vtext: chrome-post" },
+            { 0x4F451Bu, kW_AfterMap, 5, (void*)MOExperience_AfterMapEntry,
+              &g_AfterMapTramp, "vtext: aftermap" },
+            { 0x692B60u, kW_EdgeFix, 7, (void*)MOExperience_EdgeFixEntry,
+              &g_EdgeFixTramp, "vtext: edgefix" },
+            { 0x692300u, kW_ClickCoord, 7, (void*)MOExperience_ClickCoordsEntry,
+              &g_ClickCoordsTramp, "vtext: clickcoords" },
+        };
+        VecHookRun(kH2, sizeof(kH2) / sizeof(kH2[0]));
     }
 /* Clamp_Center 整条替换原版、不回调, 只在缩放启用时装; 不装即原版钳制。 */
     if (!SB_Enabled())
@@ -2850,70 +2817,30 @@ void VecText_Install(void)
         }
         else { LogLine("vtext: clampcenter bytes mismatch"); LogBytes((unsigned char*)0x6D8640u); }
     }
-/* 小地图/程序化相机定位钩 (0x6D6070): PiP 聚焦时标记跳转 (与 Enable/缩放无关)。 */
+/* 小地图/程序化相机定位 (PiP 聚焦时标记跳转, 与 Enable/缩放无关); 小地图原始格
+ * (0x653D92 = 主视野出界钳制前, 只读留一份未钳制格, PiP 用小窗尺寸重钳);
+ * 通用拉伸 blit 越界写守卫 (cameo/图标); 迷雾 DrawPixelEffects 越界写护栏。 */
     {
-        static const unsigned char kWantCamSet[5] = { 0x83, 0xEC, 0x08, 0x53, 0x55 };
-        if (BytesSame((unsigned char*)0x6D6070u, kWantCamSet, 5))
-        {
-            g_CameraSetTramp = BuildTrampAt(0x6D6070u, 5, 0x6D6075u);
-            if (g_CameraSetTramp && PatchAt(0x6D6070u, (void*)MOExperience_CameraSetEntry, 5))
-                LogLine("pip: cameraset hook ON");
-            else { LogLine("pip: cameraset hook OFF"); g_CameraSetTramp = NULL; }
-        }
-        else { LogLine("pip: cameraset bytes mismatch"); LogBytes((unsigned char*)0x6D6070u); }
+        const VecHookEnt kH3[] = {
+            { 0x6D6070u, kW_CamSet, 5, (void*)MOExperience_CameraSetEntry,
+              &g_CameraSetTramp, "pip: cameraset" },
+            { 0x653D92u, kW_RadarCell, 6, (void*)MOExperience_RadarClampEntry,
+              &g_RadarCellTramp, "pip: radarraw" },
+            { 0x6BA580u, kW_BlitGuard, 5, (void*)MOExperience_BlitGuardEntry,
+              &g_BlitGuardTramp, "vtext: blitguard" },
+            { 0x6D7840u, kW_Shroud, 5, (void*)MOExperience_ShroudEntry,
+              &g_ShroudTramp, "sbar: shroudguard" },
+        };
+        VecHookRun(kH3, sizeof(kH3) / sizeof(kH3[0]));
     }
-/* 小地图点击原始格钩 (RadarClass::Action 0x653D92 = "主视野出界"钳制前):
- * 只读留一份未钳制格; PiP 聚焦时用小窗尺寸重钳 -> 小窗能贴到地图最外圈。 */
-    {
-        static const unsigned char kWantRadarCell[6] =
-            { 0x8B, 0x0D, 0xA8, 0x6F, 0x88, 0x00 };
-        if (BytesSame((unsigned char*)0x653D92u, kWantRadarCell, 6))
-        {
-            g_RadarCellTramp = BuildTrampAt(0x653D92u, 6, 0x653D98u);
-            if (g_RadarCellTramp && PatchAt(0x653D92u, (void*)MOExperience_RadarClampEntry, 6))
-                LogLine("pip: radarraw hook ON");
-            else { LogLine("pip: radarraw hook OFF"); g_RadarCellTramp = NULL; }
-        }
-        else { LogLine("pip: radarraw bytes mismatch"); LogBytes((unsigned char*)0x653D92u); }
-    }
-/* 通用拉伸 blit 守卫钩 (0x6BA580, cameo/图标越界写拦)。 */
-    {
-        static const unsigned char kWantBlitGuard[5] =
-            { 0x83, 0xEC, 0x14, 0x55, 0x56 };
-        if (BytesSame((unsigned char*)0x6BA580u, kWantBlitGuard, 5))
-        {
-            g_BlitGuardTramp = BuildTrampAt(0x6BA580u, 5, 0x6BA585u);
-            if (g_BlitGuardTramp && PatchAt(0x6BA580u, (void*)MOExperience_BlitGuardEntry, 5))
-                LogLine("vtext: blitguard hook ON");
-            else { LogLine("vtext: blitguard hook OFF"); g_BlitGuardTramp = NULL; }
-        }
-        else { LogLine("vtext: blitguard bytes mismatch"); LogBytes((unsigned char*)0x6BA580u); }
-    }
-/* 迷雾 DrawPixelEffects 越界写护栏 (挂函数入口, 不挂 E8 调用点)。 */
-    {
-        static const unsigned char kWantShroud[5] = { 0x83, 0xEC, 0x48, 0x56, 0x57 };
-        if (BytesSame((unsigned char*)0x6D7840u, kWantShroud, 5))
-        {
-            g_ShroudTramp = BuildTrampAt(0x6D7840u, 5, 0x6D7845u);
-            if (g_ShroudTramp && PatchAt(0x6D7840u, (void*)MOExperience_ShroudEntry, 5))
-                LogLine("sbar: shroudguard hook ON");
-            else { LogLine("sbar: shroudguard hook OFF"); g_ShroudTramp = NULL; }
-        }
-        else { LogLine("sbar: shroudguard bytes mismatch"); LogBytes((unsigned char*)0x6D7840u); }
-    }
-/* 鼠标折算在源头做: 换虚表 +0x34, 11 个消费点一次覆盖 (详见 .cpp)。 */
+/* 鼠标折算在源头做: 换虚表 +0x34, 11 个消费点一次覆盖。按钮消息路 (0x6930A0)
+ * 再换第 4 实参指针为折算副本 (不过 WWMouse)。详见 notes。 */
     MOE_InstallMousePosHook();
-/* 鼠标按钮消息路 (0x6930A0): 第 4 实参指针换折算副本 (不过 WWMouse, 详见 .cpp)。 */
     {
-        static const unsigned char kWantWndMouse[8] =
-            { 0xA0, 0x78, 0xE3, 0xA8, 0x00, 0x83, 0xEC, 0x1C };
-        if (BytesSame((unsigned char*)0x6930A0u, kWantWndMouse, 8))
-        {
-            g_WndMouseTramp = BuildTrampAt(0x6930A0u, 8, 0x6930A8u);
-            if (g_WndMouseTramp && PatchAt(0x6930A0u, (void*)MOExperience_WndMouseEntry, 8))
-                LogLine("vtext: wndmouse hook ON");
-            else { LogLine("vtext: wndmouse hook OFF"); g_WndMouseTramp = NULL; }
-        }
-        else { LogLine("vtext: wndmouse bytes mismatch"); LogBytes((unsigned char*)0x6930A0u); }
+        const VecHookEnt kH4[] = {
+            { 0x6930A0u, kW_WndMouse, 8, (void*)MOExperience_WndMouseEntry,
+              &g_WndMouseTramp, "vtext: wndmouse" },
+        };
+        VecHookRun(kH4, sizeof(kH4) / sizeof(kH4[0]));
     }
 }

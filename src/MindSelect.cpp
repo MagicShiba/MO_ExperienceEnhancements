@@ -34,6 +34,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 
@@ -46,14 +47,9 @@
 #define OFF_SEL_NEXT     12u         /* {Object*, X, Y} (YRpp TacticalClass.h:13) */
 
 #define ADDR_CUROBJ    0xA8ECB8u     /* ObjectClass::CurrentObjects (当前选中) */
-#define OFF_VEC_ITEMS  4u
 #define OFF_VEC_CAP    8u
-#define OFF_VEC_COUNT  16u
 
-#define OFF_ISALIVE    0x90u
-#define OFF_INLIMBO    0x81u
 #define OFF_ISSELECTED 0x83u
-#define OFF_HEALTH     0x6Cu
 #define OFF_MCBYAUNIT  0x2C4u    /* TechnoClass::MindControlledByAUnit (bool 字节) */
 
 #define VT_SELECT       (0x14Cu / 4u)   /* 见文件头推导 */

@@ -463,7 +463,7 @@ int PlacementPreview_DrawGhostView(void* type, void* owner, void* surf,
 
 /* ---------------- 绘制 hook ---------------- */
 
-extern "C" __declspec(dllexport) DWORD __cdecl PlacementPreview_DrawHook(void* regs)
+static DWORD PP_DrawBody(void* regs)
 {
     void* building;
     void* type;
@@ -520,4 +520,15 @@ extern "C" __declspec(dllexport) DWORD __cdecl PlacementPreview_DrawHook(void* r
     if (!surf || !IsPlausiblePtr(surf)) return 0;
     PP_DrawGhost1to1(type, building, surf, point.X, point.Y, g_PpTrans);
     return 0;   /* 返回 0 = 继续执行被覆盖的原指令 (mov ecx,[0x880990]) */
+}
+
+/* 导出入口 (Syringe 按名挂钩): 只做 Perf 记账。0x6D528A 在地图绘制路径上,
+ * 每帧可能被调用多次, 这里用来确认它的固定开销 (内部 GetModuleHandleA 是
+ * 加载器锁, 高频调用不便宜)。 */
+extern "C" __declspec(dllexport) DWORD __cdecl PlacementPreview_DrawHook(void* regs)
+{
+    long long tPf = Perf_Now();
+    DWORD rc = PP_DrawBody(regs);
+    Perf_Add(PF_PLACEPREV, tPf);
+    return rc;
 }

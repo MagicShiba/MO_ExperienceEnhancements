@@ -4,6 +4,7 @@
 #pragma once
 
 #include <windows.h>
+#include "EngineAddr.h"
 
 typedef struct { short X, Y; } CellStruct;
 typedef struct { int X, Y, Z; } CoordStruct;
@@ -24,8 +25,6 @@ typedef void (__attribute__((cdecl)) *Fn_SndCb)(void);
 
 /* ---------------- 地址 (全只读, 写模拟一律禁止) ---------------- */
 
-#define ADDR_CURPLAYER     0xA83D4Cu
-#define OFF_HOUSE_INDEX    0x30u
 #define ADDR_SELOBJ_ITEMS  0xA8ECBCu
 #define ADDR_SELOBJ_COUNT  0xA8ECC8u
 
@@ -34,8 +33,6 @@ typedef void (__attribute__((cdecl)) *Fn_SndCb)(void);
 #define ADDR_OUT_NEXT  0xA802D0u
 #define ADDR_OUT_BUF   0xA802D4u
 #define ADDR_OUT_PAR   0xA83A54u
-#define EVT_SIZE 111u
-#define EVT_CAP  0x80u
 
 /* DoList (执行队列, 16384): OutList 每帧搬运的目的地。单机溢出直注用,
  * 联机不动 (MP 分组只读于中转, SP 执行不读分组, 见 notes/路径点上限.md)。 */
@@ -97,6 +94,19 @@ int OU_WhatAmI(void* p);
 int OU_IsMP(void);
 /* 标准事件入队: 单机直写 DoList (上限 16384), 联机走 OutList (满回 0)。 */
 int OU_Enqueue(char ev[EVT_SIZE]);
+/* 事件缓冲清零 (无 CRT, 不能 memset; 原来各模块自己写 for 循环, 共 18 处)。 */
+void OU_EvClear(void* ev);
+/* ---------------- Surface 锁定 (全 DLL 共用) ----------------
+ * 引擎 Surface 虚表: +0x5C = Lock(surf, rect, int, int) -> 首像素,
+ * +0x60 = Unlock(surf, rect)。这是硬编码的引擎内部布局, 原来 9 个模块各存一份
+ * 同样的槽常量 + 同样的"取虚表→判空→调 Lock"五行, 改一处要同步 9 处。
+ * 成功回已锁定首像素 (失败 NULL); 解锁自身幂等 (surf 无效直接忽略)。
+ * 注意: 宽高/pitch 由调用方提供自己的绘制坐标系, 不从 surface 推导。 */
+unsigned char* OU_SurfLock(void* surf);
+void OU_SurfUnlock(void* surf);
+/* PlanCommit 事件 (路径点收尾) 构造 + 入队。PatrolCircle / RallyPath 原来各写
+ * 一份逐字相同的 6 行, 现在只此一份。回 1=入队成功。 */
+int OU_FirePlanCommit(int houseIdx);
 /* 单机直写 DoList (111B 拷 + 现造 PAR + 转运三手续), 联机永不调用。
  * 回 1=写入, 0=DoList 满。 */
 int OU_DirectToDoList(const char* ev);
@@ -171,12 +181,22 @@ int OU_GroundZAt(int x, int y, int* zOut);
 int OU_SurfaceZAt(int x, int y, int refZ, int* zOut);
 /* 指定格中心处地表高度 (地形 + 桥面, 有桥取桥面; 只读)。 */
 int OU_CellSurfaceZ(int cx, int cy, int* zOut);
-/* 单像素细线 (Bresenham, 自带裁剪; locked=已锁定渲染面)。
- * thick<=1 = 1 像素; 2 = 两行 (每个像素再补 (x,y+1)), 视觉上 2 像素粗。 */
-void OU_ThinLine(unsigned char* locked, int w, int h, int pitch,
-                 int x0, int y0, int x1, int y1,
-                 unsigned r, unsigned g, unsigned b, unsigned a,
-                 int thick);
+
+/* ---------------- 手绘几何 (16 位面, 逐像素 Blend16) ----------------
+ * 全 DLL 唯一一份 Bresenham / 画点 / 方块 (原来 8 个模块各抄了一遍)。
+ * clip 为半开区间 [x0,x1)×[y0,y1); 传 NULL 表示不裁剪。
+ * thick 的纵向外扩是居中的: thick=1 → 单行, 3 → y-1/y/y+1。 */
+typedef struct { int x0, y0, x1, y1; } OuClip;
+int  OU_Put(unsigned char* locked, int w, int h, int pitch,
+            const OuClip* clip, int x, int y,
+            unsigned r, unsigned g, unsigned b, unsigned a);
+void OU_Line(unsigned char* locked, int w, int h, int pitch,
+             const OuClip* clip, int x0, int y0, int x1, int y1,
+             unsigned r, unsigned g, unsigned b, unsigned a, int thick);
+void OU_Box(unsigned char* locked, int w, int h, int pitch,
+            const OuClip* clip, int cx, int cy, int m,
+            unsigned r, unsigned g, unsigned b, unsigned a);
+
 /* 存一对端点 (leptons 世界坐标; 满回 0)。 */
 int OU_PrevPush(OU_PrevLine* buf, int* nio,
                 int ulx, int uly, int ulz, int tlx, int tly, int tlz);

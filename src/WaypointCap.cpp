@@ -15,6 +15,7 @@
  * 引擎事实见 notes/路径点上限.md。 */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "WaypointCap.h"
@@ -37,7 +38,6 @@
 #define WP_ORDER_SP 0x7FFFFFFF   /* 单机下令前检查恒过 (派发侧同步兜底) */
 #define WP_ORDER_MP 0x80
 
-#define ADDR_FRAME    0xA8ED84u   /* Unsorted::CurrentFrame */
 
 #define WP_VANILLA 16
 #define WP_INF     0x7FFFFFFF

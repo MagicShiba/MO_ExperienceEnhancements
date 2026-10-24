@@ -20,6 +20,7 @@
  * 引擎事实与推导见 notes/选中与下令上限.md。 */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "OrderThrottle.h"
@@ -56,13 +57,8 @@
  * r==0→追加体, r==1→成功尾 (事件已落 DoList), r==2→失败尾 (原版)。
  * 三尾皆 reg-safe, esp 进出平衡。 */
 
-#define ADDR_SCENARIO 0xA8B230u   /* ScenarioClass::Instance (换图代号) */
-#define ADDR_FRAME    0xA8ED84u   /* Unsorted::CurrentFrame */
 #define ADDR_MOVE_FB  0x822CF2u   /* Unsorted::MoveFeedback */
-#define ADDR_PLANMODE 0xAC4CF4u   /* PlanningModeActive (ClickedMission 内 0x637AA0 读它定规划令) */
 
-#define OFF_INLIMBO 0x81u
-#define OFF_ISALIVE 0x90u
 
 #define OT_QCAP     1024    /* 待发队列上限 (2 的幂, & 掩码做环形) */
 #define OT_QMASK    (OT_QCAP - 1)

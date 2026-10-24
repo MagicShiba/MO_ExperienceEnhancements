@@ -423,18 +423,7 @@ static int s_GvClip = 0;
 /* 真断崖屏差阈值 (1x 档 8px, 按缩放折算; Tile_Is_Cliff 不覆盖本图崖块, 只走几何)。 */
 #define GV_STEP_RED_PX 8
 
-static void GV_PlotC(int x, int y, int r, int g, int b, int a)
-{
-    unsigned short* dstRow;
-    if (x < 0 || y < 0 || x >= s_GvW || y >= s_GvH) return;
-    if (s_GvClip &&
-        (x < s_GvCx0 || x >= s_GvCx1 || y < s_GvCy0 || y >= s_GvCy1))
-        return;
-    dstRow = (unsigned short*)(s_GvLocked + y * s_GvPitch);
-    dstRow[x] = Blend16(dstRow[x], r, g, b, a);
-}
-
-/* 整段落在裁剪区外? (Bresenham 前的粗剔, 跨区段由 Plot 逐像素夹)。 */
+/* 整段落在裁剪区外? (Bresenham 前的粗剔, 跨区段由 OU_Put 的 clip 逐像素夹)。 */
 static int GV_SegOut(int x0, int y0, int x1, int y1)
 {
     if (!s_GvClip) return 0;
@@ -445,25 +434,21 @@ static int GV_SegOut(int x0, int y0, int x1, int y1)
     return 0;
 }
 
+/* 1px 格线 (公共实现: OrderUtil 的 OU_Line, 裁剪区走 OuClip)。 */
 static void GV_LineC(int x0, int y0, int x1, int y1,
                      int r, int g, int b, int a)
 {
-    int dx, dy, sx, sy, err, e2, x, y, n;
+    OuClip clip;
+    const OuClip* pc = 0;
     if (GV_SegOut(x0, y0, x1, y1)) return;
-    dx = x1 - x0; dy = y1 - y0;
-    sx = (dx >= 0) ? 1 : -1;
-    sy = (dy >= 0) ? 1 : -1;
-    dx = dx >= 0 ? dx : -dx; dy = dy >= 0 ? dy : -dy;
-    err = dx - dy;
-    x = x0; y = y0;
-    for (n = 0; n < 8192; n++)
+    if (s_GvClip)
     {
-        GV_PlotC(x, y, r, g, b, a);
-        if (x == x1 && y == y1) break;
-        e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x += sx; }
-        if (e2 < dx) { err += dx; y += sy; }
+        clip.x0 = s_GvCx0; clip.y0 = s_GvCy0;
+        clip.x1 = s_GvCx1; clip.y1 = s_GvCy1;
+        pc = &clip;
     }
+    OU_Line(s_GvLocked, s_GvW, s_GvH, s_GvPitch, pc, x0, y0, x1, y1,
+            (unsigned)r, (unsigned)g, (unsigned)b, (unsigned)a, 1);
 }
 
 static void GV_Line(int x0, int y0, int x1, int y1)

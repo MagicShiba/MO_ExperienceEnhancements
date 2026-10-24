@@ -71,8 +71,7 @@ static int AM_Fire(int houseIdx, int srcID, unsigned char srcRtti,
                    void* unit, int uid, int idxOk)
 {
     char ev[EVT_SIZE];
-    unsigned i;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACKMOVE,
             tgtID, (unsigned)tgtRtti, dstID, (unsigned)dstRtti, 0, 0);
     ev[OFF_PLANFLAG] = (char)(plan ? 1 : 0);

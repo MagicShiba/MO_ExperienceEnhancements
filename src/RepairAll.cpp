@@ -61,6 +61,7 @@
  */
 
 #include <windows.h>
+#include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "RepairAll.h"
@@ -69,19 +70,9 @@
 
 /* ---------------- 只读地址 ---------------- */
 
-#define ADDR_BLD_ARR   0xA8EB40u   /* BuildingClass::Array */
-#define ADDR_HOUSE_ARR 0xA80228u   /* HouseClass::Array */
-#define ADDR_FRAME     0xA8ED84u
 #define ARR_ITEMS(base) (*(void***)((base) + 4u))
 #define ARR_COUNT(base) (*(int*)((base) + 16u))
 
-#define OFF_HEALTH        0x6Cu
-#define OFF_INLIMBO       0x81u
-#define OFF_ISALIVE       0x90u
-#define OFF_OWNER         0x21Cu   /* TechnoClass::Owner -> HouseClass* */
-#define OFF_HOUSE_IDX     0x30u    /* HouseClass::ArrayIndex */
-#define OFF_HOUSE_MONEY   0x2F0u   /* HouseClass::Money (Owner 值校验用) */
-#define OFF_BLD_TYPE      0x520u   /* BuildingClass::Type */
 #define OFF_BLD_REPAIRING 0x6E8u   /* BuildingClass::IsBeingRepaired */
 #define OFF_TYPE_STRENGTH 0xA0u    /* ObjectTypeClass::Strength */
 
@@ -402,7 +393,7 @@ static int RA_Fire(int houseIdx, void* b)
     unsigned i;
     for (i = 0; i < 8; i++) tb[i] = 0;
     if (!FN_TGT_OBJ(tb, b)) return 0;
-    for (i = 0; i < EVT_SIZE; i++) ev[i] = 0;
+    OU_EvClear(ev);
     FN_TGT_EV(ev, houseIdx, EVT_REPAIR, *(int*)(tb + 0),
               (unsigned)(unsigned char)tb[4]);
     return OU_Enqueue(ev);
@@ -416,7 +407,7 @@ static void RA_Drain(void)
     if (s_RaQN <= 0) return;
     cur = *(void**)ADDR_CURPLAYER;
     if (!cur || !IsPlausiblePtr(cur)) { s_RaQN = 0; return; }
-    houseIdx = *(int*)((char*)cur + OFF_HOUSE_IDX);
+    houseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
     while (s_RaQN > 0 && sent < g_RaBatch)
     {
         void* b = s_RaQPtr[s_RaQHead];
