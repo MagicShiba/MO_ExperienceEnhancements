@@ -22,6 +22,7 @@
 #include "PlayerColor.h"
 #include "SidebarSkin.h"
 #include "FrameCap.h"
+#include "GameSpeed.h"
 
 #define ESC_SECTION          "EscMenu"
 #define ESC_REG_ESI          0x0Cu          /* Syringe REGISTERS: ESI */
@@ -54,13 +55,17 @@
 #define ESC_SEP_GAP          4
 #define ESC_ROW_H            26
 #define ESC_GROUP_H          28
+/* GUI 功能页的行数最多(23 行), 用略紧的组标题/组间距才放得下 1024x768 —— 
+ * 否则底部"阵营 UI"会被裁掉。只作用于这一页, 文本页仍用上面的值。 */
+#define ESC_GUI_GROUP_H      26
+#define ESC_GUI_GAP          6
 #define ESC_BLOCK_GAP        12
 #define ESC_WARN_H           26
 #define ESC_WARN_GAP         8
 #define ESC_TEXT_SS          2
 #define ESC_LABEL_CAP        96
 #define ESC_LEFT_ROWS        2
-#define ESC_GUI_DISPLAY      20
+#define ESC_GUI_DISPLAY      23
 #define ESC_SEP_H            14
 #define ESC_SKIN_N           5
 #define ESC_SCATTER_N        3
@@ -81,6 +86,11 @@
 #define ESC_STEP_BTN_W       24
 #define ESC_STEP_BTN_H       20
 #define ESC_STEP_NUM_PAD     10
+#define ESC_SLIDE_W          300
+#define ESC_SLIDE_GAP        10
+#define ESC_SLIDE_TRK_H      8
+#define ESC_SLIDE_KNOB_W     10
+#define ESC_SLIDE_KNOB_H     16
 #define ESC_CANCEL_W         78
 #define ESC_CANCEL_H         24
 #define ESC_CANCEL_GAP       3
@@ -100,6 +110,7 @@ enum {
     GUI_GROUP_GENERAL = 0,
     GUI_GROUP_BOTTOM,
     GUI_GROUP_SWS,
+    GUI_GROUP_GAMECTRL,
     GUI_GROUP_MISC,
     GUI_GROUP_SIDEBAR,
     GUI_GROUP_COUNT
@@ -120,6 +131,8 @@ enum {
     GUI_ITEM_SIDE_SCROLL,
     GUI_ITEM_SIDE_HIDE,
     GUI_ITEM_SWS_SIDE,
+    GUI_ITEM_GAMESPEED_ON,
+    GUI_ITEM_GAMESPEED,
     GUI_ITEM_FPS,
     GUI_ITEM_COUNT
 };
@@ -225,7 +238,7 @@ static int Esc_EditIs(int page, int item)
 typedef struct {
     int scale, pause, grid, shot, sws, fill, rows, skin, color;
     int bq, scatter, sideScroll, hide, swsSide;
-    int chatEdit, chatName;
+    int chatEdit, chatName, speed, speedOn;
 } EscSavedSettings;
 
 #define ESC_SETTING_LIST(X) \
@@ -243,11 +256,14 @@ typedef struct {
     X(hide, FM_HideState, FM_SetHideState) \
     X(swsSide, SWS_SideRight, SWS_SetSideRight) \
     X(chatEdit, ChatEdit_Enabled, ChatEdit_SetEnabled) \
-    X(chatName, ChatEdit_ShowNameSP, ChatEdit_SetShowNameSP)
+    X(chatName, ChatEdit_ShowNameSP, ChatEdit_SetShowNameSP) \
+    X(speed, GameSpeed_GetFps, GameSpeed_SetFps) \
+    X(speedOn, GameSpeed_Enabled, GameSpeed_SetEnabled)
 
 static EscSavedSettings s_Saved;
 static int s_SavedOk = 0;
 static int s_CancelDown = 0;
+static int s_SlideDrag = 0;   /* 拖动条按住中 (游戏速度) */
 
 static const wchar_t* const s_LangLabel[ESC_LANG_N] = { L"ZH", L"EN", L"AUTO" };
 static const int s_LangMode[ESC_LANG_N] = {
@@ -298,6 +314,7 @@ static void Esc_LoadAllText(void)
     Esc_GuiText("GuiGroupGeneral", s_GuiGroup[GUI_GROUP_GENERAL], ESC_LABEL_CAP);
     Esc_GuiText("GuiGroupBottom", s_GuiGroup[GUI_GROUP_BOTTOM], ESC_LABEL_CAP);
     Esc_GuiText("GuiGroupSws", s_GuiGroup[GUI_GROUP_SWS], ESC_LABEL_CAP);
+    Esc_GuiText("GuiGroupGameCtrl", s_GuiGroup[GUI_GROUP_GAMECTRL], ESC_LABEL_CAP);
     Esc_GuiText("GuiGroupMisc", s_GuiGroup[GUI_GROUP_MISC], ESC_LABEL_CAP);
     Esc_GuiText("GuiGroupSidebar", s_GuiGroup[GUI_GROUP_SIDEBAR], ESC_LABEL_CAP);
     Esc_GuiText("GuiScale", s_GuiLabel[GUI_ITEM_SCALE], ESC_LABEL_CAP);
@@ -314,6 +331,8 @@ static void Esc_LoadAllText(void)
     Esc_GuiText("GuiSideScroll", s_GuiLabel[GUI_ITEM_SIDE_SCROLL], ESC_LABEL_CAP);
     Esc_GuiText("GuiSideHide", s_GuiLabel[GUI_ITEM_SIDE_HIDE], ESC_LABEL_CAP);
     Esc_GuiText("GuiSwsSide", s_GuiLabel[GUI_ITEM_SWS_SIDE], ESC_LABEL_CAP);
+    Esc_GuiText("GuiGameSpeedOn", s_GuiLabel[GUI_ITEM_GAMESPEED_ON], ESC_LABEL_CAP);
+    Esc_GuiText("GuiGameSpeed", s_GuiLabel[GUI_ITEM_GAMESPEED], ESC_LABEL_CAP);
     Esc_GuiText("GuiFps", s_GuiLabel[GUI_ITEM_FPS], ESC_LABEL_CAP);
     Esc_GuiText("GuiOn", s_GuiOn, 16);
     Esc_GuiText("GuiOff", s_GuiOff, 16);
@@ -483,7 +502,8 @@ static void Esc_Redraw(HWND hDlg)
     UpdateWindow(hDlg);
 }
 
-static int Esc_EditCurAt(const RECT* right, int mx, const wchar_t* s, int len);
+static int Esc_EditCurAt(const RECT* right, int mx, const wchar_t* s, int len,
+                         int item);
 
 static void Esc_EditBegin(HWND hDlg, const RECT* right, int mx, int page,
                           int item, int value, int minValue, int maxValue)
@@ -492,7 +512,7 @@ static void Esc_EditBegin(HWND hDlg, const RECT* right, int mx, int page,
 
     Esc_IntToW(s_EditBuf, (unsigned)value, ESC_EDIT_CAP);
     s_EditLen = lstrlenW(s_EditBuf);
-    s_EditCur = Esc_EditCurAt(right, mx, s_EditBuf, s_EditLen);
+    s_EditCur = Esc_EditCurAt(right, mx, s_EditBuf, s_EditLen, item);
     s_EditOn = 1;
     s_EditHost = hDlg;
     s_EditPage = page;
@@ -532,6 +552,7 @@ enum {
     EG_COLOR,
     EG_CHOICE,
     EG_VALUE,
+    EG_SLIDE,       /* 拖动条: 轨道 + 数值框 */
     EG_SEP
 };
 
@@ -557,6 +578,9 @@ static const EscGuiRowInfo s_GuiLayout[ESC_GUI_DISPLAY] = {
     { EG_GROUP,  GUI_GROUP_SIDEBAR },
     { EG_SWITCH, GUI_ITEM_SIDE_SCROLL },
     { EG_CHOICE, GUI_ITEM_SIDE_HIDE },
+    { EG_GROUP,  GUI_GROUP_GAMECTRL },
+    { EG_SWITCH, GUI_ITEM_GAMESPEED_ON },
+    { EG_SLIDE,  GUI_ITEM_GAMESPEED },
     { EG_GROUP,  GUI_GROUP_MISC },
     { EG_SWITCH, GUI_ITEM_FPS },
     { EG_COLOR,  GUI_ITEM_COLOR },
@@ -598,7 +622,7 @@ static int Esc_GuiRowH(const RECT* p, int index)
 {
     int rows;
 
-    if (s_GuiLayout[index].kind == EG_GROUP) return ESC_GROUP_H;
+    if (s_GuiLayout[index].kind == EG_GROUP) return ESC_GUI_GROUP_H;
     if (s_GuiLayout[index].kind != EG_COLOR) return ESC_ROW_H;
 
     rows = Esc_ColorRows((p->right - p->left) - ESC_PAD * 2);
@@ -1208,11 +1232,65 @@ static int Esc_StepNumX(int boxX, int boxW, const wchar_t* s)
     return boxX + (boxW - tw) / 2;
 }
 
-static int Esc_StepMid(const RECT* right, int mx)
+/* ---------------- 拖动条 (游戏速度) ----------------
+ * 布局:  [标签]  [=====O=====]  [数值]
+ * 数值框没有 +/- 按钮, 直接占满右侧控件区, 否则右边会空出加号那一块。 */
+static void Esc_SlideNumBox(int rowRight, int* x, int* w)
+{
+    *x = Esc_RowCtlX(rowRight);
+    *w = ESC_STEP_W;
+}
+
+static void Esc_SlideGeom(int rowL, int rowW, int* trkX, int* trkW,
+                          int* numX, int* numW)
+{
+    int trkR, lblMin;
+
+    Esc_SlideNumBox(rowL + rowW, numX, numW);
+    trkR = *numX - ESC_SLIDE_GAP;
+    lblMin = rowL + ESC_TEXT_INSET + 84;
+    *trkX = trkR - ESC_SLIDE_W;
+    if (*trkX < lblMin) *trkX = lblMin;
+    *trkW = trkR - *trkX;
+    if (*trkW < 1) *trkW = 1;
+}
+
+/* 鼠标横坐标 -> 速度值 (按 ESC_SPEED_STEP 吸附, 最右端单独一档 = MAX) */
+static int Esc_SlideValueAt(int mx, int trkX, int trkW)
+{
+    int span = ESC_SPEED_TOP - ESC_SPEED_MIN;
+    int rel, v;
+
+    rel = mx - trkX;
+    if (rel < 0) rel = 0;
+    if (rel > trkW) rel = trkW;
+
+    v = ESC_SPEED_MIN + (rel * span + trkW / 2) / trkW;
+    if (v > ESC_SPEED_MAX) return ESC_SPEED_TOP;
+    return ((v + ESC_SPEED_STEP / 2) / ESC_SPEED_STEP) * ESC_SPEED_STEP;
+}
+
+static int Esc_SlideXFor(int value, int trkX, int trkW)
+{
+    int span = ESC_SPEED_TOP - ESC_SPEED_MIN;
+
+    return trkX + ((value - ESC_SPEED_MIN) * trkW + span / 2) / span;
+}
+
+/* 某个数值框的几何: 拖动条没有 +/- 按钮, 框占满整个控件区 */
+static void Esc_NumBoxFor(int item, const RECT* right, int* x, int* w)
+{
+    if (item == GUI_ITEM_GAMESPEED)
+        Esc_SlideNumBox(right->right - ESC_PAD, x, w);
+    else
+        Esc_StepBox(Esc_CtlX(right), x, w);
+}
+
+static int Esc_StepMid(const RECT* right, int mx, int item)
 {
     int x, w;
 
-    Esc_StepBox(Esc_CtlX(right), &x, &w);
+    Esc_NumBoxFor(item, right, &x, &w);
     return mx >= x && mx < x + w;
 }
 
@@ -1232,12 +1310,13 @@ static int Esc_CancelHit(const RECT* p, int mx, int my)
     return mx >= r.left && mx < r.right && my >= r.top && my < r.bottom;
 }
 
-static int Esc_EditCurAt(const RECT* right, int mx, const wchar_t* s, int len)
+static int Esc_EditCurAt(const RECT* right, int mx, const wchar_t* s, int len,
+                         int item)
 {
     wchar_t pre[ESC_EDIT_CAP];
     int boxX, boxW, numX, i, best = 0, bestDist = 0x7FFFFFFF;
 
-    Esc_StepBox(Esc_CtlX(right), &boxX, &boxW);
+    Esc_NumBoxFor(item, right, &boxX, &boxW);
     numX = Esc_StepNumX(boxX, boxW, s);
     for (i = 0; i <= len; i++)
     {
@@ -1420,12 +1499,41 @@ static void Esc_DrawColorRow(void* surf, int rowL, int rowY, int rowW,
     }
 }
 
-static void Esc_DrawValueRow(void* surf, int rowL, int rowY, int rowW,
-                             int bodyH, const wchar_t* label, int value,
-                             int minValue, int maxValue, int editing)
+/* 数值框里的文字 + 编辑光标 (值行与拖动条共用) */
+static void Esc_DrawNumText(void* surf, int boxX, int boxY, int boxW,
+                            int textY, int value, int editing,
+                            const wchar_t* text)
 {
     wchar_t num[16];
-    int ctlX, btnY, boxX, boxW, numW, numX;
+    int numX;
+
+    if (editing) lstrcpynW(num, s_EditBuf, 16);
+    else if (text) lstrcpynW(num, text, 16);
+    else Esc_IntToW(num, (unsigned)value, 16);
+
+    numX = Esc_StepNumX(boxX, boxW, num);
+    Esc_Text(surf, num, numX, textY, boxW, ESC_BODY_PX, ESC_BODY_SLOT,
+             238, 238, 238);
+
+    if (editing)
+    {
+        wchar_t pre[ESC_EDIT_CAP];
+        int caretX;
+
+        lstrcpynW(pre, num, s_EditCur + 1);
+        caretX = numX + Esc_TextWidth(pre, ESC_BODY_PX, ESC_BODY_SLOT);
+        if (caretX > boxX + boxW - 2) caretX = boxX + boxW - 2;
+        Esc_Fill(surf, caretX, boxY + 3, 1, ESC_STEP_BTN_H - 6,
+                 235, 235, 235, 255);
+    }
+}
+
+static void Esc_DrawValueRow(void* surf, int rowL, int rowY, int rowW,
+                             int bodyH, const wchar_t* label, int value,
+                             int minValue, int maxValue, int editing,
+                             const wchar_t* text)
+{
+    int ctlX, btnY, boxX, boxW;
     unsigned bg = editing ? 40u : 24u;
     unsigned border = editing ? 208u : 0x7Bu;
     unsigned borderG = editing ? 160u : 0x79u;
@@ -1445,23 +1553,53 @@ static void Esc_DrawValueRow(void* surf, int rowL, int rowY, int rowW,
     Esc_Outline(surf, boxX, btnY, boxW, ESC_STEP_BTN_H,
                 border, borderG, borderB, borderA, 1);
 
-    if (editing) lstrcpynW(num, s_EditBuf, 16);
-    else Esc_IntToW(num, (unsigned)value, 16);
-    numW = boxW - ESC_STEP_NUM_PAD;
-    numX = Esc_StepNumX(boxX, boxW, num);
-    Esc_Text(surf, num, numX, rowY + (ESC_ROW_H - bodyH) / 2,
-             numW, ESC_BODY_PX, ESC_BODY_SLOT, 238, 238, 238);
+    Esc_DrawNumText(surf, boxX, btnY, boxW, rowY + (ESC_ROW_H - bodyH) / 2,
+                    value, editing, text);
+}
 
-    if (editing)
+/* 拖动条行: 轨道 + 把手 + 数值框(可点进去直接输数字) */
+static void Esc_DrawSlideRow(void* surf, int rowL, int rowY, int rowW,
+                             int bodyH, const wchar_t* label, int value,
+                             int editing, const wchar_t* text)
+{
+    int trkX, trkW, numX, numW;
+    int knobX, ty, ky, btnY;
+    unsigned bg = editing ? 40u : 24u;
+    unsigned bR = editing ? 208u : 0x7Bu;
+    unsigned bG = editing ? 160u : 0x79u;
+    unsigned bB = editing ? 64u : 0x7Bu;
+    unsigned bA = editing ? 255u : 150u;
+
+    Esc_SlideGeom(rowL, rowW, &trkX, &trkW, &numX, &numW);
+    Esc_RowLabel(surf, rowL, rowY, trkX, bodyH, label);
+
+    /* 轨道 + 已选中段 */
+    ty = rowY + (ESC_ROW_H - ESC_SLIDE_TRK_H) / 2;
+    if (trkW > 8)
     {
-        wchar_t pre[ESC_EDIT_CAP];
-        int caretX;
-        lstrcpynW(pre, num, s_EditCur + 1);
-        caretX = numX + Esc_TextWidth(pre, ESC_BODY_PX, ESC_BODY_SLOT);
-        if (caretX > boxX + boxW - 2) caretX = boxX + boxW - 2;
-        Esc_Fill(surf, caretX, btnY + 3, 1, ESC_STEP_BTN_H - 6,
-                 235, 235, 235, 255);
+        Esc_Capsule(surf, trkX, ty, trkW, ESC_SLIDE_TRK_H, 44, 44, 44, 235);
+        knobX = Esc_SlideXFor(value, trkX, trkW);
+        if (knobX - trkX > 8)
+            Esc_Capsule(surf, trkX, ty, knobX - trkX, ESC_SLIDE_TRK_H,
+                        208, 160, 64, 235);
     }
+    else
+        knobX = trkX;
+
+    /* 把手 */
+    ky = rowY + (ESC_ROW_H - ESC_SLIDE_KNOB_H) / 2;
+    Esc_Fill(surf, knobX - ESC_SLIDE_KNOB_W / 2, ky,
+             ESC_SLIDE_KNOB_W, ESC_SLIDE_KNOB_H, 236, 236, 236, 255);
+    Esc_Outline(surf, knobX - ESC_SLIDE_KNOB_W / 2, ky,
+                ESC_SLIDE_KNOB_W, ESC_SLIDE_KNOB_H, 20, 20, 20, 220, 1);
+
+    /* 数值框 */
+    btnY = rowY + (ESC_ROW_H - ESC_STEP_BTN_H) / 2;
+    Esc_Fill(surf, numX, btnY, numW, ESC_STEP_BTN_H, bg, bg, bg, 230);
+    Esc_Outline(surf, numX, btnY, numW, ESC_STEP_BTN_H, bR, bG, bB, bA, 1);
+
+    Esc_DrawNumText(surf, numX, btnY, numW, rowY + (ESC_ROW_H - bodyH) / 2,
+                    value, editing, text);
 }
 
 static int Esc_TextSwitchValue(int item)
@@ -1561,7 +1699,8 @@ static void Esc_TextPanel(void* surf, RECT* p)
                                          s_TextLabel[item],
                                          MsgText_GetOption(num->opt),
                                          num->min, num->max,
-                                         Esc_EditIs(EDIT_PAGE_TEXT, item));
+                                         Esc_EditIs(EDIT_PAGE_TEXT, item),
+                                         NULL);
                 }
                 else if (kind == EG_CHOICE)
                     Esc_DrawSegRow(surf, rowL, y, rowW, bodyH,
@@ -1599,6 +1738,10 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
 
     if (!Esc_PanelFrame(surf, p, s_GuiTitle)) return;
 
+    /* 菜单开着时主循环停摆, GameSpeed_Frame 不会被调; 在这里补一次同步,
+     * 否则拖过原版速度页的滑块再回来, 这一行显示的还是旧值。 */
+    GameSpeed_Poll();
+
     w = p->right - p->left;
     bodyH = Esc_TextHeight(ESC_BODY_PX, ESC_BODY_SLOT);
     if (bodyH > ESC_ROW_H) bodyH = ESC_ROW_H;
@@ -1614,7 +1757,7 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
         kind = s_GuiLayout[i].kind;
         item = s_GuiLayout[i].item;
 
-        if (kind == EG_GROUP && item != 0) y += ESC_BLOCK_GAP;
+        if (kind == EG_GROUP && item != 0) y += ESC_GUI_GAP;
         rh = Esc_GuiRowH(p, i);
         if (y + rh > p->bottom - ESC_PAD) break;
 
@@ -1649,6 +1792,7 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
             case GUI_ITEM_BUILD_QUEUE: on = BQ_Enabled(); break;
             case GUI_ITEM_SIDE_SCROLL: on = SS_Enabled(); break;
             case GUI_ITEM_FPS:         on = FrameCap_Enabled(); break;
+            case GUI_ITEM_GAMESPEED_ON: on = GameSpeed_Enabled(); break;
             }
             Esc_DrawSwitchRow(surf, rowL, y, rowW, bodyH,
                               s_GuiLabel[item], on);
@@ -1658,7 +1802,15 @@ static void Esc_SettingsPanel(void* surf, RECT* p)
         else if (kind == EG_ROWS)
             Esc_DrawValueRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item],
                              SWS_MaxRows(), ESC_ROWS_MIN, ESC_ROWS_MAX,
-                             Esc_EditIs(EDIT_PAGE_GUI, GUI_ITEM_ROWS));
+                             Esc_EditIs(EDIT_PAGE_GUI, GUI_ITEM_ROWS), NULL);
+        else if (kind == EG_SLIDE)
+        {
+            int cur = GameSpeed_GetFps();
+
+            Esc_DrawSlideRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item],
+                             cur, Esc_EditIs(EDIT_PAGE_GUI, item),
+                             cur > ESC_SPEED_MAX ? L"MAX" : NULL);
+        }
         else if (kind == EG_COLOR)
             Esc_DrawColorRow(surf, rowL, y, rowW, bodyH, s_GuiLabel[item]);
         else if (kind == EG_SKIN)
@@ -1978,8 +2130,16 @@ static void Esc_ApplyNum(int page, int item, int value)
 
     if (page == EDIT_PAGE_GUI)
     {
-        SWS_SetMaxRows(value);
-        Esc_QueueValue("SWSidebar", "MaxRows", value);
+        if (item == GUI_ITEM_GAMESPEED)
+        {
+            GameSpeed_SetFps(value);
+            Esc_QueueValue("GameSpeed", "FPS", GameSpeed_GetFps());
+        }
+        else
+        {
+            SWS_SetMaxRows(value);
+            Esc_QueueValue("SWSidebar", "MaxRows", value);
+        }
     }
     else if ((num = Esc_TextNumFind(item)) != NULL)
     {
@@ -1998,7 +2158,7 @@ static void Esc_StepOrEdit(HWND hDlg, const RECT* right, int mx, int page,
         Esc_ApplyNum(page, item, value);
         Esc_Redraw(hDlg);
     }
-    else if (Esc_StepMid(right, mx))
+    else if (Esc_StepMid(right, mx, item))
         Esc_EditBegin(hDlg, right, mx, page, item, value, minValue, maxValue);
 }
 
@@ -2055,7 +2215,7 @@ static int Esc_HitRight(const RECT* b, int mx, int my, int* index,
     {
         int kind = s_GuiLayout[i].kind;
 
-        if (kind == EG_GROUP && s_GuiLayout[i].item != 0) rowY += ESC_BLOCK_GAP;
+        if (kind == EG_GROUP && s_GuiLayout[i].item != 0) rowY += ESC_GUI_GAP;
         rh = Esc_GuiRowH(b, i);
         if (rowY + rh > b->bottom - ESC_PAD) break;
         if (mx >= rowL && mx < rowL + rowW &&
@@ -2078,6 +2238,13 @@ static int Esc_HitRight(const RECT* b, int mx, int my, int* index,
                               Esc_ChoiceN(s_GuiLayout[i].item),
                               rowL, rowW, mx) < 0)
                 return 0;
+            if (kind == EG_SLIDE)
+            {
+                int trkX, trkW, numX, numW;
+
+                Esc_SlideGeom(rowL, rowW, &trkX, &trkW, &numX, &numW);
+                if (mx < trkX || mx >= numX + numW) return 0;
+            }
             if (kind == EG_COLOR &&
                 Esc_ColorSegmentAt(rowL, rowW, rowY, mx, my) < 0)
                 return 0;
@@ -2136,6 +2303,33 @@ static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx,
         Esc_StepOrEdit(hDlg, right, mx, EDIT_PAGE_GUI, GUI_ITEM_ROWS,
                        SWS_MaxRows(), ESC_ROWS_MIN, ESC_ROWS_MAX, 1);
         return;
+    case GUI_ITEM_GAMESPEED_ON:
+        value = GameSpeed_Enabled() ? 0 : 1;
+        GameSpeed_SetEnabled(value);
+        Esc_QueueValue("GameSpeed", "Enable", value);
+        break;
+    case GUI_ITEM_GAMESPEED:
+    {
+        int rowL = right->left + ESC_PAD;
+        int rowW = (right->right - right->left) - ESC_PAD * 2;
+        int trkX, trkW, numX, numW;
+        int cur = GameSpeed_GetFps();
+
+        Esc_SlideGeom(rowL, rowW, &trkX, &trkW, &numX, &numW);
+        if (mx >= numX)          /* 点数值框: 直接输数字 (可输非 5 的倍数) */
+        {
+            Esc_EditBegin(hDlg, right, mx, EDIT_PAGE_GUI, GUI_ITEM_GAMESPEED,
+                          cur, ESC_SPEED_MIN, ESC_SPEED_TOP);
+            return;
+        }
+        /* 点轨道: 跳到该点并进入拖动 */
+        Esc_ApplyNum(EDIT_PAGE_GUI, GUI_ITEM_GAMESPEED,
+                     Esc_SlideValueAt(mx, trkX, trkW));
+        s_SlideDrag = 1;
+        if (hDlg) SetCapture(hDlg);
+        Esc_Redraw(hDlg);
+        return;
+    }
     case GUI_ITEM_SKIN:
     {
         int pick = Esc_PickSeg(s_GuiSkinName, ESC_SKIN_N, right, mx);
@@ -2466,7 +2660,7 @@ static int Esc_EditClick(HWND hDlg, const RECT* right, int mx, int my)
 {
     int index = -1;
 
-    if (!s_EditOn || !Esc_StepMid(right, mx)) return 0;
+    if (!s_EditOn || !Esc_StepMid(right, mx, s_EditItem)) return 0;
     if (s_EditPage == EDIT_PAGE_GUI)
     {
         if (!Esc_HitRight(right, mx, my, &index, NULL)) return 0;
@@ -2478,7 +2672,7 @@ static int Esc_EditClick(HWND hDlg, const RECT* right, int mx, int my)
     else return 0;
     if (index != s_EditItem) return 0;
 
-    s_EditCur = Esc_EditCurAt(right, mx, s_EditBuf, s_EditLen);
+    s_EditCur = Esc_EditCurAt(right, mx, s_EditBuf, s_EditLen, s_EditItem);
     Esc_Redraw(hDlg);
     return 1;
 }
@@ -2489,6 +2683,7 @@ static void Esc_Cancel(HWND hDlg)
 
     if (GetCapture() == hDlg) ReleaseCapture();
     s_CancelDown = 0;
+    s_SlideDrag = 0;
     Esc_EditEnd(NULL);
     Esc_RestoreSettings();
     s_PendN = 0;
@@ -2552,6 +2747,37 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         else if (s_EditOn) Esc_EditCommit(h);
     }
 
+    /* 拖动速度条: 按住期间随鼠标横坐标改值 */
+    if (msg == WM_MOUSEMOVE && h == s_Host && s_SlideDrag && s_Sel == 0)
+    {
+        RECT a, b;
+
+        if (Esc_Layout(h, &a, &b))
+        {
+            int mx = (int)(short)LOWORD(lp);
+            int rowL = b.left + ESC_PAD;
+            int rowW = (b.right - b.left) - ESC_PAD * 2;
+            int trkX, trkW, numX, numW;
+            int v;
+
+            Esc_SlideGeom(rowL, rowW, &trkX, &trkW, &numX, &numW);
+            v = Esc_SlideValueAt(mx, trkX, trkW);
+            if (v != GameSpeed_GetFps())
+            {
+                Esc_ApplyNum(EDIT_PAGE_GUI, GUI_ITEM_GAMESPEED, v);
+                Esc_Redraw(h);
+            }
+        }
+        return 0;
+    }
+
+    if (msg == WM_LBUTTONUP && h == s_Host && s_SlideDrag)
+    {
+        s_SlideDrag = 0;
+        if (GetCapture() == h) ReleaseCapture();
+        return 0;
+    }
+
     if (msg == WM_LBUTTONUP && h == s_Host && s_CancelDown)
     {
         int mx = (int)(short)LOWORD(lp);
@@ -2570,10 +2796,10 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
 
-    if (msg == WM_CAPTURECHANGED && h == s_Host && s_CancelDown)
+    if (msg == WM_CAPTURECHANGED && h == s_Host)
     {
-        s_CancelDown = 0;
-        Esc_Redraw(h);
+        s_SlideDrag = 0;
+        if (s_CancelDown) { s_CancelDown = 0; Esc_Redraw(h); }
     }
 
     if (msg == WM_TIMER && wp == ESC_EDIT_TIMER && h == s_Host)
@@ -2592,6 +2818,7 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_SHOWWINDOW && !wp && h == s_Host)
     {
         s_CancelDown = 0;
+        s_SlideDrag = 0;
         if (GetCapture() == h) ReleaseCapture();
         Esc_EditCommit(h);
         Esc_FlushPending();

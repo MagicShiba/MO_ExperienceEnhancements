@@ -1,7 +1,7 @@
 /* PauseView.cpp - 单机暂停 + 单步帧进 (热键 + 按钮)。
  * MainLoop 入口 (0x55D360) 挂门: 暂停跑迷你循环后跳 0x55DEDB 出本轮,
  * 步进帧放行一轮原循环。迷你循环: CallBack → 守卫 → Mark(2) → 输入 →
- * Keyboard → Render → Tactical::Update → Sleep(1)。做法见 Phobos FrameByFrame。
+ * Keyboard → Render → Tactical::Update → MsgWait(15)。做法见 Phobos FrameByFrame。
  * 热键单机恒有效; [BottomBar] PauseEnable 只定按钮初始显示
  * (0=用过一次才显示, 1=常显)。
  * 格网按钮 (暂停键左侧第三块, # 图标): 与暂停按钮同显同隐 (用过一次 F5 才出现),
@@ -21,6 +21,7 @@
 #include "GridView.h"
 #include "Shot.h"
 #include "FrameCap.h"
+#include "GameSpeed.h"
 
 #define PV_SECTION "BottomBar"
 
@@ -308,6 +309,14 @@ typedef void (__attribute__((thiscall))* FnRenderMap)(void* self);
 typedef void (__attribute__((thiscall))* FnMarkHook)(void* self, int lvl);
 typedef void (__attribute__((thiscall))* FnTacUpd)(void* self);
 
+/* 迷你循环的一拍: 15ms, 但一有输入就提前返回。
+ * 不能用 Sleep(1): 定时器精度被 FrameCap / GameSpeed(>60) 提到 1ms 后,
+ * Sleep(1) 就变成 1000Hz 空转 (粗粒度下才是 15.6ms, 以前靠这个凑拍)。 */
+static void PV_IdleWait(void)
+{
+    MsgWaitForMultipleObjects(0, NULL, FALSE, 15, QS_ALLINPUT);
+}
+
 static void PV_MiniLoop(void)
 {
     void* map;
@@ -317,7 +326,7 @@ static void PV_MiniLoop(void)
     int mx, my;
     if (!*(volatile unsigned char*)(size_t)ADDR_ISACTIVE)
     {
-        Sleep(1);
+        PV_IdleWait();
         return;
     }
     map = (void*)(size_t)ADDR_MAP;
@@ -343,14 +352,27 @@ static void PV_MiniLoop(void)
             if (fnU) ((FnTacUpd)fnU)(tac);
         }
     }
-    Sleep(1);
+    PV_IdleWait();
 }
 
 extern "C" __declspec(dllexport) DWORD __cdecl PV_MainGate(void* regs)
 {
     PV_EnsureInit();
-    FrameCap_Frame();  /* 限帧: 与渲染尾/消息泵共用一次等待预算 (见 FrameCap.cpp) */
+    FrameCap_Gate();   /* 限帧节拍: 主循环还活着时由这里计时 (见 FrameCap.cpp) */
     if (!PV_CanRun()) return 0;
+
+    /* 暂停中不推进游戏帧: 这时候不能限速(没帧可限)。只同步一下原版速度页,
+     * 玩家暂停时改原版滑块也能生效。 */
+    if (s_Paused && s_Step <= 0)
+    {
+        GameSpeed_Poll();
+        PV_MiniLoop();
+        if (regs) *(DWORD*)((char*)regs + REG_OFF_EAX) =
+            *(volatile unsigned char*)(size_t)ADDR_ISACTIVE ? 0 : 1;
+        return PV_LOOP_EXIT;
+    }
+
+    GameSpeed_Frame(); /* >60 的自建毫秒节拍 + 原版速度页同步 (见 GameSpeed.cpp) */
     if (!s_Paused) return 0;
     if (s_Step > 0) { s_Step--; return 0; }   /* 步进帧: 走原循环 */
     PV_MiniLoop();

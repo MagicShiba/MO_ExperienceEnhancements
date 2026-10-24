@@ -5,9 +5,9 @@ void FrameCap_EnsureInit(void);
 int  FrameCap_Enabled(void);
 void FrameCap_SetEnabled(int on);
 
-/* 每帧限速点, 三处共用一次等待预算:
- *   MainLoop 入口 0x55D360 / 渲染尾 0x4F4589 / PeekMessageA 导入表钩 */
-void FrameCap_Frame(void);
+/* 主循环节拍点: 由主循环门 PV_MainGate (0x55D360) 每帧调一次。
+ * 主循环还活着时只有它节拍; 模态循环里由队列空的 PeekMessage 节拍。 */
+void FrameCap_Gate(void);
 
 /* ESC 菜单对话框 (首页 + 各级子页): 非 0 且可见 = 菜单开着 = 限速。 */
 void FrameCap_SetActiveDlg(void* hwnd);

@@ -11,7 +11,6 @@
 #include "ScaleBar.h"
 #include "PiP.h"
 #include "MOExperience.h"
-#include "FrameCap.h"
 
 #define VC_MAXW 32
 #define VC_MAXH 32
@@ -2429,13 +2428,10 @@ void VecText_EnsureInit(void)
     LogLine(buf);
 }
 
-/* ---------------- 渲染帧钩 (Render 尾) ----------------
- * Ares 的 FPS 计数器画在这里; 同时它是限帧的必经过点之一 (ESC 菜单打开时
- * 场景仍在每帧渲染)。限速/放行判定在 FrameCap.cpp。 */
-
-/* ---------------- FPS 钉住绘制 (Render 尾, Ares 之后) ----------------
+/* ---------------- FPS 钉住绘制 (Render 尾 0x4F4589, Ares 之后) ----------------
  * 本帧 Simple_ 收到的计数器串, 以固定字号画到固定位 (x=0, 底上 32,
- * 与 Ares 同锚点), 任何档位都是 1x。只画窗口面, 大面跳过。 */
+ * 与 Ares 同锚点), 任何档位都是 1x。只画窗口面, 大面跳过。
+ * 这里只绘制, 不参与限帧 (限帧见 FrameCap.cpp)。 */
 static void VecFpsPinDraw(void)
 {
     void* comp;
@@ -2443,10 +2439,6 @@ static void VecFpsPinDraw(void)
     unsigned char* locked;
     RectangleStruct rc;
     ColorStruct black;
-    /* 限帧: 每个渲染帧一次。ESC 菜单打开时这里是必经过点之一
-     * (菜单关着时 FrameCap 内部完全放行)。必须在下面的早退判断之前,
-     * 否则 Ares 计数器没串时限速也跟着失效。 */
-    FrameCap_Frame();
     if (!s_FpsHave || !g_VT.Render) { s_FpsHave = 0; return; }
     s_FpsHave = 0;
     if (s_FpsN <= 0) return;
@@ -2545,10 +2537,9 @@ void VecText_LateInstall(void)
                 g_OrigScoreDlgProc = NULL;
         }
     }
-    /* FPS 钉住钩同时是主循环限帧点 (FrameCap_Frame), 所以文本接管关了也照样要装。 */
-    if (!g_VT.Enable && !FrameCap_Enabled())
-    { g_LateHooksDone = 1; return; }
-    /* FPS 钉住钩 (0x4F4589, GScreenClass::Render 尾): 计数器固定位 1x。 */
+    /* FPS 钉住钩 (0x4F4589, GScreenClass::Render 尾): 只为本模块的文本服务,
+     * 文本接管关了就不装。 */
+    if (!g_VT.Enable) { g_LateHooksDone = 1; return; }
     if (BytesSame((unsigned char*)0x4F4589u, kWantFpsPin, 5))
     {
         g_FpsPinTramp = BuildTrampAt(0x4F4589u, 5, 0x4F458Eu);

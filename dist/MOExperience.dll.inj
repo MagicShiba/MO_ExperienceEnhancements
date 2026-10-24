@@ -57,6 +57,13 @@
 ; 暂停且无步进时跑迷你循环后跳 0x55DEDB (ret) 出本轮;
 ; 步进帧入口扣数放行一轮原循环。Logic/帧存/限速整轮不跑。
 0x55D360 = PV_MainGate, 5
+; 自定义游戏速度 (5~120 FPS, 121 = 原版不限速), 见 src/GameSpeed.cpp
+; 帧延时唯一计算点 (6B = mov esi,[0xA8EB60]): 用自己的 tick 数替换 ESI, 跳过
+; 原指令 (返回绝对地址 0x55D7A4); 关闭/联机时返回 0 跑原指令。绝不回写 0xA8EB60。
+0x55D79E = GameSpeed_TickHook, 6
+; 引擎帧率结算写入点 (5B = mov [0xABCD44], eax): 把 EAX 里的窗口帧数按真实墙钟
+; 换算回每秒帧数后返回 0, 让引擎自己写。见 src/GameSpeed.cpp
+0x55E3B5 = GameSpeed_EngSettleHook, 5
 ; 雷达事件行点击门 (DisplayClass::ProcessClickCoords 内 0x69234B, 5 字节 =
 ; mov eax,[ebp] / test eax,eax, 都是无副作用的读, 门落点 0x6925FC 栈形对齐)。
 ; 落在"操作与战斗提示"里的雷达事件行上就跳视口到该事件格并吞掉这次地图点击;
