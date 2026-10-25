@@ -308,6 +308,27 @@ static int FM_PtInKeepRegion(int px, int py)
     return 1;
 }
 
+/* 侧栏"顶部那一块"(资金条 + 小地图 + 顶部两个按钮) 在**屏幕**上的矩形。
+ * 与 FM_PtInKeepRegion / FM_RadarClickGate 同源 (Fm_KeepTopRect + Fm_ColumnX)。
+ * 小窗 (PiP) 用它避让: 态 2 (只留顶部块) 时视口已铺到屏幕右缘, 这一块却仍压在
+ * 画面上, 不躲就会盖住小地图。态 3 (全隐藏) 返回 0 —— 那时整块都没有, 右上角
+ * 是干净的地图区, 小窗可以随便放。 */
+int FM_KeepTopRectScreen(RectangleStruct* out)
+{
+    RectangleStruct top;
+    RectangleStruct* sb = (RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS;
+    int colX;
+    if (!Fm_KeepTopRect(&top)) return 0;
+    colX = Fm_ColumnX(0);
+    if (colX < 0) colX = sb->X;
+    if (colX < 0 || colX > 8192) return 0;
+    out->X = colX + top.X;
+    out->Y = top.Y;
+    out->Width = top.Width;
+    out->Height = top.Height;
+    return (out->Width > 0 && out->Height > 0);
+}
+
 /* 视口拒点门要放行吗 (ScaleBar 的 ClickCoordsReject 调)。判据是**物理**鼠标位置:
  * 传进来的 pt 是折算出来的, 已被移到 R 之外, 反算回去才无歧义。*/
 int FM_ShouldDeferClick(void)

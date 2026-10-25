@@ -160,25 +160,29 @@ static unsigned s_PcBgA = 0xFFFFFFFFu;   /* 通道表现对应的底板 alpha (0
 static unsigned short s_BgR[32], s_BgG[64], s_BgB[32];
 static int s_BgBits6 = 6;
 
-/* 底板通道表: 直接问 Blend16 要"只留一个通道"的答案, 保证与逐像素混合逐位一致。 */
+/* 底板通道表: 直接问 Blend16 要"只留一个通道"的答案, 保证与逐像素混合逐位一致。
+ * 三通道项数不同: R/B 恒 32 项, G 在 565 下有 64 项 (6 位) —— 必须各建各的,
+ * 按 32 项一起建会让 dst 绿分量 >=32 的像素查到表外 (恒 0), 整块底板偏品红。 */
 static void PcBuildBgTab(unsigned a)
 {
-    int i;
+    int i, gm, rs;
     unsigned short v;
-    int rs, gm;
     if (s_PcBgA == a) return;
     s_PcBgA = a;
-    rs = (g_GBits == 6) ? 11 : 10;
     s_BgBits6 = g_GBits;
-    gm = (g_GBits == 6) ? 63 : 31;
+    rs = (g_GBits == 6) ? 11 : 10;
+    gm = (g_GBits == 6) ? 63 : 31;      /* 绿通道最大值 */
     for (i = 0; i < 32; i++)
     {
         v = Blend16((unsigned short)((unsigned)i << rs), 0, 0, 0, a);
         s_BgR[i] = (unsigned short)((v >> rs) & 31u);
-        v = Blend16((unsigned short)((unsigned)i << 5), 0, 0, 0, a);
-        s_BgG[i] = (unsigned short)((v >> 5) & (unsigned)gm);
         v = Blend16((unsigned short)i, 0, 0, 0, a);
         s_BgB[i] = (unsigned short)(v & 31u);
+    }
+    for (i = 0; i <= gm; i++)
+    {
+        v = Blend16((unsigned short)((unsigned)i << 5), 0, 0, 0, a);
+        s_BgG[i] = (unsigned short)((v >> 5) & (unsigned)gm);
     }
 }
 

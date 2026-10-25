@@ -71,6 +71,11 @@ int  FM_RadarHit(int gx, int gy);
  * (Fm_ColumnPlace), PiP 的侧栏按钮按它定位。 */
 int  FM_SidebarColumnX(void);
 
+/* 侧栏"顶部那一块"(资金条 + 小地图 + 顶部两个按钮) 在屏幕上的矩形。与
+ * FM_RadarHit / FM_RadarClickGate 同源。返回 0 = 该块此刻不呈现 (全隐藏档)。
+ * PiP 用它把小窗从这块上挤开: 只留顶部块时视口铺到屏幕右缘, 不躲就压住小地图。*/
+int  FM_KeepTopRectScreen(RectangleStruct* out);
+
 
 
 

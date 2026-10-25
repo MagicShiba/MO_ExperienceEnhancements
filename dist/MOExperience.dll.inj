@@ -44,7 +44,7 @@
 ; "合并规则的快照"。恒返回 0 = 跑原指令。
 ; 小地图点击 (FullMap): 同一函数里另落一道门 (6 字节 = push ecx / mov ecx,0x87F7E8),
 ; 落点雷达矩形内就自己调引擎原生 RadarClass::Action 跳转并跳 0x6925FC 吞掉,
-; 见 src/GUI/FullMap.cpp 的"小地图点击: 自己接手 + 吞掉穿透"
+; 见 src/gui/FullMap.cpp 的"小地图点击: 自己接手 + 吞掉穿透"
 0x692406 = FullMap_RadarClickGate, 6
 
 ; 维修简化: 维修快捷键 ToggleRepariModeCommandClass::Execute 吞 Ctrl (落 ret 4)
@@ -52,24 +52,24 @@
 ; 侧栏维修图标 (egui_BUTTON_REPAIR 0x8065 分支) 吞 Ctrl (落分支公共尾 jmp)
 0x6A78D9 = RepairAll_Button, 6
 ; 单人暂停/步进 (仅遭遇战/战役, 联机空转; PauseEnable 只定按钮初始显示),
-; 见 src/GUI/PauseView.cpp 与 Phobos FrameByFrame。
+; 见 src/gui/PauseView.cpp 与 Phobos FrameByFrame。
 ; MainLoop 入口 (0x55D360, 首 5B 单指令 mov al,[IsActive]):
 ; 暂停且无步进时跑迷你循环后跳 0x55DEDB (ret) 出本轮;
 ; 步进帧入口扣数放行一轮原循环。Logic/帧存/限速整轮不跑。
 0x55D360 = PV_MainGate, 5
-; 自定义游戏速度 (5~120 FPS, 121 = 原版不限速), 见 src/GameSpeed.cpp
+; 自定义游戏速度 (5~120 FPS, 121 = 原版不限速), 见 src/perf/GameSpeed.cpp
 ; 帧延时唯一计算点 (6B = mov esi,[0xA8EB60]): 用自己的 tick 数替换 ESI, 跳过
 ; 原指令 (返回绝对地址 0x55D7A4); 关闭/联机时返回 0 跑原指令。绝不回写 0xA8EB60。
 0x55D79E = GameSpeed_TickHook, 6
 ; 引擎帧率结算写入点 (5B = mov [0xABCD44], eax): 把 EAX 里的窗口帧数按真实墙钟
-; 换算回每秒帧数后返回 0, 让引擎自己写。见 src/GameSpeed.cpp
+; 换算回每秒帧数后返回 0, 让引擎自己写。见 src/perf/GameSpeed.cpp
 0x55E3B5 = GameSpeed_EngSettleHook, 5
 ; 雷达事件行点击门 (DisplayClass::ProcessClickCoords 内 0x69234B, 5 字节 =
 ; mov eax,[ebp] / test eax,eax, 都是无副作用的读, 门落点 0x6925FC 栈形对齐)。
 ; 落在"操作与战斗提示"里的雷达事件行上就跳视口到该事件格并吞掉这次地图点击;
 ; 否则返回 0 跑原指令 (下面 0x692350 的 jl 出界判据一点没动)。见 MsgText.cpp
 0x69234B = MsgText_RadarClickGate, 5
-; 聚集点多段路径 (Z + 折线), 见 src/RallyPath.cpp
+; 聚集点多段路径 (Z + 折线), 见 src/order/RallyPath.cpp
 ; 门: CellClickedAction 聚集点分支 (6B)。按住 Z 吞原生单点令改记折线, 余者放行。
 0x44377E = RallyPath_GateHook, 6
 ; 出厂: BuildingClass::ExitObject (虚表第 64 项), WhatAmI 分派前, 载具/步兵/飞机全命中。
@@ -81,7 +81,7 @@
 ; 无法攻击的单位不再冲向目标: FootClass::ObjectClickedAction 的
 ; NoMove(action==2) 处理器入口 0x4D77BD (6B = mov edx,[ebx] + lea eax,[esp+0x74], 无 rel)。
 ; ESI=this, EBX=pTarget; 目标非本家非盟友就跳 epilogue 0x4D7CC0 (停原地)。
-; 见 src/NoApproach.cpp
+; 见 src/misc/NoApproach.cpp
 0x4D77BD = NoApproach_Hook, 6
 
 ; 画中画窗内左键按下: 跳过引擎 LeftDownPosition 记录 (0x4AC310 前 6B 是
@@ -99,12 +99,12 @@
 ; 错位幽灵框; 主视图渲染 (g_InRender=0) 不受影响。见 PiP.cpp
 0x6DA180 = PiP_BandGate, 6
 
-; ESC 菜单: 对话框创建后 (ESI=HWND, 5B). 见 src/GUI/EscMenu.cpp 与 notes/ESC菜单.md
+; ESC 菜单: 对话框创建后 (ESI=HWND, 5B). 见 src/gui/EscMenu.cpp 与 notes/ESC菜单.md
 0x4F1140 = EscMenu_OnShow, 5
 ; ESC 菜单: 临时 BSurface 内容绘制后、blit 前 (6B).
 0x622396 = EscMenu_OnPaintSurface, 6
 
-; Player color rainbow tick (MainLoop frame step, 5B). src/GUI/PlayerColor.cpp
+; Player color rainbow tick (MainLoop frame step, 5B). src/gui/PlayerColor.cpp
 0x55DDA0 = PlayerColor_TickHook, 5
 
 ; TActionClass::Execute entry (0x6DD8B0, 6B = sub esp,0x240).
@@ -112,5 +112,5 @@
 0x6DD8B0 = TAction_UISkin, 6
 ; 建筑放置半透明预览 (0x6D528A, 6B = mov ecx,[0x880990])。画完绿/红地基格后
 ; 追加一次半透明 Buildup/Image 静态帧; 只读+渲染面绘制, 检测到 Phobos.dll 时不画。
-; 见 src/PlacementPreview.cpp
+; 见 src/preview/PlacementPreview.cpp
 0x6D528A = PlacementPreview_DrawHook, 6

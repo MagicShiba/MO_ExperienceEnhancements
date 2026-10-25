@@ -11,7 +11,7 @@ set "PWSH=C:\Program Files\PowerShell\7\pwsh.exe"
 set PATH=G:\motest\AutoLoadDev\tools\mingw\mingw32\bin;%PATH%
 cd /d "%~dp0"
 
-set CXXFLAGS=-O2 -Wall -fno-exceptions -fno-rtti -fno-builtin-memset -fno-builtin-memcpy -fno-builtin-memmove -fno-builtin-strlen -fno-builtin-strcmp -fno-builtin-sin -fno-builtin-cos -Isrc -Isrc\\GUI -c
+set CXXFLAGS=-O2 -Wall -fno-exceptions -fno-rtti -fno-builtin-memset -fno-builtin-memcpy -fno-builtin-memmove -fno-builtin-strlen -fno-builtin-strcmp -fno-builtin-sin -fno-builtin-cos -Isrc -Isrc\\core -Isrc\\gui -Isrc\\order -Isrc\\sidebar -Isrc\\preview -Isrc\\perf -Isrc\\misc -c
 
 if /i "%~1"=="/clean" (
   if exist obj rmdir /s /q obj
@@ -34,11 +34,11 @@ rem (Old rule "any header in src changed" forced a full rebuild on every edit to
 rem  a widely-included header such as OrderUtil.h -- e.g. a MOE_VERSION bump.)
 rem g++ -MM yields the per-file include list; only run it for files whose .o is
 rem  older than the newest header, so the no-header-change path stays fast.
-"%PWSH%" -NoProfile -Command "$src = @(Get-ChildItem src -Include *.cpp -Recurse); $hdr = @(Get-ChildItem src -Include *.h -Recurse); $newest = ($hdr | Measure-Object LastWriteTime -Maximum).Maximum; $inc = @('-Isrc','-Isrc\GUI'); $stale = @(foreach ($f in $src) { $o = 'obj\' + $f.BaseName + '.o'; if (-not (Test-Path $o)) { $f; continue }; $ot = (Get-Item $o).LastWriteTime; if ($f.LastWriteTime -gt $ot) { $f; continue }; if ($ot -lt $newest) { $dep = (& g++ -MM -MG @inc $f.FullName 2>$null) -join ' '; $hit = $false; foreach ($t in ($dep -split '\s+')) { if ($t -match '\.h$' -and (Test-Path $t) -and (Get-Item $t).LastWriteTime -gt $ot) { $hit = $true; break } }; if ($hit) { $f } } }); if ($stale.Count -gt 0) { $stale | ForEach-Object { $_.FullName } | Set-Content -Encoding ascii obj\stale.txt } else { Set-Content -Encoding ascii -Value '' obj\stale.txt }"
+"%PWSH%" -NoProfile -Command "$src = @(Get-ChildItem src -Include *.cpp -Recurse); $hdr = @(Get-ChildItem src -Include *.h -Recurse); $newest = ($hdr | Measure-Object LastWriteTime -Maximum).Maximum; $inc = @('-Isrc','-Isrc\core','-Isrc\gui','-Isrc\order','-Isrc\sidebar','-Isrc\preview','-Isrc\perf','-Isrc\misc'); $stale = @(foreach ($f in $src) { $o = 'obj\' + $f.BaseName + '.o'; if (-not (Test-Path $o)) { $f; continue }; $ot = (Get-Item $o).LastWriteTime; if ($f.LastWriteTime -gt $ot) { $f; continue }; if ($ot -lt $newest) { $dep = (& g++ -MM -MG @inc $f.FullName 2>$null) -join ' '; $hit = $false; foreach ($t in ($dep -split '\s+')) { if ($t -match '\.h$' -and (Test-Path $t) -and (Get-Item $t).LastWriteTime -gt $ot) { $hit = $true; break } }; if ($hit) { $f } } }); if ($stale.Count -gt 0) { $stale | ForEach-Object { $_.FullName } | Set-Content -Encoding ascii obj\stale.txt } else { Set-Content -Encoding ascii -Value '' obj\stale.txt }"
 
 if exist obj\compiled.flag del obj\compiled.flag
 if exist obj\res.flag del obj\res.flag >nul 2>nul
-"%PWSH%" -NoProfile -Command "$out='obj\icons.res.o'; $f=@(Get-Item 'src\GUI\icons.rc','src\GUI\IconRes.h') + @(Get-ChildItem icons -Filter *.pcx -File); $new=($f | Measure-Object LastWriteTime -Maximum).Maximum; if ($null -eq $new) { exit 0 }; $old=[datetime]::MinValue; if (Test-Path $out) { $old=(Get-Item $out).LastWriteTime }; if ($new -gt $old) { & windres -i src\GUI\icons.rc -o $out; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Set-Content -Encoding ascii -Value 1 obj\res.flag }"
+"%PWSH%" -NoProfile -Command "$out='obj\icons.res.o'; $f=@(Get-Item 'src\gui\icons.rc','src\gui\IconRes.h') + @(Get-ChildItem icons -Filter *.pcx -File); $new=($f | Measure-Object LastWriteTime -Maximum).Maximum; if ($null -eq $new) { exit 0 }; $old=[datetime]::MinValue; if (Test-Path $out) { $old=(Get-Item $out).LastWriteTime }; if ($new -gt $old) { & windres -i src\gui\icons.rc -o $out; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Set-Content -Encoding ascii -Value 1 obj\res.flag }"
 if errorlevel 1 exit /b 1
 if exist obj\res.flag (
   echo [res] icons.rc

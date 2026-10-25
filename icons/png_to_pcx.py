@@ -14,7 +14,7 @@ Usage:
   python icons/png_to_pcx.py --out build/icons --recursive
 
 Run pcx_tool.py afterwards only for existing PCX files; PNG output is already
-normalized and can be embedded by src/GUI/icons.rc.
+normalized and can be embedded by src/gui/icons.rc.
 """
 
 from __future__ import annotations

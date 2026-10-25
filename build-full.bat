@@ -8,7 +8,7 @@ setlocal
 set PATH=G:\motest\AutoLoadDev\tools\mingw\mingw32\bin;%PATH%
 cd /d "%~dp0"
 
-set CXXFLAGS=-O2 -Wall -fno-exceptions -fno-rtti -fno-builtin-memset -fno-builtin-memcpy -fno-builtin-memmove -fno-builtin-strlen -fno-builtin-strcmp -fno-builtin-sin -fno-builtin-cos -Isrc -Isrc\\GUI -c
+set CXXFLAGS=-O2 -Wall -fno-exceptions -fno-rtti -fno-builtin-memset -fno-builtin-memcpy -fno-builtin-memmove -fno-builtin-strlen -fno-builtin-strcmp -fno-builtin-sin -fno-builtin-cos -Isrc -Isrc\\core -Isrc\\gui -Isrc\\order -Isrc\\sidebar -Isrc\\preview -Isrc\\perf -Isrc\\misc -c
 
 if not exist obj mkdir obj
 
@@ -17,10 +17,10 @@ rem game dir renders as an EMPTY menu line, so deploy them every build.
 xcopy /Y /D /Q /I dist\MOExperienceResources\*.ini ..\MOExperienceResources\ >nul
 
 echo [res] icons.rc
-windres -i src\GUI\icons.rc -o obj\icons.res.o
+windres -i src\gui\icons.rc -o obj\icons.res.o
 if errorlevel 1 exit /b 1
 
-for %%F in (src\MOExperience.cpp src\SyringeHooks.cpp src\GUI\GdiText.cpp src\Lang.cpp src\GUI\MsgText.cpp src\GUI\SWPanel.cpp src\GUI\PowerDisplay.cpp src\GUI\VecText.cpp src\GUI\ToolTip.cpp src\GUI\ChatEdit.cpp src\GUI\FullMap.cpp src\GUI\ScaleBar.cpp src\GUI\PauseView.cpp src\GUI\Shot.cpp src\FrameCap.cpp src\GameSpeed.cpp src\GUI\PiP.cpp src\GUI\GridView.cpp src\GUI\SideScroll.cpp src\GUI\EscMenu.cpp src\GUI\PlayerColor.cpp src\GUI\SidebarSkin.cpp src\TypeSelect.cpp src\AirWay.cpp src\Aggressive.cpp src\BuildQueue.cpp src\PatrolCircle.cpp src\RallyPath.cpp src\SmartOrder.cpp src\TreeChop.cpp src\FuzzyAttack.cpp src\AttackMove.cpp src\SmartArea.cpp src\OrderUtil.cpp src\MindSelect.cpp src\Observer.cpp src\DeployPreview.cpp src\WeaponRange.cpp src\SWSBar.cpp src\SWSTest.cpp src\RepairAll.cpp src\PlaceScatter.cpp src\PlacementPreview.cpp src\OrderThrottle.cpp src\WaypointCap.cpp src\MegaListCap.cpp src\NoApproach.cpp src\PvpNotice.cpp src\GUI\Icon.cpp src\GUI\PcxImage.cpp) do (
+for %%F in (src\core\MOExperience.cpp src\core\SyringeHooks.cpp src\core\Lang.cpp src\gui\GdiText.cpp src\gui\MsgText.cpp src\gui\SWPanel.cpp src\gui\PowerDisplay.cpp src\gui\VecText.cpp src\gui\ToolTip.cpp src\gui\ChatEdit.cpp src\gui\FullMap.cpp src\gui\ScaleBar.cpp src\gui\PauseView.cpp src\gui\Shot.cpp src\gui\PiP.cpp src\gui\GridView.cpp src\gui\EscMenu.cpp src\gui\PlayerColor.cpp src\gui\Icon.cpp src\gui\PcxImage.cpp src\order\TypeSelect.cpp src\order\AirWay.cpp src\order\PatrolCircle.cpp src\order\RallyPath.cpp src\order\SmartOrder.cpp src\order\TreeChop.cpp src\order\FuzzyAttack.cpp src\order\AttackMove.cpp src\order\SmartArea.cpp src\order\OrderUtil.cpp src\order\MindSelect.cpp src\order\OrderThrottle.cpp src\order\Aggressive.cpp src\sidebar\BuildQueue.cpp src\sidebar\SWSBar.cpp src\sidebar\SWSTest.cpp src\sidebar\RepairAll.cpp src\sidebar\SideScroll.cpp src\sidebar\SidebarSkin.cpp src\preview\DeployPreview.cpp src\preview\PlaceScatter.cpp src\preview\PlacementPreview.cpp src\preview\WeaponRange.cpp src\perf\FrameCap.cpp src\perf\GameSpeed.cpp src\misc\Observer.cpp src\misc\WaypointCap.cpp src\misc\MegaListCap.cpp src\misc\NoApproach.cpp src\misc\PvpNotice.cpp) do (
   echo [cc] %%~nxF
   g++ %CXXFLAGS% -o "obj\%%~nF.o" %%F
   if errorlevel 1 exit /b 1

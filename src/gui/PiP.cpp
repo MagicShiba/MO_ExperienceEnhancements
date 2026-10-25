@@ -107,7 +107,10 @@ static int g_PinX = 0, g_PinY = 0;
 static int g_LastMainX = 0, g_LastMainY = 0, g_HaveLastMain = 0;
 static int g_RadarSteal = 0;   /* 相机定位钩标记: 本帧有一次程序化相机跳转 */
 static int g_PipX = 0, g_PipY = 0, g_PipW = 0, g_PipH = 0;  /* 小窗物理游戏坐标 */
-static int g_MoveX = 0, g_MoveY = 0;      /* 拖动后相对默认落点(右上角)的偏移 */
+/* 用户拖出来的落点 (屏幕绝对坐标), -1 = 还没放过 (按右上角默认落点算)。
+ * 存绝对值而非"相对视口右上角的偏移": 侧栏一收/一放视口右边界就变 (1752 <-> 1920),
+ * 跟着锚会把窗整个甩到新边界上 —— 只留小地图时正好盖住小地图。 */
+static int s_WantX = -1, s_WantY = -1;
 static int g_Drag = 0, g_DragGX = 0, g_DragGY = 0;
 static int g_Pan = 0;                     /* 窗内右键拖动中 (含按下但还没过阈值) */
 static int g_PanBaseX = 0, g_PanBaseY = 0;/* 右键拖动期间被钉住的主相机位置 */
@@ -416,7 +419,7 @@ static void PiP_Toggle(void)
     g_HasContent = 0;
     if (g_Show)
     {
-        g_MoveX = 0; g_MoveY = 0;
+        s_WantX = -1; s_WantY = -1;    /* 落回默认右上角 */
         g_Pinned = 0;              /* 目标 = 当前主相机中心 (渲染时取) */
         g_SurfJustBuilt = 0;
         g_ForceDue = 4;            /* 首帧地形/缓存可能未就绪, 连续补渲 */
@@ -1236,10 +1239,8 @@ static void PiP_PollMouse(void)
 
     if (g_Drag)                          /* 拖动小窗 (移动图标) */
     {
-        RectangleStruct a;
-        FM_GetViewRects(&a, 0);
-        g_MoveX = (mx - g_DragGX) - (a.X + a.Width - g_PipW - g_PadX);
-        g_MoveY = (my - g_DragGY) - (a.Y + g_PadY);
+        s_WantX = mx - g_DragGX;
+        s_WantY = my - g_DragGY;
         if (!lb) g_Drag = 0;
     }
 
@@ -1373,15 +1374,32 @@ done:
     g_Frame++;
 }
 
-/* 小窗在地图区里的物理位置 = 默认落点 (右上角) + 拖动偏移, 钳进地图区。 */
+/* 小窗在地图区里的物理位置: 用记下来的绝对落点 (没放过就取右上角默认点),
+ * 钳进地图区, 再避让侧栏顶部那一块。 */
 static void PiP_PipPos(const RectangleStruct* a, int dW, int dH, int* X, int* Y)
 {
-    int x = a->X + a->Width - dW - g_PadX + g_MoveX;
-    int y = a->Y + g_PadY + g_MoveY;
+    RectangleStruct blk;
+    int x, y;
+    if (s_WantX < 0 || s_WantY < 0)
+    {
+        s_WantX = a->X + a->Width - dW - g_PadX;
+        s_WantY = a->Y + g_PadY;
+    }
+    x = s_WantX; y = s_WantY;
     if (x < a->X) x = a->X;
     if (y < a->Y) y = a->Y;
     if (x + dW > a->X + a->Width) x = a->X + a->Width - dW;
     if (y + dH > a->Y + a->Height) y = a->Y + a->Height - dH;
+    /* 侧栏只留顶部那一块 (资金条/小地图/两个按钮) 时, 视口已铺到屏幕右缘, 那一块
+     * 却仍压在画面上 —— 小窗压上去就盖住小地图, 而且点进去先被 FM_RadarHit 吃掉。
+     * 相交就整体左移到块的左侧。全隐藏档该块不存在 (返回 0), 右上角可随便放。*/
+    if (FM_KeepTopRectScreen(&blk) &&
+        x < blk.X + blk.Width && x + dW > blk.X &&
+        y < blk.Y + blk.Height && y + dH > blk.Y)
+    {
+        x = blk.X - dW;
+        if (x < a->X) x = a->X;
+    }
     *X = x; *Y = y;
 }
 

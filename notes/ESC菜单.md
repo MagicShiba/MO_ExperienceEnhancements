@@ -1,6 +1,6 @@
 # ESC 菜单自定义页 (EscMenu)
 
-代码: `src/GUI/EscMenu.cpp` / `EscMenu.h`。配置: `dist/MOExperience.ini` 的
+代码: `src/gui/EscMenu.cpp` / `EscMenu.h`。配置: `dist/MOExperience.ini` 的
 `[EscMenu] Enable=1`，并同步到游戏目录。只改显示与输入，不写模拟状态。
 
 ## 1. 定位
@@ -29,7 +29,7 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
 
 钩子：`0x4F1140 = EscMenu_OnShow, 5` (仅记录/子类化)；
 `0x622396 = EscMenu_OnPaintSurface, 6` (绘制)。在
-`src/SyringeHooks.cpp` 注册，构建时编入 `.syhks00`，不再需要 `.inj`。
+`src/core/SyringeHooks.cpp` 注册，构建时编入 `.syhks00`，不再需要 `.inj`。
 
 ## 3. 布局
 
@@ -105,7 +105,7 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
   `Side` 按字符串写 `right`/`left`，其余按整数。回写按字节定位 `key=value`，
   只替换值，保留行尾注释、空行和文件编码。
 - “玩家颜色”只保留界面布局/绘制/命中测试；颜色枚举、当前色、切换与
-  刷新逻辑在 `src/GUI/PlayerColor.cpp`，详见 `notes/玩家颜色切换.md`。
+  刷新逻辑在 `src/gui/PlayerColor.cpp`，详见 `notes/玩家颜色切换.md`。
 - 原 WndProc 存在窗口属性 `MOE_EscOldProc`；按 `IsWindowUnicode` 选择
   `CallWindowProcA/W` 或 `DefWindowProcA/W`。
 

@@ -622,6 +622,8 @@ typedef struct {
     int groupH;
     int gap;
     int scrollable;
+    /* 组标题文案; NULL = 组标题就在行文案数组里 (文本页共用一个 enum) */
+    const wchar_t (*groups)[ESC_LABEL_CAP];
     void (*draw)(void* surf, int rowL, int rowY, int rowW, int rh, int bodyH,
                  int kind, int item);
 } EscPage;
@@ -1711,9 +1713,9 @@ static void Esc_DrawTextRow(void* surf, int rowL, int rowY, int rowW, int rh,
 }
 
 static const EscPage kGuiPage = { s_GuiLayout, ESC_GUI_DISPLAY, ESC_GUI_GROUP_H,
-                                  ESC_GUI_GAP, 0, Esc_DrawGuiRow };
+                                  ESC_GUI_GAP, 0, s_GuiGroup, Esc_DrawGuiRow };
 static const EscPage kTextPage = { s_TextLayout, TX_COUNT, ESC_GROUP_H,
-                                   ESC_BLOCK_GAP, 1, Esc_DrawTextRow };
+                                   ESC_BLOCK_GAP, 1, NULL, Esc_DrawTextRow };
 
 /* 两页共用的行循环: 组标题 / 分隔条 / 行底板在这里, 控件交给 page->draw。
  * 文本页整行裁剪 (滚出视野的行不画但仍占位), 设置页放不下就直接收尾。 */
@@ -1757,7 +1759,8 @@ static void Esc_RowsPanel(void* surf, RECT* p, const wchar_t* title,
             Esc_Fill(surf, rowL + ESC_TEXT_INSET, y + rh / 2,
                      rowW - ESC_TEXT_INSET * 2, 1, 0x7B, 0x79, 0x7B, 160);
         else if (kind == EG_GROUP)
-            Esc_GroupRow(surf, rowL, rowW, y, rh, bodyH, labels[item]);
+            Esc_GroupRow(surf, rowL, rowW, y, rh, bodyH,
+                         pg->groups ? pg->groups[item] : labels[item]);
         else
         {
             Esc_RowPlate(surf, rowL, rowW, y, rh);
