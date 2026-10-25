@@ -17,8 +17,6 @@
 
 /* 砍树私有地址 (共享部分见 OrderUtil.h) */
 
-#define ADDR_TERRAINTYPES 0xA8E318u  /* TerrainType 数组 (DynamicVector) */
-
 /* CellClass::GetTerrain (0x47C550): 返回格上地形或空。 */
 typedef void* __attribute__((thiscall)) (*Fn_GetTerrain)(void* cell, int alt);
 #define FN_GETTERRAIN ((Fn_GetTerrain)(void*)0x47C550u)
@@ -64,24 +62,8 @@ static int TC_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
                          int tgtID, unsigned char tgtRtti,
                          void* unit, int uid, int idxOk)
 {
-    char ev[EVT_SIZE];
-    OU_EvClear(ev);
-    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
-            tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
-    ev[OFF_PLANFLAG] = 1;
-    return OT_Fire(ev, unit, uid, idxOk);
-}
-
-static void* TC_CellPtr(int cx, int cy)
-{
-    void** cells;
-    int maxc, idx;
-    if (!OU_CellValid(cx, cy)) return 0;
-    cells = *(void***)(ADDR_DISPLAY + OFF_MAP_CELLS);
-    maxc = *(int*)(ADDR_DISPLAY + OFF_MAP_MAXC);
-    idx = (cy << 9) + cx;
-    if (idx < 0 || idx >= maxc) return 0;
-    return cells[idx];
+    return OU_FireMega(houseIdx, srcID, srcRtti, MISSION_ATTACK,
+                       tgtID, tgtRtti, 0, 0, 0, 0, 1, unit, uid, idxOk);
 }
 
 /* 画框投影: 格线角点走引擎 CoordsToClient, 每角取框内格高。 */
@@ -91,57 +73,10 @@ typedef int __attribute__((thiscall)) (*Fn_TC_C2C)(void* tac,
 #define FN_TC_C2C ((Fn_TC_C2C)(void*)0x6D2140u)
 #define TC_TAC_INSTANCE 0x887324u
 
-typedef int __attribute__((thiscall)) (*Fn_TC_FloorH)(void* cell, const Point2D* p);
-#define FN_TC_FLOORH ((Fn_TC_FloorH)(void*)0x47B3A0u)
-
-static int TC_CellZ(int cx, int cy, int* zOut)
-{
-    void** cells;
-    int maxc, idx;
-    void* cell;
-    Point2D zero;
-    int z;
-    if (cx < 0 || cy < 0 || cx >= 512 || cy >= 512) return 0;
-    cells = *(void***)(ADDR_DISPLAY + OFF_MAP_CELLS);
-    maxc = *(int*)(ADDR_DISPLAY + OFF_MAP_MAXC);
-    if (!cells || !IsPlausiblePtr(cells) || maxc <= 0 || maxc > 512 * 512) return 0;
-    idx = (cy << 9) + cx;
-    if (idx < 0 || idx >= maxc) return 0;
-    cell = cells[idx];
-    if (!cell || !IsPlausiblePtr(cell)) return 0;
-    zero.X = 0; zero.Y = 0;
-    z = FN_TC_FLOORH(cell, &zero);
-    if (z < -8192 || z > 8192) return 0;
-    *zOut = z;
-    return 1;
-}
-
-/* 鼠标格 + 光标高度 (ClickCoords, 只读)。 */
-static int TC_MouseCellZ(int* mcx, int* mcy, int* lz)
-{
-    int mx, my;
-    Point2D pt;
-    CellStruct center;
-    CoordStruct crd;
-    void* tgtObj = 0;
-    unsigned char b5 = 0, b6 = 0;
-    center.X = center.Y = 0;
-    crd.X = crd.Y = crd.Z = 0;
-    if (!GtMouseGameXY(&mx, &my)) return 0;
-    pt.X = mx; pt.Y = my;
-    if (!SB_MapPoint(&pt)) return 0;   /* 栏带不进引擎查询 (无上界) */
-    if (!FN_CLICKCOORDS((void*)ADDR_DISPLAY, &pt, &center, &crd,
-                        &tgtObj, &b5, &b6))
-        return 0;
-    *mcx = (int)center.X; *mcy = (int)center.Y;
-    *lz = crd.Z;
-    if (*lz < -8192 || *lz > 8192) *lz = 0;
-    return OU_CellValid(*mcx, *mcy);
-}
-
+/* 角点高度 = 其框内格高度, 失败回落 fb。 */
 static int TC_CornerZ(int cx, int cy, int fb, int* zOut)
 {
-    if (TC_CellZ(cx, cy, zOut)) return 1;
+    if (OU_CellFloorZ(cx, cy, zOut)) return 1;
     *zOut = fb;
     return 1;
 }
@@ -212,19 +147,7 @@ static int TC_TypeID(void* p, char* out)
 }
 
 /* 指针是否在 TerrainType 数组内。 */
-static int TC_InTerrainSet(void* p)
-{
-    void** items;
-    int cnt, i;
-    if (!p) return 0;
-    cnt = *(int*)(ADDR_TERRAINTYPES + OFF_VEC_COUNT);
-    items = *(void***)(ADDR_TERRAINTYPES + OFF_VEC_ITEMS);
-    if (cnt <= 0 || cnt > 20000) return 0;
-    if (!items || !IsPlausiblePtr(items)) return 0;
-    for (i = 0; i < cnt; i++)
-        if (items[i] == p) return 1;
-    return 0;
-}
+static int TC_InTerrainSet(void* p) { return OU_InVec(ADDR_TERRAINTYPES, p); }
 
 /* 树对象取 Type 指针 (命中直取, 否则扫描)。 */
 static void* TC_TerrainTypeOf(void* t)
@@ -282,7 +205,7 @@ static int TC_FindTrees(int cx, int cy, void** trees, int* treeIDs)
             char tb[8];
             unsigned ti;
             int k, dup;
-            cell = TC_CellPtr(cx + dx, cy + dy);
+            cell = OU_CellPtr(cx + dx, cy + dy);
             if (!cell) continue;
             tr = FN_GETTERRAIN(cell, 0);
             if (!tr || !IsPlausiblePtr(tr)) continue;
@@ -510,7 +433,7 @@ void TreeChop_Draw(void* surf, int w, int h, int pitch)
     if (!OU_KeyDown(g_TcHk.vk)) return;
     if (!OU_ModsDown(g_TcHk.mods) || !OU_ExtraDown(&g_TcHk)) return;
     if (!g_Calibrated) return;
-    if (!TC_MouseCellZ(&ccx, &ccy, &clz)) return;
+    if (!OU_MouseCellZ(&ccx, &ccy, &clz)) return;
     lo = -(g_TcRange / 2);
     hi = lo + g_TcRange - 1;
     bx0 = ccx + lo; by0 = ccy + lo;

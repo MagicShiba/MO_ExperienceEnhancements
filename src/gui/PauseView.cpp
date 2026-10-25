@@ -306,7 +306,7 @@ typedef void (__attribute__((thiscall))* FnTacUpd)(void* self);
 
 /* 迷你循环的一拍: 15ms, 但一有输入就提前返回。
  * 不能用 Sleep(1): 定时器精度被 FrameCap / GameSpeed(>60) 提到 1ms 后,
- * Sleep(1) 就变成 1000Hz 空转 (粗粒度下才是 15.6ms, 以前靠这个凑拍)。 */
+ * Sleep(1) 就变成 1000Hz 空转。 */
 static void PV_IdleWait(void)
 {
     MsgWaitForMultipleObjects(0, NULL, FALSE, 15, QS_ALLINPUT);

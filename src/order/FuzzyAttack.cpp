@@ -39,7 +39,6 @@
 
 /* ---------------- 模糊攻击私有地址 (共享部分见 OrderUtil.h) ---------------- */
 
-
 /* CellClass::FindObjectOfType (0x47C4D0, ECX=格, 栈 abs+alt): 返回链头或空。 */
 typedef void* __attribute__((thiscall)) (*Fn_FindObjType)(void* cell, int abs, int alt);
 #define FN_FINDOBJTYPE ((Fn_FindObjType)(void*)0x47C4D0u)
@@ -80,44 +79,13 @@ static void FA_EnsureInit(void)
 
 /* ---------------- 小工具 (通用部分见 OrderUtil.h) ---------------- */
 
-/* 攻击者: 地面 + 飞机 (难。点的高速单位, 建筑除外)。 */
-static int FA_IsAttacker(void* p)
-{
-    int w = OU_WhatAmI(p);
-    return (w == ABS_UNIT || w == ABS_INFANTRY || w == ABS_AIRCRAFT) ? 1 : 0;
-}
-
-/* 可攻击的目标类型 (单位/步兵/飞机/建筑)。 */
-static int FA_IsTargetType(void* p)
-{
-    int w = OU_WhatAmI(p);
-    return (w == ABS_UNIT || w == ABS_INFANTRY ||
-            w == ABS_AIRCRAFT || w == ABS_BUILDING) ? 1 : 0;
-}
-
 /* 强制攻击: MegaMission(Attack, Target=敌对象, Dst=空, 直接下令 flag=0)。 */
 static int FA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
                          int tgtID, unsigned char tgtRtti,
                          void* unit, int uid, int idxOk)
 {
-    char ev[EVT_SIZE];
-    OU_EvClear(ev);
-    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
-            tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
-    ev[OFF_PLANFLAG] = 0;
-    return OT_Fire(ev, unit, uid, idxOk);
-}
-
-static void* FA_CellPtr(int cx, int cy)
-{
-    void** cells;
-    int maxc, idx;
-    if (!OU_CellValid(cx, cy)) return 0;
-    cells = *(void***)(ADDR_DISPLAY + OFF_MAP_CELLS);
-    maxc = *(int*)(ADDR_DISPLAY + OFF_MAP_MAXC);
-    idx = (cy << 9) + cx;
-    if (idx < 0 || idx >= maxc) return 0;
-    return cells[idx];
+    return OU_FireMega(houseIdx, srcID, srcRtti, MISSION_ATTACK,
+                       tgtID, tgtRtti, 0, 0, 0, 0, 0, unit, uid, idxOk);
 }
 
 /* ---------------- Owner 自校准 (敌我判定, 双单位确认) ---------------- */
@@ -171,7 +139,7 @@ static void FA_CollectChain(void* first, void* curHouse,
             void* oh;
             char tb[8];
             unsigned ti;
-            if (!FA_IsTargetType(o)) goto next;
+            if (!OU_IsTarget(o)) goto next;
             /* 敌我: Owner 非空、合理、非本家 (中立也算敌, 可强制攻击)。 */
             oh = *(void**)((char*)o + (unsigned)g_FaOwnerOff);
             if (!oh || !IsPlausiblePtr(oh) || oh == curHouse) goto next;
@@ -206,7 +174,7 @@ static int FA_FindEnemies(int cx, int cy, void* curHouse,
                 void* cell;
                 if (cheb != d) continue;
                 if (dx < lo || dx > hi || dy < lo || dy > hi) continue;
-                cell = FA_CellPtr(cx + dx, cy + dy);
+                cell = OU_CellPtr(cx + dx, cy + dy);
                 if (!cell) continue;
                 for (t = 0; t < 4; t++)
                 {
@@ -260,21 +228,16 @@ static void FA_Drain(void)
     while (g_FaPendCount > 0 && sent < FA_DRAIN_PER_POLL)
     {
         FAPend* e = &g_FaPend[0];
-        char srcB[8], tgtB[8];
-        unsigned i;
         int srcID, tgtID;
         unsigned char srcR, tgtR;
-        for (i = 0; i < 8; i++) srcB[i] = tgtB[i] = 0;
         /* 先验活 (纯读索引): 战死/目标已毁即丢弃, 不碰悬空指针 */
         if (!OU_PtrAlive(e->unit, e->uid, g_FaIdxOk)) { FA_ShiftDown(); continue; }
-        if (!FA_IsAttacker(e->unit)) { FA_ShiftDown(); continue; }
+        if (!OU_IsUnit(e->unit)) { FA_ShiftDown(); continue; }
         if (!OU_PtrAlive(e->foe, e->fid, g_FaIdxOk)) { FA_ShiftDown(); continue; }
         /* 发令前重验攻击能力 (目标移动/状态变化也只读复核, 不猜着下单) */
         if (!OU_CanAttack(e->unit, e->foe)) { FA_ShiftDown(); continue; }
-        if (!FN_TGT_OBJ(tgtB, e->foe)) { FA_ShiftDown(); continue; }
-        if (!FN_TGT_OBJ(srcB, e->unit)) { FA_ShiftDown(); continue; }
-        srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
-        tgtID = *(int*)(tgtB + 0); tgtR = (unsigned char)tgtB[4];
+        if ((tgtID = OU_ObjTgt(e->foe, &tgtR)) < 0) { FA_ShiftDown(); continue; }
+        if ((srcID = OU_ObjTgt(e->unit, &srcR)) < 0) { FA_ShiftDown(); continue; }
         if (!FA_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR,
                              e->unit, e->uid, g_FaIdxOk))
             return; /* 满: 下轮继续 */
@@ -312,7 +275,7 @@ static void FA_Preview(void)
     items = *(void***)ADDR_SELOBJ_ITEMS;
     if (selN <= 0 || !items || !IsPlausiblePtr(items)) { s_FaPrevN = 0; return; }
     for (i = 0; i < selN && nu < FA_UNIT_CAP; i++)
-        if (FA_IsAttacker(items[i])) s_pu[nu++] = items[i];
+        if (OU_IsUnit(items[i])) s_pu[nu++] = items[i];
     if (nu <= 0) { s_FaPrevN = 0; return; }
     if (!FA_CalOwner(s_pu[0], nu > 1 ? s_pu[1] : 0, cur))
     { s_FaPrevN = 0; return; }
@@ -366,20 +329,14 @@ static void FA_Press(void)
     for (i = 0; i < selN && nu < FA_UNIT_CAP; i++)
     {
         void* o = items[i];
-        if (FA_IsAttacker(o)) s_units[nu++] = o;
+        if (OU_IsUnit(o)) s_units[nu++] = o;
     }
     if (nu <= 0) return;
     /* Owner 自校准 (双确认; 失败直接放弃, 绝不误击友军)。 */
     if (!FA_CalOwner(s_units[0], nu > 1 ? s_units[1] : 0, cur)) return;
     if (!OU_MouseCell(&cx, &cy)) return;
     /* 快照单位 Fetch_ID (存活校验用; 选中单位必活, 此处 vcall 安全) */
-    for (i = 0; i < nu; i++)
-    {
-        char tb[8];
-        unsigned ti;
-        for (ti = 0; ti < 8; ti++) tb[ti] = 0;
-        s_uids[i] = FN_TGT_OBJ(tb, s_units[i]) ? *(int*)(tb + 0) : 0;
-    }
+    for (i = 0; i < nu; i++) s_uids[i] = OU_ObjId(s_units[i]);
     /* ID 索引自检 (fail-open): 首单位查不到则本轮跳过存活校验 */
     g_FaIdxOk = 0;
     {

@@ -95,23 +95,17 @@ static void Lang_GetSystemLocale(void)
 
 static void Lang_MakePath(const char* locale, char* path, int cap)
 {
-    unsigned i, n;
-    int len;
+    const char* dir = GtGameDir();
+    unsigned i;
     if (!path || cap <= 0) return;
     path[0] = 0;
-    if (!locale || !locale[0]) return;
-    if (!g_IniPath[0]) BuildPaths();
+    if (!locale || !locale[0] || !dir[0]) return;
 
-    len = lstrlenA(g_IniPath);
-    n = (len > 0) ? (unsigned)len : 0;
-    while (n > 0 && g_IniPath[n - 1] != '\\' && g_IniPath[n - 1] != '/') n--;
-    for (i = 0; i < n && i < (unsigned)cap - 1; i++) path[i] = g_IniPath[i];
-    path[i] = 0;
-    if (i > 0 && path[i - 1] != '\\' && path[i - 1] != '/' && i < (unsigned)cap - 1)
-        path[i++] = '\\';
-    i = AppendCStr(path, i, LANG_DIR_NAME "\\", cap);
-    i = AppendCStr(path, i, locale, cap);
-    AppendCStr(path, i, LANG_FILE_EXT, cap);
+    i = AppendCStr(path, 0, dir, (unsigned)cap);
+    i = AppendCh(path, i, '\\', (unsigned)cap);
+    i = AppendCStr(path, i, LANG_DIR_NAME "\\", (unsigned)cap);
+    i = AppendCStr(path, i, locale, (unsigned)cap);
+    AppendCStr(path, i, LANG_FILE_EXT, (unsigned)cap);
 }
 
 static int Lang_FileExists(const char* path)

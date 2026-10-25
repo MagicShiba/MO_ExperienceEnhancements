@@ -31,9 +31,13 @@ unsigned MemReadableBytes(const void* p, unsigned maxBytes);
 
 /* ---------------- 日志 ---------------- */
 extern HANDLE g_Log;
+extern char g_GameDir[MAX_PATH_LEN];   /* 游戏根目录, BuildPaths 填 */
 extern char g_IniPath[MAX_PATH_LEN];
 extern char g_LogPath[MAX_PATH_LEN];
 void BuildPaths(void);
+/* 游戏根目录 (无尾分隔符; 取不到 = 空串)。**拼根目录下的文件一律用它**,
+ * 不要自己 GetModuleFileNameA + 往回找分隔符。 */
+const char* GtGameDir(void);
 void GtEnsureLog(void);   /* 定义在 MOExperience.cpp; 幂等: 建路径+打开日志, 失败则 g_Log=NULL */
 void LogLine(const char* body);
 /* ---------------- 鼠标游戏坐标 (WWMouse 原始客户区坐标, 供 PatrolCircle 等输入模块用), 返回 1=有效 */
@@ -75,16 +79,15 @@ enum
     PF_VECGETDIM,   /* VecText 字宽度量钩累计 (每次一次度量) */
     PF_PLACEPREV,   /* 放置预览绘制钩 0x6D528A */
     PF_SHROUD,      /* 迷雾 DrawPixelEffects 入口钩 */
-    /* ---- 钩子频率普查已结束 (结论见 notes/性能.md: 全部 ≤14 次/帧, 无高频钩子陷阱),
-     * 那 14 个只计次的槽位连同 38 处 Perf_Hit 调用已删除。别再往事件型钩子里
-     * 加纯计次的埋点: 想要数值就给 Perf_Add 计时, 想查频次用临时开关。 ---- */
+    /* ---- 别再往事件型钩子里加纯计次的埋点: 想要数值就给 Perf_Add 计时,
+     * 想查频次用临时开关 ---- */
     /* SWPanel 内部细分 (找 200us 花在哪: 量宽 / 底板 / 文字) */
     PF_SWP_MEAS, PF_SWP_BG, PF_SWP_TXT,
     PF_H_PRINT, PF_H_SIMPLE,   /* VecText 的 Print / Simple_ 入口 (含被拦截的串) */
     PF_H_PRTO, PF_H_SMPO,      /* 上面两者里"放行给引擎原版"那部分 */
     PF_H_VB1, PF_H_VB2,        /* BlitBody: 入口→VecMeasure 完 / Measure→返回 */
     PF_H_CLAER,                /* 侧栏面整条抹黑 (Fm_ClearStripExceptRadar) */
-    /* ---- 第三轮: 调用时机账 (谁在每帧重复跑 / 谁在空转) ---- */
+    /* ---- 调用时机 (谁在每帧重复跑 / 谁在空转) ---- */
     PF_SB_SS, PF_SB_PWR, PF_SB_PIP, PF_SB_FM,   /* BlitSb 入口四段 (含与 prepare 重复的两段) */
     PF_D_SWS, PF_D_SO, PF_D_PC, PF_D_RP, PF_D_FA, PF_D_SA, PF_D_TC, PF_D_DP,
     PF_D_WR, PF_D_AG, PF_D_RADAR,               /* msgdraw 里 10 个 *_Draw + 雷达上屏 */
@@ -92,7 +95,7 @@ enum
     PF_VHIT, PF_VMISS,         /* VecGlyph 字形缓存 命中/未命中 (未命中 = 一次 GDI 光栅) */
     PF_LOCK,                   /* 全部 GtLock+GtUnlock 的 vtable 调用累计 */
     PF_SB2_SETUP, PF_SB2_FILL, PF_SB2_LBL,   /* 刻度条: 取面/布局 / 填充 / 档位文字 */
-    PF_SWS_BUILD, PF_SWS_BLIT,  /* 超武侧栏: 重建缓存 (节流 15 帧) / 每帧带 alpha 贴层 */
+    PF_SWS_BUILD, PF_SWS_BLIT,  /* 超武侧栏: 重建缓存 (帧门 + 墙钟门) / 每帧带 alpha 贴层 */
     PF_COUNT
 };
 long long Perf_Now(void);

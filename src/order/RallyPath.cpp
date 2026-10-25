@@ -52,17 +52,9 @@ extern int g_Calibrated;
 #define ADDR_PLANNING_MODE    0xAC4CF4u /* PlanningNodeClass::PlanningModeActive */
 
 /* 私有引擎入口 (只读 + 标准事件, 不直接改模拟状态)。 */
-typedef void* __attribute__((thiscall)) (*Fn_TargetFromCell)(void* tgt,
-                                                             const CellStruct* cell);
 typedef int __attribute__((thiscall)) (*Fn_IsUnitFactory)(void* self);
 
-#define FN_TGT_CELL   ((Fn_TargetFromCell)(void*)0x6E6B20u)
-typedef void* __attribute__((thiscall)) (*Fn_PlanCommitCtor)(void* ev,
-                                                            int houseIdx, int evtType);
-#define FN_PLANCOMMIT ((Fn_PlanCommitCtor)(void*)0x4C66C0u)
-
 /* ---------------- 私有常量 ---------------- */
-
 
 #define RP_TAB_CAP   128   /* 折线表上限 (静态数组) */
 #define RP_NODE_MAX  16    /* 单条折线段数上限 (ini MaxNodes 2~16) */
@@ -342,14 +334,13 @@ static void RP_EnsureInit(void)
 static RPPath* RP_NewPath(void* bld)
 {
     RPPath* p = RP_Find(bld);
-    char tb[8] = { 0 };
     if (p) return p;
     RP_EnsureInit();
     if (g_RpTabCount >= RP_TAB_CAP) return 0;
     p = &g_RpTab[g_RpTabCount++];
     p->bld = bld;
     p->vt = *(void**)bld;
-    p->id = FN_TGT_OBJ(tb, bld) ? *(int*)(tb + 0) : 0;
+    p->id = OU_ObjId(bld);
     p->n = 0;
     p->sx = -1;
     p->sy = -1;
@@ -574,22 +565,13 @@ extern "C" __declspec(dllexport) unsigned __cdecl RallyPath_ExitHook(void* regs)
 
 static int RP_FireNode(int houseIdx, void* unit, int uid, int idxOk, int cx, int cy)
 {
-    char ev[EVT_SIZE], srcB[8], dstB[8];
-    CellStruct cs;
-    unsigned i;
-    int srcID, dstID;
     unsigned char srcR, dstR;
-    OU_EvClear(ev);
-    for (i = 0; i < 8; i++) srcB[i] = dstB[i] = 0;
-    cs.X = (short)cx; cs.Y = (short)cy;
-    FN_TGT_CELL(dstB, &cs);
-    if (!FN_TGT_OBJ(srcB, unit)) return 0;
-    srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
-    dstID = *(int*)(dstB + 0); dstR = (unsigned char)dstB[4];
-    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcR, MISSION_MOVE,
-            0, 0, dstID, (unsigned)dstR, dstID, (unsigned)dstR);
-    ev[OFF_PLANFLAG] = 1;                 /* 规划点 */
-    return OT_Fire(ev, unit, uid, idxOk) ? 1 : 0;
+    int srcID = OU_ObjTgt(unit, &srcR);
+    int dstID = OU_CellTgt(cx, cy, &dstR);
+    if (srcID < 0) return 0;
+    return OU_FireMega(houseIdx, srcID, srcR, MISSION_MOVE,
+                       0, 0, dstID, dstR, dstID, dstR, 1,
+                       unit, uid, idxOk) ? 1 : 0;
 }
 
 static int RP_FireCommit(int houseIdx)

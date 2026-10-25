@@ -43,9 +43,6 @@
 #define LAND_ROCK 3
 #define PS_ABS_TERRAIN 36
 
-typedef void* __attribute__((thiscall)) (*Fn_PsTgtCell)(void* tgt, const CellStruct* cell);
-#define FN_PS_TGTCELL ((Fn_PsTgtCell)(void*)0x6E6B20u)
-
 #define EVT_PLACE 0xBu          /* EventType::Place */
 #define PS_OFF_EV_LOCX 0x13u    /* Place.Location.X (CellStruct, short) */
 #define PS_OFF_EV_LOCY 0x15u    /* Place.Location.Y (CellStruct, short) */
@@ -250,19 +247,10 @@ static int PS_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
                        int dstX, int dstY)
 {
     char ev[EVT_SIZE];
-    char dstB[8];
-    CellStruct cs;
-    unsigned i;
-    int dstID;
     unsigned char dstR;
-    for (i = 0; i < 8; i++) dstB[i] = 0;
-    cs.X = (short)dstX; cs.Y = (short)dstY;
-    FN_PS_TGTCELL(dstB, &cs);
-    dstID = *(int*)(dstB + 0); dstR = (unsigned char)dstB[4];
-    OU_EvClear(ev);
-    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
-            0, 0, dstID, (unsigned)dstR, 0, 0);
-    ev[OFF_PLANFLAG] = 0;
+    int dstID = OU_CellTgt(dstX, dstY, &dstR);
+    OU_MakeMega(ev, houseIdx, srcID, srcRtti, MISSION_MOVE,
+                0, 0, dstID, dstR, 0, 0, 0);
     return OU_Enqueue(ev);
 }
 

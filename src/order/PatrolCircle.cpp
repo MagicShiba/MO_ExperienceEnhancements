@@ -57,7 +57,6 @@
 
 #define OFF_TOK_LOOPN 0x90u   /* PlanningToken ClosedLoopNodeCount */
 
-typedef void* __attribute__((thiscall)) (*Fn_TargetFromCell)(void* tgt, const CellStruct* cell);
 /* MegaMission ctor (0x4C6860, ECX=ev111, 栈 0x28):
  * house, srcID, srcRTTI, mission, tgtID, tgtRtti, dstID, dstRtti, folID, folRtti */
 /* PlanConnect ctor (0x4C6780, ECX=ev111, ret 0x18):
@@ -66,13 +65,10 @@ typedef void* __attribute__((thiscall)) (*Fn_TargetFromCell)(void* tgt, const Ce
  * Target1(单位)@7(ID@7+RTTI@11), Target2(格)@12(ID@12+RTTI@16)。 */
 typedef void* __attribute__((thiscall)) (*Fn_PlanConnectCtor)(void* ev, int houseIdx, int evtType,
     int srcID, unsigned srcRttiW, int dstID, unsigned dstRttiW);
-typedef void* __attribute__((thiscall)) (*Fn_PlanCommitCtor)(void* ev, int houseIdx, int evtType);
 /* UI 关闭函数 0x639740 (fastcall ECX=单位, EDX=节点):
  * 故意不用 (只改本机模拟状态, 不广播, 联机必不同步)。
  * 关环一律走合环 Connect 事件 (原生对照, pev 实证)。 */
-#define FN_TGT_CELL   ((Fn_TargetFromCell)(void*)0x6E6B20u)
 #define FN_PLANCONNECT ((Fn_PlanConnectCtor)(void*)0x4C6780u)
-#define FN_PLANCOMMIT ((Fn_PlanCommitCtor)(void*)0x4C66C0u)
 
 /* ---------------- 配置 ---------------- */
 
@@ -142,14 +138,11 @@ static int PC_FireMega(int houseIdx, int srcID, unsigned char srcRtti,
                        int dstID, unsigned char dstRtti,
                        void* unit, int uid, int idxOk)
 {
-    char ev[EVT_SIZE];
-    OU_EvClear(ev);
     /* 原生对照 (pev 抓包): 每单位每节点各一 Mega, Follow=Dst 格
      * (Follow 空会导致关环语义缺失, 联机不同步的根因之一)。 */
-    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
-            0, 0, dstID, (unsigned)dstRtti, dstID, (unsigned)dstRtti);
-    ev[OFF_PLANFLAG] = 1;
-    return OT_Fire(ev, unit, uid, idxOk);
+    return OU_FireMega(houseIdx, srcID, srcRtti, MISSION_MOVE,
+                       0, 0, dstID, dstRtti, dstID, dstRtti, 1,
+                       unit, uid, idxOk);
 }
 
 static int PC_FireCommit(int houseIdx)
@@ -371,20 +364,13 @@ static int PC_Drain(void)
     while (g_PcPendCount > 0 && sent < PC_DRAIN_PER_POLL)
     {
         PCPend* e = &g_PcPend[0];
-        char srcB[8], dstB[8];
-        CellStruct cs;
         int srcID, dstID;
         unsigned char srcR, dstR;
-        unsigned i;
-        for (i = 0; i < 8; i++) srcB[i] = dstB[i] = 0;
-        cs.X = e->x; cs.Y = e->y;
-        FN_TGT_CELL(dstB, &cs);
-        dstID = *(int*)(dstB + 0); dstR = (unsigned char)dstB[4];
+        dstID = OU_CellTgt(e->x, e->y, &dstR);
         /* 先验活 (纯读索引): 战死即丢弃, 不碰悬空指针 */
         if (!OU_PtrAlive(e->unit, e->id, g_PcIdxOk)) { PC_ShiftDown(); continue; }
         if (!PC_IsFoot(e->unit)) { PC_ShiftDown(); continue; }
-        if (!FN_TGT_OBJ(srcB, e->unit)) { PC_ShiftDown(); continue; }
-        srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
+        if ((srcID = OU_ObjTgt(e->unit, &srcR)) < 0) { PC_ShiftDown(); continue; }
         if (e->conn == 1)
         {
             if (!PC_FireConnect(houseIdx, srcID, srcR, dstID, dstR,
@@ -583,12 +569,9 @@ static void PC_TriggerAt(int ax, int ay, int bx, int by)
     g_PcCloseCount = 0;
     for (i = 0; i < nu && i < PC_CLOSE_CAP; i++)
     {
-        char tb[8];
-        unsigned ti;
         g_PcCloseUnits[i] = s_units[i];
         /* 快照 Fetch_ID (存活校验用; 选中单位必活, 此处 vcall 安全) */
-        for (ti = 0; ti < 8; ti++) tb[ti] = 0;
-        g_PcCloseIDs[i] = FN_TGT_OBJ(tb, s_units[i]) ? *(int*)(tb + 0) : 0;
+        g_PcCloseIDs[i] = OU_ObjId(s_units[i]);
     }
     g_PcCloseCount = (nu < PC_CLOSE_CAP) ? nu : PC_CLOSE_CAP;
     /* ID 索引自检: 已知存活的首单位必须能查到, 否则本轮跳过存活校验

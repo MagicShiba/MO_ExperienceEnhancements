@@ -22,7 +22,6 @@
 static int s_Init = 0;
 static int s_Show = 0;                 /* [BottomBar] ShotEnable */
 static int s_BaseOk = 0;
-static char s_Dir[MAX_PATH_LEN];       /* [BottomBar] ShotDir */
 static char s_Base[MAX_PATH_LEN];      /* 输出目录全路径 */
 
 static int s_Hov = 0;
@@ -32,39 +31,17 @@ static int s_Flash = 0;                /* 成功反馈倒计时 */
 
 /* ---------------- 路径 ---------------- */
 
-/* 去掉 INI 值里手写的 ';' 注释与尾空格。 */
-static void Shot_TrimIniValue(char* s)
-{
-    int i;
-    for (i = 0; s[i]; i++)
-        if (s[i] == ';') { s[i] = 0; break; }
-    while (i > 0 && (s[i - 1] == ' ' || s[i - 1] == '\t')) s[--i] = 0;
-}
-
-/* 输出目录 = 游戏目录 \ ShotDir; 空 = 游戏目录本身, 含盘符或前导 '\' = 绝对路径。 */
+/* 输出目录 = <游戏目录>\Screenshots —— 就是游戏自带截图那个文件夹, 不开放配置。 */
 static void Shot_BuildTarget(void)
 {
-    char exe[MAX_PATH_LEN];
-    DWORD n, i;
+    const char* dir;
     unsigned p;
     if (s_BaseOk) return;
     s_BaseOk = 1;
-    s_Base[0] = 0;
-    n = GetModuleFileNameA(NULL, exe, MAX_PATH_LEN);
-    if (n == 0 || n >= MAX_PATH_LEN) return;
-    i = n;
-    while (i > 0 && exe[i] != '\\' && exe[i] != '/') i--;
-    exe[i] = 0;
-    if (s_Dir[0] == 0)
-        AppendCStr(s_Base, 0, exe, MAX_PATH_LEN);
-    else if (s_Dir[0] == '\\' || s_Dir[1] == ':')
-        AppendCStr(s_Base, 0, s_Dir, MAX_PATH_LEN);
-    else
-    {
-        p = AppendCStr(s_Base, 0, exe, MAX_PATH_LEN);
-        p = AppendCStr(s_Base, p, "\\", MAX_PATH_LEN);
-        AppendCStr(s_Base, p, s_Dir, MAX_PATH_LEN);
-    }
+    dir = GtGameDir();
+    if (!dir[0]) return;
+    p = AppendCStr(s_Base, 0, dir, MAX_PATH_LEN);
+    AppendCStr(s_Base, p, "\\Screenshots", MAX_PATH_LEN);
     CreateDirectoryA(s_Base, NULL);   /* 已存在返回 ERROR_ALREADY_EXISTS, 忽略 */
 }
 
@@ -235,13 +212,9 @@ void Shot_EnsureInit(void)
     BuildPaths();
     GtEnsureLog();
     s_Show = GetPrivateProfileIntA(SHOT_SECTION, "ShotEnable", 0, g_IniPath) ? 1 : 0;
-    GetPrivateProfileStringA(SHOT_SECTION, "ShotDir", "Screenshots",
-                             s_Dir, (DWORD)sizeof(s_Dir), g_IniPath);
-    Shot_TrimIniValue(s_Dir);
     p = AppendCStr(buf, 0, "shot: btn=", sizeof(buf));
     p += UtoA((unsigned)s_Show, buf + p);
-    p = AppendCStr(buf, p, " dir=", sizeof(buf));
-    AppendCStr(buf, p, s_Dir[0] ? s_Dir : "(game)", sizeof(buf));
+    p = AppendCStr(buf, p, " dir=Screenshots", sizeof(buf));
     LogLine(buf);
 }
 
@@ -284,9 +257,8 @@ void Shot_Poll(void)
     down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
     edge = (down && !s_LbPrev) ? 1 : 0;
     s_LbPrev = down;
-    /* 未开局 (大厅/载入屏) 不截: 那时渲染面里没有地图。 */
-    if (edge && s_Hov && *(volatile unsigned char*)(size_t)ADDR_SCEN_STARTED)
-        s_Req = 1;
+    /* 只在 prepare / 侧栏呈现里跑: 大厅与载入屏无战术渲染 ⇒ 无按钮也无点击。 */
+    if (edge && s_Hov) s_Req = 1;
 }
 
 void Shot_CapturePending(void)

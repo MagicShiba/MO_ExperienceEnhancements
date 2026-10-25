@@ -62,19 +62,16 @@ static int      g_Len = 0;
 
 /* ---------------- 文本 ---------------- */
 
-/* 游戏根目录 (= g_IniPath 所在目录) 下是否有该文件。 */
+/* 游戏根目录下是否有该文件。 */
 static int PN_FileAtRoot(const char* name)
 {
     char path[MAX_PATH_LEN];
-    int i, n = lstrlenA(g_IniPath);
+    const char* dir = GtGameDir();
     DWORD a;
-
-    while (n > 0 && g_IniPath[n - 1] != '\\' && g_IniPath[n - 1] != '/') n--;
-    if (n <= 0 || n + lstrlenA(name) >= MAX_PATH_LEN) return 0;
-    for (i = 0; i < n; i++) path[i] = g_IniPath[i];
-    path[n] = 0;
-    AppendCStr(path, (unsigned)n, name, MAX_PATH_LEN);
-
+    unsigned n;
+    if (!dir[0]) return 0;
+    n = AppendCStr(path, 0, dir, MAX_PATH_LEN);
+    AppendCStr(path, n, name, MAX_PATH_LEN);
     a = GetFileAttributesA(path);
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }

@@ -20,8 +20,6 @@
 #include "OrderUtil.h"
 #include "MegaListCap.h"
 
-#define ML_SECTION "Features"
-
 #define ML_N 0x1000u           /* 4096 (掩码 0xFFF, 与 WaypointCap 上限对齐) */
 #define ML_MASK 0xFFFu
 

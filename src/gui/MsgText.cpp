@@ -1292,7 +1292,7 @@ static int DrawBox(void* surf, BoxSpec* B, int bitLineH, int screenW,
     rect.Width = maxW + 6;
     rect.Height = totalRows * adv + 4;
     board.R = 0; board.G = 0; board.B = 0;
-    /* 底板透明度叠渐隐 (fade=100 与原来一致); 0 不画底板
+    /* 底板透明度叠渐隐 (fade=100 即引擎原版值); 0 不画底板
      * (战役框同时省阴影; 提示框阴影照画, 见下)。
      * 整块只在悬停/展开时铺 (Phobos hover 态); 平时逐行包裹已揭示文本。 */
     {

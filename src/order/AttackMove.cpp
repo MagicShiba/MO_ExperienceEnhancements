@@ -27,9 +27,6 @@
 #define AM_SECTION "Features"
 #define MISSION_ATTACKMOVE 29   /* Mission::AttackMove (YRpp GeneralDefinitions.h) */
 
-typedef void* __attribute__((thiscall)) (*Fn_TargetFromCell)(void* tgt, const CellStruct* cell);
-#define FN_TGT_CELL ((Fn_TargetFromCell)(void*)0x6E6B20u)
-
 #define AM_UNIT_CAP 1024   /* 快照单位上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */
 #define AM_PEND_CAP 1024   /* 待发上限 (同上) */
 #define AM_DRAIN_PER_POLL 128
@@ -59,23 +56,14 @@ static void AM_EnsureInit(void)
     if (!g_AmEnable) LogLine("attackmove: OFF");
 }
 
-static int AM_IsAttacker(void* p)
-{
-    int w = OU_WhatAmI(p);
-    return (w == ABS_UNIT || w == ABS_INFANTRY || w == ABS_AIRCRAFT) ? 1 : 0;
-}
-
 static int AM_Fire(int houseIdx, int srcID, unsigned char srcRtti,
                    int tgtID, unsigned char tgtRtti,
                    int dstID, unsigned char dstRtti, int plan,
                    void* unit, int uid, int idxOk)
 {
-    char ev[EVT_SIZE];
-    OU_EvClear(ev);
-    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACKMOVE,
-            tgtID, (unsigned)tgtRtti, dstID, (unsigned)dstRtti, 0, 0);
-    ev[OFF_PLANFLAG] = (char)(plan ? 1 : 0);
-    return OT_Fire(ev, unit, uid, idxOk);
+    return OU_FireMega(houseIdx, srcID, srcRtti, MISSION_ATTACKMOVE,
+                       tgtID, tgtRtti, dstID, dstRtti, 0, 0, plan,
+                       unit, uid, idxOk);
 }
 
 static void AM_ShiftDown(void)
@@ -96,23 +84,17 @@ static void AM_Drain(void)
     while (g_AmPendCount > 0 && sent < AM_DRAIN_PER_POLL)
     {
         AMPend* e = &g_AmPend[0];
-        char srcB[8], tgtB[8], dstB[8];
-        CellStruct cs;
-        unsigned i;
         int srcID, tgtID = 0, dstID;
         unsigned char srcR, tgtR = 0, dstR;
-        for (i = 0; i < 8; i++) srcB[i] = tgtB[i] = dstB[i] = 0;
         if (!OU_PtrAlive(e->unit, e->uid, g_AmIdxOk)) { AM_ShiftDown(); continue; }
-        if (!AM_IsAttacker(e->unit)) { AM_ShiftDown(); continue; }
-        if (!FN_TGT_OBJ(srcB, e->unit)) { AM_ShiftDown(); continue; }
-        srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
-        cs.X = e->x; cs.Y = e->y;
-        FN_TGT_CELL(dstB, &cs);
-        dstID = *(int*)(dstB + 0); dstR = (unsigned char)dstB[4];
+        if (!OU_IsUnit(e->unit)) { AM_ShiftDown(); continue; }
+        if ((srcID = OU_ObjTgt(e->unit, &srcR)) < 0) { AM_ShiftDown(); continue; }
+        dstID = OU_CellTgt(e->x, e->y, &dstR);
         /* Target object died -> fall back to pure cell AttackMove. */
-        if (e->tgt && OU_PtrAlive(e->tgt, e->tid, g_AmIdxOk) && FN_TGT_OBJ(tgtB, e->tgt))
+        if (e->tgt && OU_PtrAlive(e->tgt, e->tid, g_AmIdxOk))
         {
-            tgtID = *(int*)(tgtB + 0); tgtR = (unsigned char)tgtB[4];
+            tgtID = OU_ObjTgt(e->tgt, &tgtR);
+            if (tgtID < 0) tgtID = tgtR = 0;
         }
         {
             int plan = OU_KeyDown('Z') ? 1 : 0;
@@ -144,12 +126,9 @@ static void AM_Press(void)
     for (i = 0; i < selN && nu < AM_UNIT_CAP; i++)
     {
         void* o = items[i];
-        char tb[8];
-        unsigned ti;
-        if (!AM_IsAttacker(o)) continue;
-        for (ti = 0; ti < 8; ti++) tb[ti] = 0;
+        if (!OU_IsUnit(o)) continue;
         s_units[nu] = o;
-        s_uids[nu] = FN_TGT_OBJ(tb, o) ? *(int*)(tb + 0) : 0;
+        s_uids[nu] = OU_ObjId(o);
         nu++;
     }
     if (nu <= 0) return;

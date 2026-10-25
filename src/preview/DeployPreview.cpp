@@ -37,10 +37,6 @@
 
 /* ---------------- 私有地址 (共享部分见 OrderUtil.h) ---------------- */
 
-#define DP_ADDR_TYPARRAY 0xA8EB00u
-#define DP_OFF_VEC_ITEMS 4u
-#define DP_OFF_VEC_COUNT 16u
-
 /* 反汇编实证偏移: UnitType+0x404 = DeploysInto (TryToDeploy 两处独立同式)。
  * 地基宽/高经 0x45EC90/0x45ECA0 取得 (后者栈传 0=不含 bib)。 */
 #define DP_OFF_DEPLOYSINTO 0x404u
@@ -51,13 +47,10 @@ typedef short (__attribute__((thiscall)) *Fn_FoundationH)(void* bldType, int inc
 #define DP_FN_FH ((Fn_FoundationH)(void*)0x45ECA0u)
 
 /* 标准移动/展开事件构造 (与 SmartOrder/手点同形, 联机安全) */
-typedef void* __attribute__((thiscall)) (*Fn_DPTgtCell)(void* tgt, const CellStruct* cell);
 typedef void* __attribute__((thiscall)) (*Fn_DPDeployCtor)(void* ev, int houseIdx,
     int evtType, int id, unsigned rttiW);
-#define FN_DP_TGTCELL ((Fn_DPTgtCell)(void*)0x6E6B20u)
 #define FN_DP_DEPLOY ((Fn_DPDeployCtor)(void*)0x4C65E0u)
 #define EVT_DP_DEPLOY 0x9
-
 
 /* ---------------- 配置 ---------------- */
 
@@ -96,29 +89,7 @@ static void DP_EnsureInit(void)
  * 0x739460/0x73931C 两处独立同式)。只解引用选中数组活对象与静态类型
  * 数组 (InTypeSet 只比指针), 无扫描、无 pin, 又快又不会崩。 */
 
-static int DP_TypeCount(void*** itemsOut)
-{
-    void** items;
-    int cnt;
-    *itemsOut = 0;
-    cnt = *(int*)(DP_ADDR_TYPARRAY + DP_OFF_VEC_COUNT);
-    items = *(void***)(DP_ADDR_TYPARRAY + DP_OFF_VEC_ITEMS);
-    if (cnt <= 0 || cnt > 20000) return 0;
-    if (!items || !IsPlausiblePtr(items)) return 0;
-    *itemsOut = items;
-    return cnt;
-}
-
-static int DP_InTypeSet(void* p)
-{
-    void** items = 0;
-    int cnt, i;
-    cnt = DP_TypeCount(&items);
-    if (!cnt) return 0;
-    for (i = 0; i < cnt; i++)
-        if (items[i] == p) return 1;
-    return 0;
-}
+static int DP_InTypeSet(void* p) { return OU_InVec(ADDR_TYPARRAY, p); }
 
 #define DP_OFF_UNIT_TYPE 0x6C4u
 
@@ -226,62 +197,10 @@ typedef int __attribute__((thiscall)) (*Fn_DPC2C)(void* tac,
 #define FN_DP_C2C ((Fn_DPC2C)(void*)0x6D2140u)
 #define DP_TAC_INSTANCE 0x887324u
 
-/* 格子地面高度 (lep, 只读): CellClass::GetFloorHeight (0x47B3A0,
- * thiscall 传 Point2D* 单指针 + ret 4, 与按值 8 字节严格区分)。
- * 每角取其框内格高度, 无效格回落光标高度。 */
-
-typedef int __attribute__((thiscall)) (*Fn_DPFloorH)(void* cell, const Point2D* p);
-#define FN_DP_FLOORH ((Fn_DPFloorH)(void*)0x47B3A0u)
-
-static int DP_CellZ(int cx, int cy, int* zOut)
-{
-    void** cells;
-    int maxc, idx;
-    void* cell;
-    Point2D zero;
-    int z;
-    if (cx < 0 || cy < 0 || cx >= 512 || cy >= 512) return 0;
-    cells = *(void***)(ADDR_DISPLAY + OFF_MAP_CELLS);
-    maxc = *(int*)(ADDR_DISPLAY + OFF_MAP_MAXC);
-    if (!cells || !IsPlausiblePtr(cells) || maxc <= 0 || maxc > 512 * 512) return 0;
-    idx = (cy << 9) + cx;
-    if (idx < 0 || idx >= maxc) return 0;
-    cell = cells[idx];
-    if (!cell || !IsPlausiblePtr(cell)) return 0;
-    zero.X = 0; zero.Y = 0;
-    z = FN_DP_FLOORH(cell, &zero);
-    if (z < -8192 || z > 8192) return 0;
-    *zOut = z;
-    return 1;
-}
-
-/* 鼠标格 + 光标地面高度 (ProcessClickCoords 同 OU_MouseCell 入口, 只读;
- * 高度作每角取高失败时的回落)。 */
-static int DP_MouseCellZ(int* mcx, int* mcy, int* lz)
-{
-    int mx, my;
-    Point2D pt;
-    CellStruct center;
-    CoordStruct crd;
-    void* tgtObj = 0;
-    unsigned char b5 = 0, b6 = 0;
-    center.X = center.Y = 0;
-    crd.X = crd.Y = crd.Z = 0;
-    if (!GtMouseGameXY(&mx, &my)) return 0;
-    pt.X = mx; pt.Y = my;
-    if (!SB_MapPoint(&pt)) return 0;   /* 栏带不进引擎查询 (无上界) */
-    if (!FN_CLICKCOORDS((void*)ADDR_DISPLAY, &pt, &center, &crd, &tgtObj, &b5, &b6))
-        return 0;
-    *mcx = (int)center.X; *mcy = (int)center.Y;
-    *lz = crd.Z;
-    if (*lz < -8192 || *lz > 8192) *lz = 0;
-    return OU_CellValid(*mcx, *mcy);
-}
-
-/* 角点高度 = 其框内格高度, 失败回落 fb (光标高度)。 */
+/* 角点高度 = 其框内格高度 (OU_CellFloorZ), 失败回落 fb (光标地面高度)。 */
 static void DP_CornerZ(int cx, int cy, int fb, int* zOut)
 {
-    if (!DP_CellZ(cx, cy, zOut)) *zOut = fb;
+    if (!OU_CellFloorZ(cx, cy, zOut)) *zOut = fb;
 }
 
 /* 任意 lep 点 → 渲染面坐标 (不折界面缩放; 缩放档虚影自己缩位图用)。 */
@@ -381,12 +300,8 @@ static int DP_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
                        int dstID, unsigned char dstRtti,
                        void* unit, int uid, int idxOk)
 {
-    char ev[EVT_SIZE];
-    OU_EvClear(ev);
-    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
-            0, 0, dstID, (unsigned)dstRtti, 0, 0);
-    ev[OFF_PLANFLAG] = 0;
-    return OT_Fire(ev, unit, uid, idxOk);
+    return OU_FireMega(houseIdx, srcID, srcRtti, MISSION_MOVE,
+                       0, 0, dstID, dstRtti, 0, 0, 0, unit, uid, idxOk);
 }
 
 /* 展开令: EventType 0x9 (Deploy), Whom=该车 (与手按 D 同形, ctor 0x4C65E0)。 */
@@ -743,11 +658,8 @@ static int DP_TryMoveHead(void)
 {
     void* cur;
     int houseIdx;
-    char srcB[8], dstB[8];
-    CellStruct cs;
     int srcID, dstID;
     unsigned char srcR, dstR;
-    unsigned i;
     DPMvE* e;
     if (s_DpMvN <= 0) return 1;
     e = &s_DpMv[0];
@@ -755,16 +667,10 @@ static int DP_TryMoveHead(void)
     if (!cur || cur != s_DpHouse) { s_DpMvN = 0; return 1; }
     houseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
     if (houseIdx != s_DpHouseIdx) { s_DpMvN = 0; return 1; }
-    for (i = 0; i < 8; i++) srcB[i] = dstB[i] = 0;
-    cs.X = e->dx; cs.Y = e->dy;
-    FN_DP_TGTCELL(dstB, &cs);
-    dstID = *(int*)(dstB + 0); dstR = (unsigned char)dstB[4];
+    dstID = OU_CellTgt(e->dx, e->dy, &dstR);
     if (!OU_PtrAlive(e->unit, e->id, s_DpIdxOk)) goto drop;
-    if (OU_WhatAmI(e->unit) != ABS_UNIT &&
-        OU_WhatAmI(e->unit) != ABS_AIRCRAFT &&
-        OU_WhatAmI(e->unit) != ABS_INFANTRY) goto drop;
-    if (!FN_TGT_OBJ(srcB, e->unit)) goto drop;
-    srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
+    if (!OU_IsUnit(e->unit)) goto drop;
+    if ((srcID = OU_ObjTgt(e->unit, &srcR)) < 0) goto drop;
     if (!DP_FireMove(houseIdx, srcID, srcR, dstID, dstR,
                       e->unit, e->id, s_DpIdxOk))
         return 0; /* OutList 满: 下轮继续 */
@@ -1194,7 +1100,7 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
     if (!g_Calibrated) return;
     if (!surf || !IsPlausiblePtr(surf)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;
-    if (!DP_MouseCellZ(&mcx, &mcy, &mlz)) return;   /* 逻辑格+光标地面高度 */
+    if (!OU_MouseCellZ(&mcx, &mcy, &mlz)) return;   /* 逻辑格+光标地面高度 */
     if (!DP_FootprintCached(&fw, &fh)) return;
     /* 基点 = 光标格 + 引擎偏移 (大地基 -1,-1; 小地基 0) */
     if (fw > 2 || fh > 2) { bx = mcx - 1; by = mcy - 1; }

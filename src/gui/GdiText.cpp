@@ -110,6 +110,7 @@ extern "C" void* memmove(void* dst, const void* src, unsigned n)
 /* ---------------- 日志 ---------------- */
 
 HANDLE g_Log = NULL;
+char   g_GameDir[MAX_PATH_LEN];
 char   g_IniPath[MAX_PATH_LEN];
 char   g_LogPath[MAX_PATH_LEN];
 int    g_LogDetail = 0;
@@ -126,10 +127,19 @@ void BuildPaths(void)
     while (i > 0 && exe[i] != '\\' && exe[i] != '/') i--;
     exe[i] = 0;
 
+    AppendCStr(g_GameDir, 0, exe, MAX_PATH_LEN);   /* 根目录: 各模块拼路径都用它 */
     k = AppendCStr(g_LogPath, 0, exe, MAX_PATH_LEN);
     AppendCStr(g_LogPath, k, "\\MOExperience.log", MAX_PATH_LEN);
     k = AppendCStr(g_IniPath, 0, exe, MAX_PATH_LEN);
     AppendCStr(g_IniPath, k, "\\MOExperience.ini", MAX_PATH_LEN);
+}
+
+/* 游戏根目录 (exe 所在处, 无尾分隔符; 取不到 = 空串)。首次调用自动建路径。 */
+const char* GtGameDir(void)
+{
+    static int built = 0;
+    if (!built) { built = 1; BuildPaths(); }
+    return g_GameDir;
 }
 
 /* ---------------- 游戏窗口与鼠标坐标 ----------------
@@ -1182,15 +1192,15 @@ int RenderLine(const wchar_t* text, int len)
     int fit, keyLen = len;
     if (!g_G->dc || len <= 0) return 0;
     /* 命中优先: 缓存里已有本串的像素, 连 CharsFit 那次 GDI 度量都省掉
-     * (刻度条档位字/超武面板行都是同串反复画, 原来每帧 4 次 Extent 调用)。
+     * (刻度条档位字/超武面板行都是同串反复画, 每帧会量 4 次)。
      * 键用**原始 len** (限宽只影响画多宽, 不影响这是哪一串)。 */
     if (RowCE_Get(text, keyLen, &e))
     {
         RowCE_Blit(e);
         return e->w;
     }
-    /* 精确限宽: 按实际字形 fit DIB (之前 len*24 粗估, 16px 下只画 42 字,
-     * 聊天长文尾部直接被砍还留黑盒; CharsFit 同 dc 同字体, 精确无浪费) */
+    /* 精确限宽: 按实际字形 fit DIB (粗估会砍掉长文尾部还留黑盒;
+     * CharsFit 同 dc 同字体, 精确无浪费)。 */
     fit = CharsFit(text, len, DIB_W - 8);
     if (fit < 0) fit = 0;
     if (fit < len) len = fit;

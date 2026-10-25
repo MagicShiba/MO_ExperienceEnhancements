@@ -49,7 +49,6 @@
 #define ARR_ITEMS(base) (*(void***)((base) + 4u))
 #define ARR_COUNT(base) (*(int*)((base) + 16u))
 
-
 #define VT_GETMISSION (0x184u / 4u)
 
 /* MISSION_ATTACK 已在 OrderUtil.h 定义; 这里只补闲置判定用到的三个。 */
@@ -110,12 +109,6 @@ static void AG_EnsureInit(void)
 }
 
 /* ---------------- 小工具 ---------------- */
-
-static int AG_IsAttacker(void* p)
-{
-    int w = OU_WhatAmI(p);
-    return (w == ABS_UNIT || w == ABS_INFANTRY || w == ABS_AIRCRAFT) ? 1 : 0;
-}
 
 /* 对象 Fetch_ID (身份; 失败回 0)。rttiOut 透出 RTTI 字节 (可空)。 */
 static int AG_FetchId(void* p, unsigned char* rttiOut)
@@ -283,7 +276,7 @@ static void AG_ToggleSelect(void)
         void* o = items[i];
         int uid;
         if (!o || !IsPlausiblePtr(o)) continue;
-        if (!AG_IsAttacker(o)) continue;
+        if (!OU_IsUnit(o)) continue;
         if (*(void**)((char*)o + OFF_OWNER) != cur) continue;   /* 只认本家 */
         uid = AG_FetchId(o, 0);
         if (uid <= 0) continue;
@@ -413,12 +406,9 @@ static int AG_Fire(int houseIdx, int srcID, unsigned char srcRtti, int mission,
                    int dstID, unsigned char dstRtti,
                    void* unit, int uid, int idxOk)
 {
-    char ev[EVT_SIZE];
-    OU_EvClear(ev);
-    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, mission,
-            tgtID, (unsigned)tgtRtti, dstID, (unsigned)dstRtti, 0, 0);
-    ev[OFF_PLANFLAG] = 0;
-    return OT_Fire(ev, unit, uid, idxOk);
+    return OU_FireMega(houseIdx, srcID, srcRtti, mission,
+                       tgtID, tgtRtti, dstID, dstRtti, 0, 0, 0,
+                       unit, uid, idxOk);
 }
 
 static void AG_ShiftDown(void)
@@ -440,7 +430,7 @@ static void AG_Drain(void)
         int srcID, tgtID, atk;
         unsigned char srcR = 0, tgtR = 0;
         if (!AG_Alive(e->unit, e->uid)) { AG_ShiftDown(); continue; }
-        if (!AG_IsAttacker(e->unit)) { AG_ShiftDown(); continue; }
+        if (!OU_IsUnit(e->unit)) { AG_ShiftDown(); continue; }
         if (!OU_PtrAlive(e->foe, e->fid, s_AgIdxOk)) { AG_ShiftDown(); continue; }
         /* 发令前重算订单 (只读光标复核): 状态变了 (打不着/改占领) 就丢, 不猜着下单。 */
         if (AG_UnitMission(e->unit, e->foe) != e->mission)

@@ -15,10 +15,6 @@
 
 /* ---------------- 私有地址 (共享部分见 OrderUtil.h) ---------------- */
 
-#define WR_TYPARRAY 0xA8EB00u
-#define WR_OFF_VEC_ITEMS 4u
-#define WR_OFF_VEC_COUNT 16u
-
 #define WR_OFF_T_UNIT 0x6C4u      /* 飞行单位与单位同偏移 */
 #define WR_OFF_T_INFANTRY 0x6C0u
 
@@ -56,29 +52,7 @@ static void WR_EnsureInit(void)
 
 /* ---------------- 类型取得 (DeployPreview 同式) ---------------- */
 
-static int WR_TypeCount(void*** itemsOut)
-{
-    void** items;
-    int cnt;
-    *itemsOut = 0;
-    cnt = *(int*)(WR_TYPARRAY + WR_OFF_VEC_COUNT);
-    items = *(void***)(WR_TYPARRAY + WR_OFF_VEC_ITEMS);
-    if (cnt <= 0 || cnt > 20000) return 0;
-    if (!items || !IsPlausiblePtr(items)) return 0;
-    *itemsOut = items;
-    return cnt;
-}
-
-static int WR_InTypeSet(void* p)
-{
-    void** items = 0;
-    int cnt, i;
-    cnt = WR_TypeCount(&items);
-    if (!cnt) return 0;
-    for (i = 0; i < cnt; i++)
-        if (items[i] == p) return 1;
-    return 0;
-}
+static int WR_InTypeSet(void* p) { return OU_InVec(ADDR_TYPARRAY, p); }
 
 static void* WR_TypeOf(void* u, int w)
 {

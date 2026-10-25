@@ -46,7 +46,6 @@
 
 /* ---------------- 私有地址 (共享部分见 OrderUtil.h) ---------------- */
 
-
 typedef void* __attribute__((thiscall)) (*Fn_FindObjType)(void* cell, int abs, int alt);
 #define FN_FINDOBJTYPE ((Fn_FindObjType)(void*)0x47C4D0u)
 
@@ -142,24 +141,7 @@ static int SA_DirtyHeld(void)
 
 /* ---------------- 决策 ---------------- */
 
-static int SA_IsAttacker(void* p)
-{
-    int w = OU_WhatAmI(p);
-    return (w == ABS_UNIT || w == ABS_INFANTRY || w == ABS_AIRCRAFT) ? 1 : 0;
-}
-
-static int SA_IsTargetType(void* p)
-{
-    int w = OU_WhatAmI(p);
-    return (w == ABS_UNIT || w == ABS_INFANTRY ||
-            w == ABS_AIRCRAFT || w == ABS_BUILDING) ? 1 : 0;
-}
-
 /* ---------------- 类型自校准 (SmartOrder 同式, 工程师判定用) ---------------- */
-
-#define SA_TYPARRAY 0xA8EB00u
-#define SA_OFF_VEC_ITEMS 4u
-#define SA_OFF_VEC_COUNT 16u
 
 static int g_SaTypeOff[3] = { -1, -1, -1 }; /* 0=Unit 1=Aircraft 2=Infantry */
 static int g_SaIdOff = -1;
@@ -215,29 +197,9 @@ static int SA_TypeID(void* p, char* out)
     return 0;
 }
 
-static int SA_TypeCount(void*** itemsOut)
-{
-    void** items;
-    int cnt;
-    *itemsOut = 0;
-    cnt = *(int*)(SA_TYPARRAY + SA_OFF_VEC_COUNT);
-    items = *(void***)(SA_TYPARRAY + SA_OFF_VEC_ITEMS);
-    if (cnt <= 0 || cnt > 20000) return 0;
-    if (!items || !IsPlausiblePtr(items)) return 0;
-    *itemsOut = items;
-    return cnt;
-}
+static int SA_TypeCount(void*** o) { return OU_VecItems(ADDR_TYPARRAY, o); }
 
-static int SA_InTypeSet(void* p)
-{
-    void** items = 0;
-    int cnt, i;
-    cnt = SA_TypeCount(&items);
-    if (!cnt) return 0;
-    for (i = 0; i < cnt; i++)
-        if (items[i] == p) return 1;
-    return 0;
-}
+static int SA_InTypeSet(void* p) { return OU_InVec(ADDR_TYPARRAY, p); }
 
 static void* SA_TypeOf(void* u, int w)
 {
@@ -344,7 +306,7 @@ static int SA_UnitMission(void* u, void* t, int* actOut)
 {
     int act, ms;
     if (actOut) *actOut = -1;
-    if (!SA_IsAttacker(u) || !SA_IsTargetType(t)) return -1;
+    if (!OU_IsUnit(u) || !OU_IsTarget(t)) return -1;
     act = OU_MouseOverObjectNative(u, t);
     if (actOut) *actOut = act;
     if (act < 0) return -1;
@@ -401,26 +363,20 @@ static int SA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
                          int tgtID, unsigned char tgtRtti,
                          void* unit, int uid, int idxOk)
 {
-    char ev[EVT_SIZE];
-    OU_EvClear(ev);
-    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
-            tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
     /* 按住 Z = 路径点(排队, 按序追加不覆盖); 不按 Z 直接下令 (与手点同形)。 */
-    ev[OFF_PLANFLAG] = OU_KeyDown('Z') ? 1 : 0;
-    return OT_Fire(ev, unit, uid, idxOk);
+    return OU_FireMega(houseIdx, srcID, srcRtti, MISSION_ATTACK,
+                       tgtID, tgtRtti, 0, 0, 0, 0, OU_KeyDown('Z') ? 1 : 0,
+                       unit, uid, idxOk);
 }
 
 static int SA_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
                        int dstID, unsigned char dstRtti, int mission,
                        void* unit, int uid, int idxOk)
 {
-    char ev[EVT_SIZE];
-    OU_EvClear(ev);
-    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, mission,
-            0, 0, dstID, (unsigned)dstRtti, 0, 0);
     /* 按住 Z = 路径点(排队, 按序追加不覆盖); 不按 Z 直接下令 (与手点同形)。 */
-    ev[OFF_PLANFLAG] = OU_KeyDown('Z') ? 1 : 0;
-    return OT_Fire(ev, unit, uid, idxOk);
+    return OU_FireMega(houseIdx, srcID, srcRtti, mission,
+                       0, 0, dstID, dstRtti, 0, 0, OU_KeyDown('Z') ? 1 : 0,
+                       unit, uid, idxOk);
 }
 
 #define SA_PEND_CAP 1024   /* 待发上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */
@@ -459,18 +415,13 @@ static void SA_Drain(void)
     while (g_SaPendCount > 0 && sent < SA_DRAIN_PER_POLL)
     {
         SAPend* e = &g_SaPend[0];
-        char srcB[8], tgtB[8];
-        unsigned i;
         int srcID, tgtID;
         unsigned char srcR, tgtR;
-        for (i = 0; i < 8; i++) srcB[i] = tgtB[i] = 0;
         if (!OU_PtrAlive(e->unit, e->uid, g_SaIdxOk)) { SA_ShiftDown(); continue; }
-        if (!SA_IsAttacker(e->unit)) { SA_ShiftDown(); continue; }
+        if (!OU_IsUnit(e->unit)) { SA_ShiftDown(); continue; }
         if (!OU_PtrAlive(e->tgt, e->tid, g_SaIdxOk)) { SA_ShiftDown(); continue; }
-        if (!FN_TGT_OBJ(tgtB, e->tgt)) { SA_ShiftDown(); continue; }
-        if (!FN_TGT_OBJ(srcB, e->unit)) { SA_ShiftDown(); continue; }
-        srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
-        tgtID = *(int*)(tgtB + 0); tgtR = (unsigned char)tgtB[4];
+        if ((tgtID = OU_ObjTgt(e->tgt, &tgtR)) < 0) { SA_ShiftDown(); continue; }
+        if ((srcID = OU_ObjTgt(e->unit, &srcR)) < 0) { SA_ShiftDown(); continue; }
         if (e->mission == MISSION_ATTACK)
         {
             if (!SA_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR,
@@ -554,7 +505,7 @@ static void SA_CollectChain(void* first, void** out, int* tids, int* nio)
             if (out[dup] == o) break;
         if (dup >= *nio)
         {
-            if (!SA_IsTargetType(o)) goto next;
+            if (!OU_IsTarget(o)) goto next;
             for (ti = 0; ti < 8; ti++) tb[ti] = 0;
             if (!FN_TGT_OBJ(tb, o)) goto next;
             out[*nio] = o;
@@ -676,12 +627,9 @@ static int SA_Snapshot(void)
     for (i = 0; i < selN && nu < SA_UNIT_CAP; i++)
     {
         void* o = items[i];
-        char tb[8];
-        unsigned ti;
-        if (!SA_IsAttacker(o)) continue;
-        for (ti = 0; ti < 8; ti++) tb[ti] = 0;
+        if (!OU_IsUnit(o)) continue;
         s_SnapUnits[nu] = o;
-        s_SnapUids[nu] = FN_TGT_OBJ(tb, o) ? *(int*)(tb + 0) : 0;
+        s_SnapUids[nu] = OU_ObjId(o);
         s_SnapBusy[nu] = 0;
         nu++;
     }
@@ -698,7 +646,7 @@ static int SA_Snapshot(void)
     if (!SA_CalOwner(s_SnapUnits[0], nu > 1 ? s_SnapUnits[1] : 0, cur))
         g_SaOwnerOff = -1;
     /* 目标: 松开格直接点中的排首, 再沿轨迹各节点逐块环扫 (去重)。 */
-    if (direct && IsPlausiblePtr(direct) && SA_IsTargetType(direct))
+    if (direct && IsPlausiblePtr(direct) && OU_IsTarget(direct))
     {
         char tb[8];
         unsigned ti;

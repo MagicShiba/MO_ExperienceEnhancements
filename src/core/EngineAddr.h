@@ -1,14 +1,10 @@
 /* EngineAddr.h - gamemd 引擎地址与结构偏移的唯一出处。
  *
- * 为什么集中: 这些地址原来各自写在用它的 .cpp 里, 同一个地址最多有 11 份副本
- * (ADDR_FRAME), 改一处要翻 11 个文件, 而且副本之间会悄悄跑偏 —— 2026-10-25 收拢
- * 时正好抓到一例: OFF_HOUSE_MONEY 在 RepairAll.cpp 写成 0x2F0, 别处是 0x30C。
- * 0x2F0 是错误的, 于是那个模块的 "Owner 合法性校验" 读的是一个无关字段, 校验恒
- * 失败 → 修复全部静默地什么都不做。
- *
- * 铁律: 新增引擎地址只许加在这个文件里, 不要再在 .cpp 里写本地 #define。
+ * 铁律: 新增引擎地址只许加在这个文件里, 不要在 .cpp 里写本地 #define ——
+ * 同一地址的副本之间会悄悄跑偏 (`OFF_HOUSE_MONEY` 就分叉出 0x2F0 / 0x30C
+ * 两个值), 读错字段的那处判据恒失败, 功能静默失效。
  * 每个地址后面必须能指出出处 (函数地址 / 指令字节 / YRpp 成员名), 因为引擎是
- * 按版本硬编码的, 没有出处就无法在下一次换 exe 时复核。
+ * 按版本硬编码的, 没有出处就无法在换 exe 时复核。
  *
  * 本文件只含宏, 不依赖任何其它头, 可以在任何位置 include。
  */
@@ -73,11 +69,20 @@
 #define OFF_NEXT_OBJ            0x30u     /* ObjectClass::NextObject */
 #define OFF_OWNER               0x21Cu    /* TechnoClass::Owner -> HouseClass* */
 #define OFF_BLD_TYPE            0x520u    /* BuildingClass::Type */
+#define OFF_BLD_REPAIRING       0x6E8u    /* BuildingClass::IsBeingRepaired
+                                           * (0x4506C6 读 / 0x4509B4 清 0) */
+#define OFF_TYPE_STRENGTH       0xA0u     /* ObjectTypeClass::Strength
+                                           * (0x5F5C42 自己的 `fild [eax+0xA0]`) */
 #define OFF_TECH_TOKEN          0x514u    /* TechnoClass 规划令牌 (0x705D20 实证) */
 
 /* 动态向量 (DynamicVectorClass) 通用布局。 */
 #define OFF_VEC_ITEMS           4u
 #define OFF_VEC_COUNT           16u
+
+/* 静态类型数组 (DynamicVector of ObjectTypeClass*)。判定"某 Type 指针是否合法"
+ * 只比指针, 不解引用。 */
+#define ADDR_TYPARRAY           0xA8EB00u   /* Unit/Aircraft/Infantry 类型 */
+#define ADDR_TERRAINTYPES       0xA8E318u   /* TerrainType (树/矿等) */
 
 /* ==================== 规划令牌 (PlanningToken) ==================== */
 
@@ -104,6 +109,54 @@
 
 /* 雷达点击门 (点击是否已被 UI 消费)。 */
 #define ADDR_CLICKGATE_SKIP     0x006925FCu
+
+/* ==================== 聊天 / 消息列表 ==================== */
+
+#define ADDR_MSGLIST            0xA8BC60u   /* MessageListClass::Instance */
+#define OFF_MSGLIST_EDIT        0x19u       /* MessageListClass::IsEdit (聊天框输入态) */
+
+/* ==================== 战术渲染 (TacticalClass) ==================== */
+
+/* TacticalClass::Render(this, surf, flag, mode): mode 0 准备 / 1 地形 / 2 覆盖+物件。 */
+#define ADDR_TAC_RENDER         0x006D3D10u
+/* TacticalClass::MakeSelection(this, filter) 与原版框选物件过滤回调。 */
+#define ADDR_TAC_MAKESEL        0x006D9FF0u
+#define ADDR_TAC_SELFILTER      0x004AC2B0u
+
+/* TacticalClass 成员偏移 (YRpp TacticalClass.h 换算 + 0x6D6070 / 0x6D9FF0 反汇编实证)。 */
+#define OFF_TAC_TACX            0xB0u    /* 视口原点 X */
+#define OFF_TAC_TACY            0xB4u
+#define OFF_TAC_LSTX            0xB8u    /* 上次视口原点 X (位移=0 => 走整幅重画) */
+#define OFF_TAC_LSTY            0xBCu
+#define OFF_TAC_VISCNT          0xE0u    /* 可见单元数 */
+#define OFF_TAC_VISARR          0xE4u    /* 可见单元表 (4B/项) */
+#define OFF_TAC_CURX            0xD64u   /* 相机中心 X */
+#define OFF_TAC_CURY            0xD68u
+#define OFF_TAC_PRX             0xD6Cu
+#define OFF_TAC_PRY             0xD70u
+#define OFF_TAC_TGX             0xD74u
+#define OFF_TAC_TGY             0xD78u
+#define OFF_TAC_F7C             0xD7Cu   /* 缩放档相关标记 (各 1 字节, 按 int 读写会互相覆盖) */
+#define OFF_TAC_F7D             0xD7Du
+#define OFF_TAC_BAND_X1         0xD90u   /* 框选带左上 */
+#define OFF_TAC_BAND_Y1         0xD94u
+#define OFF_TAC_BAND_X2         0xD98u   /* 框选带右下 */
+#define OFF_TAC_BAND_Y2         0xD9Cu
+#define OFF_TAC_SELCNT          0xDB0u   /* 可选物件表项数 */
+
+/* ViewBounds 的缓存副本 (0x6D5F60 抄出来): 4 个**连续** int = X, Y, W, H。
+ * 战术渲染实际读这四个, 改 ViewBounds 不改缓存 = 两边不一致。 */
+#define ADDR_VIEWCACHE          0x00B0CE28u
+/* 战术渲染的 Z 缓冲 / 属性缓冲 (setDims 按 ViewBounds 重建)。 */
+#define ADDR_TAC_ZBUF           0x00887644u
+#define ADDR_TAC_ABUF           0x0087E8A4u
+/* 脏区表项数 (表指针 0xB0CE7C, 20B/项)。渲染只会在 count>0 时删末项,
+ * 所以"提前把 count 清 0"= 一项都不动。 */
+#define ADDR_DIRTY_COUNT        0x00B0CE88u
+/* Unsorted::TacticalSelectables (12B/项, 上限 500) = 物件屏坐标表。 */
+#define ADDR_TACTICAL_SELARR    0x00B0CEC8u
+/* 引擎"本帧整幅重画"标志 (GScreenClass::Render 的 mode 0 趟消费它)。 */
+#define ADDR_FULLREDRAW         0x00B0E63Cu
 
 /* PCX 实例 (改色盘用)。 */
 #define ADDR_PCX_INSTANCE       0xAC4848u

@@ -10,6 +10,8 @@ typedef struct { short X, Y; } CellStruct;
 typedef struct { int X, Y, Z; } CoordStruct;
 
 typedef void* __attribute__((thiscall)) (*Fn_TargetFromObj)(void* tgt, void* obj);
+/* TargetFromCell (0x6E6B20): CellStruct → 8 字节 TARGET 缓冲 (id + rtti@+4)。 */
+typedef void* __attribute__((thiscall)) (*Fn_TargetFromCell)(void* tgt, const CellStruct* cell);
 typedef void* __attribute__((thiscall)) (*Fn_MegaMissionCtor)(void* ev, int houseIdx,
     int srcID, unsigned srcRttiW, int mission,
     int tgtID, unsigned tgtRttiW, int dstID, unsigned dstRttiW,
@@ -20,6 +22,7 @@ typedef int __attribute__((thiscall)) (*Fn_WhatAmI)(void* self);
 typedef void (__attribute__((cdecl)) *Fn_SndCb)(void);
 
 #define FN_TGT_OBJ    ((Fn_TargetFromObj)(void*)0x6E6AB0u)
+#define FN_TGT_CELL   ((Fn_TargetFromCell)(void*)0x6E6B20u)
 #define FN_MEGA       ((Fn_MegaMissionCtor)(void*)0x4C6860u)
 #define FN_CLICKCOORDS ((Fn_ClickCoords)(void*)0x692300u)
 
@@ -90,30 +93,62 @@ void OU_CopyEvt(char* dst, const char* src);
 
 /* 对象 WhatAmI (虚表 0x2C, 三重守卫)。 */
 int OU_WhatAmI(void* p);
+/* 类型判定 (聚合 WhatAmI): 可实现下令的机动单位 (单位/步兵/飞机);
+ * 可作战目标 (上面三类 + 建筑)。 */
+int OU_IsUnit(void* p);
+int OU_IsTarget(void* p);
 /* 联机判定 (GameMode 3=LAN/4=Internet, 其它单机)。订单系统共用。 */
 int OU_IsMP(void);
 /* 标准事件入队: 单机直写 DoList (上限 16384), 联机走 OutList (满回 0)。 */
 int OU_Enqueue(char ev[EVT_SIZE]);
-/* 事件缓冲清零 (无 CRT, 不能 memset; 原来各模块自己写 for 循环, 共 18 处)。 */
+/* 事件缓冲清零 (无 CRT, 不能 memset)。 */
 void OU_EvClear(void* ev);
 /* ---------------- Surface 锁定 (全 DLL 共用) ----------------
  * 引擎 Surface 虚表: +0x5C = Lock(surf, rect, int, int) -> 首像素,
- * +0x60 = Unlock(surf, rect)。这是硬编码的引擎内部布局, 原来 9 个模块各存一份
- * 同样的槽常量 + 同样的"取虚表→判空→调 Lock"五行, 改一处要同步 9 处。
+ * +0x60 = Unlock(surf, rect)。硬编码的引擎内部布局, 全 DLL 只此一份。
  * 成功回已锁定首像素 (失败 NULL); 解锁自身幂等 (surf 无效直接忽略)。
  * 注意: 宽高/pitch 由调用方提供自己的绘制坐标系, 不从 surface 推导。 */
 unsigned char* OU_SurfLock(void* surf);
 void OU_SurfUnlock(void* surf);
-/* PlanCommit 事件 (路径点收尾) 构造 + 入队。PatrolCircle / RallyPath 原来各写
- * 一份逐字相同的 6 行, 现在只此一份。回 1=入队成功。 */
+/* PlanCommit 事件 (路径点收尾) 构造 + 入队。回 1=入队成功。 */
 int OU_FirePlanCommit(int houseIdx);
+/* MegaMission 事件构造 + 下令 —— **全 DLL 唯一的事件构造点**
+ * (清事件 → FN_MEGA → 置 IsPlanningEvent → OT_Fire)。
+ * tgt/dst/fol 三个槽各是一对 (对象或格的 id, rtti), 不用的槽传 (0, 0)。
+ * 形状必须与鼠标真实事件同形 (见 notes/选中与下令上限.md), 改这里即改全部。
+ * OU_MakeMega 只填事件 (给走 OU_Enqueue 的调用方); OU_FireMega 填完直接下令
+ * (联机 mode=2 才被 OT 接管, 否则落 OU_Enqueue)。回 1=已入队。 */
+void OU_MakeMega(char ev[EVT_SIZE], int houseIdx, int srcID, unsigned srcRtti,
+                 int mission, int tgtID, unsigned tgtRtti,
+                 int dstID, unsigned dstRtti,
+                 int folID, unsigned folRtti, int plan);
+int OU_FireMega(int houseIdx, int srcID, unsigned srcRtti, int mission,
+                int tgtID, unsigned tgtRtti, int dstID, unsigned dstRtti,
+                int folID, unsigned folRtti, int plan,
+                void* unit, int uid, int idxOk);
 /* 单机直写 DoList (111B 拷 + 现造 PAR + 转运三手续), 联机永不调用。
  * 回 1=写入, 0=DoList 满。 */
 int OU_DirectToDoList(const char* ev);
 /* 格合法性: idx=(Y<<9)+X, 0<=idx<MaxCells 且 Cells[idx] 非空。 */
 int OU_CellValid(int cx, int cy);
+/* 格地面高度 (lep, 越界/无效格回 0)。 */
+int OU_CellFloorZ(int cx, int cy, int* zOut);
+/* DynamicVector (Items@+4 / Count@+16) 元素数, 带范围与可读性守卫 (失败回 0,
+ * items 置 NULL)。 */
+int OU_VecItems(unsigned vecAddr, void*** itemsOut);
+/* p 是否该 DynamicVector 的成员 (类型数组判定: 只比指针)。 */
+int OU_InVec(unsigned vecAddr, const void* p);
+/* ---- TARGET 编码 (8 字节: id@0, rtti@4) ----
+ * 目标槽统一走这两个: 清缓冲 + 调引擎编码 + 取 id/rtti 一手包办。
+ * OU_ObjTgt 解不出回 -1 (id 本身可以是 0, 不能用 0 当失败); rttiOut 可传 0。
+ * OU_CellTgt 恒回 id (空格=0), 不判失败。 */
+int OU_ObjTgt(void* obj, unsigned char* rttiOut);
+int OU_ObjId(void* obj);        /* 只要 id, 解不出回 0 */
+int OU_CellTgt(int cx, int cy, unsigned char* rttiOut);
 /* 鼠标屏坐标 → 格 (ProcessClickCoords + 地图校验)。 */
 int OU_MouseCell(int* cx, int* cy);
+/* 格 + 光标地面高度 (越界高度归零)。 */
+int OU_MouseCellZ(int* cx, int* cy, int* lz);
 /* 同上 + 实测像素 (橡皮线用, px/py 可空)。 */
 int OU_MouseCellPx(int* cx, int* cy, int* px, int* py);
 /* 同上 + 点中对象 (智能下令用; tgtOut 可空, 无目标时写 0, 返回值仍是格有效性)。 */
@@ -183,7 +218,7 @@ int OU_SurfaceZAt(int x, int y, int refZ, int* zOut);
 int OU_CellSurfaceZ(int cx, int cy, int* zOut);
 
 /* ---------------- 手绘几何 (16 位面, 逐像素 Blend16) ----------------
- * 全 DLL 唯一一份 Bresenham / 画点 / 方块 (原来 8 个模块各抄了一遍)。
+ * 全 DLL 唯一一份 Bresenham / 画点 / 方块。
  * clip 为半开区间 [x0,x1)×[y0,y1); 传 NULL 表示不裁剪。
  * thick 的纵向外扩是居中的: thick=1 → 单行, 3 → y-1/y/y+1。 */
 typedef struct { int x0, y0, x1, y1; } OuClip;

@@ -1692,7 +1692,7 @@ static VCEnt* VecGlyph(void* t, wchar_t wch, int adv, int h, int px)
         return e;
     }
     if (g_PfOn) g_PfMiss++;   /* 未命中 = 一次 GDI 光栅 + DIB 清 + ABC 填充 */
-    /* 第三轮: 未命中率是"每帧每字都重光栅化"还是"只换内容才重做"的判据。
+    /* 未命中率是"每帧每字都重光栅化"还是"只换内容才重做"的判据。
      * 同时记下是哪个 key 字段变了 (见 Perf_Frame 的 vwhy)。 */
     if (g_PfOn)
     {
@@ -1827,7 +1827,7 @@ static int VecRender(void* t, wchar_t wch, int adv, int h, int x, int y,
     }
     dy += yOff;
     /* 混合热循环: 5 位 alpha 查表版。
-     * 原来每像素 3 次展表 + 6 次乘除 (8 位空间混合再压位, ~50 cycles);
+     * 逐像素朴素算法是 3 次展表 + 6 次乘除 (8 位空间混合再压位, ~50 cycles);
      * 现在把 alpha 压到 5 位 (aq = a>>3), 目标侧用全局表 TB[inv][dst]
      * = dst*inv/31, 前景侧按字现建 32 项, 每像素只剩 4 次小表查 + 3 次加。
      * 边界精确: a=0 -> aq=0/inv=31 -> 结果等于原像素; a=255 -> aq=31/inv=0

@@ -42,13 +42,10 @@
 
 /* ---------------- 散开私有地址 (共享部分见 OrderUtil.h) ---------------- */
 
-#define ADDR_TYPARRAY 0xA8EB00u
 #define SO_CAP 1024         /* 快照单位上限 (超限进 OT 队列分帧, 与 OT_QCAP 对齐) */
 #define SO_PEND_CAP 1024    /* 待发上限 (同上) */
 #define SO_DRAIN_PER_POLL 128
-#define FN_TGT_CELL ((Fn_TargetFromCell)(void*)0x6E6B20u)
 
-typedef void* __attribute__((thiscall)) (*Fn_TargetFromCell)(void* tgt, const CellStruct* cell);
 /* ---------------- 配置 ---------------- */
 
 static int g_SoInit = 0;
@@ -140,30 +137,8 @@ static int SO_TypeID(void* p, char* out)
     return 0;
 }
 
-/* 类型数组元素数 (守卫后返回, 否则 0)。 */
-static int SO_TypeCount(void*** itemsOut)
-{
-    void** items;
-    int cnt;
-    *itemsOut = 0;
-    cnt = *(int*)(ADDR_TYPARRAY + OFF_VEC_COUNT);
-    items = *(void***)(ADDR_TYPARRAY + OFF_VEC_ITEMS);
-    if (cnt <= 0 || cnt > 20000) return 0;
-    if (!items || !IsPlausiblePtr(items)) return 0;
-    *itemsOut = items;
-    return cnt;
-}
-
-static int SO_InTypeSet(void* p)
-{
-    void** items = 0;
-    int cnt, i;
-    cnt = SO_TypeCount(&items);
-    if (!cnt) return 0;
-    for (i = 0; i < cnt; i++)
-        if (items[i] == p) return 1;
-    return 0;
-}
+/* 是否静态类型数组的成员 (类型指针判定的共同底座, 见 OrderUtil.h)。 */
+static int SO_InTypeSet(void* p) { return OU_InVec(ADDR_TYPARRAY, p); }
 
 /* 单位取 Type 指针 (pin 命中则快路, 否则全扫; 跨单位一致即自证)。 */
 static void* SO_TypeOf(void* u, int w)
@@ -253,13 +228,10 @@ static void SO_Press(void)
     for (i = 0; i < selN && nu < SO_CAP; i++)
     {
         void* o = items[i];
-        char tb[8];
-        unsigned ti;
         int w = OU_WhatAmI(o);
-        if (w != ABS_UNIT && w != ABS_AIRCRAFT && w != ABS_INFANTRY) continue;
-        for (ti = 0; ti < 8; ti++) tb[ti] = 0;
+        if (!OU_IsUnit(o)) continue;
         g_SoUnits[nu].unit = o;
-        g_SoUnits[nu].id = FN_TGT_OBJ(tb, o) ? *(int*)(tb + 0) : 0;
+        g_SoUnits[nu].id = OU_ObjId(o);
         g_SoUnits[nu].w = w;
         nu++;
     }
@@ -345,12 +317,8 @@ static int SO_FireMove(int houseIdx, int srcID, unsigned char srcRtti,
                        int dstID, unsigned char dstRtti,
                        void* unit, int uid, int idxOk)
 {
-    char ev[EVT_SIZE];
-    OU_EvClear(ev);
-    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_MOVE,
-            0, 0, dstID, (unsigned)dstRtti, 0, 0);
-    ev[OFF_PLANFLAG] = 0;
-    return OT_Fire(ev, unit, uid, idxOk);
+    return OU_FireMega(houseIdx, srcID, srcRtti, MISSION_MOVE,
+                       0, 0, dstID, dstRtti, 0, 0, 0, unit, uid, idxOk);
 }
 
 /* ---------------- 智能对象令 (攻击/进入/进驻/占领, 与原生点击同形) ---
@@ -368,24 +336,16 @@ static int SO_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
                          int tgtID, unsigned char tgtRtti,
                          void* unit, int uid, int idxOk)
 {
-    char ev[EVT_SIZE];
-    OU_EvClear(ev);
-    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, MISSION_ATTACK,
-            tgtID, (unsigned)tgtRtti, 0, 0, 0, 0);
-    ev[OFF_PLANFLAG] = 0;
-    return OT_Fire(ev, unit, uid, idxOk);
+    return OU_FireMega(houseIdx, srcID, srcRtti, MISSION_ATTACK,
+                       tgtID, tgtRtti, 0, 0, 0, 0, 0, unit, uid, idxOk);
 }
 
 static int SO_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
                        int dstID, unsigned char dstRtti, int mission,
                        void* unit, int uid, int idxOk)
 {
-    char ev[EVT_SIZE];
-    OU_EvClear(ev);
-    FN_MEGA(ev, houseIdx, srcID, (unsigned)srcRtti, mission,
-            0, 0, dstID, (unsigned)dstRtti, 0, 0);
-    ev[OFF_PLANFLAG] = 0;
-    return OT_Fire(ev, unit, uid, idxOk);
+    return OU_FireMega(houseIdx, srcID, srcRtti, mission,
+                       0, 0, dstID, dstRtti, 0, 0, 0, unit, uid, idxOk);
 }
 
 /* Action(光标) → Mission(订单): gamemd 0x4D74E0 跳转表实证
@@ -504,21 +464,14 @@ static void SO_Drain(void)
     while (g_SoPendCount > 0 && sent < SO_DRAIN_PER_POLL)
     {
         SOPend* e = &g_SoPend[0];
-        char srcB[8], dstB[8];
-        CellStruct cs;
         int srcID, dstID;
         unsigned char srcR, dstR;
-        unsigned i;
-        for (i = 0; i < 8; i++) srcB[i] = dstB[i] = 0;
-        cs.X = e->x; cs.Y = e->y;
-        FN_TGT_CELL(dstB, &cs);
-        dstID = *(int*)(dstB + 0); dstR = (unsigned char)dstB[4];
+        dstID = OU_CellTgt(e->x, e->y, &dstR);
         if (!OU_PtrAlive(e->unit, e->id, g_SoIdxOk)) { SO_ShiftDown(); continue; }
         if (OU_WhatAmI(e->unit) != ABS_UNIT &&
             OU_WhatAmI(e->unit) != ABS_AIRCRAFT &&
             OU_WhatAmI(e->unit) != ABS_INFANTRY) { SO_ShiftDown(); continue; }
-        if (!FN_TGT_OBJ(srcB, e->unit)) { SO_ShiftDown(); continue; }
-        srcID = *(int*)(srcB + 0); srcR = (unsigned char)srcB[4];
+        if ((srcID = OU_ObjTgt(e->unit, &srcR)) < 0) { SO_ShiftDown(); continue; }
         if (!SO_FireMove(houseIdx, srcID, srcR, dstID, dstR,
                           e->unit, e->id, g_SoIdxOk))
             return; /* OutList 满: 下轮继续 */
@@ -534,17 +487,8 @@ typedef void* __attribute__((thiscall)) (*Fn_FindObjType)(void* cell, int abs, i
 
 static void* SO_CellBuilding(int cx, int cy)
 {
-    void** cells;
-    int maxc, idx;
-    void* cell;
+    void* cell = OU_CellPtr(cx, cy);
     void* head;
-    if (cx < 0 || cy < 0 || cx >= 512 || cy >= 512) return 0;
-    cells = *(void***)(ADDR_DISPLAY + OFF_MAP_CELLS);
-    maxc = *(int*)(ADDR_DISPLAY + OFF_MAP_MAXC);
-    if (!cells || !IsPlausiblePtr(cells) || maxc <= 0 || maxc > 512 * 512) return 0;
-    idx = (cy << 9) + cx;
-    if (idx < 0 || idx >= maxc) return 0;
-    cell = cells[idx];
     if (!cell || !IsPlausiblePtr(cell)) return 0;
     head = FN_FINDOBJTYPE(cell, ABS_BUILDING, 0);
     if (!head || !IsPlausiblePtr(head)) return 0;

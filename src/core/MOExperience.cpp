@@ -266,9 +266,8 @@ void* g_PrepareTramp = NULL;
 static int g_InPrepare = 0;
 
 /* 0x4F42F0 是"渲染前 prepare", 但**不是每帧一次**: 它有上百个静态调用点, 多处
- * 在逐对象循环里, 实测每帧被调 160+ 次 (见 perf 日志 prepN)。原来这里每个 Poll
- * 都跟着跑 160 遍 —— v0.2.472 实测 prep 1.85ms/帧, 其中 PiP 侧栏按钮 0.85ms、
- * 底部电量 0.21ms、RallyPath/MindSelect/RepairAll 峰值各 0.1~0.17ms, 全是重复。
+ * 在逐对象循环里, 每帧被调 160+ 次 (见 perf 日志 prepN)。各 Poll 若跟着跑,
+ * 同一轮就得跑 160 遍, 纯属重复。
  *
  * 门控 = "帧号变了 或 距上次 >= 16ms": 前者把同一帧里的重复调用压成一次, 后者
  * 保证暂停/步进时 (帧号冻结, 迷你循环里 prepare 照跑) 输入照样被采样。

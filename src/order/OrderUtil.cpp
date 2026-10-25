@@ -5,8 +5,21 @@
 #include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "OrderThrottle.h"   /* OT_Fire: OU_FireMega 的收尾 */
 #include "ScaleBar.h"
 
+int OU_IsUnit(void* p)
+{
+    int w = OU_WhatAmI(p);
+    return (w == ABS_UNIT || w == ABS_INFANTRY || w == ABS_AIRCRAFT) ? 1 : 0;
+}
+
+int OU_IsTarget(void* p)
+{
+    int w = OU_WhatAmI(p);
+    return (w == ABS_UNIT || w == ABS_INFANTRY ||
+            w == ABS_AIRCRAFT || w == ABS_BUILDING) ? 1 : 0;
+}
 
 int OU_WhatAmI(void* p)
 {
@@ -153,6 +166,29 @@ int OU_FirePlanCommit(int houseIdx)
     return OU_Enqueue(ev);
 }
 
+/* MegaMission 事件构造 (3 个目标槽各一对 (id, rtti), 不用的槽传 0)。 */
+void OU_MakeMega(char ev[EVT_SIZE], int houseIdx, int srcID, unsigned srcRtti,
+                 int mission, int tgtID, unsigned tgtRtti,
+                 int dstID, unsigned dstRtti,
+                 int folID, unsigned folRtti, int plan)
+{
+    OU_EvClear(ev);
+    FN_MEGA(ev, houseIdx, srcID, srcRtti, mission,
+            tgtID, tgtRtti, dstID, dstRtti, folID, folRtti);
+    ev[OFF_PLANFLAG] = (char)(plan ? 1 : 0);
+}
+
+int OU_FireMega(int houseIdx, int srcID, unsigned srcRtti, int mission,
+                int tgtID, unsigned tgtRtti, int dstID, unsigned dstRtti,
+                int folID, unsigned folRtti, int plan,
+                void* unit, int uid, int idxOk)
+{
+    char ev[EVT_SIZE];
+    OU_MakeMega(ev, houseIdx, srcID, srcRtti, mission,
+                tgtID, tgtRtti, dstID, dstRtti, folID, folRtti, plan);
+    return OT_Fire(ev, unit, uid, idxOk);
+}
+
 int OU_Enqueue(char ev[EVT_SIZE])
 {
     unsigned count;
@@ -175,9 +211,88 @@ int OU_CellValid(int cx, int cy)
     return OU_CellPtr(cx, cy) ? 1 : 0;
 }
 
+/* 格地面高度 (lep): CellClass::GetFloorHeight 0x47B3A0 —— thiscall 传
+ * Point2D* 单指针 + ret 4, 与按值 8 字节严格区分。 */
+typedef int __attribute__((thiscall)) (*Fn_FloorH)(void* cell, const Point2D* p);
+#define FN_FLOORH ((Fn_FloorH)(void*)0x47B3A0u)
+
+int OU_CellFloorZ(int cx, int cy, int* zOut)
+{
+    void* cell = OU_CellPtr(cx, cy);
+    Point2D zero;
+    int z;
+    if (!cell || !IsPlausiblePtr(cell)) return 0;
+    zero.X = 0;
+    zero.Y = 0;
+    z = FN_FLOORH(cell, &zero);
+    if (z < -8192 || z > 8192) return 0;
+    *zOut = z;
+    return 1;
+}
+
+/* DynamicVector 元素数 (守卫后)。items 恒被写 (失败置 NULL)。 */
+int OU_VecItems(unsigned vecAddr, void*** itemsOut)
+{
+    void** items;
+    int cnt;
+    *itemsOut = 0;
+    cnt = *(int*)(size_t)(vecAddr + OFF_VEC_COUNT);
+    items = *(void***)(size_t)(vecAddr + OFF_VEC_ITEMS);
+    if (cnt <= 0 || cnt > 20000) return 0;
+    if (!items || !IsPlausiblePtr(items)) return 0;
+    *itemsOut = items;
+    return cnt;
+}
+
+/* p 是否该 DynamicVector 的成员 (静态类型数组判定: 只比指针, 不解引用)。 */
+int OU_InVec(unsigned vecAddr, const void* p)
+{
+    void** items;
+    int i, cnt;
+    if (!p) return 0;
+    cnt = OU_VecItems(vecAddr, &items);
+    for (i = 0; i < cnt; i++)
+        if (items[i] == p) return 1;
+    return 0;
+}
+
+/* ---- TARGET 编码 (8 字节: id@0, rtti@4) ----
+ * 每个要送进 MegaMission 的目标槽都得先清缓冲再调 FN_TGT_OBJ/FN_TGT_CELL,
+ * 然后取 id/rtti。 */
+
+int OU_ObjTgt(void* obj, unsigned char* rttiOut)
+{
+    char tb[8];
+    int i;
+    for (i = 0; i < 8; i++) tb[i] = 0;
+    if (!obj || !FN_TGT_OBJ(tb, obj)) return -1;
+    if (rttiOut) *rttiOut = (unsigned char)tb[4];
+    return *(int*)(tb + 0);
+}
+
+int OU_ObjId(void* obj)
+{
+    int id = OU_ObjTgt(obj, 0);
+    return id < 0 ? 0 : id;
+}
+
+/* 格编码: 引擎不报失败 (空格也填, id=0), 与原调用点一致不判返回值。 */
+int OU_CellTgt(int cx, int cy, unsigned char* rttiOut)
+{
+    char tb[8];
+    CellStruct cs;
+    int i;
+    for (i = 0; i < 8; i++) tb[i] = 0;
+    cs.X = (short)cx;
+    cs.Y = (short)cy;
+    FN_TGT_CELL(tb, &cs);
+    if (rttiOut) *rttiOut = (unsigned char)tb[4];
+    return *(int*)(tb + 0);
+}
+
 /* 鼠标屏坐标 → 格 + 点中对象。filterTgt 非 0 时只透出单位/建筑类对象。 */
 static int OU_MouseCellInner(int* cx, int* cy, void** tgtOut, int* px, int* py,
-                             int filterTgt)
+                             int filterTgt, int* zOut)
 {
     int mx, my;
     Point2D pt;
@@ -199,6 +314,7 @@ static int OU_MouseCellInner(int* cx, int* cy, void** tgtOut, int* px, int* py,
     *cx = (int)center.X; *cy = (int)center.Y;
     if (px) *px = mx;
     if (py) *py = my;
+    if (zOut) *zOut = crd.Z;
     if (!OU_CellValid(*cx, *cy)) return 0;
     if (tgtOut && tgtObj && IsPlausiblePtr(tgtObj))
     {
@@ -216,7 +332,15 @@ static int OU_MouseCellInner(int* cx, int* cy, void** tgtOut, int* px, int* py,
 
 int OU_MouseCellPx(int* cx, int* cy, int* px, int* py)
 {
-    return OU_MouseCellInner(cx, cy, 0, px, py, 0);
+    return OU_MouseCellInner(cx, cy, 0, px, py, 0, 0);
+}
+
+/* 格 + 光标地面高度 (越界高度归零)。 */
+int OU_MouseCellZ(int* cx, int* cy, int* lz)
+{
+    if (!OU_MouseCellInner(cx, cy, 0, 0, 0, 1, lz)) return 0;
+    if (*lz < -8192 || *lz > 8192) *lz = 0;
+    return 1;
 }
 
 int OU_MouseCell(int* cx, int* cy)
@@ -227,7 +351,7 @@ int OU_MouseCell(int* cx, int* cy)
 /* 取格 + 点中对象 (tgtOut 可空, 无目标写 0, 返回值仍是格有效性)。 */
 int OU_MouseCellTarget(int* cx, int* cy, void** tgtOut, int* px, int* py)
 {
-    return OU_MouseCellInner(cx, cy, tgtOut, px, py, 1);
+    return OU_MouseCellInner(cx, cy, tgtOut, px, py, 1, 0);
 }
 
 typedef int __attribute__((thiscall)) (*Fn_MouseOverObj)(void* self, void* target, int ignoreForce);
@@ -523,9 +647,8 @@ int OU_CellSurfaceZ(int cx, int cy, int* zOut)
 }
 
 /* ---------------- 手绘几何 (16 位面, 逐像素 Blend16) ----------------
- * 这三件事原来在 8 个模块里各写了一份 (Bresenham / 画点 / 实心方块, 合计 300+
- * 行), 彼此只差颜色与线宽 —— 而且线宽的纵向外扩方向还不统一 (多数居中, 本文件
- * 原来往下补)。现在只此一份, 统一为**居中**外扩 (thick=3 即 y-1/y/y+1)。
+ * Bresenham / 画点 / 实心方块, 全 DLL 只此一份。
+ * thick 的纵向外扩**居中** (thick=1 单行, 3 即 y-1/y/y+1)。
  *
  * clip 传 NULL 表示不裁剪; 否则只画 [x0,x1) × [y0,y1) 内的像素 (GridView 用)。
  * 调用方给的 locked/w/h/pitch 是当前锁定的 16 位面, 与本文件其它绘制同口径。 */
