@@ -161,6 +161,25 @@
 /* PCX 实例 (改色盘用)。 */
 #define ADDR_PCX_INSTANCE       0xAC4848u
 
+/* ==================== 光照 (ScenarioClass) ==================== */
+
+/* ScenarioClass 里的光照字段偏移。地图 ini 的 [Lighting] 段读进来就放这儿
+ * (gamemd 0x68A7xx 那段读入代码): Ambient 与 tint = ini 值 ×100,
+ * Ground / Level = ini 值 ×1000 (常量 0x7E2AC0=100.0, 0x7E4658=1000.0)。
+ * 本项目只动 Ambient 与 R/G/B, Ground/Level 不碰。 */
+#define OFF_SCEN_AMBIENT_ORIG  0x3528u   /* AmbientOriginal (ini 的 Ambient) */
+#define OFF_SCEN_AMBIENT_CUR   0x352Cu   /* AmbientCurrent */
+#define OFF_SCEN_AMBIENT_TGT   0x3530u   /* AmbientTarget */
+#define OFF_SCEN_TINT_R        0x3534u   /* NormalLighting.Tint.R (ini 的 Red) */
+#define OFF_SCEN_TINT_G        0x3538u   /* NormalLighting.Tint.G (Green) */
+#define OFF_SCEN_TINT_B        0x353Cu   /* NormalLighting.Tint.B (Blue) */
+
+/* ScenarioClass::RecalcLighting(R, G, B, tint) —— __fastcall: ecx=R, edx=G,
+ * B 与 tint 走栈且由被调方自己回收 (ret 8)。它内部会重算所有格子的光照
+ * 并让地图面重画, 所以改完字段调它一个就够。
+ * tint 分量的单位是"真实值 ×1000", 上限 1000 (=1.0), 引擎内部会夹紧。 */
+#define FN_RECALC_LIGHTING     0x0053AD00u
+
 /* ==================== 事件 (EventClass) ==================== */
 
 #define EVT_SIZE                111u      /* EventClass 结构的字节数 */

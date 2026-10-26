@@ -45,6 +45,7 @@
 #include "EscMenu.h"
 #include "SidebarSkin.h"
 #include "PvpNotice.h"
+#include "LightingPreset.h"
 #include "MOExperience.h"
 #include "MOEVersion.h"
 
@@ -333,6 +334,8 @@ static void PowerDrawBoth(void)
     tSeg = Perf_Now(); Aggressive_Poll(); Perf_Add(PF_A_AG, tSeg);
     /* 多观战修复 + 观战面板排序 (联机安全, 见 Observer.cpp)。 */
     tSeg = Perf_Now(); Observer_Poll();   Perf_Add(PF_A_OB, tSeg);
+    /* 光照预设: 换局后重新快照地图原值并重套当前选择。 */
+    tSeg = Perf_Now(); Lighting_Poll();   Perf_Add(PF_A_LIGHT, tSeg);
     }
     if (!g_InitDone) MOE_EnsureInit();
     /* 撑满视口 + 摘侧栏 gadget (隐藏原版建造栏时必须每循环都跑, 引擎每次

@@ -234,7 +234,7 @@ static const char* const kPfName[] =
     "gate", "fc", "gs", "prep", "fm", "sb", "ss",
     "aw", "bq", "pc", "so", "rp", "tc", "fa", "am",
     "sa", "dp", "ms", "ot", "wpc", "mlc", "sws",
-    "ra", "ps", "ag", "ob",
+    "ra", "ps", "ag", "ob", "light",
     "pv", "shot", "vts", "pub", "mhk", "pwr", "pipb",
     "skin", "pvp",
     "msg", "msgtext", "msgswp", "msgdraw", "msgtail",
