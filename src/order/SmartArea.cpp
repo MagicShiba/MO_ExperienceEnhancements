@@ -663,6 +663,11 @@ static int SA_Snapshot(void)
     if (nt <= 0) return 0;
     s_SnapNu = nu;
     s_SnapNt = nt;
+    /* 本快照的"已派"标记与待发令从零开始: 同一快照会被重判多次 (留待命后
+     * 松开再判、同轮连判), 标记必须跟着快照走, 否则会把同一目标重复分满。 */
+    for (j = 0; j < SA_TGT_CAP; j++) s_SnapEnterTaken[j] = 0;
+    for (j = 0; j < SA_TGT_CAP; j++) s_SnapRepairSent[j] = 0;
+    g_SaPendCount = 0;
     return 1;
 }
 
@@ -939,8 +944,8 @@ static void SA_Distribute(void* house)
     SA_NeutSelfCheck(house);
     SA_TechLevelSelfCheck();
     SA_CachePrep(house);
-    for (j = 0; j < SA_TGT_CAP; j++) s_SnapEnterTaken[j] = 0;
-    for (j = 0; j < SA_TGT_CAP; j++) s_SnapRepairSent[j] = 0;
+    /* 注意: 目标已派标记 (s_SnapEnterTaken/s_SnapRepairSent) 不在这里清,
+     * 由 SA_Snapshot 在取新快照时清 (见那里的说明)。 */
     /* 预轮: 士兵进驻中立民房轮转均分 (人用完为止)。
      * 首轮跳单靠 AssignOne 条件判定 (中立民房进驻类直接跳过), 不另标记。 */
     if (g_SaTlOk && !g_SaTlBad && nu > 0 && nt > 0)
@@ -1018,7 +1023,8 @@ static void SA_DecideFire(void)
     cur = *(void**)ADDR_CURPLAYER;
     if (!cur || !IsPlausiblePtr(cur))
     { g_SaHaveSnapshot = 0; SA_BoxReset(); return; }
-    g_SaPendCount = 0;
+    /* 不清 g_SaPendCount: 上一次没发完的令 (OutList 满) 由 SA_Drain 续发, 清零
+     * 会让那批单位停在 busy 却不动。待发队列只在取新快照时清。 */
     SA_Distribute(cur);
     for (i = 0; i < nu; i++)
     {

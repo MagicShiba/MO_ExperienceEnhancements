@@ -42,6 +42,7 @@
 #include "FrameCap.h"
 #include "Shot.h"
 #include "PiP.h"
+#include "Weather.h"
 #include "EscMenu.h"
 #include "SidebarSkin.h"
 #include "PvpNotice.h"
@@ -1405,7 +1406,15 @@ static DWORD MsgDrawBody(void* regs)
      * 否则被缩放模块一起放大/缩小。 */
     PiP_DrawOnComposite(surf);
 
-    drew = MOE_DrawUILayers(surf, surfW, surfH, surfPitch, &bitLineH, &screenW, NULL);
+    /* 天气 (雨/雪): 在 UI 层之下、地图之上。直接画进 Composite 的视图区,
+     * 不覆盖侧栏; 每帧重画 (Composite 每帧被引擎重铺, 没法缓存)。 */
+    {
+        long long tWth = Perf_Now();
+        if (Weather_Draw(surf, surfW, surfH, surfPitch)) drew = 1;
+        Perf_Add(PF_D_WTH, tWth);
+    }
+
+    drew |= MOE_DrawUILayers(surf, surfW, surfH, surfPitch, &bitLineH, &screenW, NULL);
 
     {
     long long tSeg = Perf_Now(), tOne;

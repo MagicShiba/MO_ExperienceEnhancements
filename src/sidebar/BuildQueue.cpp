@@ -5,10 +5,10 @@
  *   - 建筑页/防御页天然分开: 条目按 house+heap 匹配 (heap=BuildingType.ArrayIndex,
  *     唯一), 喂单按 (naval,cat) 解析各页工厂; 取消只动本家本型。
  *   - 条目**不存工厂指针**: 工厂对象会死/换, 一律按 (house,naval,cat) 每轮现解析
- *     槽位 (GetPrimaryFactory 0x500510, 槽位即权威), 故不存在 stale。
+ *     (GetPrimaryFactory 0x500510), 不缓存结果, 故不存在 stale。
  *   - 左键跨型号点击: 忙时走原版拒绝路径 0x6AB689, 吞掉记入本地; 闲时原生下单
  *     第 1 个并顺手记 4 个 (Shift 一次记 5 个, 槽不够记到满)。
-* 切换清产的原生 abandon 路 (0x6AA7BC/0x6AA884) 零触发, 不钩 (见文件末说明)。
+ * 切换清产的原生 abandon 路 (0x6AA7BC/0x6AA884) 零触发, 不钩 (见文件末说明)。
  *   - 图标数字 (DrawStrip 的 CountTotal 取数点 0x6A9C86): 本地有排队则
  *     EAX/EBX=原版数+本地数后跳 0x6A9CC9 借用原版绘制; 无排队跑原指令。
  *   - 就绪文本左对齐 (DrawStrip Ready/状态分支, 纯渲染补丁, 不碰模拟):
@@ -16,78 +16,80 @@
  *     数字 (x=esi+0x3C, flag 0x242 右对齐);
  *     有数字时的状态字 (x=esi+2, flag 0x42 左对齐, 如"等待");
  *     无数字时的状态字/就绪 (x=esi+0x1E, flag 0x142 居中)。
-  *     flag 高字节位 0=居中/位 1=右对齐 (0x242 右/0x142 中/0x42 左)。
+ *     flag 高字节位 0=居中/位 1=右对齐 (0x242 右/0x142 中/0x42 左)。
  *     工厂完工且有排队时, 状态块画居中的"就绪" (IsDone→0xD53 经
  *     0x6A9DAB/0x6A9E17) 与右侧数字同行重叠 (CJK 比原版 1bpp 字宽)。
  *     开关开时给状态块加条件排版 (与 0x6A9EE4 处 Ready 块同判据):
  *     本图标画过数字 ([esp+0x13]==1) 则走左分支几何 (x=esi+2,
  *     flag 0x42), 否则走原版居中 (x=esi+0x1E, flag 0x142)。
-  *     实现为两处 JMP 桩 (开关开时一次性写入, 指令等长覆盖, 无 rel):
-  *       布局点 0x6A9DAB (8B: lea+push) → BQ_StateLay,
-  *       绘制点 0x6A9E17 (5B: push) → BQ_StateDraw;
-  *     桩内读 [esp+0x13] 判本图标是否画过数字,
-  *     原字节照抄执行后跳回原生后继 (0x6A9DB3/0x6A9E1C)。
+ *     实现为两处 JMP 桩 (开关开时一次性写入, 指令等长覆盖, 无 rel):
+ *       布局点 0x6A9DAB (8B: lea+push) → BQ_StateLay,
+ *       绘制点 0x6A9E17 (5B: push) → BQ_StateDraw;
+ *     桩内读 [esp+0x13] 判本图标是否画过数字,
+ *     原字节照抄执行后跳回原生后继 (0x6A9DB3/0x6A9E1C)。
  *     无数字的就绪/等待保持原版居中; 有数字时"就绪"居左,
  *     右侧数字底框独占右侧不再被挡。
  *     数字底框本身由 VecText 度量 (maxW<=0 不限宽同样给 GDI 真宽)
  *     保证与落墨同宽、正确包裹。字节不符 (版本/Ares 差异) 则静默跳过
  *     (fail-close 回原版)。
  *   - BuildQueue_Poll (每循环, 挂 PowerDrawBoth): 无对账无丢单, 只喂单 ——
- *     逐条目按 (house,naval,cat) 现解析工厂; 工厂不存在/非本家→留着等
- *     (卖了重建/具现后自动续上); 工厂 Object==null (无在产/待放置) 才复刻一次
- *     点击下单; 同一工厂每轮只喂一项 (事件下帧才执行, 当轮再喂会被原版拒绝,
- *     故用 fed 限流)。每帧另采样 Shift 进 32 帧闩锁 (左键记数用"当前或近期
- *     按下", 防单帧竞态/提前松开)。
-  *   - 限造 (rules.ini BuildLimit, 本 mod 大量建筑限 1/2/3): 原版达上限拒收,
-  *     本地队列须按同口径算余量 BQ_RoomLeft, 记入时只记还造得出的条数,
-  *     每轮喂单前排不进的直接丢 (=原版"点不下"语义, 队列自愈)。
-  *   - 权限复查: 科技树变化后失去建造资格 (前置被卖/毁等) 的条目,
-  *     本地复刻事件绕过了原版 cameo 校验 (0x6AA781), 永不认领且重发会按
-  *     (house,naval,cat) 压住整条产线。每轮喂单前按同口径复查
-  *     HouseClass::CanBuild (0x4F7870): ==0 直接丢, >0 (含 -1 临时灰化) 不动。
-  *     只读, 联机安全。
+ *     逐条目按 (house,naval,cat) 现解析工厂, Object==null (无在产/待放置) 才
+ *     复刻一次点击下单; 同一条产线按逻辑帧限速 (BQ_PEND_FRAMES)。
+ *     GetPrimaryFactory 只读 house 的缓存槽, 引擎拒单会清空它, 故槽空照发
+ *     (引擎 BeginProduction 会按需建厂写回), 认领改用工厂数组扫描。
+ *     每轮另采样 Shift 的按下帧 (左键记数用"当前或刚按过", 防单帧竞态)。
+ *   - 限造 (rules.ini BuildLimit, 本 mod 大量建筑限 1/2/3): 原版达上限拒收,
+ *     本地队列须按同口径算余量 BQ_RoomLeft, 记入时只记还造得出的条数,
+ *     每轮喂单前排不进的直接丢 (=原版"点不下"语义, 队列自愈)。
+ *   - 认领: 发单不等于成单 (执行侧可能拒收), 条目留着等"本家工厂在造本型"
+ *     才删; 放置完成 Object 变空后才喂下一项。
+ *   - 权限复查: 科技树变化后失去建造资格 (前置被卖/毁等) 的条目,
+ *     本地复刻事件绕过了原版 cameo 校验 (0x6AA781), 永不认领且重发会按
+ *     (house,naval,cat) 压住整条产线。每轮喂单前按同口径复查
+ *     HouseClass::CanBuild (0x4F7870): ==0 直接丢, >0 (含 -1 临时灰化) 不动。
+ *     只读, 联机安全。
  *   - 右键规则 (Shift=清全部): 点一次暂停, 再点取消; 取消时优先减数 (N>1 弹尾,
  *     在产/暂停不动), 最后剩在产单个走原生真取消。Shift+右键=取消全部: 清空本地
  *     后跑原生 0x2E (在产亦清, 显示归零); 未暂停的按住 Shift 点只先暂停
  *     (随后暂停态再 Shift 点清零), 天然两步防误删。
-  *   - 右键真分发: [esp+0xB0]&0x10 为右键; [esp+0x18]==null→
+ *   - 右键真分发: [esp+0xB0]&0x10 为右键; [esp+0x18]==null→
  *     0x6AB0AC 明路 (空闲态才到); 在产未暂停→0x6AAFE1 暗暂停 (暂停保持原生);
  *     已暂停/空闲→按 shift 进 0x6AAE4A (0x2E, Shift 清全) 或 0x6AAFBD (0x10,
- *     经 jmp 0x6AB1FF 共享尾构造)。剥离在明取消分支 (0x6AB197, d=1/5/0/8) 与暗
- *     分发点 (0x6AAE44, d=6/7/8) 两处; 明暂停检查 state==1 一律原生暂停。
-  *     全程不仿造事件构造 (E8 点一律不碰)。
-  *   - Shift 检测走原版键位函数 0x53EC70 (ecx=0x10, AH&0x80 为按下; GetKeyState 后备)。
-  * 待放置时 Object 非空故下一个先等着, 放下后自动开工。
-  * 存档/读档/换 CurrentPlayer 即清空 (未下单=未扣费, 经济一致)。
-   * 开关关时钩子全跑原指令、轮询直接返回 (=原版行为)。
-  *
-  * 铁律: .inj 钩子凡偷了含 rel 的字节 (E8 call / Jcc),
-  *   永远不许 return 0; 条件跳转永不跳回钩子自身地址。
-  *   本文件钩子皆纯传送字节 (0x6AB689 push/or, 0x6AB6CE mov/mov, 0x6AB0C1 Jcc 永跳,
-  *   0x6AB197 push/push/mov, 0x6AAE44 Jcc 永跳, 0x6AAFE1 mov, 0x6A9C86 mov/cmp,
-  *   0x6A9C6C mov/mov): return 0 跑原指令安全, 跳转只跳前向原生目标。
-  *   大块改用 Jcc 分发点。
+ *     经 jmp 0x6AB1FF 共享尾构造)。剥离在明取消分支 (0x6AB197) 与暗
+ *     分发点 (0x6AAE44) 两处; 明暂停检查 state==1 一律原生暂停。
+ *     全程不仿造事件构造 (E8 点一律不碰)。
+ *   - Shift 检测走原版键位函数 0x53EC70 (ecx=0x10, AH&0x80 为按下; GetKeyState 后备)。
+ *   - 待放置时 Object 非空, 下一个先等着, 放下后自动开工。
+ *   - 存档/读档/换 CurrentPlayer 即清空 (未下单=未扣费, 经济一致)。
+ *   - 开关关时钩子全跑原指令、轮询直接返回 (=原版行为)。
+ *
+ * 铁律: .inj 钩子凡偷了含 rel 的字节 (E8 call / Jcc),
+ *   永远不许 return 0; 条件跳转永不跳回钩子自身地址。
+ *   本文件钩子皆纯传送字节 (0x6AB689 push/or, 0x6AB6CE mov/mov, 0x6AB0C1 Jcc 永跳,
+ *   0x6AB197 push/push/mov, 0x6AAE44 Jcc 永跳, 0x6AAFE1 mov, 0x6A9C86 mov/cmp,
+ *   0x6A9C6C mov/mov): return 0 跑原指令安全, 跳转只跳前向原生目标。
+ *   大块改用 Jcc 分发点。
  *
  * 事件复刻 (与点击路径 0x6AB741-0x6AB7C7 逐字节同义):
  *   EventClass ctor 0x4C6970 (thiscall, this=111 字节栈缓冲,
  *     houseIndex/0xE(Produce)/rtti/heap/naval 入栈),
-  *   OutList (0xA802C8 计数, 满 0x80 则下帧重试) 111 字节拷入
-  *   0xA802D4+next*111, 同款无参回调 call [0x7E1530],
-  *   并行数组 0xA83A54[next]=调用后 EAX, 计数器按原版掩码推进。
-  * 参数来源:
-  *   rtti=7 (AbstractType::BuildingType, vtable+0x2C 验证);
+ *   OutList (0xA802C8 计数, 满 0x80 则下帧重试) 111 字节拷入
+ *   0xA802D4+next*111, 同款无参回调 call [0x7E1530],
+ *   并行数组 0xA83A54[next]=调用后 EAX, 计数器按原版掩码推进。
+ * 参数来源:
+ *   rtti=7 (AbstractType::BuildingType, vtable+0x2C 验证);
  *   heap=[type+0xDF8] (BuildingType.ArrayIndex);
  *   naval=[type+0xCCE] (TechnoType.Naval, 原版两次喂给 GetPrimaryFactory);
  *   houseIndex=[house+0x30] (House.ArrayIndex, 原版事件构造同取);
-  *   Factory.Object=+0x58, Factory.Owner=+0x6C;
-  *   CurrentPlayer=*(0xA83D4C)。
+ *   Factory.Object=+0x58, Factory.Owner=+0x6C;
+ *   CurrentPlayer=*(0xA83D4C)。
  * 限造字段: BuildLimit=[type+0x3B8]; OwnedBuildingTypes=[house+0x5500],
  *   FactoryProducedBuildingTypes=[house+0x55A0] (CounterClass 取值走 0x49FAE0,
  *   参数=类型 ArrayIndex); 在产判定=Factory.Object→vtable+0x84。
  * 点击钩子寄存器 (0x6AB689/0x6AB6CE): EBP=abs (原版 cmp ebp,7 紧邻在前),
  * EDI=图标类型 (0x6AB602 取自 [esp+0x28], 原版 0x6AB6CE 处 [edi+0xCCE]),
  * ESI=工厂 (0x6AB602 处 GetPrimaryFactory 结果, 0x6AB61E mov esi,eax)。
-  * 原版右键流 (0x6AB0AC-0x6AB0A7, 此处不钩仅记录):
+ * 原版右键流 (0x6AB0AC-0x6AB0A7, 此处不钩仅记录):
  * state==1 则置 2 发 SUSPEND 后跳 0x6AB28f 退出 (暂停),
  * state!=1 才进 0x6AB18d 取消分支 (IsQueued→0x2E/0x10)。
  *
@@ -130,7 +132,7 @@
 #define ADDR_FACARR_ITEMS 0xA83E34u
 #define ADDR_FACARR_COUNT 0xA83E40u
 /* FactoryClass::Array: Items=[0xA83E34], Count=[0xA83E40]。
- * 只用于显示求和 (不做存活判断, 无 stale 问题)。 */
+ * 显示求和与认领扫描共用 (只读, 不做存活判断)。 */
 
 #define TO_CLICK_EXIT 0x006AB95Au
 #define TO_CANCEL_EXIT 0x006AB28Fu
@@ -143,31 +145,29 @@
 
 #define BQ_CAP 50
 
-/* 待发事件窗守卫: Poll 挂渲染 (可快于逻辑帧), 同一工厂连续两轮都可能
- * 见到 Object==null (上轮发的 PRODUCE 还没执行), 连发两单则第二单在
- * 执行侧被 BeginProduction 拒绝 (0x4FA520 起首即 busy+building 返 3),
- * 静默丢单。pend 记住本轮发过单的线, N 轮内不再发 (执行后 Object 非空,
- * 本来就会停; 哑单则 N 轮后重试)。键为 (house,naval,cat), 与喂单同键。 */
-#define BQ_PEND_N 45
+/* 重发窗口守卫: 同一条产线 (house,naval,cat) 发单后隔 2 个逻辑帧才允许再发。
+ * 为什么按逻辑帧而不按轮询次数: Poll 挂在渲染 prepare 上 (每帧 1 次), 轮询次数
+ * 与逻辑帧的比例随帧率/暂停/步进变化, 按次数计会变成"几百毫秒的哑等"。
+ * 为什么 2 帧够: 引擎每逻辑帧派发一次 OutList, 事件执行后 Object 非空, 本函数
+ * 自然跳过; 若被拒 (Object 仍空), 隔一帧就能重发 (=自愈)。 */
+#define BQ_PEND_FRAMES 2
+/* 主工厂缓存槽为空时的重发间隔: 引擎可能拒单并清空槽, 每 2 帧照发会一直
+ * 刷事件。单被接受后条目立刻被认领, 这个间隔不拖慢正常队列。 */
+#define BQ_BLIND_FRAMES 15
 #define BQ_PEND_SLOTS 8
 typedef struct
 {
     void* house;
     unsigned naval;
     unsigned buildcat;
-    int age;
+    int frame; /* 上次发单的逻辑帧 (ADDR_FRAME); 帧号倒退=读档/新局, 视为过期 */
 } BQPend;
 
 static BQPend g_BQPend[BQ_PEND_SLOTS];
 
-static void BQ_PendAge(void)
+static int BQ_Frame(void)
 {
-    int s;
-    for (s = 0; s < BQ_PEND_SLOTS; s++)
-    {
-        if (g_BQPend[s].house && g_BQPend[s].age < BQ_PEND_N)
-            g_BQPend[s].age++;
-    }
+    return *(int*)ADDR_FRAME;
 }
 
 static void BQ_PendClear(void)
@@ -180,11 +180,16 @@ static void BQ_PendClear(void)
 static int BQ_Pending(void* house, unsigned naval, unsigned cat)
 {
     int s;
+    int fr = BQ_Frame();
     for (s = 0; s < BQ_PEND_SLOTS; s++)
     {
-        if (g_BQPend[s].house == house && g_BQPend[s].naval == naval &&
-            g_BQPend[s].buildcat == cat && g_BQPend[s].age < BQ_PEND_N)
-            return 1;
+        int age;
+        if (g_BQPend[s].house != house || g_BQPend[s].naval != naval ||
+            g_BQPend[s].buildcat != cat)
+            continue;
+        age = fr - g_BQPend[s].frame;
+        if (age < 0) return 0;
+        return (age < BQ_PEND_FRAMES) ? 1 : 0;
     }
     return 0;
 }
@@ -198,21 +203,20 @@ static void BQ_MarkPending(void* house, unsigned naval, unsigned cat)
         if (g_BQPend[s].house == house && g_BQPend[s].naval == naval &&
             g_BQPend[s].buildcat == cat)
         {
-            g_BQPend[s].age = 0;
+            g_BQPend[s].frame = BQ_Frame();
             return;
         }
-        if (!g_BQPend[s].house || g_BQPend[s].age >= BQ_PEND_N)
-            free = s;
+        if (!g_BQPend[s].house && free < 0) free = s;
     }
     if (free < 0) return; /* 槽满: 不记 (fail-open, 等价于无守卫) */
     g_BQPend[free].house = house;
     g_BQPend[free].naval = naval;
     g_BQPend[free].buildcat = cat;
-    g_BQPend[free].age = 0;
+    g_BQPend[free].frame = BQ_Frame();
 }
 
-/* 条目不存工厂指针: 每轮按 (house,naval,cat) 现解析槽位, 无 stale。
- * buildcat 取自点击帧原生栈 [esp+0x24] (与原生 GPF 入参同值)。 */
+/* 条目按 (house,type,naval,cat) 定位产线; buildcat 取自点击帧原生栈
+ * [esp+0x24] (与原生 GPF 入参同值)。 */
 typedef struct
 {
     void* house;
@@ -220,6 +224,7 @@ typedef struct
     unsigned naval;
     unsigned buildcat;
     int flying; /* 已发单待模拟认领 (见喂单确认制) */
+    int fired;  /* 上次发单的逻辑帧 (缓存槽空时用它限重发) */
 } BQEntry;
 
 static int g_BQInit = 0;
@@ -227,9 +232,12 @@ static int g_BQEnable = 0;
 static BQEntry g_BQList[BQ_CAP];
 static int g_BQCount = 0;
 static void* g_BQHouse = 0;
-/* Shift 闩锁: Poll 每帧采样 1 位, 32 帧窗口。左键用闩锁 (防单帧竞态/
- * 提前松开), 右键清空只认当前按下 (防 0.5s 内的误删)。 */
-static unsigned g_BQShiftHist = 0;
+/* Shift 近按窗: Poll 记下最近采样到按下的逻辑帧, 窗口 2 帧。
+ * 左键用"当前按下或刚松开" (防单帧竞态/提前松开), 右键清空只认当前按下。
+ * 窗口必须按逻辑帧: 按轮询次数算会随轮询频率变成几百毫秒, 那段时间每个普通
+ * 点击都被当成 Shift+点击 (一次记 5 个)。 */
+#define BQ_SHIFT_FRAMES 2
+static int g_BQShiftFrame = 0; /* 0=本局还没按过 */
 
 static void* BQ_ModBase(void)
 {
@@ -353,6 +361,16 @@ typedef int __attribute__((thiscall)) (*Fn_CounterGet)(void* counter, int index)
 typedef void* __attribute__((thiscall)) (*Fn_ObjGetType)(void* obj);
 #define OFF_VT_GETTYPE (0x84 / 4)
 
+/* 对象类型 (只读; 取不到返 0)。 */
+static void* BQ_ObjType(void* obj)
+{
+    void** vt;
+    if (!obj) return 0;
+    vt = *(void***)obj;
+    if (!vt || !vt[OFF_VT_GETTYPE]) return 0;
+    return ((Fn_ObjGetType)vt[OFF_VT_GETTYPE])(obj);
+}
+
 #define FN_EVENTCTOR ((Fn_EventCtor)(void*)0x4C6970u)
 #define FN_GETPRIMARYFACTORY ((Fn_GetPrimaryFactory)(void*)0x500510u)
 #define FN_CANBUILD ((Fn_CanBuild)(void*)0x4F7870u)
@@ -381,11 +399,14 @@ static int BQ_ShiftRaw(void)
     return (r & 0x8000u) ? 1 : 0;
 }
 
-/* 点击用 Shift: 当前按下或 32 帧窗口内按过 (Poll 每帧采样)。 */
+/* 点击用 Shift: 当前按下或最近 2 个逻辑帧内按过 (Poll 采样)。 */
 static int BQ_ShiftDown(void)
 {
+    int age;
     if (BQ_ShiftRaw()) return 1;
-    return g_BQShiftHist != 0u ? 1 : 0;
+    if (!g_BQShiftFrame) return 0;
+    age = BQ_Frame() - g_BQShiftFrame;
+    return (age >= 0 && age <= BQ_SHIFT_FRAMES) ? 1 : 0;
 }
 
 static void BQ_RemoveAt(int idx);
@@ -435,12 +456,37 @@ static void BQ_RemoveAt(int idx)
     g_BQCount--;
 }
 
-/* 按 (house,naval,cat) 取主工厂 (与原版点击路径同调用; 槽位即权威,
- * 无 stale。工厂未具现/已死返回空, 调用方留着等, 永不丢单)。 */
+/* 按 (house,naval,cat) 取主工厂。返回的是 house 的缓存槽, 不是"找工厂":
+ * 引擎 BeginProduction 槽空时新建工厂写回, 拒单时清空 (0x4FA7EC)。 */
 static void* BQ_Resolve(void* house, unsigned naval, unsigned cat)
 {
     if (!house) return 0;
     return FN_GETPRIMARYFACTORY(house, ABS_BUILDINGTYPE, naval, cat);
+}
+
+/* 本家任一工厂正在造本型 (Object 类型对上)。认领判据: 不依赖缓存槽,
+ * 槽空时同样可用。只读。 */
+static int BQ_FacOnTypeAny(void* house, void* type)
+{
+    void** items;
+    int count;
+    int i;
+    if (!house || !type) return 0;
+    items = *(void***)ADDR_FACARR_ITEMS;
+    count = *(int*)ADDR_FACARR_COUNT;
+    if (!items || count <= 0 || !IsPlausiblePtr(items)) return 0;
+    if (count > 4096) count = 4096;
+    for (i = 0; i < count; i++)
+    {
+        void* fac = items[i];
+        void* obj;
+        if (!fac) continue;
+        if (*(void**)((char*)fac + OFF_FAC_OWNER) != house) continue;
+        obj = *(void**)((char*)fac + OFF_FAC_OBJECT);
+        if (!obj) continue;
+        if (BQ_ObjType(obj) == type) return 1;
+    }
+    return 0;
 }
 
 /* 复刻一次点击下单 (PRODUCE 事件手工进 OutList, 见文件头)。
@@ -491,18 +537,18 @@ static int BQ_FireProduce(void* house, void* type)
     return 1;
 }
 
-/* 每循环轮询 (挂 PowerDrawBoth)。首行采样 Shift 进闩锁 (开关关/
- * 队列空也采样, 保证闩锁连续); 之后开关关/队列空直接返回。
- * 只喂单, 不对账: 条目不存工厂指针, 无 stale。
- * 就绪/待放置 (Object 非空) 只等放置, 不动队列: 放下后
- * Object==null, 下一轮自动开工。 */
+/* 每循环轮询 (挂 PowerDrawBoth)。首轮采样 Shift (开关关/队列空也采样,
+ * 保证闩锁连续); 之后开关关/队列空直接返回。
+ * 条目不存工厂指针, 每轮按 (house,naval,cat) 现解析, 无 stale。
+ * 就绪/待放置 (Object 非空) 只等放置: 放下后 Object==null, 下一轮自动开工。 */
 void BuildQueue_Poll(void)
 {
     void* cur;
     int i;
+    int fr;
 
     BQ_EnsureInit();
-    g_BQShiftHist = (g_BQShiftHist << 1) | (BQ_ShiftRaw() ? 1u : 0u);
+    if (BQ_ShiftRaw()) g_BQShiftFrame = BQ_Frame();
     if (!g_BQEnable) return;
     cur = *(void**)ADDR_CURPLAYER;
     if (!cur || (g_BQHouse && cur != g_BQHouse))
@@ -513,10 +559,10 @@ void BuildQueue_Poll(void)
         return;
     }
     if (!g_BQHouse) g_BQHouse = cur;
-    BQ_PendAge();
     if (g_BQCount <= 0) return;
-    /* 确认制: 发单只 mark flying 不移除, 下轮见模拟认领
-     * (CountTotal>0) 才移除; 执行拒收则条目留着数字留着, pend 窗后重发。 */
+    fr = BQ_Frame();
+    /* 确认制: 发单只 mark flying 不移除, 见模拟认领才移除; 执行拒收则条目
+     * 留着, 重发窗口过后自动重试。 */
     for (i = 0; i < g_BQCount; i++)
     {
         BQEntry* e = &g_BQList[i];
@@ -539,34 +585,37 @@ void BuildQueue_Poll(void)
             i--;
             continue;
         }
+        /* 认领: 本家任一工厂正在造本型。放置前 Object 一直是它, 放下后变空,
+         * 才会喂下一项; 按数组扫描, 不依赖主工厂缓存槽。 */
+        if (e->flying && BQ_FacOnTypeAny(cur, e->type))
+        {
+            BQ_RemoveAt(i);
+            i--;
+            continue;
+        }
+        if (BQ_Pending(cur, e->naval, e->buildcat)) continue;
         factory = BQ_Resolve(cur, e->naval, e->buildcat);
-        if (!factory) continue; /* 工厂不存在: 留着等具现/重建, 不丢单 */
-        if (e->flying)
+        if (factory)
         {
-            if (BQ_SimCount(cur, e->type) > 0)
-            {
-                /* 模拟已认领则删条目并继续 (删后下标顶上, 不可再用旧工厂)。 */
-                BQ_RemoveAt(i);
-                i--;
-                continue;
-            }
-            if (BQ_Pending(cur, e->naval, e->buildcat))
-                continue; /* 等执行 */
-            /* 否则 pend 过期未认领: 下沉重发 (经 owner/object 门) */
+            if (*(void**)((char*)factory + OFF_FAC_OWNER) != cur) continue;
+            if (*(void**)((char*)factory + OFF_FAC_OBJECT)) continue;
         }
-        else
+        else if (e->flying && e->fired && fr - e->fired >= 0 &&
+                 fr - e->fired < BQ_BLIND_FRAMES)
         {
-            if (BQ_Pending(cur, e->naval, e->buildcat)) continue;
+            continue; /* 缓存槽空: 照发, 但引擎可能每单都拒, 别每轮都发 */
         }
-        if (*(void**)((char*)factory + OFF_FAC_OWNER) != cur) continue;
-        if (*(void**)((char*)factory + OFF_FAC_OBJECT)) continue;
+        /* 槽空也照发: 引擎 BeginProduction 会按需建厂并写回槽, 拦着就
+         * 再也续不上。 */
         BQ_MarkPending(cur, e->naval, e->buildcat);
         if (!BQ_FireProduce(cur, e->type)) continue;
         e->flying = 1;
+        e->fired = fr;
     }
 }
 
-/* 记入 N 条本地 (槽位复用须清 flying, 否则残留 1 会被误认领)。 */
+/* 记入 N 条本地 (槽位复用须清 flying/fired, 否则残留会被误认领 /
+ * 让新条目的重发窗沿用旧时间)。 */
 static void BQ_PushN(void* house, void* type, unsigned naval, unsigned cat,
                      int n)
 {
@@ -578,6 +627,7 @@ static void BQ_PushN(void* house, void* type, unsigned naval, unsigned cat,
         g_BQList[g_BQCount].naval = naval;
         g_BQList[g_BQCount].buildcat = cat;
         g_BQList[g_BQCount].flying = 0;
+        g_BQList[g_BQCount].fired = 0;
         g_BQCount++;
     }
 }
@@ -665,7 +715,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_FreeShift(void* regs)
  * EAX=state 地址 (0x6AB0B8 已算好), EDI=图标类型, EBP=abs。
  * state!=1→跳取消分支 (原生 jne 去向); state==1 (本要暂停):
  * Shift+右键且本地有本型→清空后转取消分支 (原生下 0x2E);
- * 否则一律原生暂停 (d=3 与暂停优先模型一致)。
+ * 否则一律原生暂停 (暂停优先)。
  * 只读不写。 */
 extern "C" __declspec(dllexport) DWORD __cdecl BQ_PausePeel(void* regs)
 {
@@ -799,7 +849,8 @@ static int BQ_ClearType(void* house, int heap)
     return n;
 }
 
-/* 暗路剥离: 本地有本型→弹尾跳原生出口; 本地空→模拟>1 拦下; 否则走原生。Shift 方向由分发点处理。 */
+/* 暗路剥离: 本地有本型→弹尾跳原生出口; 本地空→模拟>1 拦下; 否则走原生。
+ * Shift 方向由分发点处理。 */
 static DWORD BQ_DarkPeel(void* regs)
 {
     unsigned abs;

@@ -110,6 +110,46 @@
 /* 雷达点击门 (点击是否已被 UI 消费)。 */
 #define ADDR_CLICKGATE_SKIP     0x006925FCu
 
+/* ==================== 动画类型 (天气 SHp 来源) ==================== */
+
+/* AnimTypeClass::Array (DynamicVectorClass<AnimTypeClass*>)。
+ * 结构: +0x00 虚表 / +0x04 数据指针 (元素数组) / +0x10 个数。
+ * 实证: gamemd 0x428BB3 读 [0x8B4154] 取第 i 个指针, 0x428BBC
+ * `add ecx,0x24` 后与传入 ID 做 _strcmpi 比较; 0x428BA8 读 [0x8B4160] 是个数。 */
+#define ADDR_ANIMTYPE_ARR       0x008B4150u
+#define ADDR_ANIMTYPE_COUNT     0x008B4160u
+
+/* AnimTypeClass 成员偏移:
+ *   +0x24 = char ID[0x18]  (AbstractTypeClass::ID)
+ *   +0xA4 = SHPStruct* Image, +0xA8 = bool ImageAllocated (ObjectTypeClass)
+ *   +0x1F8 = char ImageFile[0x19] (ObjectTypeClass) —— 有 Image= 时用这个
+ * 实证: gamemd 0x4279A8..0x4279E1 反复读写 [esi+0xA4]/[esi+0xA8],
+ * 且 0x5F70C7 清零 +0xA4、0x5F70CD 清零字节 +0xA8。 */
+#define OFF_ANIMTYPE_ID         0x24u
+#define OFF_ANIMTYPE_IMAGE      0xA4u
+
+/* 动画播放参数 (int, YRpp AnimTypeClass 成员顺序: Rate -> Start -> LoopStart ->
+ * LoopEnd)。注意 +0x2B0 里存的**不是** artmo.ini 写的那个 Rate: 活进程实测
+ * (tools/animdump.c) RAIN/SNOW 在这里都是 2, 而两者 art 里写的是 Rate=400 ——
+ * 引擎读 ini 时就换算成了"每动画帧要过几个逻辑帧" (= 900/Rate 截断, 见 ModEnc
+ * Rate), 所以这个字段可以直接当间隔用, 别再除一次。
+ * 循环段: RAIN 有 31 帧 / SNOW 20 帧, 而两者 LoopEnd=19, 必须按类型字段截断。
+ * 实证: gamemd 0x42477B-0x4247B1 用 [type+0x2B8]/[type+0x2BC] 复位动画帧,
+ * 0x4246FC 用 LoopEnd-Start 判循环。 */
+#define OFF_ANIMTYPE_RATE       0x2B0u
+#define OFF_ANIMTYPE_START      0x2B4u
+#define OFF_ANIMTYPE_LOOPSTART  0x2B8u
+#define OFF_ANIMTYPE_LOOPEND    0x2BCu
+
+/* 天气动画用的调色板 (ConvertClass*): 引擎画动画用的那一个。
+ * YRpp FileSystem.h: ANIM_PAL = 0x87F6C0 (ConvertClass*)。 */
+#define ADDR_ANIM_PAL            0x0087F6C0u
+
+/* 引擎 SHp 绘制入口 CC_Draw_Shape (gamemd 0x4AED70)。
+ * __fastcall: ecx=Surface, edx=ConvertClass*; 栈参顺序见 YRpp Surface.h
+ * 的 DSurface::DrawSHP。返回 0x38 (ret 0x38)。 */
+#define FN_DRAW_SHAPE            0x004AED70u
+
 /* ==================== 聊天 / 消息列表 ==================== */
 
 #define ADDR_MSGLIST            0xA8BC60u   /* MessageListClass::Instance */

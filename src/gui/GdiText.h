@@ -96,6 +96,8 @@ enum
     PF_LOCK,                   /* 全部 GtLock+GtUnlock 的 vtable 调用累计 */
     PF_SB2_SETUP, PF_SB2_FILL, PF_SB2_LBL,   /* 刻度条: 取面/布局 / 填充 / 档位文字 */
     PF_SWS_BUILD, PF_SWS_BLIT,  /* 超武侧栏: 重建缓存 (帧门 + 墙钟门) / 每帧带 alpha 贴层 */
+    PF_D_WTH,                   /* 天气覆盖层: 引擎 blit 平铺 + 粒子 */
+    PF_D_CLD,                   /* 其中云影那一层 (逐像素压暗) */
     PF_COUNT
 };
 long long Perf_Now(void);

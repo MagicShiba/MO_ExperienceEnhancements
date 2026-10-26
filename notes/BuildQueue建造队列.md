@@ -43,7 +43,6 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈）：E8 点五个 push 之
   （`0x6AB602 mov edi,[esp+0x28]`，`0x6AB6CE` 处 `[edi+0xCCE]`），
   ESI=工厂（`0x6AB602` 处 `GetPrimaryFactory` 结果，
   `0x6AB61E mov esi,eax`）。
-- （历史钩点，已全撤，见上）
 - `0x6AB6CE`（10 字节，`mov edx,[esp+0x24] + mov al,[edi+0xcce]`，无 rel）
   → 工厂闲时 Shift+左键顺手记 4 个（原版即时下单第 1 个，合计 5 个；
   ESI 可空时按主工厂回退），跑原指令。regs 同点击钩子。
@@ -53,8 +52,10 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈）：E8 点五个 push 之
 - 右键语义（`0x6AB0AC-0x6AB0A7`）：cameo state==1 则置 2、
   发 SUSPEND、跳 `0x6AB28f`（暂停）；state!=1 才进 `0x6AB18d` 取消分支
   （IsQueued→`0x2E`/`0x10`）。
-- Shift 检测：`0x53EC70`（ecx=`0x10`，`test ah,0x80`，含 `GetKeyState` 后备）。另有 32 帧闩锁（Poll 每帧采样）：
-  左键记数用“当前或近期按下”（防单帧竞态/提前松开），右键清空只认当前。
+- Shift 检测：`0x53EC70`（ecx=`0x10`，`test ah,0x80`，含 `GetKeyState` 后备）。另有 2 逻辑帧闩锁：
+  Poll 记下最近按下的逻辑帧号，左键记数用“当前或刚按过”（防单帧竞态/提前松开），
+  右键清空只认当前。窗口按逻辑帧而非轮询次数：Poll 挂渲染 prepare，按次数算会随帧率
+  变成几百毫秒，那段时间的普通点击会被当成 Shift+点击（一次记 5 个）。
 - 建筑页/防御页天然分开：条目按 house+heap 匹配（heap=ArrayIndex 类型唯一，
   同型必同 BuildCat/同工厂），清空只清本家本型。
 - 日志：仅启动两行（`bqueue: local building queue ON` + `bqueue: modbase=`）。
@@ -62,12 +63,12 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈）：E8 点五个 push 之
   绘制按 buildcat=0 取槽工厂，建筑页没下过单则槽空，原生直接跳过计数，
   防御页连带没数字。工厂空但本地有本型→EAX/EBX=本地数跳绘制块；
   工厂空且本地无→跳原生跳过处。
-- 待发事件窗守卫：Poll 挂渲染可快于逻辑帧，连发两单则第二单
-  在执行侧被拒（`0x4FA520` 首部 busy+building 直接返 3），静默丢单；
-  故发单后同线 45 轮内不再发（执行后 Object 非空本来就会停）。
-- 确认制：发单只 mark flying 不移除，见模拟认领
-  （`CountTotal>0`）才移除；执行拒收则条目留着数字
-  留着，pend 窗后重发。发而不删，永不哑单丢数。
+- 待发事件窗守卫：发单后同线 2 逻辑帧内不再发（执行后 Object 非空本来就会停，
+  被拒则隔一帧自愈）。
+- 确认制：发单只 mark flying 不移除，等模拟认领才移除。认领判据＝本家任一工厂
+  `Object` 的类型就是本条类型（`Object->vtbl+0x84`），扫 `FactoryClass::Array`，
+  不依赖主工厂缓存槽。Object 为空不算认领，放置后变空才喂下一项。执行拒收则条目
+  留着，重发窗口过后重试。发而不删，永不哑单丢数。
 - `0x6A9C86`（5 字节，`mov ebx,eax + cmp ebx,1`，CountTotal 取数点）→ 本地
   有排队或原生数为 0 时改用全厂求和（`sim+n`，`sim` 为本家各工厂
   `CountTotal` 之和）后跳 `0x6A9CC9` 借用原版绘制数字，否则跑原指令。
@@ -89,11 +90,18 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈）：E8 点五个 push 之
   `CurrentPlayer=*(0xA83D4C)`；`EventType::Produce=0xE/Abandon=0x10`。
 
 轮询（`BuildQueue_Poll`，挂 `PowerDrawBoth` 每循环）：
-条目不存工厂指针（只存 house/type/naval/cat，cat 取自点击帧 `[esp+0x24]`
-与原生 GPF 入参同值），每轮按 `(house,naval,cat)` 现解析槽位工厂
-（槽位即权威，无 stale）；工厂不存在/非本家→留着等（卖了重建/具现后
-自动续上）；`Object==null` 才下单；同一工厂每轮只喂一项（事件下帧才
-执行）。菜单/读档/换 CurrentPlayer 即清空（未下单=未扣费）。上限 50。
+条目不存工厂指针（只存 house/type/naval/cat，cat 取自点击帧 `[esp+0x24]`，
+与原生 GPF 入参同值），每轮按 `(house,naval,cat)` 现解析工厂，`Object==null`
+才下单，同线按逻辑帧限速。菜单/读档/换 CurrentPlayer 即清空（未下单=未扣费），
+上限 50。Poll 由 `PrepDue` 限速（约 60 次/秒，与帧率无关），时间判据一律用
+逻辑帧 `ADDR_FRAME`。
+
+主工厂槽（`GetPrimaryFactory 0x500510`）不是“找工厂”，只读 house 的缓存槽
+（absID=6/7 → `[house+0x53BC]`，`buildcat==5` → `[house+0x53CC]`）。槽由引擎
+`BeginProduction` 写：空则新建 `FactoryClass` 并写回，**拒单时清空**
+（0x4FA7EC 一族）。所以槽空只表示“现在查不到”，不等于不能下单 —— 槽空照发
+PRODUCE 事件（引擎执行侧会按需建厂写回），重发间隔 `BQ_BLIND_FRAMES`=15 帧，
+防“产线真忙→拒单→清槽→再发”刷事件；单被接受后条目立刻被认领，不拖慢队列。
 
 限造（`rules.ini BuildLimit`，本 mod 大量建筑限 1/2/3）：
 
@@ -112,8 +120,8 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈）：E8 点五个 push 之
 - 原版 cameo 校验（`0x6AA781`）调 `HouseClass::CanBuild`(`0x4F7870`)：
   `==0` 永久不可造，`>0`（`1` 可造 / `-1` 临时灰化，如工厂断电）放行。
   本地复刻事件绕过了它，条目失去资格后永不认领，重发还会压住整条产线。
-- 修法：Poll 每条目喂单前调 `FN_CANBUILD(house,type,0,1)`，
-  `==0` 则 `BQ_RemoveAt`+`continue`；`>0` 不动。只读，联机安全。
+- 故 Poll 每条目喂单前调 `FN_CANBUILD(house,type,0,1)`，`==0` 则
+  `BQ_RemoveAt`+`continue`，`>0` 不动。只读，联机安全。
 
 结论：
 
@@ -123,3 +131,10 @@ R_ESP 即原始 ESP（Syringe 补丁是 JMP 不压栈）：E8 点五个 push 之
 - 开关关时钩子全跑原指令、轮询直接返回。
 
 本地使用前，必须用反汇编核对上述地址是否适用于 `G:\motest\gamemd.exe`。
+
+## 修正记录
+
+- 0.2.493：认领从 `CountTotal>0` 改为 `Object` 类型匹配（放置瞬间计数口径未落定
+  会误认领，删了条目却不产）；pend 窗与 Shift 闩锁从“轮询次数”改为逻辑帧。
+- 0.2.494：主工厂槽为空时不再拦，照发事件由引擎按需建厂（槽会被引擎拒单清空，
+  旧逻辑一旦清空就永不续建）；认领独立于槽，扫工厂数组。

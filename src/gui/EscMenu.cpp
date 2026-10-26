@@ -9,6 +9,7 @@
 #include "PauseView.h"
 #include "GridView.h"
 #include "Shot.h"
+#include "Weather.h"
 #include "SWSBar.h"
 #include "BuildQueue.h"
 #include "PlaceScatter.h"
@@ -56,9 +57,10 @@
 #define ESC_SEP_GAP          4
 #define ESC_ROW_H            26
 #define ESC_GROUP_H          28
-/* GUI 功能页的行数最多(26 行), 用略紧的组标题/组间距才放得下 1024x768 ——
- * 放不下的部分靠滚轮 (设置页也可滚, 见 Esc_PageWalk)。只作用于这一页,
- * 文本页仍用上面的值。 */#define ESC_GUI_GROUP_H      26
+/* GUI 功能页行数随功能增加, 用略紧的组标题/组间距尽量多放几行, 1024x768 放
+ * 不下的部分靠滚轮 (设置页也可滚, 见 Esc_PageWalk)。只作用于这一页,
+ * 文本页仍用上面的值。 */
+#define ESC_GUI_GROUP_H      26
 #define ESC_GUI_GAP          6
 #define ESC_BLOCK_GAP        12
 #define ESC_WARN_H           26
@@ -66,7 +68,7 @@
 #define ESC_TEXT_SS          2
 #define ESC_LABEL_CAP        96
 #define ESC_LEFT_ROWS        2
-#define ESC_GUI_DISPLAY      26
+#define ESC_GUI_DISPLAY      32
 #define ESC_SEP_H            14
 #define ESC_SKIN_N           5
 #define ESC_SCATTER_N        3
@@ -144,6 +146,12 @@ enum {
     GUI_ITEM_LIGHT_RED,
     GUI_ITEM_LIGHT_GREEN,
     GUI_ITEM_LIGHT_BLUE,
+    GUI_ITEM_WTH_MODE,
+    GUI_ITEM_WTH_RAIN,
+    GUI_ITEM_WTH_SNOW,
+    GUI_ITEM_WTH_FIRE,
+    GUI_ITEM_WTH_CLOUD,
+    GUI_ITEM_WTH_STYLE,
     GUI_ITEM_COUNT
 };
 
@@ -194,6 +202,8 @@ static wchar_t s_GuiSkinName[ESC_SKIN_N][32];
 static wchar_t s_GuiScatter[ESC_SCATTER_N][32];
 static wchar_t s_GuiHide[ESC_HIDE_N][32];
 static wchar_t s_GuiSwsSide[ESC_SWS_SIDE_N][32];
+static wchar_t s_GuiWthMode[WEATHER_DRAW_N][32];
+static wchar_t s_GuiWthStyle[WEATHER_CLOUD_STYLE_N][32];
 /* 光照预设分段: 原图 + 标准/早上/下午/黄昏/晚上 + 自定义 (自定义只是状态)。 */
 static wchar_t s_GuiLight[LIGHT_PRESET_COUNT + 1][32];
 
@@ -251,6 +261,7 @@ typedef struct {
     int scale, pause, grid, shot, sws, fill, rows, skin, color;
     int bq, scatter, sideScroll, hide, swsSide;
     int chatEdit, chatName, speed, speedOn;
+    int wthMode, wthRain, wthSnow, wthFire, wthCloud, wthStyle;
 } EscSavedSettings;
 
 #define ESC_SETTING_LIST(X) \
@@ -270,7 +281,13 @@ typedef struct {
     X(chatEdit, ChatEdit_Enabled, ChatEdit_SetEnabled) \
     X(chatName, ChatEdit_ShowNameSP, ChatEdit_SetShowNameSP) \
     X(speed, GameSpeed_GetFps, GameSpeed_SetFps) \
-    X(speedOn, GameSpeed_Enabled, GameSpeed_SetEnabled)
+    X(speedOn, GameSpeed_Enabled, GameSpeed_SetEnabled) \
+    X(wthMode, Weather_DrawMode, Weather_SetDrawMode) \
+    X(wthRain, Weather_Rain, Weather_SetRain) \
+    X(wthSnow, Weather_Snow, Weather_SetSnow) \
+    X(wthFire, Weather_Fire, Weather_SetFire) \
+    X(wthCloud, Weather_Cloud, Weather_SetCloud) \
+    X(wthStyle, Weather_CloudStyle, Weather_SetCloudStyle)
 
 static EscSavedSettings s_Saved;
 static int s_SavedOk = 0;
@@ -312,7 +329,8 @@ static const char* const kLabelKey[GUI_ITEM_COUNT] = {
     "GuiSideScroll", "GuiSideHide", "GuiSwsSide", "GuiGameSpeedOn",
     "GuiGameSpeed", "GuiFps",
     "GuiLightPreset", "GuiLightParm", "GuiLightAmbient", "GuiLightRed",
-    "GuiLightGreen", "GuiLightBlue"
+    "GuiLightGreen", "GuiLightBlue", "GuiWthMode", "GuiWthRain",
+    "GuiWthSnow", "GuiWthFire", "GuiWthCloud", "GuiWthStyle"
 };
 static const char* const kLightKey[LIGHT_PRESET_COUNT + 1] = {
     "GuiLightOrig", "GuiLightStandard", "GuiLightMorning", "GuiLightAfternoon",
@@ -329,6 +347,14 @@ static const char* const kHideKey[ESC_HIDE_N] = {
 };
 static const char* const kSwsSideKey[ESC_SWS_SIDE_N] = {
     "GuiSwsSideRight", "GuiSwsSideLeft"
+};
+static const char* const kWeatherKey[WEATHER_DRAW_N] = {
+    "GuiWthImage", "GuiWthParticle"
+};
+/* 云影风格名 (与 Weather.cpp 的 kCldStyle 顺序一致) */
+static const char* const kCldStyleKey[WEATHER_CLOUD_STYLE_N] = {
+    "GuiWthStyle0", "GuiWthStyle1", "GuiWthStyle2", "GuiWthStyle3",
+    "GuiWthStyle4", "GuiWthStyle5", "GuiWthStyle6"
 };
 static const char* const kTextKey[TX_COUNT] = {
     "TextGroupCamp", "TextCampEnable", "TextCampLines", "TextCampOpacity",
@@ -392,6 +418,8 @@ static void Esc_LoadAllText(void)
     ESC_LOAD_FAM(kScatterKey, s_GuiScatter, 0);
     ESC_LOAD_FAM(kHideKey, s_GuiHide, 0);
     ESC_LOAD_FAM(kSwsSideKey, s_GuiSwsSide, 0);
+    ESC_LOAD_FAM(kWeatherKey, s_GuiWthMode, 0);
+    ESC_LOAD_FAM(kCldStyleKey, s_GuiWthStyle, 0);
     ESC_LOAD_FAM(kLightKey, s_GuiLight, 0);
 
     Esc_TextText("TextTitle", s_TextTitle, ESC_LABEL_CAP);
@@ -614,6 +642,12 @@ static const EscGuiRowInfo s_GuiLayout[ESC_GUI_DISPLAY] = {
     { EG_COLOR,  GUI_ITEM_COLOR },
     { EG_SKIN,   GUI_ITEM_SKIN },
     { EG_GROUP,  GUI_GROUP_MISC },
+    { EG_CHOICE, GUI_ITEM_WTH_MODE },
+    { EG_SWITCH, GUI_ITEM_WTH_RAIN },
+    { EG_SWITCH, GUI_ITEM_WTH_SNOW },
+    { EG_SWITCH, GUI_ITEM_WTH_FIRE },
+    { EG_SWITCH, GUI_ITEM_WTH_CLOUD },
+    { EG_CHOICE, GUI_ITEM_WTH_STYLE },
     { EG_SWITCH, GUI_ITEM_FPS }
 };
 
@@ -1088,7 +1122,12 @@ static const EscToggle s_Toggle[] = {
     { GUI_ITEM_SORT,         "SWSidebar", "FillMode",     SWS_FillMode,      SWS_SetFillMode },
     { GUI_ITEM_GAMESPEED_ON, "GameSpeed", "Enable",       GameSpeed_Enabled, GameSpeed_SetEnabled },
     { GUI_ITEM_BUILD_QUEUE,  "Features",  "BuildQueue",   BQ_Enabled,        BQ_SetEnabled },
-    { GUI_ITEM_SIDE_SCROLL,  "Sidebar",   "ScrollEnable", SS_Enabled,        SS_SetEnabled }
+    { GUI_ITEM_SIDE_SCROLL,  "Sidebar",   "ScrollEnable", SS_Enabled,        SS_SetEnabled },
+    /* 天气: 雨/雪/火雨只在本次运行有效 (section=NULL), 云影是长期开关, 落盘。 */
+    { GUI_ITEM_WTH_RAIN,     NULL, NULL, Weather_Rain, Weather_SetRain },
+    { GUI_ITEM_WTH_SNOW,     NULL, NULL, Weather_Snow, Weather_SetSnow },
+    { GUI_ITEM_WTH_FIRE,     NULL, NULL, Weather_Fire, Weather_SetFire },
+    { GUI_ITEM_WTH_CLOUD,    "Weather", "CloudEnable", Weather_Cloud, Weather_SetCloud }
 };
 
 /* 行控件表的 item 都是首字段, 五张表的查找长得一样, 用宏生成。 */
@@ -1132,6 +1171,21 @@ static void EscChoiceSwsSide(int pick)
     Esc_QueueRaw("SWSidebar", "Side", pick ? "left" : "right");
 }
 
+/* 天气画法: 0=图像 (引擎 SHP) 1=粒子。这是**长期设置**, 落盘到 [Weather] DrawMode;
+ * 雨/雪/火雨各自的开关仍然只在本次运行有效 (不在配置里留"恒定天气")。 */
+static void EscChoiceWthMode(int pick)
+{
+    Weather_SetDrawMode(pick);
+    Esc_QueueRaw("Weather", "DrawMode", pick ? "particle" : "image");
+}
+
+/* 云影风格: 换一种云图预设。也是长期设置, 落盘到 [Weather] CloudStyle (写序号)。 */
+static void EscChoiceWthStyle(int pick)
+{
+    Weather_SetCloudStyle(pick);
+    Esc_QueueValue("Weather", "CloudStyle", pick);
+}
+
 /* 光照预设: 当前是"手动调过"时高亮最后一段 (自定义), 那一段不可选,
  * 只是状态显示。 */
 static int EscChoiceLightGet(void)
@@ -1152,7 +1206,11 @@ static const EscChoice s_Choice[] = {
     { GUI_ITEM_SIDE_HIDE, s_GuiHide,    ESC_HIDE_N,     0, FM_HideState,  EscChoiceHide },
     { GUI_ITEM_SWS_SIDE,  s_GuiSwsSide, ESC_SWS_SIDE_N, 1, SWS_SideRight, EscChoiceSwsSide },
     { GUI_ITEM_LIGHT_PRESET, s_GuiLight, LIGHT_PRESET_COUNT + 1, 0,
-      EscChoiceLightGet, EscChoiceLightApply }
+      EscChoiceLightGet, EscChoiceLightApply },
+    { GUI_ITEM_WTH_MODE,  s_GuiWthMode, WEATHER_DRAW_N, 0, Weather_DrawMode,
+      EscChoiceWthMode },
+    { GUI_ITEM_WTH_STYLE, s_GuiWthStyle, WEATHER_CLOUD_STYLE_N, 0,
+      Weather_CloudStyle, EscChoiceWthStyle }
 };
 
 ESC_FINDER(Esc_ChoiceFind, EscChoice, s_Choice)
@@ -2381,7 +2439,7 @@ static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx,
     {
         value = t->get() ? 0 : 1;
         t->set(value);
-        Esc_QueueValue(t->section, t->key, value);
+        if (t->section) Esc_QueueValue(t->section, t->key, value);
         Esc_Redraw(hDlg);
         return;
     }

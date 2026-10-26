@@ -245,7 +245,7 @@ static const char* const kPfName[] =
     "dSWS", "dSO", "dPC", "dRP", "dFA", "dSA", "dTC", "dDP", "dWR", "dAG", "dRAD",
     "tCE", "tPWR", "tSB", "tPV", "tSHOT",
     "vhit", "vmiss", "lock", "sbSet", "sbFill", "sbLbl",
-    "swsB", "swsL"
+    "swsB", "swsL", "dWTH", "dCLD"
 };
 typedef char kPfName_align_check[
     (sizeof(kPfName) / sizeof(kPfName[0]) == (unsigned)PF_COUNT) ? 1 : -1];
