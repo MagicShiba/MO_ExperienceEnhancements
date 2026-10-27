@@ -35,7 +35,7 @@ struct SyHookDecl
 
 #define SYHOOK(a, s, n) { (a), (s), (n), 0u }
 
-/* 与 dist/MOExperience.dll.inj 逐行对应 (43 项, 顺序一致)。 */
+/* 与 dist/MOExperience.dll.inj 逐行对应 (50 项, 顺序一致)。 */
 static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(16))) =
 {
     SYHOOK(0x5D3BA0u, 6u, "MsgText_AddMessageHook"),
@@ -65,6 +65,7 @@ static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(
     SYHOOK(0x4346C0u, 5u, "ToolTip_AdvFix"),
     SYHOOK(0x692419u, 7u, "SWS_ClickGate"),
     SYHOOK(0x692406u, 6u, "FullMap_RadarClickGate"),
+    SYHOOK(0x692361u, 6u, "UP_ClickGate"),
     SYHOOK(0x536FA0u, 7u, "RepairAll_HotKey"),
     SYHOOK(0x6A78D9u, 6u, "RepairAll_Button"),
     SYHOOK(0x55D360u, 5u, "PV_MainGate"),
@@ -82,6 +83,11 @@ static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(
     SYHOOK(0x55DDA0u, 5u, "PlayerColor_TickHook"),
     SYHOOK(0x6DD8B0u, 6u, "TAction_UISkin"),
     SYHOOK(0x6D528Au, 6u, "PlacementPreview_DrawHook"),
+    SYHOOK(0x4C7462u, 5u, "SU_EventRecord"),
+    SYHOOK(0x73D8B7u, 6u, "SU_StateEntry"),
+    SYHOOK(0x73D8CDu, 5u, "SU_PopOne"),
+    SYHOOK(0x4580A9u, 6u, "SU_BldLoop"),
+    SYHOOK(0x4581A4u, 5u, "SU_BldTail"),
 };
 
 /* ---------------- Syringe 握手 ---------------- */

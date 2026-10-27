@@ -98,6 +98,8 @@ enum
     PF_SWS_BUILD, PF_SWS_BLIT,  /* 超武侧栏: 重建缓存 (帧门 + 墙钟门) / 每帧带 alpha 贴层 */
     PF_D_WTH,                   /* 天气覆盖层: 引擎 blit 平铺 + 粒子 */
     PF_D_CLD,                   /* 其中云影那一层 (逐像素压暗) */
+    PF_A_UP,                    /* 左下选中面板: 每循环快照/摆位/取点击 */
+    PF_D_UP,                    /* 左下选中面板: 画进 Composite */
     PF_COUNT
 };
 long long Perf_Now(void);
@@ -261,8 +263,8 @@ void GtUnpack16(unsigned short px, unsigned char* r, unsigned char* g,
 
 /* 槽: 0=战役框 1=提示框 2=全局文本主字号 3=超武面板/底电 4=聊天输入
  * 5=超武充能% 6=超武悬停名 7=缩放刻度 8=全局文本顶栏字号 9=FPS钉住
- * 10=ESC标题 11=ESC正文。一槽一字号。 */
-#define GDI_SLOTS 12
+ * 10=ESC标题 11=ESC正文 12=左下选中面板 13=左下选中面板的数量角标。一槽一字号。 */
+#define GDI_SLOTS 14
 
 typedef struct {
     HDC dc;
@@ -298,13 +300,15 @@ int RenderLine(const wchar_t* text, int len);
 int CharsFit(const wchar_t* text, int len, int maxW);
 /* 单字形光栅: 在 (x0,y0) 画一个字, 返回像素宽。只清用到的矩形。 */
 int GtRenderGlyphAt(wchar_t ch, int x0, int y0, int* outW);
-/* DIB 覆盖率 blit 到已 Lock 的 16 位面。 */
+/* DIB 覆盖率 blit 到已 Lock 的 16 位面。
+ * alphaScale 是**透明度百分比**: 100 = 覆盖率原样 (不透明); 超过 100 一律按 100。
+ * 不是 0~255: 传 255 会让 cov>=100 的像素全饱和, 抗锯齿边缘被削平 (小字发胖发花)。 */
 void BlitCoverage(unsigned char* dstBase, int dstPitch, int surfW, int surfH,
                   int dx, int dy, int w, int h,
                   unsigned fr, unsigned fg, unsigned fb, unsigned alphaScale);
 
 /* 阴影单遍合成 (Size×Size 偏移块并集, 每像素只混一次)。
- * sw/sh 为源区 (惯例: 文字宽+2 × 行高)。 */
+ * sw/sh 为源区 (惯例: 文字宽+2 × 行高)。alphaScale 同 BlitCoverage (百分比)。 */
 void BlitCoverageShadow(unsigned char* dstBase, int dstPitch,
                         int surfW, int surfH,
                         int dx, int dy, int sw, int sh,

@@ -73,6 +73,7 @@ void OU_CopyEvt(char* dst, const char* src);
 #define MISSION_ENTER 7       /* Mission::Enter (载具/运输, Destination=目标对象) */
 #define MISSION_CAPTURE 8     /* Mission::Capture (工程师占领/步兵进驻, Destination=建筑) */
 #define MISSION_SABOTAGE 17   /* Mission::Sabotage (备用进驻, Destination=建筑) */
+#define MISSION_UNLOAD 16     /* Mission::Unload (载具放载员, 见 SingleUnload.cpp) */
 
 /* 光标 Action (YRpp GeneralDefinitions.h, MouseOver/DecideAction 返回值)。
  * 注意与 Mission 编号不同: 如 Action::Attack=5 对应 Mission::Attack=1。 */

@@ -47,6 +47,7 @@
 #include "SidebarSkin.h"
 #include "PvpNotice.h"
 #include "LightingPreset.h"
+#include "UnitPanel.h"
 #include "MOExperience.h"
 #include "MOEVersion.h"
 
@@ -402,6 +403,10 @@ static void PowerDrawBoth(void)
     tSeg = Perf_Now();
     SidebarSkin_Poll();
     Perf_Add(PF_B_SKIN, tSeg);
+    /* 左下角选中信息面板: 快照选中集 + 取点击 (真正选中在下一帧做, 见 UnitPanel.cpp)。*/
+    tSeg = Perf_Now();
+    UP_Poll();
+    Perf_Add(PF_A_UP, tSeg);
     /* 没有 AI 的对局: 每 30s 用引擎的聊天广播声明"非纯净版本"。放最后 —— 它内部
      * 会重入本函数 (被上面的闸挡掉), 不能让别的模块半截被打断。 */
     tSeg = Perf_Now();
@@ -1444,6 +1449,8 @@ static DWORD MsgDrawBody(void* regs)
     tOne = Perf_Now(); if (PV_DrawToComposite()) drew = 1;   Perf_Add(PF_T_PV, tOne);
     /* 截图键 (刻度条左侧最外一格, 与暂停三键同为底栏按钮)。 */
     tOne = Perf_Now(); if (Shot_DrawToComposite()) drew = 1;  Perf_Add(PF_T_SHOT, tOne);
+    /* 左下角选中信息面板 (压在视口上, 不遮底栏)。 */
+    tOne = Perf_Now(); if (UP_Draw()) drew = 1;              Perf_Add(PF_D_UP, tOne);
     Perf_Add(PF_MSG_TAIL, tSeg);
     }
 
@@ -1515,6 +1522,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_WheelHook(void* regs
     wparam = *(unsigned*)((char*)regs + OFF_REG_ECX);
 /* wparam 高位 (bit31) 为负 = 下滚。两框"上/下"语义相反, dir 反向传 (非 bug):
  * 战役框最新在下 (下滚 skip 减), 超武栏 0 项在上 (下滚 scroll 加)。 */
+    if (UP_WheelIn(mx, my, (wparam & 0x80000000u) ? 1 : -1)) return 0;
     if (SWS_WheelIn(mx, my, (wparam & 0x80000000u) ? 1 : -1)) return 0;
     MsgText_WheelIn(mx, my, (wparam & 0x80000000u) ? 1 : 0);
     return 0;
@@ -1684,6 +1692,8 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         UtoA((unsigned)(size_t)ep->ContextRecord->Ebp, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " eip=", sizeof(buf));
         UtoA((unsigned)(size_t)ep->ContextRecord->Eip, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " fr=", sizeof(buf));
+        UtoA(*(const unsigned*)(size_t)0xA8ED84u, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         LogLine(buf);
 
         /* 阶段名 + 两个栈窗口 (esp / ebp, ebp 窗是返回地址所在)。 */
@@ -1800,6 +1810,65 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
             p = AppendCStr(buf, p, b1, sizeof(buf));
         }
         LogLine(buf);
+
+        /* 栈回溯: 栈上落在本 DLL / 游戏 exe 里的字按 模块+偏移 记下来。
+         * 崩溃点落在第三方代码或野地址时, 只有这条链能指出是谁调进来的。 */
+        {
+            HMODULE self = GetModuleHandleA("MOExperience.dll");
+            HMODULE exe = GetModuleHandleA(NULL);
+            unsigned selfSz = 0, exeSz = 0;
+            unsigned sp = (unsigned)(size_t)ep->ContextRecord->Esp;
+            int n = 0, col = 0;
+
+            if (self)
+                selfSz = ((const IMAGE_NT_HEADERS*)((const char*)self
+                    + ((const IMAGE_DOS_HEADER*)self)->e_lfanew))->OptionalHeader.SizeOfImage;
+            if (exe)
+                exeSz = ((const IMAGE_NT_HEADERS*)((const char*)exe
+                    + ((const IMAGE_DOS_HEADER*)exe)->e_lfanew))->OptionalHeader.SizeOfImage;
+            p = 0;
+            p = AppendCStr(buf, p, "CRASH: mods exe=", sizeof(buf));
+            MOE_Hex(b1, (unsigned)(size_t)exe); p = AppendCStr(buf, p, b1, sizeof(buf));
+            p = AppendCStr(buf, p, " self=", sizeof(buf));
+            MOE_Hex(b1, (unsigned)(size_t)self); p = AppendCStr(buf, p, b1, sizeof(buf));
+            p = AppendCStr(buf, p, " ares=", sizeof(buf));
+            MOE_Hex(b1, (unsigned)(size_t)GetModuleHandleA("Ares.dll"));
+            p = AppendCStr(buf, p, b1, sizeof(buf));
+            p = AppendCStr(buf, p, " al=", sizeof(buf));
+            MOE_Hex(b1, (unsigned)(size_t)GetModuleHandleA("AutoLoad_nolog.dll"));
+            p = AppendCStr(buf, p, b1, sizeof(buf));
+            LogLine(buf);
+
+            p = 0;
+            p = AppendCStr(buf, p, "CRASH: stk", sizeof(buf));
+            for (i = 0; i < 0x800 && n < 18; i += 4)
+            {
+                unsigned v = *(const unsigned*)(size_t)(sp + i);
+                unsigned base;
+                const char* tag;
+                if (v < 0x10000u) continue;
+                if (self && v - (unsigned)(size_t)self < selfSz)
+                { tag = " MOE+"; base = (unsigned)(size_t)self; }
+                else if (exe && v - (unsigned)(size_t)exe < exeSz)
+                { tag = " exe+"; base = (unsigned)(size_t)exe; }
+                else continue;
+                if (col == 6)
+                {
+                    LogLine(buf);
+                    p = 0;
+                    p = AppendCStr(buf, p, "CRASH: stk", sizeof(buf));
+                    col = 0;
+                }
+                p = AppendCh(buf, p, ' ', sizeof(buf));
+                UtoA(i, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+                p = AppendCh(buf, p, ':', sizeof(buf));
+                p = AppendCStr(buf, p, tag, sizeof(buf));
+                MOE_Hex(b1, v - base); p = AppendCStr(buf, p, b1, sizeof(buf));
+                col++;
+                n++;
+            }
+            if (col) LogLine(buf);
+        }
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }

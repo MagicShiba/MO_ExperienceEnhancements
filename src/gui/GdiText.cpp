@@ -245,7 +245,7 @@ static const char* const kPfName[] =
     "dSWS", "dSO", "dPC", "dRP", "dFA", "dSA", "dTC", "dDP", "dWR", "dAG", "dRAD",
     "tCE", "tPWR", "tSB", "tPV", "tSHOT",
     "vhit", "vmiss", "lock", "sbSet", "sbFill", "sbLbl",
-    "swsB", "swsL", "dWTH", "dCLD"
+    "swsB", "swsL", "dWTH", "dCLD", "upP", "upD"
 };
 typedef char kPfName_align_check[
     (sizeof(kPfName) / sizeof(kPfName[0]) == (unsigned)PF_COUNT) ? 1 : -1];
@@ -966,7 +966,7 @@ typedef struct {
     unsigned char cov[ROWC_W * ROWC_H];
 } RowCE;
 static RowCE g_RowC[ROWC_N];
-static int g_RowGen[GDI_SLOTS] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+static int g_RowGen[GDI_SLOTS] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
 static int g_RowRR = 0;
 
 static void GdiFreeSlot(GdiSlot* s)
@@ -1227,7 +1227,9 @@ int GtRenderGlyphAt(wchar_t ch, int x0, int y0, int* outW)
     return sz.cx;
 }
 
-/* DIB 覆盖率 blit 到已 Lock 的 16 位面。 */
+/* DIB 覆盖率 blit 到已 Lock 的 16 位面。
+ * alphaScale 是**百分比** (100 = 不透明), 不是 0~255 的 alpha: 它乘在覆盖率上,
+ * 传 255 会让 cov>=100 的像素全部饱和成实心 —— 抗锯齿边缘被削平, 小字发胖发花。 */
 void BlitCoverage(unsigned char* dstBase, int dstPitch, int surfW, int surfH,
                   int dx, int dy, int w, int h,
                   unsigned fr, unsigned fg, unsigned fb, unsigned alphaScale)
@@ -1237,7 +1239,7 @@ void BlitCoverage(unsigned char* dstBase, int dstPitch, int surfW, int surfH,
     x0 = (dx < 0) ? -dx : 0;
     x1 = (dx + w > surfW) ? surfW - dx : w;
     if (x1 <= x0) return;
-    if (alphaScale > 255u) alphaScale = 255u;
+    if (alphaScale > 100u) alphaScale = 100u;
     /* 纯黑走 BlendDark, 与 Blend16(…,0,0,0,a) 相同。 */
     if (fr == 0 && fg == 0 && fb == 0)
     {
@@ -1320,7 +1322,7 @@ void BlitCoverageShadow(unsigned char* dstBase, int dstPitch,
     if (!g_G || !g_G->bits || sw <= 0 || sh <= 0) return;
     if (Size < 1) Size = 1;
     if (Size > 4) Size = 4;
-    if (alphaScale > 255u) alphaScale = 255u;
+    if (alphaScale > 100u) alphaScale = 100u;   /* 同 BlitCoverage: 百分比 */
     X0 = dx + offX;
     X1 = dx + offX + Size - 1 + sw - 1;
     if (X1 < X0 || surfW <= 0 || surfH <= 0) return;

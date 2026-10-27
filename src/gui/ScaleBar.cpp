@@ -2058,9 +2058,9 @@ static void Sb_PaintLabels(unsigned char* base, int pitch, int W, int H, int ox,
         if (!n) continue;
         tw = RenderLine(buf, n);
         if (tw <= 0) continue;
-        /* 不透明覆盖：幂等，每帧照画不叠亮。 */
+        /* 不透明覆盖: 幂等, 每帧照画不叠亮 (末位是透明度百分比, 100=不透明) */
         BlitCoverage(base, pitch, W, H, Sb_DetentX(i, ga, gb, gn) + ox - tw / 2, by,
-                     tw + 2, th, 242, 246, 252, 255);
+                     tw + 2, th, 242, 246, 252, 100);
     }
 }
 

@@ -84,6 +84,91 @@
 #define ADDR_TYPARRAY           0xA8EB00u   /* Unit/Aircraft/Infantry 类型 */
 #define ADDR_TERRAINTYPES       0xA8E318u   /* TerrainType (树/矿等) */
 
+/* ==================== 选中集 ==================== */
+
+/* ObjectClass::CurrentObjects (DynamicVectorClass<ObjectClass*>, YRpp ObjectClass.h)。
+ * 实证: MapClass::UnselectAll 0x48DC90 读 [0xA8ECC8] 当个数、[0xA8ECBC] 当数组,
+ * 逐个 call [vtbl+0x150] (ObjectClass::Deselect)。 */
+#define ADDR_CUR_OBJECTS        0x00A8ECB8u   /* 容器本体 (items=+4, count=+0x10) */
+
+/* AbstractClass::WhatAmI 虚表槽 (0x692590 `mov eax,[ecx]; call [eax+0x2c]` 后
+ * `cmp eax,6` = BuildingClass 实证)。返回值见 AbstractType。 */
+#define OFF_VT_WHATAMI          0x2Cu
+#define WHATAMI_UNIT            1
+#define WHATAMI_AIRCRAFT        2
+#define WHATAMI_BUILDING        6
+#define WHATAMI_INFANTRY        15
+
+/* 具体类的类型指针成员 (YRpp 布局换算, BuildingClass 那项 0x520 与
+ * OFF_BLD_TYPE 同值 ⇒ 其余同类可信)。 */
+#define OFF_UNIT_TYPE           0x6C4u
+#define OFF_AIRCRAFT_TYPE       0x6C4u
+#define OFF_INFANTRY_TYPE       0x6C0u
+
+/* TechnoClass 成员。Veterancy 是 float: 0~1 = 新兵升老兵进度, 1~2 = 老兵升精英,
+ * <0 = 不吃经验 (YRpp VeterancyStruct::IsNegative)。Ammo 是当前弹药。 */
+#define OFF_TECH_VETERANCY      0x150u
+#define OFF_TECH_AMMO           0x2FCu
+/* PassengersClass { int NumPassengers; FootClass* FirstPassenger; }, 链走
+ * ObjectClass::NextObject (+0x30)。 */
+#define OFF_TECH_PASSNUM        0x114u
+#define OFF_TECH_PASSFIRST      0x118u
+/* FootClass::Transporter: 载员指回载具, 载具自己为 NULL (运行时实证:
+ * 车下载员此处 == 载具指针, 载具自己为 0)。 */
+#define OFF_TECH_TRANSPORT      0x11Cu
+/* FootClass::Container: 驻军建筑 / 坦克掩体用的"容器"字段 (0x6EA500 attach
+ * 写 0x5D4, 0x457DE0 放人时据此断开)。车下载员恒为 0, 不要拿它判载具归属。 */
+#define OFF_TECH_CONTAINER      0x5D4u
+/* UnitClass::NonPassengerCount: 卸载状态机保留几个不下车 (炮手)。
+ * 卸载状态 3 的判据就是 NumPassengers <= 这个值 (0x73D8C5)。 */
+#define OFF_TECH_NONPASS        0x6E4u
+/* BuildingClass::Occupants: DynamicVectorClass<InfantryClass*> 本体 0x684,
+ * Items 0x688, Count 0x694 (GetOccupantCount 0x4581F0 直接返回 [ecx+0x694];
+ * 0x4585C0 KillOccupants 读 Items/Count, 0x522941 AddOccupant 用
+ * lea [ebp+0x684] 实证)。驻军不走 Passengers 链, 是另一套存储。 */
+#define OFF_BLD_OCC_VEC         0x684u
+#define OFF_BLD_OCC_ITEMS       0x688u
+#define OFF_BLD_OCC_COUNT       0x694u
+
+/* 类型的名字字段: AbstractTypeClass::ID (0x24, char[0x18]) 与
+ * ObjectTypeClass::ImageFile (0x1F8, char[0x19])。art ini 的节名用 ImageFile,
+ * 空时落 ID (与引擎查 art 的顺序一致)。 */
+#define OFF_TYPE_ID             0x24u
+#define OFF_TYPE_IMAGEFILE      0x1F8u
+
+/* CCINIClass::INI_Art (对象本体, 0x887180) 与 ReadString
+ * (0x528A10, __thiscall: section, key, def, buf, size; 返回写入长度)。
+ * MO 的单位图标走 Ares 的 art 键 CameoPCX=xxx.pcx, 引擎自己的 Cameo= 字段是空的,
+ * 所以只能问 art ini 要文件名。
+ *
+ * ⚠ INIClass 内部按**指针**缓存上一次查的节: `obj+4` = 节名字符串指针,
+ * `obj+8` = 该节数据。0x528A4D 处是 `cmp 节名指针, [obj+4]` —— 指针相同就直接用
+ * 缓存, 连字符串都不比。所以 section 必须传**持久的、每个节不同地址**的字符串
+ * (类型对象里的 ImageFile/ID 正合适); 传栈上局部数组会让所有后续查询全部命中
+ * 第一次的缓存, 表现为"所有单位图标都是同一个"。 */
+#define ADDR_INI_ART            0x00887180u
+#define FN_INI_READSTRING       0x00528A10u
+
+/* TechnoTypeClass 成员 (图标 SHP 与弹药上限)。CameoFile 是 `Cameo=` 写的文件名
+ * (0x19 字节, 紧挨在 Cameo 指针前); MO 的图标多为 .pcx, 此时 Cameo 指向的是
+ * XXICON.SHP 占位图, 必须按 CameoFile 走 PCX 才拿得到真图。 */
+#define OFF_TT_CAMEOFILE        0x6D6u
+#define OFF_TT_CAMEO            0x6F0u
+#define OFF_TT_AMMO             0x684u
+/* rules 里的 `PipWrap=` (一排显示几个弹药格) 与 `PipScale=`。
+ * 偏移由 YRpp 同版本布局算出 (Ammo=0x684 与上面对得上, 可信):
+ * PipScale=0x3D4 (枚举 dword), PipWrap=0x3E4 (int)。 */
+#define OFF_TT_PIPSCALE         0x3D4u
+#define OFF_TT_PIPWRAP          0x3E4u
+
+/* ==================== 选中 / 取消选中 (只动本地 UI 选择集) ==================== */
+
+/* MapClass::UnselectAll (0x48DC90, __fastcall 无实参): 逐个 Deselect + 清界面。 */
+#define FN_MAP_UNSELECTALL      0x0048DC90u
+/* TechnoClass::Select (0x6FBFA0, __thiscall, 返回 bool): 内部过 CanBeSelectedNow
+ * (0x5F4520) 与 0x637840 (加进 CurrentObjects)。 */
+#define FN_TECHNO_SELECT        0x006FBFA0u
+
 /* ==================== 规划令牌 (PlanningToken) ==================== */
 
 #define OFF_TOK_NODES           8u        /* PlanningNodes 数组 */
@@ -149,6 +234,21 @@
  * __fastcall: ecx=Surface, edx=ConvertClass*; 栈参顺序见 YRpp Surface.h
  * 的 DSurface::DrawSHP。返回 0x38 (ret 0x38)。 */
 #define FN_DRAW_SHAPE            0x004AED70u
+
+/* ==================== 引擎 SHp 绘制 / cameo ==================== */
+
+/* FileSystem::CAMEO_PAL (ConvertClass*), 侧栏 cameo 用的调色板。 */
+#define ADDR_CAMEO_PAL          0x0087F6B0u
+/* PCX::Instance 的取面/装图 (SWSBar/PcxImage 同一条路):
+ * GetSurface(pcx, name, pal) / ForceLoadFile(pcx, name, 2, 0)。 */
+#define FN_PCX_GETSURF          0x006BA140u
+#define FN_PCX_LOAD             0x006B9D00u
+/* gamemd BSurface 虚表: 渲染 cameo 到自有 16 位缓冲时拼假面用 (只用到 GetRect)。 */
+#define ADDR_BSHAPE_VTBL        0x007E2070u
+/* DSurface::DrawSHP 的 cameo 调用参数 (与侧栏同口径): BlitterFlags 0x400,
+ * Brightness 1000。 */
+#define CAMEO_BLIT_FLAGS        0x400
+#define CAMEO_BRIGHTNESS        0x3E8
 
 /* ==================== 聊天 / 消息列表 ==================== */
 
@@ -229,6 +329,8 @@
 /* ==================== Syringe 入口钩的寄存器偏移 ==================== */
 
 #define REG_OFF_ESI             0x0Cu     /* YRpp Syringe.h REGISTERS */
+#define REG_OFF_EDI             0x08u
+#define REG_OFF_EBP             0x10u
 #define REG_OFF_EAX             0x24u
 
 #endif /* MOE_ENGINEADDR_H */

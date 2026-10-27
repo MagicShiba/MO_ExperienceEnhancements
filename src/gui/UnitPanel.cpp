@@ -1,0 +1,1839 @@
+/* UnitPanel.cpp - 左下角选中信息面板, 见 UnitPanel.h。
+ *
+ * 版式: 九宫格外框 (border_mental_n9.pcx, 边距 9px) 只包格子, 格数按内容定
+ * (单选 2 格 = 2x1, 4 架 = 2x2, 9 个以上才 3x3), 中间留 1px 缝; 没选中东西
+ * 时整块框不显示。框外左侧竖排 5 个 18px 按钮 (自下而上: 折叠 / 操作模式 /
+ * 收藏 1..3), 底边钉在视口底, 整块贴视口左下角。外框最后画, 压在所有图标之上。
+ *
+ * 图标: art ini 的 CameoPCX= 指向 pcx 时走 PCX::Instance + 最近邻缩到 60x48;
+ * 否则回退 CC_Draw_Shape (0x4AED70) + CAMEO_PAL 现渲。装载/渲染都放在 UP_Poll,
+ * 绘制只读 s_Cap[] 缓存。类型指针只当键用, 不解引用 (取图标/血量/弹药前都过
+ * IsPlausiblePtr)。
+ *
+ * 点击: 面板压在视口上, 引擎会把点到的位置当地图点击 (取消选择 / 下令)。所以在
+ * DisplayClass::ProcessClickCoords 里挂一道门 (Syringe 0x692361), 落点在面板内
+ * 就跳 0x6925FC (原函数"未处理"出口) 吞掉; 门里只记坐标, 真正的选中动作放到
+ * 下一次 UP_Poll —— 那一帧已经不在引擎的点击链路里, 调 UnselectAll/Select 安全。
+ *
+ * 绘制落点: Composite, 由消息帧钩在底栏三件套之后调用 (每帧重铺, 没法缓存到面)。
+ * 只读模拟状态 + 只改本机选中集, 联机安全。
+ */
+
+#include <windows.h>
+#include "EngineAddr.h"
+#include "GdiText.h"
+#include "OrderUtil.h"
+#include "PcxImage.h"
+#include "SingleUnload.h"
+#include "UnitPanel.h"
+#include "VecText.h"
+
+#define UP_SECTION "UnitPanel"
+
+/* ---------------- 版式常量 ---------------- */
+#define UP_CELL_W   60          /* cameo 原生尺寸, 不缩放 */
+#define UP_CELL_H   48
+#define UP_CELL_GAP 1           /* 相邻图标之间的空隙, 让边框/悬停框不互相贴死 */
+/* 九宫格分割线 (源图 border_mental_n9_B.pcx 36x36 上的取值): 上 8 / 下 6 / 左右 7。
+ * 目标内边距与分割线同值 → 四边都 1:1 贴, 框带不做重采样。 */
+#define UP_SRC_T    8
+#define UP_SRC_B    6
+#define UP_SRC_L    7
+#define UP_SRC_R    7
+#define UP_PAD_L    UP_SRC_L
+#define UP_PAD_R    UP_SRC_R
+#define UP_PAD_T    UP_SRC_T
+#define UP_PAD_B    UP_SRC_B
+#define UP_NAME_H   12          /* cameo 底部烧死的单位名高度, 弹药格要让开这一条 */
+#define UP_BTN_W    18
+#define UP_BTN_H    18
+#define UP_BTN_GAP  2
+#define UP_BTN_N    5
+#define UP_GAP      1           /* 按钮列与九宫格的间距 */
+#define UP_COLS_MAX 3           /* 每页最多 3x3; 实际用几行几列由 s_Cols/s_Rows 决定 */
+#define UP_ROWS_MAX 3
+#define UP_CELLN    (UP_COLS_MAX * UP_ROWS_MAX)
+#define UP_PAGES    3
+#define UP_ENT_MAX  (UP_CELLN * UP_PAGES)
+
+#define UP_ICON_W   60
+#define UP_ICON_H   48
+#define UP_LIST_CAP 512
+#define UP_CAP_N    384
+
+/* cameo 渲染的色键 (COLOR_PURPLE)。SHP 透明像素落成它, 贴图时跳过。 */
+#define UP_KEY      0xF81Fu
+
+#define UP_N9_MAX   64          /* 九宫格原图缓冲上限 */
+#define UP_GDI_SLOT 12          /* GdiText 槽: 左下选中面板 */
+#define UP_BADGE_SLOT 13        /* GdiText 槽: 数量角标 (资金/顶栏资源那套字体与字号) */
+
+/* 按钮下标 (自下而上) */
+#define UP_BTN_FOLD 0
+#define UP_BTN_MODE 1
+#define UP_BTN_FAV1 2
+#define UP_BTN_FAV2 3
+#define UP_BTN_FAV3 4
+
+/* 格子种类 */
+#define UP_CELL_EMPTY 0
+#define UP_CELL_ICON  1
+#define UP_CELL_INFO  2
+#define UP_CELL_MORE  3
+
+/* ---------------- 类型 ---------------- */
+
+typedef struct {
+    void* obj;
+    void* type;
+    int   count;
+} UpEnt;
+
+typedef struct {
+    void* type;
+    unsigned short* pix;
+} UpCap;
+
+/* ---------------- 配置 / 状态 ---------------- */
+
+static int s_Init = 0;
+static int s_Enable = 1;
+static int s_Margin = 0;
+static int s_FontPx = 11;
+static int s_Collapsed = 0;
+static int s_Vis = 0;            /* 本帧该不该显示 */
+static int s_LoggedGeom = 0;
+static wchar_t s_Face[FONT_FACE_MAX];
+static char s_FaceCfg[64];
+
+/* 版式 */
+static int s_Px, s_Py, s_Pw, s_Ph;
+static int s_Gx, s_Gy;
+static int s_Bx, s_By[UP_BTN_N];
+static int s_BtnTop;             /* 按钮列顶端 (框比按钮列矮时, 命中区要往上扩) */
+static int s_Cbx, s_Cby;         /* 折叠态那个按钮 */
+
+/* 半成品: 待处理点击 (门里记, Poll 里做) */
+static int s_Pend = 0, s_PendX = 0, s_PendY = 0;
+static int s_GateLb = 0;         /* 门侧左键按下沿标记: ProcessClickCoords 一次按下会进多趟 */
+/* 悬停 */
+static int s_HoverCell = -1;
+static int s_HoverBtn = -1;
+
+/* 选中快照 */
+static UpEnt s_List[UP_LIST_CAP];
+static int s_ListN = 0;
+static int s_ListFrame = -1;
+static unsigned s_ListMs = 0;
+static unsigned s_ListSig = 0;
+
+/* 当前页的格子 (s_Page 变或模型变时重建)。只有前 s_Cols*s_Rows 个有效:
+ * 单选 = 2 格, 4 架 = 2x2, 9 个以上才铺满 3x3 —— 不留空槽。 */
+static UpEnt s_Cell[UP_CELLN];
+static int s_CellN = 0;
+static int s_Cols = 1;
+static int s_Rows = 1;
+static int s_Pages = 1;
+static int s_Page = 0;
+static int s_Trunc = 0;
+/* 0 = 单选版式一页装完 (图标+信息+载员), 1 = 列表分页版式 (每页 9 格平铺),
+ * 2 = 单选版式分页 (前两格每页固定, 第 3 格起是当前页的载员)。 */
+static int s_Paged = 0;
+
+/* 九宫格原图 */
+static int s_Bw = 0, s_Bh = 0;
+static unsigned short s_Border[UP_N9_MAX * UP_N9_MAX];
+static unsigned short s_BorderKey = UP_KEY;
+static int s_BorderOK = 0;
+static unsigned short* s_Bg = NULL;
+static int s_BgW = 0, s_BgH = 0;
+
+/* cameo 缓存 */
+static UpCap s_Cap[UP_CAP_N];
+static int s_CapN = 0;
+
+/* ---------------- 引擎入口 ---------------- */
+
+typedef int (__attribute__((thiscall)) *Fn_WhatAmI)(void*);
+typedef int (__attribute__((thiscall)) *Fn_Select)(void*);
+typedef void (__fastcall *Fn_UnselectAll)(void);
+/* CC_Draw_Shape: __fastcall ecx=Surface, edx=Palette, ret 0x38。 */
+typedef void (__fastcall *UpDrawShpFn)(void* surf, void* pal, void* shp,
+    int frame, Point2D* pos, RectangleStruct* bounds, int flags, int remap,
+    int zadjust, int zgrad, int bright, int tint, void* zshape, int zframe,
+    int xoff, int yoff);
+
+/* ---------------- 小工具 ---------------- */
+
+static int Up_Min(int a, int b) { return a < b ? a : b; }
+
+static void Up_Fill(unsigned char* base, int pitch, int W, int H,
+                    int x, int y, int w, int h,
+                    unsigned r, unsigned g, unsigned b, int a)
+{
+    int j, i;
+    if (w <= 0 || h <= 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > W) w = W - x;
+    if (y + h > H) h = H - y;
+    for (j = 0; j < h; j++)
+    {
+        unsigned short* row = (unsigned short*)(base + (y + j) * pitch) + x;
+        for (i = 0; i < w; i++) row[i] = Blend16(row[i], r, g, b, (unsigned)a);
+    }
+}
+
+/* 一行文本。align: 0=左 1=中 2=右 (以 boxX/boxW 为基准)。 */
+static void Up_Text(unsigned char* base, int pitch, int W, int H,
+                    int x, int y, const wchar_t* s, int n,
+                    unsigned r, unsigned g, unsigned b,
+                    int align, int boxX, int boxW)
+{
+    int w;
+    if (!s || n <= 0) return;
+    w = RenderLine(s, n);
+    if (w <= 0) return;
+    if (align == 1) x = boxX + (boxW - w) / 2;
+    else if (align == 2) x = boxX + boxW - w;
+    /* 末位是透明度百分比 (100 = 不透明), 覆盖率原样进混合; 传 255 会把 cov>=100
+     * 的像素全饱和, 抗锯齿边缘被削平, 小字发胖发花。 */
+    BlitCoverage(base, pitch, W, H, x, y, w + 2, g_G->adv, r, g, b, 100);
+}
+
+/* 覆盖率里墨迹的上下界 (行内相对 y, 不含行距空档)。
+ * 行盒高度 g_G->adv 含 ascent+descent, 数字只占其中一段, 按行盒铺底会显得上下各空 4~5px。 */
+static void Up_InkTB(int w, int* top, int* bot)
+{
+    unsigned char* p;
+    int x, y, first = -1, last = -1;
+    *top = 0;
+    *bot = g_G->adv - 1;
+    if (!g_G || !g_G->bits || w <= 0) return;
+    for (y = 0; y < g_G->adv; y++)
+    {
+        p = g_G->bits + y * g_G->pitch;
+        for (x = 0; x < w; x++)
+        {
+            if (p[x * 4 + 2])
+            {
+                if (first < 0) first = y;
+                last = y;
+                break;
+            }
+        }
+    }
+    if (first >= 0) { *top = first; *bot = last; }
+}
+
+/* 数字串 (无 CRT 的 UtoA) */
+static int Up_Num(wchar_t* dst, int cap, int v)
+{
+    char b[16];
+    int i = 0, n = 0;
+    unsigned u;
+    if (cap <= 1) return 0;
+    if (v < 0) { dst[n++] = (wchar_t)'-'; v = -v; }
+    u = (unsigned)v;
+    UtoA(u, b);
+    while (b[i] && n < cap - 1) dst[n++] = (wchar_t)(unsigned char)b[i++];
+    dst[n] = 0;
+    return n;
+}
+
+/* "123/200" */
+static int Up_NumPair(wchar_t* dst, int cap, int a, int b)
+{
+    int n = Up_Num(dst, cap, a);
+    if (n < cap - 1) dst[n++] = (wchar_t)'/';
+    if (n < cap - 1)
+    {
+        wchar_t t[16];
+        int m = Up_Num(t, 16, b), i;
+        for (i = 0; i < m && n < cap - 1; i++) dst[n++] = t[i];
+    }
+    dst[n] = 0;
+    return n;
+}
+
+/* "45%" / "MAX" */
+static int Up_Percent(wchar_t* dst, int cap, int pc, int isMax)
+{
+    int n;
+    if (isMax)
+    {
+        dst[0] = (wchar_t)'M'; dst[1] = (wchar_t)'A'; dst[2] = (wchar_t)'X';
+        dst[3] = 0;
+        return 3;
+    }
+    n = Up_Num(dst, cap - 1, pc);
+    if (n < cap - 1) { dst[n++] = (wchar_t)'%'; dst[n] = 0; }
+    return n;
+}
+
+/* ---------------- 配置 ---------------- */
+
+void UP_EnsureInit(void)
+{
+    static unsigned s_RetryMs = 0;
+    char buf[256];
+    unsigned q = 0;
+    if (s_Init) return;
+    /* prepare 钩在引擎初始化早期就会跑: 路径/日志还没建好时读 ini 会把默认值钉死。
+     * 没就绪就退回, 下次再来 (100ms 一次, 不白跑 BuildPaths)。 */
+    if (!g_IniPath[0] || !g_Log)
+    {
+        unsigned now = GetTickCount();
+        if (s_RetryMs && (unsigned)(now - s_RetryMs) < 100u) return;
+        s_RetryMs = now;
+        BuildPaths();
+        GtEnsureLog();
+        if (!g_IniPath[0] || !g_Log) return;
+    }
+    s_Init = 1;
+    s_Enable = GetPrivateProfileIntA(UP_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
+    s_Margin = GetPrivateProfileIntA(UP_SECTION, "Margin", 0, g_IniPath);
+    s_FontPx = GetPrivateProfileIntA(UP_SECTION, "FontPx", 11, g_IniPath);
+    s_Collapsed = GetPrivateProfileIntA(UP_SECTION, "Collapsed", 0, g_IniPath) ? 1 : 0;
+    if (s_Margin < 0) s_Margin = 0;
+    if (s_Margin > 200) s_Margin = 200;
+    if (s_FontPx < 8) s_FontPx = 8;
+    if (s_FontPx > 16) s_FontPx = 16;
+    OU_ReadString(UP_SECTION, "FontFace", "msyh.ttc", s_FaceCfg, (int)sizeof(s_FaceCfg));
+    ResolveFontFace(s_FaceCfg, "up", s_Face, L"Microsoft YaHei");
+    if (!g_Log) return;
+    q = AppendCStr(buf, q, "up: enable=", sizeof(buf));
+    q += UtoA((unsigned)s_Enable, buf + q);
+    q = AppendCStr(buf, q, " margin=", sizeof(buf));
+    q += UtoA((unsigned)s_Margin, buf + q);
+    q = AppendCStr(buf, q, " px=", sizeof(buf));
+    q += UtoA((unsigned)s_FontPx, buf + q);
+    q = AppendCStr(buf, q, " fold=", sizeof(buf));
+    q += UtoA((unsigned)s_Collapsed, buf + q);
+    q = AppendCStr(buf, q, " face=", sizeof(buf));
+    AppendCStr(buf, q, s_FaceCfg, sizeof(buf));
+    LogLine(buf);
+}
+
+void UP_SetEnabled(int enable)
+{
+    UP_EnsureInit();
+    s_Enable = enable ? 1 : 0;
+    if (!s_Enable) { s_Vis = 0; s_Pend = 0; }
+    LogLine(s_Enable ? "up: ON" : "up: OFF");
+}
+
+int UP_Enabled(void) { UP_EnsureInit(); return s_Enable; }
+
+/* ---------------- 版式 ---------------- */
+
+static void Up_Layout(void)
+{
+    const int* vc = (const int*)(size_t)ADDR_VIEWCACHE;
+    int vx = vc[0], vy = vc[1], vw = vc[2], vh = vc[3];
+    int i, by;
+    if (vw < 160 || vh < 160)
+    {
+        vx = 0; vy = 0;
+        vw = GtGameW(); vh = GtGameH() - 32;
+        if (vw < 160 || vh < 160) { vw = 1024; vh = 600; }
+    }
+    /* 九宫格只包格子; 按钮列在框外左侧, 整块贴视口左下角。
+     * 上/下内边距不对称 (8/6): 框带上方留宽一点压住标题感, 下方留给页码块。 */
+    s_Pw = UP_PAD_L + UP_PAD_R + s_Cols * UP_CELL_W + (s_Cols - 1) * UP_CELL_GAP;
+    s_Ph = UP_PAD_T + UP_PAD_B + s_Rows * UP_CELL_H + (s_Rows - 1) * UP_CELL_GAP;
+    s_Px = vx + s_Margin + UP_BTN_W + UP_GAP;
+    s_Py = vy + vh - s_Margin - s_Ph;
+    if (s_Py < vy) s_Py = vy;
+    s_Bx = vx + s_Margin;
+    s_Gx = s_Px + UP_PAD_L;
+    s_Gy = s_Py + UP_PAD_T;
+    /* 按钮列自下而上排; 底边钉在视口底 (== 框底), 不随面板格数浮动 */
+    by = vy + vh - s_Margin;
+    for (i = 0; i < UP_BTN_N; i++)
+    {
+        s_By[i] = by - UP_BTN_H;
+        by = s_By[i] - UP_BTN_GAP;
+    }
+    s_BtnTop = by + UP_BTN_GAP;
+    /* 折叠态: 只剩折叠键, 贴视口左下角 */
+    s_Cbx = vx + s_Margin;
+    s_Cby = vy + vh - s_Margin - UP_BTN_H;
+    if (s_Cby < vy) s_Cby = vy;
+}
+
+static int Up_PtIn(int x, int y, int rx, int ry, int rw, int rh)
+{
+    return (x >= rx && x < rx + rw && y >= ry && y < ry + rh) ? 1 : 0;
+}
+
+static int Up_HitPanel(int x, int y)
+{
+    int top;
+    if (s_Collapsed) return Up_PtIn(x, y, s_Cbx, s_Cby, UP_BTN_W, UP_BTN_H);
+    /* 按钮列可能比框还高 (框只有一两格时), 命中区取两者并集 */
+    top = s_Py;
+    if (s_BtnTop < top) top = s_BtnTop;
+    /* 没选中东西时框不显示, 只有按钮列算面板 */
+    if (!s_ListN)
+        return Up_PtIn(x, y, s_Bx, s_BtnTop, UP_BTN_W, s_Py + s_Ph - s_BtnTop);
+    /* 按钮列 + 九宫格框 = 一整块 */
+    return Up_PtIn(x, y, s_Bx, top, (s_Px + s_Pw) - s_Bx, (s_Py + s_Ph) - top);
+}
+
+/* 第 i 格左上角 (含 1px 间隙的行列步进) */
+static void Up_CellPos(int i, int* px, int* py)
+{
+    *px = s_Gx + (i % s_Cols) * (UP_CELL_W + UP_CELL_GAP);
+    *py = s_Gy + (i / s_Cols) * (UP_CELL_H + UP_CELL_GAP);
+}
+
+/* 格子命中: 0..s_Cols*s_Rows-1, -1 = 不在格子上 (落到间隙里也算不在) */
+static int Up_HitCell(int x, int y)
+{
+    int cw = UP_CELL_W + UP_CELL_GAP;
+    int ch = UP_CELL_H + UP_CELL_GAP;
+    int gw = s_Cols * UP_CELL_W + (s_Cols - 1) * UP_CELL_GAP;
+    int gh = s_Rows * UP_CELL_H + (s_Rows - 1) * UP_CELL_GAP;
+    int cx, cy;
+    if (s_Collapsed || !s_ListN) return -1;
+    if (!Up_PtIn(x, y, s_Gx, s_Gy, gw, gh)) return -1;
+    cx = (x - s_Gx) / cw;
+    cy = (y - s_Gy) / ch;
+    if (cx < 0 || cx >= s_Cols || cy < 0 || cy >= s_Rows) return -1;
+    /* 落在格子的右侧/下侧空隙里: 不算命中 */
+    if ((x - s_Gx) % cw >= UP_CELL_W) return -1;
+    if ((y - s_Gy) % ch >= UP_CELL_H) return -1;
+    return cy * s_Cols + cx;
+}
+
+/* 按钮命中: 0..4, -1 = 不在按钮上 (折叠态用 UP_BTN_FOLD) */
+static int Up_HitBtn(int x, int y)
+{
+    int i;
+    if (s_Collapsed) return Up_PtIn(x, y, s_Cbx, s_Cby, UP_BTN_W, UP_BTN_H) ? UP_BTN_FOLD : -1;
+    for (i = 0; i < UP_BTN_N; i++)
+        if (Up_PtIn(x, y, s_Bx, s_By[i], UP_BTN_W, UP_BTN_H)) return i;
+    return -1;
+}
+
+int UP_Over(int mx, int my)
+{
+    UP_EnsureInit();
+    if (!s_Enable || !s_Vis) return 0;
+    return Up_HitPanel(mx, my);
+}
+
+/* ---------------- 选中集快照 ---------------- */
+
+static int Up_WhatAmI(void* o)
+{
+    void** vt;
+    Fn_WhatAmI f;
+    if (!o || !IsPlausiblePtr(o)) return -1;
+    vt = *(void***)o;
+    if (!vt || !IsPlausiblePtr(vt)) return -1;
+    f = (Fn_WhatAmI)vt[OFF_VT_WHATAMI / 4];
+    if (!f) return -1;
+    return f(o);
+}
+
+static void* Up_TypeOf(void* o, int am)
+{
+    unsigned off;
+    void* t;
+    if (am == WHATAMI_UNIT) off = OFF_UNIT_TYPE;
+    else if (am == WHATAMI_AIRCRAFT) off = OFF_AIRCRAFT_TYPE;
+    else if (am == WHATAMI_INFANTRY) off = OFF_INFANTRY_TYPE;
+    else if (am == WHATAMI_BUILDING) off = OFF_BLD_TYPE;
+    else return NULL;
+    t = *(void**)((char*)o + off);
+    if (!t || !IsPlausiblePtr(t)) return NULL;
+    return t;
+}
+
+static int Up_Hp(void* o) { return *(int*)((char*)o + OFF_HEALTH); }
+static int Up_HpMax(void* t) { return *(int*)((char*)t + OFF_TYPE_STRENGTH); }
+static int Up_Ammo(void* o) { return *(int*)((char*)o + OFF_TECH_AMMO); }
+static int Up_AmmoMax(void* t) { return *(int*)((char*)t + OFF_TT_AMMO); }
+/* rules 的 `PipWrap=`: 弹药格一排几个 (0/缺省按 6) */
+static int Up_PipWrap(void* t) { return *(int*)((char*)t + OFF_TT_PIPWRAP); }
+static int Up_Level(void* o)
+{
+    float v = *(float*)((char*)o + OFF_TECH_VETERANCY);
+    if (v < 0.0f) return 0;
+    if (v >= 2.0f) return 2;
+    if (v >= 1.0f) return 1;
+    return 0;
+}
+static int Up_IsEnemy(void* o)
+{
+    void* own = *(void**)((char*)o + OFF_OWNER);
+    void* me = *(void**)(size_t)ADDR_CURPLAYER;
+    if (!own || !me) return 0;
+    return own != me;
+}
+
+static void Up_BuildList(void)
+{
+    void** items = *(void***)(size_t)(ADDR_CUR_OBJECTS + OFF_VEC_ITEMS);
+    int n = *(int*)(size_t)(ADDR_CUR_OBJECTS + OFF_VEC_COUNT);
+    int i;
+    s_ListN = 0;
+    if (!items || !IsPlausiblePtr(items)) return;
+    if (n <= 0) return;
+    if (n > UP_LIST_CAP) n = UP_LIST_CAP;
+    for (i = 0; i < n; i++)
+    {
+        void* o = items[i];
+        void* t;
+        int am;
+        if (!o || !IsPlausiblePtr(o)) continue;
+        am = Up_WhatAmI(o);
+        t = Up_TypeOf(o, am);
+        if (!t) continue;
+        s_List[s_ListN].obj = o;
+        s_List[s_ListN].type = t;
+        s_List[s_ListN].count = 1;
+        s_ListN++;
+    }
+}
+
+/* 同型判定 (类型指针相同即同型) */
+static int Up_AllSameType(void)
+{
+    int i;
+    if (s_ListN < 2) return 1;
+    for (i = 1; i < s_ListN; i++)
+        if (s_List[i].type != s_List[0].type) return 0;
+    return 1;
+}
+
+/* 弹药比例 (没有弹药的一律算"满", 排后面) */
+static int Up_AmmoPct(const UpEnt* e)
+{
+    int mx = Up_AmmoMax(e->type);
+    int am;
+    if (mx <= 0) return 1000;
+    am = Up_Ammo(e->obj);
+    if (am < 0) am = 0;
+    if (am > mx) am = mx;
+    return am * 1000 / mx;
+}
+
+/* 按弹药从少到多排 (空弹优先显示) */
+static void Up_SortByAmmo(UpEnt* a, int n)
+{
+    int i, j;
+    for (i = 1; i < n; i++)
+    {
+        UpEnt k = a[i];
+        int kp = Up_AmmoPct(&k);
+        for (j = i - 1; j >= 0; j--)
+        {
+            int jp = Up_AmmoPct(&a[j]);
+            if (jp <= kp) break;
+            a[j + 1] = a[j];
+        }
+        a[j + 1] = k;
+    }
+}
+
+/* 驻军建筑: 载员在 BuildingClass::Occupants 向量里 (Items 0x688 / Count 0x694),
+ * 与载具的 Passengers 链是两套存储。向量序就是面板序, 点击时按同一序反查
+ * (SingleUnload.cpp)。 */
+static int Up_AddOccupants(void* o, UpEnt* all, int n)
+{
+    void** items = *(void***)((char*)o + OFF_BLD_OCC_ITEMS);
+    int cnt = *(int*)((char*)o + OFF_BLD_OCC_COUNT);
+    int i;
+
+    if (!items || !IsPlausiblePtr(items)) return n;
+    if (cnt < 0) return n;
+    if (cnt > 64) cnt = 64;
+    for (i = 0; i < cnt && n < UP_ENT_MAX; i++)
+    {
+        void* q = items[i];
+        void* t;
+        if (!q || !IsPlausiblePtr(q)) continue;
+        t = Up_TypeOf(q, Up_WhatAmI(q));
+        if (!t) continue;
+        all[n].obj = q; all[n].type = t; all[n].count = 1;
+        n++;
+    }
+    return n;
+}
+
+/* 重建整张表 + 当前页的 9 格 */
+static void Up_FitGrid(int n);
+static void Up_Rebuild(void)
+{
+    static UpEnt all[UP_ENT_MAX];
+    int n = 0, i;
+
+    s_Paged = 1;
+    s_Trunc = 0;
+    if (s_ListN == 1)
+    {
+        /* 单选: 图标 + 信息 + 载员。载员超过 (9-2) 个就翻页, 前两格每页固定。 */
+        void* o = s_List[0].obj;
+        int cap = UP_CELLN - 2;
+        int occ;
+        all[0].obj = o; all[0].type = s_List[0].type; all[0].count = 1;
+        all[1].obj = o; all[1].type = s_List[0].type; all[1].count = 0;   /* 0 => 信息格 */
+        n = 2;
+        if (Up_WhatAmI(o) == WHATAMI_BUILDING)
+        {
+            n = Up_AddOccupants(o, all, n);
+        }
+        else
+        {
+            int pn = *(int*)((char*)o + OFF_TECH_PASSNUM);
+            void* p = *(void**)((char*)o + OFF_TECH_PASSFIRST);
+            if (pn > 0 && p && IsPlausiblePtr(p))
+            {
+                int guard = 0;
+                while (p && IsPlausiblePtr(p) && guard < 64 && n < UP_ENT_MAX)
+                {
+                    void* t = Up_TypeOf(p, Up_WhatAmI(p));
+                    if (t)
+                    {
+                        all[n].obj = p; all[n].type = t; all[n].count = 1;
+                        n++;
+                    }
+                    p = *(void**)((char*)p + OFF_NEXT_OBJ);
+                    guard++;
+                }
+            }
+        }
+        occ = n - 2;
+        if (occ <= cap)
+        {
+            s_Paged = 0;
+            s_Pages = 1;
+        }
+        else
+        {
+            s_Paged = 2;
+            s_Pages = (occ + cap - 1) / cap;
+            /* 超过 3 页: 末页最后一格当"更多"翻页 (与列表版式一致)。 */
+            s_Trunc = (occ > UP_PAGES * cap) ? 1 : 0;
+        }
+    }
+    else if (s_ListN > 1 && Up_AllSameType())
+    {
+        /* 同型: 每个一 格, 弹药少的在前 */
+        for (i = 0; i < s_ListN && i < UP_ENT_MAX; i++) all[i] = s_List[i];
+        n = Up_Min(s_ListN, UP_ENT_MAX);
+        Up_SortByAmmo(all, n);
+        s_Pages = (n + UP_CELLN - 1) / UP_CELLN;
+    }
+    else if (s_ListN <= UP_CELLN)
+    {
+        /* 少量混型: 全展开, 同类型相邻 */
+        int j;
+        for (i = 0; i < s_ListN; i++) all[i] = s_List[i];
+        n = s_ListN;
+        for (i = 1; i < n; i++)
+        {
+            UpEnt k = all[i];
+            for (j = i - 1; j >= 0 && (unsigned)(size_t)all[j].type > (unsigned)(size_t)k.type; j--)
+                all[j + 1] = all[j];
+            all[j + 1] = k;
+        }
+        s_Pages = 1;
+    }
+    else
+    {
+        /* 大量混型: 按组显示 */
+        UpEnt g[UP_ENT_MAX];
+        int gn = 0, j;
+        for (i = 0; i < s_ListN; i++)
+        {
+            for (j = 0; j < gn; j++) if (g[j].type == s_List[i].type) break;
+            if (j < gn) g[j].count++;
+            else if (gn < UP_ENT_MAX)
+            {
+                g[gn].obj = s_List[i].obj;
+                g[gn].type = s_List[i].type;
+                g[gn].count = 1;
+                gn++;
+            }
+        }
+        for (i = 1; i < gn; i++)
+        {
+            UpEnt k = g[i];
+            for (j = i - 1; j >= 0 && g[j].count < k.count; j--) g[j + 1] = g[j];
+            g[j + 1] = k;
+        }
+        /* 分组体检: 同一类型的号/图标被拆成两组时要能一眼看出来 */
+        if (g_Log)
+        {
+            static unsigned s_GrpSig = 0;
+            unsigned hs = (unsigned)gn * 2654435761u;
+            for (i = 0; i < gn; i++)
+                hs = hs * 31u + (unsigned)(size_t)g[i].type * 7u + (unsigned)g[i].count;
+            if (hs != s_GrpSig)
+            {
+                int k;
+                s_GrpSig = hs;
+                for (k = 0; k < gn && k < 9; k++)
+                {
+                    const char* id = (const char*)((char*)g[k].type + OFF_TYPE_ID);
+                    char buf[96];
+                    unsigned q = 0;
+                    q = AppendCStr(buf, q, "up: grp ", sizeof(buf));
+                    if (MemReadableBytes(id, 0x18) >= 0x18 && id[0])
+                    {
+                        int m;
+                        for (m = 0; m < 16 && id[m] && q + 1 < sizeof(buf); m++)
+                            buf[q++] = id[m];
+                        buf[q] = 0;
+                    }
+                    else q = AppendCStr(buf, q, "?", sizeof(buf));
+                    q = AppendCStr(buf, q, " n=", sizeof(buf));
+                    q += UtoA((unsigned)g[k].count, buf + q);
+                    LogLine(buf);
+                }
+            }
+        }
+        for (i = 0; i < gn && i < UP_ENT_MAX; i++) all[i] = g[i];
+        n = Up_Min(gn, UP_ENT_MAX);
+        s_Trunc = (gn > UP_ENT_MAX) ? 1 : 0;
+        s_Pages = (n + UP_CELLN - 1) / UP_CELLN;
+    }
+
+    if (s_Pages > UP_PAGES) s_Pages = UP_PAGES;
+    if (s_Pages < 1) s_Pages = 1;
+    if (s_Page >= s_Pages) s_Page = s_Pages - 1;
+    if (s_Page < 0) s_Page = 0;
+
+    /* 当前页: 单选分页 (s_Paged==2) 时前两格固定, 其余按 (UP_CELLN-2) 个一页 */
+    for (i = 0; i < UP_CELLN; i++)
+    {
+        int idx;
+        if (s_Paged == 2)
+            idx = (i < 2) ? i : (2 + s_Page * (UP_CELLN - 2) + (i - 2));
+        else
+            idx = s_Paged ? (s_Page * UP_CELLN + i) : i;
+        if (idx < n) s_Cell[i] = all[idx];
+        else { s_Cell[i].obj = NULL; s_Cell[i].type = NULL; s_Cell[i].count = -1; }
+    }
+    /* 超 3 页: 第 27 格 (== 末页最后一个) 换成"更多" */
+    if (s_Trunc && s_Page == s_Pages - 1)
+    {
+        s_Cell[UP_CELLN - 1].obj = NULL;
+        s_Cell[UP_CELLN - 1].type = NULL;
+        s_Cell[UP_CELLN - 1].count = -2;   /* -2 => 更多 */
+    }
+    s_CellN = n;
+    Up_FitGrid(n);
+}
+
+/* 面板只铺需要的格数: 2 格就 2x1, 4 架就 2x2, 9 个以上才 3x3。
+ * 多页时固定 3x3 (每页 9 格, 末格可能是"更多")。 */
+static void Up_FitGrid(int n)
+{
+    static const unsigned char kCols[10] = { 1, 1, 2, 3, 2, 3, 3, 3, 3, 3 };
+    int cols;
+    if (s_Pages > 1) { s_Cols = UP_COLS_MAX; s_Rows = UP_ROWS_MAX; return; }
+    if (n < 1) n = 1;
+    if (n > UP_CELLN) n = UP_CELLN;
+    cols = kCols[n];
+    s_Cols = cols;
+    s_Rows = (n + cols - 1) / cols;
+}
+
+/* 是否需要重建 (选中集变化 / 弹药可能变化) */
+static unsigned Up_Sig(void)
+{
+    unsigned s = (unsigned)s_ListN * 2246822519u;
+    int i;
+    for (i = 0; i < s_ListN; i++)
+        s = s * 31u + (unsigned)(size_t)s_List[i].obj;
+    return s;
+}
+
+static void Up_Refresh(void)
+{
+    int fr = *(volatile int*)(size_t)ADDR_FRAME;
+    unsigned now = GetTickCount();
+    int due = 0;
+    if (fr != s_ListFrame) { s_ListFrame = fr; due = 1; }
+    if ((unsigned)(now - s_ListMs) >= 250u) { s_ListMs = now; due = 1; }
+    if (!due) return;
+    Up_BuildList();
+    {
+        unsigned sig = Up_Sig();
+        if (sig != s_ListSig)
+        {
+            s_ListSig = sig;
+            s_Page = 0;
+        }
+    }
+    Up_Rebuild();
+}
+
+static unsigned short* Up_Cameo(void* type);
+static unsigned short* Up_CapFind(void* type);
+
+/* 备齐当前页的图标: PCX 装载/ SHP 现渲都动引擎, 必须在扫描期做。
+ * 布局变化时顺手打一条自检 (没有截图时靠它确认"图标到底取到没有")。 */
+static void Up_PrepareIcons(void)
+{
+    int i;
+    if (s_Collapsed) return;
+    for (i = 0; i < UP_CELLN; i++)
+    {
+        const UpEnt* e = &s_Cell[i];
+        if (e->type && e->count >= 0) Up_Cameo(e->type);
+    }
+    if (g_Log)
+    {
+        static unsigned s_PrepSig = 0;
+        unsigned hs = (unsigned)s_Cols * 131u + (unsigned)s_Rows * 17u + (unsigned)s_Pages * 7u;
+        int nslot = s_Cols * s_Rows;
+        for (i = 0; i < nslot; i++)
+            hs = hs * 31u + (unsigned)(size_t)s_Cell[i].type * 7u + (unsigned)(s_Cell[i].count + 3);
+        if (hs != s_PrepSig)
+        {
+            s_PrepSig = hs;
+            for (i = 0; i < nslot; i++)
+            {
+                const UpEnt* e = &s_Cell[i];
+                char buf[96];
+                unsigned q = 0;
+                q = AppendCStr(buf, q, "up: cell ", sizeof(buf));
+                q += UtoA((unsigned)i, buf + q);
+                q = AppendCh(buf, q, ' ', sizeof(buf));
+                if (e->type && MemReadableBytes((char*)e->type + OFF_TYPE_ID, 0x18) >= 0x18)
+                {
+                    const char* id = (const char*)((char*)e->type + OFF_TYPE_ID);
+                    int m;
+                    for (m = 0; m < 12 && id[m] && q + 1 < sizeof(buf); m++) buf[q++] = id[m];
+                }
+                else q = AppendCh(buf, q, '-', sizeof(buf));
+                q = AppendCStr(buf, q, " cameo=", sizeof(buf));
+                q += UtoA((unsigned)((e->type && Up_CapFind(e->type)) ? 1 : 0), buf + q);
+                q = AppendCStr(buf, q, " cnt=", sizeof(buf));
+                if (e->count == -2) q = AppendCStr(buf, q, "more", sizeof(buf));
+                else if (e->count == -1) q = AppendCStr(buf, q, "empty", sizeof(buf));
+                else if (e->count == 0) q = AppendCStr(buf, q, "info", sizeof(buf));
+                else q += UtoA((unsigned)e->count, buf + q);
+                LogLine(buf);
+            }
+        }
+    }
+}
+
+static void Up_ForceRebuild(void)
+{
+    s_ListSig = 0;
+    s_ListMs = 0;
+    s_ListFrame = -1;
+}
+
+/* ---------------- 图标 (cameo) ----------------
+ * MO 的单位图标绝大多数是 `Cameo=xxx.pcx` (Ares 键), 这时 `TechnoTypeClass::Cameo`
+ * 指向 XXICON.SHP 占位图 —— 照 SHP 画出来的就是那个紫球。所以先读 CameoFile:
+ * 是 .pcx 就走引擎 PCX (与超武侧栏 SwsSnapPcxCap 同一条路), 否则才用 SHP +
+ * CAMEO_PAL 现渲 (旧式固定调色板图标)。
+ * PCX 装载会动引擎的面池, 只能在 UP_Poll (扫描期) 做, 绘制帧里只读缓存。 */
+
+typedef void* (__attribute__((thiscall)) *Fn_PcxGetSurf)(void* pcx, const char* name, void* pal);
+typedef int (__attribute__((thiscall)) *Fn_PcxLoad)(void* pcx, const char* name, int f1, int f2);
+
+static unsigned short* Up_CapFind(void* type)
+{
+    int i;
+    for (i = 0; i < s_CapN; i++) if (s_Cap[i].type == type) return s_Cap[i].pix;
+    return NULL;
+}
+
+/* 取 PCX 面 (未加载则现装一次)。**只能在 UP_Poll 里调**。 */
+static void* Up_PcxSurf(const char* file)
+{
+    void* pcx = (void*)ADDR_PCX_INSTANCE;
+    void* surf;
+    if (!pcx || !IsPlausiblePtr(pcx)) return NULL;
+    surf = ((Fn_PcxGetSurf)(void*)FN_PCX_GETSURF)(pcx, file, NULL);
+    if (!surf)
+    {
+        ((Fn_PcxLoad)(void*)FN_PCX_LOAD)(pcx, file, 2, 0);
+        surf = ((Fn_PcxGetSurf)(void*)FN_PCX_GETSURF)(pcx, file, NULL);
+    }
+    if (surf && !IsPlausiblePtr(surf)) return NULL;
+    if (surf && !IsPlausiblePtr(*(void**)surf)) return NULL;
+    return surf;
+}
+
+/* 把 PCX 面缩成 60x48 (最近邻), 色键统一换成 UP_KEY。
+ * 源尺寸记到 s_PcxLastW/H, 只给日志看 (cameo 该是 60x48)。 */
+static int s_PcxLastW = 0, s_PcxLastH = 0;
+static int Up_SnapPcx(void* surf, unsigned short* dst)
+{
+    const unsigned short* src;
+    unsigned short key;
+    int w, h, bpp, r, c;
+    if (!surf) return 0;
+    w = *(int*)((char*)surf + 0x04);
+    h = *(int*)((char*)surf + 0x08);
+    bpp = *(int*)((char*)surf + 0x10);
+    src = *(const unsigned short**)((char*)surf + 0x14);
+    if (w < 1 || w > 256 || h < 1 || h > 256 || bpp != 2) return 0;
+    if (!src || !IsPlausiblePtr((void*)src)) return 0;
+    if (*(int*)((char*)surf + 0x18) != w * h * 2) return 0;
+    s_PcxLastW = w; s_PcxLastH = h;
+    key = src[0];
+    for (r = 0; r < UP_ICON_H; r++)
+    {
+        const unsigned short* srow = src + (size_t)((r * h) / UP_ICON_H) * w;
+        unsigned short* drow = dst + (size_t)r * UP_ICON_W;
+        for (c = 0; c < UP_ICON_W; c++)
+        {
+            unsigned short v = srow[(c * w) / UP_ICON_W];
+            drow[c] = (v == key) ? UP_KEY : v;
+        }
+    }
+    return 1;
+}
+
+/* SHP 现渲 (旧式 cameo, 固定调色板 CAMEO_PAL)。 */
+static int Up_RenderShp(void* shp, unsigned short* out)
+{
+    unsigned int surf[8];
+    unsigned char* s = (unsigned char*)surf;
+    void* pal;
+    Point2D pos;
+    RectangleStruct b;
+    int i;
+    if (!shp || !IsPlausiblePtr(shp)) return 0;
+    if (!IsPlausiblePtr((void*)ADDR_CAMEO_PAL)) return 0;
+    pal = *(void**)ADDR_CAMEO_PAL;
+    if (!pal || !IsPlausiblePtr(pal)) return 0;
+    for (i = 0; i < 0x20; i++) s[i] = 0;
+    *(void**)(s + 0x00) = (void*)ADDR_BSHAPE_VTBL;
+    *(int*)(s + 0x04) = UP_ICON_W;
+    *(int*)(s + 0x08) = UP_ICON_H;
+    *(int*)(s + 0x0C) = 0;
+    *(int*)(s + 0x10) = 2;
+    *(void**)(s + 0x14) = (void*)out;
+    *(int*)(s + 0x18) = UP_ICON_W * UP_ICON_H * 2;
+    *(int*)(s + 0x1C) = 1;
+    for (i = 0; i < UP_ICON_W * UP_ICON_H; i++) out[i] = UP_KEY;
+    pos.X = 0; pos.Y = 0;
+    b.X = 0; b.Y = 0; b.Width = UP_ICON_W; b.Height = UP_ICON_H;
+    ((UpDrawShpFn)(void*)FN_DRAW_SHAPE)(surf, pal, shp, 0, &pos, &b,
+        CAMEO_BLIT_FLAGS, 0, 0, 0, CAMEO_BRIGHTNESS, 0, NULL, 0, 0, 0);
+    return 1;
+}
+
+/* 图标文件名: 先问 art ini 的 `CameoPCX=` (Ares 键, MO 全部单位图标都在这),
+ * 没有再退回类型自己的 Cameo= 字段 (老式 SHP 时为空)。返回 1 = 拿到 .pcx 名。
+ *
+ * ⚠ `INIClass` 内部按**指针**缓存上一次查的节 (`obj+4` 存节名字符串指针,
+ * `obj+8` 存该节数据)。传栈上的局部数组时, 每次调用地址相同 → 第二次起
+ * 直接命中第一次的缓存, 于是所有类型都读到同一个 `CameoPCX`。所以这里必须
+ * 直接把类型对象里的持久字符串 (`ImageFile` / `ID`) 传进去, 一份不动。
+ *
+ * secOut 只回带节名给日志看, 不参与查询。 */
+static int Up_CameoPcxName(void* type, char* out, int cap, char* secOut, int secCap)
+{
+    typedef int (__attribute__((thiscall)) *Fn_ReadStr)(void* ini, const char* sec,
+                                                        const char* key, const char* def,
+                                                        char* buf, unsigned size);
+    const char* img = (const char*)((char*)type + OFF_TYPE_IMAGEFILE);
+    const char* id = (const char*)((char*)type + OFF_TYPE_ID);
+    const char* use = img;
+    int n, i;
+
+    out[0] = 0;
+    if (secOut && secCap > 0) secOut[0] = 0;
+    if (!MemReadableBytes(img, 0x19) && !MemReadableBytes(id, 0x18)) return 0;
+    if (!img[0]) use = id;
+    if (!use[0]) return 0;
+    if (secOut)
+    {
+        int k;
+        for (k = 0; k + 1 < secCap && use[k]; k++) secOut[k] = use[k];
+        secOut[k] = 0;
+    }
+
+    if (IsPlausiblePtr((void*)ADDR_INI_ART))
+        ((Fn_ReadStr)(void*)FN_INI_READSTRING)((void*)ADDR_INI_ART, use, "CameoPCX",
+                                              "", out, (unsigned)cap);
+    if (!out[0])
+    {
+        /* 类型自带的 Cameo= (可能是 .pcx, 也可能空) */
+        const char* f = (const char*)((char*)type + OFF_TT_CAMEOFILE);
+        if (MemReadableBytes(f, 0x19) < 0x19) return 0;
+        for (n = 0; n < 0x19 && f[n]; n++) if (n < cap - 1) out[n] = f[n];
+        out[n < cap ? n : cap - 1] = 0;
+    }
+    n = 0;
+    while (out[n]) n++;
+    if (n < 5) { out[0] = 0; return 0; }
+    for (i = 0; i < n; i++)
+    {
+        if (out[i] == '\\') out[i] = '/';
+        else if (out[i] >= 'A' && out[i] <= 'Z') out[i] = (char)(out[i] - 'A' + 'a');
+    }
+    if (out[n - 4] == '.' && out[n - 3] == 'p' && out[n - 2] == 'c' && out[n - 1] == 'x')
+        return 1;
+    out[0] = 0;
+    return 0;
+}
+
+/* 取某类型的 60x48 图标 (首次现备), NULL = 这个类型没有图标。
+ * 只在 UP_Poll 里调: PCX 装载会动引擎面池。 */
+static unsigned short* Up_Cameo(void* type)
+{
+    unsigned short* px;
+    char name[64];
+    char sec[32];
+    int fromPcx = 0;
+    void* shp;
+
+    if (!type || !IsPlausiblePtr(type)) return NULL;
+    px = Up_CapFind(type);
+    if (px) return px;
+
+    px = (unsigned short*)LocalAlloc(LMEM_FIXED,
+            (SIZE_T)(UP_ICON_W * UP_ICON_H) * sizeof(unsigned short));
+    if (!px) return NULL;
+
+    name[0] = 0;
+    sec[0] = 0;
+    if (Up_CameoPcxName(type, name, (int)sizeof(name), sec, (int)sizeof(sec)) &&
+        Up_SnapPcx(Up_PcxSurf(name), px))
+        fromPcx = 1;
+    else
+    {
+        shp = *(void**)((char*)type + OFF_TT_CAMEO);
+        if (!shp || !IsPlausiblePtr(shp) || !Up_RenderShp(shp, px))
+        {
+            LocalFree(px);
+            return NULL;
+        }
+    }
+
+    if (s_CapN < 12 && g_Log)
+    {
+        /* 对应关系排查: 类型 ID / 查的 art 节 / 实际贴的 pcx */
+        char buf[192];
+        unsigned q = 0;
+        const char* id = (const char*)((char*)type + OFF_TYPE_ID);
+        q = AppendCStr(buf, q, "up: icon id=", sizeof(buf));
+        if (MemReadableBytes(id, 0x18) >= 0x18 && id[0])
+        {
+            int k;
+            for (k = 0; k < 16 && id[k] && q + 1 < sizeof(buf); k++) buf[q++] = id[k];
+            buf[q] = 0;
+        }
+        else q = AppendCStr(buf, q, "?", sizeof(buf));
+        q = AppendCStr(buf, q, " sec=", sizeof(buf));
+        q = AppendCStr(buf, q, sec[0] ? sec : "?", sizeof(buf));
+        q = AppendCStr(buf, q, fromPcx ? " pcx=" : " shp=", sizeof(buf));
+        q = AppendCStr(buf, q, name[0] ? name : "none", sizeof(buf));
+        if (fromPcx && q + 8 < sizeof(buf))
+        {
+            q = AppendCh(buf, q, ' ', sizeof(buf));
+            q += UtoA((unsigned)s_PcxLastW, buf + q);
+            q = AppendCh(buf, q, 'x', sizeof(buf));
+            q += UtoA((unsigned)s_PcxLastH, buf + q);
+        }
+        LogLine(buf);
+    }
+
+    if (s_CapN < UP_CAP_N)
+    {
+        s_Cap[s_CapN].type = type;
+        s_Cap[s_CapN].pix = px;
+        s_CapN++;
+    }
+    else
+    {
+        /* 满了就换掉第 0 条 (老图标基本不会被再选到) */
+        LocalFree(s_Cap[0].pix);
+        s_Cap[0].type = type;
+        s_Cap[0].pix = px;
+    }
+    return px;
+}
+
+static void Up_BlitIcon(unsigned char* base, int pitch, int W, int H,
+                        int dx, int dy, const unsigned short* px)
+{
+    int y, x;
+    if (!px) return;
+    for (y = 0; y < UP_ICON_H; y++)
+    {
+        int sy = dy + y;
+        const unsigned short* srow;
+        unsigned short* drow;
+        if (sy < 0 || sy >= H) continue;
+        srow = px + y * UP_ICON_W;
+        drow = (unsigned short*)(base + sy * pitch);
+        for (x = 0; x < UP_ICON_W; x++)
+        {
+            int sx = dx + x;
+            unsigned short v;
+            if (sx < 0 || sx >= W) continue;
+            v = srow[x];
+            if (v == UP_KEY) continue;
+            drow[sx] = v;
+        }
+    }
+}
+
+/* ---------------- 九宫格外框 ---------------- */
+
+static void Up_LoadBorder(void)
+{
+    PcxImage img;
+    int x, y;
+    if (s_BorderOK) return;
+    if (!PcxImage_Load(&img, "border_mental_n9_B.pcx", 2)) return;
+    if (img.width < UP_SRC_L + UP_SRC_R + 2 || img.height < UP_SRC_T + UP_SRC_B + 2) return;
+    if (img.width > UP_N9_MAX || img.height > UP_N9_MAX) return;
+    s_Bw = img.width;
+    s_Bh = img.height;
+    s_BorderKey = img.key;
+    for (y = 0; y < s_Bh; y++)
+        for (x = 0; x < s_Bw; x++)
+            s_Border[y * UP_N9_MAX + x] =
+                ((const unsigned short*)img.px)[y * s_Bw + x];
+    s_BorderOK = 1;
+    if (g_Log)
+    {
+        char buf[128];
+        unsigned q = 0;
+        q = AppendCStr(buf, q, "up: border n9 ", sizeof(buf));
+        q += UtoA((unsigned)s_Bw, buf + q);
+        q = AppendCh(buf, q, 'x', sizeof(buf));
+        q += UtoA((unsigned)s_Bh, buf + q);
+        q = AppendCStr(buf, q, " key=", sizeof(buf));
+        q += HtoA((unsigned)s_BorderKey, buf + q);
+        LogLine(buf);
+    }
+}
+
+/* 九宫格坐标映射: 四边框带按源分割线 1:1 贴, 中间段拉伸。
+ * padA/padB 是目标带宽, srcA/srcB 是源分割线; 两者相等时直接原样取 (不重采样)。 */
+static int Up_Slice(int v, int outLen, int srcLen, int padA, int padB,
+                    int srcA, int srcB)
+{
+    int om, sm;
+    if (padA < 0) padA = 0;
+    if (padB < 0) padB = 0;
+    if (v < padA)
+        return (padA == srcA) ? v : ((padA > 0) ? (v * srcA / padA) : 0);
+    if (v >= outLen - padB)
+    {
+        int k = outLen - 1 - v;                       /* 从末端往回数 */
+        int s = srcLen - 1 - ((padB == srcB) ? k : (padB > 0 ? (k * srcB / padB) : 0));
+        if (s < srcLen - srcB) s = srcLen - srcB;
+        if (s < 0) s = 0;
+        if (s >= srcLen) s = srcLen - 1;
+        return s;
+    }
+    om = outLen - padA - padB;
+    sm = srcLen - srcA - srcB;
+    if (om <= 0) return srcA;
+    return srcA + (v - padA) * sm / om;
+}
+
+static int Up_BuildBg(void)
+{
+    int x, y;
+    Up_LoadBorder();
+    if (!s_BorderOK) return 0;
+    if (s_Bg && s_BgW == s_Pw && s_BgH == s_Ph) return 1;
+    if (s_Bg) { LocalFree(s_Bg); s_Bg = NULL; }
+    s_Bg = (unsigned short*)LocalAlloc(LMEM_FIXED,
+            (SIZE_T)s_Pw * (SIZE_T)s_Ph * sizeof(unsigned short));
+    if (!s_Bg) return 0;
+    for (y = 0; y < s_Ph; y++)
+    {
+        int sy = Up_Slice(y, s_Ph, s_Bh, UP_PAD_T, UP_PAD_B, UP_SRC_T, UP_SRC_B);
+        if (sy < 0) sy = 0;
+        if (sy >= s_Bh) sy = s_Bh - 1;
+        for (x = 0; x < s_Pw; x++)
+        {
+            int sx = Up_Slice(x, s_Pw, s_Bw, UP_PAD_L, UP_PAD_R, UP_SRC_L, UP_SRC_R);
+            if (sx < 0) sx = 0;
+            if (sx >= s_Bw) sx = s_Bw - 1;
+            s_Bg[y * s_Pw + x] = s_Border[sy * UP_N9_MAX + sx];
+        }
+    }
+    s_BgW = s_Pw;
+    s_BgH = s_Ph;
+    return 1;
+}
+
+/* 把 bg 贴到 Composite (色键像素跳过, 四角是透的)。
+ * ringOnly=1 只贴四边框带: 这张九宫格中心是不透明近黑色, 整块贴会把 cameo 盖掉,
+ * 所以分两遍 —— 先满贴当内底, 画完格子再只补框带。 */
+static void Up_BlitBg(unsigned char* base, int pitch, int W, int H, int dx, int dy,
+                      int ringOnly)
+{
+    int y, x, step = pitch >> 1;
+    for (y = 0; y < s_Ph; y++)
+    {
+        int sy = dy + y;
+        const unsigned short* srow;
+        unsigned short* drow;
+        if (sy < 0 || sy >= H) continue;
+        srow = s_Bg + y * s_Pw;
+        drow = (unsigned short*)base + sy * step;
+        for (x = 0; x < s_Pw; x++)
+        {
+            int sx = dx + x;
+            unsigned short v = srow[x];
+            if (sx < 0 || sx >= W) continue;
+            if (ringOnly && x >= UP_PAD_L && x < s_Pw - UP_PAD_R &&
+                y >= UP_PAD_T && y < s_Ph - UP_PAD_B) continue;
+            if (v == s_BorderKey) continue;
+            drow[sx] = v;
+        }
+    }
+}
+
+/* ---------------- 绘制: 小图元 ---------------- */
+
+static void Up_Bar(unsigned char* base, int pitch, int W, int H,
+                   int x, int y, int w, int h, int pct, int maxed,
+                   unsigned r, unsigned g, unsigned b)
+{
+    int fw;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    if (maxed) pct = 100;
+    Up_Fill(base, pitch, W, H, x, y, w, h, 24, 24, 26, 235);
+    fw = w * pct / 100;
+    if (fw > 0) Up_Fill(base, pitch, W, H, x, y, fw, h, r, g, b, 255);
+    /* 一像素暗边, 让条在深底上也看得清 */
+    Up_Fill(base, pitch, W, H, x, y, w, 1, 60, 60, 70, 200);
+}
+
+/* 等级小三角 (军衔): n=1 老兵, 2 精英, 画在图标左上 */
+/* 军衔标记: 与游戏一致 —— 一级一个金色 ︿, 二级金色星星。
+ * 两者都先按 3x3 铺一层深色轮廓再压金色芯, 压在亮 cameo 上也看得清。 */
+static const char* const k_Vet1[5] = {
+    "....X....",
+    "...XXX...",
+    "..XX.XX..",
+    ".XX...XX.",
+    "X.......X"
+};
+static const char* const k_Vet2[9] = {
+    "....X....",
+    "...XXX...",
+    "XXXXXXXXX",
+    ".XXXXXXX.",
+    "..XXXXX..",
+    "..XXXXX..",
+    ".XX...XX.",
+    ".X.....X.",
+    "........."
+};
+
+static void Up_Glyph(unsigned char* base, int pitch, int W, int H,
+                     int x, int y, const char* const* g, int n, int w,
+                     unsigned r, unsigned gg, unsigned b)
+{
+    int j, i;
+    for (j = 0; j < n; j++)
+        for (i = 0; i < w; i++)
+            if (g[j][i] == 'X')
+                Up_Fill(base, pitch, W, H, x + i - 1, y + j - 1, 3, 3, 0, 0, 0, 225);
+    for (j = 0; j < n; j++)
+        for (i = 0; i < w; i++)
+            if (g[j][i] == 'X')
+                Up_Fill(base, pitch, W, H, x + i, y + j, 1, 1, r, gg, b, 255);
+}
+
+static void Up_Rank(unsigned char* base, int pitch, int W, int H,
+                    int x, int y, int level)
+{
+    if (level >= 2)
+        Up_Glyph(base, pitch, W, H, x, y, k_Vet2, 9, 9, 255, 208, 60);
+    else if (level >= 1)
+        Up_Glyph(base, pitch, W, H, x, y + 2, k_Vet1, 5, 9, 255, 208, 60);
+}
+
+static const char* const k_Star[11] = {
+    ".....X.....",
+    "....XXX....",
+    "....XXX....",
+    "XXXXXXXXXXX",
+    ".XXXXXXXXX.",
+    "..XXXXXXX..",
+    "...XXXXX...",
+    "...XXXXX...",
+    "..XX...XX..",
+    ".XX.....XX.",
+    "..........."
+};
+
+static void Up_Star(unsigned char* base, int pitch, int W, int H,
+                    int x, int y, unsigned r, unsigned g, unsigned b, int a)
+{
+    int j, i;
+    for (j = 0; j < 11; j++)
+        for (i = 0; i < 11; i++)
+            if (k_Star[j][i] == 'X')
+                OU_Put(base, W, H, pitch, NULL, x + i, y + j, r, g, b, a);
+}
+
+static void Up_Tri(unsigned char* base, int pitch, int W, int H,
+                   int x, int y, int right, unsigned r, unsigned g, unsigned b)
+{
+    int j;
+    for (j = 0; j < 11; j++)
+    {
+        int half = (j < 5) ? (5 - j) : (j - 5);
+        int len = 6 - half;
+        int i;
+        for (i = 0; i < len; i++)
+            OU_Put(base, W, H, pitch, NULL,
+                   x + (right ? i : (len - 1 - i)), y + j, r, g, b, 255);
+    }
+}
+
+/* 按钮底板: 平时不画 (让图标直接压在地图上), 只有悬停/激活才给底 */
+static void Up_BtnBg(unsigned char* base, int pitch, int W, int H,
+                     int x, int y, int hot, int active)
+{
+    unsigned char br, bg2, bb;
+    if (!hot && !active) return;
+    Up_Fill(base, pitch, W, H, x, y, UP_BTN_W, UP_BTN_H, 22, 22, 26, 200);
+    if (active) { br = 240; bg2 = 200; bb = 80; }
+    else { br = 210; bg2 = 210; bb = 225; }
+    Up_Fill(base, pitch, W, H, x, y, UP_BTN_W, 1, br, bg2, bb, 235);
+    Up_Fill(base, pitch, W, H, x, y + UP_BTN_H - 1, UP_BTN_W, 1, br, bg2, bb, 235);
+    Up_Fill(base, pitch, W, H, x, y, 1, UP_BTN_H, br, bg2, bb, 235);
+    Up_Fill(base, pitch, W, H, x + UP_BTN_W - 1, y, 1, UP_BTN_H, br, bg2, bb, 235);
+}
+
+/* ---------------- 绘制: 格子 ---------------- */
+
+static void Up_DrawCellBg(unsigned char* base, int pitch, int W, int H,
+                          int x, int y, int hot)
+{
+    (void)hot;
+    Up_Fill(base, pitch, W, H, x + 1, y + 1, UP_CELL_W - 2, UP_CELL_H - 2,
+            10, 10, 12, 90);
+}
+
+/* 悬停框: 必须画在图标**之后**, 否则 60x48 的 cameo 会整个盖掉它 */
+static void Up_CellFrame(unsigned char* base, int pitch, int W, int H,
+                         int x, int y, int hot)
+{
+    unsigned char r = 255, g = 205, b = 60;
+    if (!hot) return;
+    Up_Fill(base, pitch, W, H, x, y, UP_CELL_W, 1, r, g, b, 255);
+    Up_Fill(base, pitch, W, H, x, y + UP_CELL_H - 1, UP_CELL_W, 1, r, g, b, 255);
+    Up_Fill(base, pitch, W, H, x, y, 1, UP_CELL_H, r, g, b, 255);
+    Up_Fill(base, pitch, W, H, x + UP_CELL_W - 1, y, 1, UP_CELL_H, r, g, b, 255);
+}
+
+/* 弹药格: MO 的 cameo 底部烧死了单位名 (约 12px), 所以弹药格不贴格底,
+ * 而是抬到名字上方、从左下往右铺; 一排几个看 rules 的 `PipWrap=`,
+ * 格数看 `Ammo=` (最多发数), 满的发亮黄、空的是暗块。
+ * 格子 2(宽) x 3(高), 横竖各自留 1px 缝; 整块外面包 1px 深色轮廓。 */
+static void Up_AmmoPips(unsigned char* base, int pitch, int W, int H,
+                        int x, int y, int ammo, int ammoMax, int wrap)
+{
+    int pw = 2, ph = 3, gap = 1, outline = 1;
+    int hs, vs, rows, cols, k, left, bottom, bw, bh, top;
+
+    if (ammoMax <= 0 || ammoMax > 48) return;
+    hs = pw + gap;
+    vs = ph + gap;
+    left = x + 1;
+    bottom = y + UP_CELL_H - UP_NAME_H - 1 + 2;    /* 名字上方, 再下移 2 */
+    if (bottom - (y + 10) < vs) return;
+    if (wrap < 1 || wrap > 12) wrap = 6;           /* 没配 PipWrap 时默认 6 个一排 */
+    cols = wrap;
+    if (cols > ammoMax) cols = ammoMax;
+    {   /* 宽度上限: 60 - 左右轮廓 */
+        int fit = (UP_CELL_W - outline * 2 - 1 + gap) / hs;
+        if (cols > fit) cols = fit;
+    }
+    if (cols < 1) return;
+    rows = (ammoMax + cols - 1) / cols;
+    if (rows * vs > bottom - (y + 10)) rows = (bottom - (y + 10)) / vs;
+    if (rows < 1) return;
+
+    bw = cols * pw + (cols - 1) * gap;
+    bh = rows * ph + (rows - 1) * gap;
+    top = bottom - bh;                             /* 最后一排的下沿就是 bottom-1 */
+    {   /* 轮廓不许越过格子左边界 (会压到相邻格的 1px 缝上) */
+        int bx = left - outline;
+        int ow = bw + outline * 2;
+        if (bx < x) { ow -= (x - bx); bx = x; }
+        Up_Fill(base, pitch, W, H, bx, top - outline, ow, bh + outline * 2,
+                10, 10, 12, 200);
+    }
+
+    for (k = 0; k < ammoMax; k++)
+    {
+        int cy = k / cols;
+        int px = left + (k % cols) * hs;
+        int py = bottom - (cy + 1) * vs + gap;
+        if (cy >= rows) break;
+        if (k < ammo)
+            Up_Fill(base, pitch, W, H, px, py, pw, ph, 250, 205, 75, 255);
+        else
+            Up_Fill(base, pitch, W, H, px, py, pw, ph, 74, 74, 80, 235);
+    }
+}
+
+/* 数量角标 (组显示时右上角的数字): 字体/字号/粗细全取资金 (顶栏资源数字) 那套,
+ * 底色贴格子右上角不留缝, 四边各留 2px, 底按墨迹高度铺。 */
+static void Up_CountBadge(unsigned char* base, int pitch, int W, int H,
+                          int cx, int cy, int count)
+{
+    wchar_t t[16];
+    int n, w, top, bot, bw, bh, bx, by, px;
+    if (count <= 1) return;
+    px = VecText_CreditPx();
+    if (px <= 0) px = VecText_FontPx();
+    if (px < 8) px = 8;
+    if (px > 24) px = 24;
+    if (!GdiEnsure(px, VecText_Bold(), UP_BADGE_SLOT, VecText_FontFace())) return;
+    n = Up_Num(t, 16, count);
+    w = RenderLine(t, n);
+    if (w > 0)
+    {
+        Up_InkTB(w, &top, &bot);
+        bw = w + 4;
+        bh = (bot - top + 1) + 4;
+        if (bw > UP_CELL_W) bw = UP_CELL_W;
+        if (bh > UP_CELL_H) bh = UP_CELL_H;
+        bx = cx + UP_CELL_W - bw;              /* 贴右上角, 不留缝 */
+        by = cy;
+        Up_Fill(base, pitch, W, H, bx, by, bw, bh, 0, 0, 0, 150);
+        BlitCoverage(base, pitch, W, H, bx + 2, by + 2 - top, w + 2, g_G->adv,
+                     255, 255, 255, 100);
+    }
+    /* 换回面板正文字号, 后面的文本才按 s_FontPx 排 */
+    GdiEnsure(s_FontPx, 0, UP_GDI_SLOT, s_Face);
+}
+
+/* 单格图标 + 角标 (等级/弹药/数量) */
+static void Up_DrawIconCell(unsigned char* base, int pitch, int W, int H,
+                            int x, int y, const UpEnt* e, int hot)
+{
+    unsigned short* cameo;
+    int enemy, ammoMax, ammo, level, wrap;
+
+    Up_DrawCellBg(base, pitch, W, H, x, y, hot);
+    if (!e || !e->type || !e->obj) return;
+    cameo = Up_Cameo(e->type);
+    if (cameo) Up_BlitIcon(base, pitch, W, H, x, y, cameo);
+    else
+    {
+        /* 没有 cameo: 留空 (只画角标), 不做假图 */
+    }
+    enemy = Up_IsEnemy(e->obj);
+    ammoMax = Up_AmmoMax(e->type);
+    ammo = Up_Ammo(e->obj);
+    level = Up_Level(e->obj);
+    wrap = Up_PipWrap(e->type);
+
+    /* 等级 (仅我方): 图标左上, 一级 ︿ / 二级 星星 */
+    if (!enemy && level > 0) Up_Rank(base, pitch, W, H, x + 2, y + 1, level);
+
+    /* 弹药 (仅我方): 名字上方的小方块阵 */
+    if (!enemy && ammoMax > 0 && ammo >= 0)
+        Up_AmmoPips(base, pitch, W, H, x, y, ammo, ammoMax, wrap);
+
+    /* 数量 (组): 右上角, 资金那套字体 */
+    if (e->count > 1) Up_CountBadge(base, pitch, W, H, x, y, e->count);
+}
+
+/* 信息格: 血量 (当前/总) + 经验
+ * 纵向排布按字号算 (by/ty/ey/ec 都是绝对 y): 血条 -> 血量文本 -> 经验条 -> 经验文本。
+ * 字号大到最后一行放不下时只丢经验文本, 条仍然画, 绝不越出 48px。 */
+static void Up_DrawInfoCell(unsigned char* base, int pitch, int W, int H,
+                            int x, int y, const UpEnt* e, int hot)
+{
+    int hp, mx, pc, enemy, level, adv;
+    float vet;
+    wchar_t t[24];
+    int n;
+    unsigned char r = 60, g = 210, b = 60;
+    unsigned char er = 90, eg = 150, eb = 240;
+    int by, ty, ey, ec, bar1 = 5, bar2 = 4;
+
+    Up_DrawCellBg(base, pitch, W, H, x, y, hot);
+    if (!e || !e->obj || !e->type) return;
+    adv = g_G->adv;
+    hp = Up_Hp(e->obj);
+    mx = Up_HpMax(e->type);
+    if (mx <= 0) mx = 1;
+    if (hp < 0) hp = 0;
+    if (hp > mx) hp = mx;
+    pc = hp * 100 / mx;
+    enemy = Up_IsEnemy(e->obj);
+    level = Up_Level(e->obj);
+    vet = *(float*)((char*)e->obj + OFF_TECH_VETERANCY);
+
+    /* 血量色: 与游戏同口径 (>=50% 绿, >=25% 黄, 否则红) */
+    if (pc >= 50) { r = 60; g = 210; b = 60; }
+    else if (pc >= 25) { r = 235; g = 210; b = 60; }
+    else { r = 230; g = 60; b = 60; }
+    /* 经验条颜色即等级: 新兵蓝 / 老兵青 / 精英金 */
+    if (level >= 2) { er = 255; eg = 200; eb = 80; }
+    else if (level >= 1) { er = 110; eg = 200; eb = 255; }
+
+    /* 字号大到四行塞不下 (字号 11 时 adv=18, 四行正好 45) 时先压条高;
+     * 再不行就由下面的守卫丢掉经验文本, 条照画, 绝不越出格子。 */
+    if (bar1 + adv + bar2 + adv > UP_CELL_H) { bar1 = 4; bar2 = 3; }
+
+    if (enemy)
+        by = y + (UP_CELL_H - (bar1 + adv)) / 2;      /* 敌方: 只有条 + 血量, 竖向居中 */
+    else
+        by = y + (UP_CELL_H - (bar1 + adv + bar2 + adv)) / 2;
+    if (by < y + 1) by = y + 1;
+
+    /* 四行从上到下紧排 (文本自带行距, 不再额外留空): 条 / 血量 / 条 / 经验 */
+    ty = by + bar1;
+    ey = ty + adv;
+    ec = ey + bar2;
+
+    Up_Bar(base, pitch, W, H, x + 4, by, UP_CELL_W - 8, bar1, pc, 0, r, g, b);
+    n = Up_NumPair(t, 24, hp, mx);
+    /* 4 位以上的血量 "2000/2000" 会超格宽: 放不下就只留当前值 (比例看条) */
+    if (RenderLine(t, n) > UP_CELL_W - 4) n = Up_Num(t, 24, hp);
+    Up_Text(base, pitch, W, H, 0, ty, t, n, 235, 235, 235, 1, x + 2, UP_CELL_W - 4);
+    if (enemy) return;   /* 敌方: 只显示图标 + 血量 */
+
+    /* 经验: 当前等级内的进度 (精英 = MAX) */
+    {
+        int epc, isMax = (level >= 2) ? 1 : 0;
+        if (isMax) epc = 100;
+        else
+        {
+            float frac = vet;
+            if (frac < 0.0f) frac = 0.0f;
+            frac = frac - (float)(int)frac;
+            epc = (int)(frac * 100.0f);
+            if (epc < 0) epc = 0;
+            if (epc > 99) epc = 99;
+        }
+        if (ey + bar2 > y + UP_CELL_H) return;
+        Up_Bar(base, pitch, W, H, x + 4, ey, UP_CELL_W - 8, bar2, epc, isMax,
+               er, eg, eb);
+        if (ec + adv > y + UP_CELL_H) return;
+        n = Up_Percent(t, 24, epc, isMax);
+        Up_Text(base, pitch, W, H, 0, ec, t, n, er, eg, eb, 1, x + 2, UP_CELL_W - 4);
+    }
+}
+
+static void Up_DrawMoreCell(unsigned char* base, int pitch, int W, int H,
+                            int x, int y, int hot)
+{
+    static const wchar_t s_more[] = { 0x66F4, 0x591A, 0 };   /* 更多 */
+    Up_DrawCellBg(base, pitch, W, H, x, y, hot);
+    Up_Text(base, pitch, W, H, 0, y + (UP_CELL_H - g_G->adv) / 2, s_more, 2,
+            235, 235, 235, 1, x, UP_CELL_W);
+}
+
+/* ---------------- 绘制入口 ---------------- */
+
+static void Up_DrawButtons(unsigned char* base, int pitch, int W, int H)
+{
+    int i;
+    for (i = 0; i < UP_BTN_N; i++)
+    {
+        int x = s_Bx, y = s_By[i];
+        int hot = (s_HoverBtn == i);
+        int active = (i == UP_BTN_FOLD && s_Collapsed);
+        unsigned char cr, cg, cb;
+        Up_BtnBg(base, pitch, W, H, x, y, hot, active);
+        /* 图标按 18px 框居中: 三角 6x11, 三条 10x2, 星 11x11 */
+        if (i == UP_BTN_FOLD) { cr = 235; cg = 235; cb = 245; }
+        else if (active) { cr = 240; cg = 200; cb = 80; }
+        else if (hot) { cr = 255; cg = 240; cb = 200; }
+        else { cr = 195; cg = 195; cb = 205; }
+        if (i == UP_BTN_FOLD)
+            Up_Tri(base, pitch, W, H, x + 6, y + 4, s_Collapsed, cr, cg, cb);
+        else if (i == UP_BTN_MODE)
+        {
+            int k;
+            for (k = 0; k < 3; k++)
+                Up_Fill(base, pitch, W, H, x + 4, y + 4 + k * 4, 10, 2,
+                        cr, cg, cb, 255);
+        }
+        else
+            Up_Star(base, pitch, W, H, x + 4, y + 4, cr, cg, cb, 255);
+    }
+}
+
+static void Up_DrawCollapsedButton(unsigned char* base, int pitch, int W, int H)
+{
+    int hot = (s_HoverBtn == UP_BTN_FOLD);
+    Up_BtnBg(base, pitch, W, H, s_Cbx, s_Cby, hot, 1);
+    Up_Tri(base, pitch, W, H, s_Cbx + 6, s_Cby + 4, 1, 240, 220, 120);
+}
+
+int UP_Draw(void)
+{
+    void* surf;
+    unsigned char* base;
+    int w, h, pitch, i, cx, cy;
+
+    UP_EnsureInit();
+    if (!s_Enable || !s_Vis) return 0;
+    Up_Layout();
+    Up_BuildBg();
+
+    surf = *(void**)ADDR_SURF_COMPOSITE;
+    if (!surf || !IsPlausiblePtr(surf)) return 0;
+    w = GtSurfGet(surf, GtVT_GET_WIDTH);
+    h = GtSurfGet(surf, GtVT_GET_HEIGHT);
+    pitch = GtSurfGet(surf, GtVT_GET_PITCH);
+    if (w <= 0 || h <= 0 || pitch < w * 2) return 0;
+
+    if (!GdiEnsure(s_FontPx, 0, UP_GDI_SLOT, s_Face)) return 0;
+
+    base = GtLock(surf);
+    if (!base) return 0;
+
+    if (s_Collapsed) Up_DrawCollapsedButton(base, pitch, w, h);
+    else
+    {
+        int nslot = s_Cols * s_Rows;
+
+        /* 没选中东西时不画九宫格 (只留左侧按钮列), 免得平白占一块黑板 */
+        if (s_ListN > 0)
+        {
+            /* 第一遍: 满贴, 给格子和 1px 缝提供底 (九宫格中间是深色内底) */
+            if (s_BorderOK) Up_BlitBg(base, pitch, w, h, s_Px, s_Py, 0);
+            else Up_Fill(base, pitch, w, h, s_Px, s_Py, s_Pw, s_Ph, 8, 8, 10, 210);
+
+            for (i = 0; i < nslot; i++)
+            {
+                const UpEnt* e = &s_Cell[i];
+                int hot = (s_HoverCell == i);
+                Up_CellPos(i, &cx, &cy);
+                if (e->count == -2) Up_DrawMoreCell(base, pitch, w, h, cx, cy, hot);
+                else if (!e->type || !e->obj) Up_DrawCellBg(base, pitch, w, h, cx, cy, 0);
+                else if (e->count == 0) Up_DrawInfoCell(base, pitch, w, h, cx, cy, e, hot);
+                else Up_DrawIconCell(base, pitch, w, h, cx, cy, e, hot);
+                Up_CellFrame(base, pitch, w, h, cx, cy, hot);
+            }
+            /* 第二遍: 只补 9px 外框带 —— 它是最外一层, 不能被图标盖住,
+             * 而它的内底又不许盖图标, 所以只能拆成两遍贴。 */
+            if (s_BorderOK) Up_BlitBg(base, pitch, w, h, s_Px, s_Py, 1);
+        }
+        Up_DrawButtons(base, pitch, w, h);
+
+        /* 页码: 小长方块直接压在下边框带上 (竖着居中), 不额外占行 */
+        if (s_ListN > 0 && s_Pages > 1)
+        {
+            int bw = 6, bh = 3, bgap = 2;
+            int total = s_Pages * bw + (s_Pages - 1) * bgap;
+            int dx0 = s_Px + (s_Pw - total) / 2;
+            int dy = s_Py + s_Ph - UP_PAD_B + (UP_PAD_B - bh) / 2;
+            for (i = 0; i < s_Pages; i++)
+            {
+                int dx = dx0 + i * (bw + bgap);
+                if (i == s_Page)
+                    Up_Fill(base, pitch, w, h, dx, dy, bw, bh, 245, 225, 150, 255);
+                else
+                    Up_Fill(base, pitch, w, h, dx, dy, bw, bh, 150, 150, 160, 235);
+            }
+        }
+    }
+    GtUnlock(surf);
+
+    if (!s_LoggedGeom && g_Log)
+    {
+        char buf[160];
+        unsigned q = 0;
+        s_LoggedGeom = 1;
+        q = AppendCStr(buf, q, "up: geom p=", sizeof(buf));
+        q += UtoA((unsigned)s_Px, buf + q); q = AppendCh(buf, q, ',', sizeof(buf));
+        q += UtoA((unsigned)s_Py, buf + q); q = AppendCStr(buf, q, " ", sizeof(buf));
+        q += UtoA((unsigned)s_Pw, buf + q); q = AppendCh(buf, q, 'x', sizeof(buf));
+        q += UtoA((unsigned)s_Ph, buf + q); q = AppendCStr(buf, q, " cells=", sizeof(buf));
+        q += UtoA((unsigned)s_CellN, buf + q); q = AppendCStr(buf, q, " pages=", sizeof(buf));
+        q += UtoA((unsigned)s_Pages, buf + q);
+        LogLine(buf);
+    }
+    return 1;
+}
+
+/* ---------------- 输入 ---------------- */
+
+static void Up_Select(const UpEnt* e)
+{
+    void* keep[UP_LIST_CAP];
+    int n = 0, i;
+    int cnt = e->count > 0 ? e->count : 1;
+
+    if (!s_ListN) return;
+    if (cnt > 1)
+    {
+        for (i = 0; i < s_ListN; i++)
+            if (s_List[i].type == e->type) keep[n++] = s_List[i].obj;
+    }
+    else keep[n++] = e->obj;
+    if (!n) return;
+
+    ((Fn_UnselectAll)(size_t)FN_MAP_UNSELECTALL)();
+    for (i = 0; i < n; i++)
+    {
+        Fn_Select f = (Fn_Select)(size_t)FN_TECHNO_SELECT;
+        f(keep[i]);
+    }
+    Up_ForceRebuild();
+    Up_Refresh();
+}
+
+static void Up_ClickAt(int mx, int my)
+{
+    int btn = Up_HitBtn(mx, my);
+    int cell;
+    if (btn == UP_BTN_FOLD)
+    {
+        s_Collapsed = s_Collapsed ? 0 : 1;
+        s_HoverCell = -1;
+        s_Pend = 0;
+        LogLine(s_Collapsed ? "up: collapsed" : "up: expanded");
+        return;
+    }
+    if (s_Collapsed) return;
+    if (btn >= 0)
+    {
+        /* 操作模式 / 收藏: 功能待定, 先只记日志, 不吞其它行为 */
+        LogLine(btn == UP_BTN_MODE ? "up: mode btn (todo)" : "up: fav btn (todo)");
+        return;
+    }
+    cell = Up_HitCell(mx, my);
+    {
+        /* 排查用: 一次点击一行, 先看门有没有把点击交给面板、命中的是哪一格。 */
+        char buf[96];
+        unsigned q = 0;
+        q = AppendCStr(buf, q, "up: click btn=", sizeof(buf));
+        q = AppendInt(buf, q, sizeof(buf), btn);
+        q = AppendCStr(buf, q, " cell=", sizeof(buf));
+        q = AppendInt(buf, q, sizeof(buf), cell);
+        q = AppendCStr(buf, q, " list=", sizeof(buf));
+        q = AppendInt(buf, q, sizeof(buf), s_ListN);
+        q = AppendCStr(buf, q, " paged=", sizeof(buf));
+        q = AppendInt(buf, q, sizeof(buf), s_Paged);
+        LogLine(buf);
+    }
+    if (cell < 0 || cell >= s_Cols * s_Rows) return;
+    {
+        const UpEnt* e = &s_Cell[cell];
+        if (e->count == -2)   /* 更多: 翻页 */
+        {
+            s_Page = (s_Page + 1) % s_Pages;
+            Up_Rebuild();
+            return;
+        }
+        /* 单选版式第 0 格是本车/本建筑、第 1 格是信息格, 第 2 格起才是载员
+         * (分页时前两格每页都在): 点载员 = 只让那一个下车 (SingleUnload.cpp)。
+         * 载员在车内不可选, 所以这一格绝不落到 Up_Select —— 否则 UnselectAll
+         * 之后选不回来, 面板会整块消失。 */
+        if (s_ListN == 1 && cell >= 2)
+        {
+            if (e->obj && e->type && e->count > 0)
+                SU_ClickPassenger(s_List[0].obj, e->obj);
+            else
+                LogLine("up: pax cell empty");
+            return;
+        }
+        if (!e->obj || !e->type || e->count == 0) return;
+        Up_Select(e);
+    }
+}
+
+void UP_NoteClick(int mx, int my, int left, int right)
+{
+    (void)right;
+    if (!left) { s_GateLb = 0; return; }
+    /* 一次按下可能多次进 ProcessClickCoords (引擎按帧重算落点), 只认按下沿,
+     * 否则点一下折叠键会来回折十几次。 */
+    if (s_GateLb) return;
+    s_GateLb = 1;
+    s_Pend = 1;
+    s_PendX = mx;
+    s_PendY = my;
+}
+
+int UP_WheelIn(int mx, int my, int dir)
+{
+    UP_EnsureInit();
+    if (!s_Enable || !s_Vis) return 0;
+    if (!Up_HitPanel(mx, my)) return 0;
+    if (s_Collapsed) return 1;
+    if (s_Pages > 1)
+    {
+        int p = s_Page + (dir > 0 ? 1 : -1);
+        if (p < 0) p = 0;
+        if (p > s_Pages - 1) p = s_Pages - 1;
+        if (p != s_Page) { s_Page = p; Up_Rebuild(); }
+    }
+    return 1;
+}
+
+void UP_Poll(void)
+{
+    int mx = -1, my = -1;
+    UP_EnsureInit();
+    if (!s_Enable) { s_Vis = 0; return; }
+    s_Vis = (*(volatile unsigned char*)(size_t)ADDR_SCEN_STARTED) ? 1 : 0;
+    if (!s_Vis) { s_Pend = 0; return; }
+    /* 先刷模型再排版: 格数决定面板宽高, 反过来会让几何滞后一帧 */
+    Up_Refresh();
+    Up_Layout();
+    Up_PrepareIcons();
+    /* 松开时清门侧按下沿标记 (松手那一下未必再进门) */
+    if (s_GateLb && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) s_GateLb = 0;
+
+    if (s_Pend)
+    {
+        int px = s_PendX, py = s_PendY;
+        s_Pend = 0;
+        Up_ClickAt(px, py);
+    }
+
+    if (!GtMouseGameXY(&mx, &my)) { s_HoverCell = -1; s_HoverBtn = -1; return; }
+    s_HoverBtn = Up_HitBtn(mx, my);
+    s_HoverCell = (s_HoverBtn >= 0) ? -1 : Up_HitCell(mx, my);
+}
+
+/* ---------------- 点击门 (Syringe 0x692361, 6B) ---------------- */
+
+extern "C" __declspec(dllexport) unsigned __cdecl UP_ClickGate(void* regs)
+{
+    int mx = -1, my = -1;
+    int lb, rb;
+    (void)regs;
+    UP_EnsureInit();
+    if (!s_Enable || !s_Vis) return 0;
+    if (!GtMouseGameXY(&mx, &my)) return 0;
+    if (!Up_HitPanel(mx, my)) return 0;
+    lb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
+    rb = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 1 : 0;
+    if (lb || rb)
+    {
+        char buf[64];
+        unsigned q = 0;
+        q = AppendCStr(buf, q, "up: gate lb=", sizeof(buf));
+        q = AppendInt(buf, q, sizeof(buf), lb);
+        q = AppendCStr(buf, q, " pend=", sizeof(buf));
+        q = AppendInt(buf, q, sizeof(buf), s_Pend);
+        LogLine(buf);
+        UP_NoteClick(mx, my, lb, rb);
+    }
+    /* 落在面板上就不许引擎再拿它当地图点击 (否则会取消选择/下令)。 */
+    return (unsigned)ADDR_CLICKGATE_SKIP;
+}
