@@ -220,6 +220,11 @@ int PV_ButtonsEnabled(void)
     return PV_ShowButtons();
 }
 
+int PV_Paused(void)
+{
+    return s_Paused ? 1 : 0;
+}
+
 void PV_SetButtonsEnabled(int enable)
 {
     PV_EnsureInit();

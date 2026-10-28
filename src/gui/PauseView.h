@@ -17,6 +17,9 @@ void PV_Poll(void);
 int PV_ButtonsEnabled(void);
 void PV_SetButtonsEnabled(int enable);
 
+/* 当前是否停在单机暂停态 (联机恒 0)。供键盘移动等输入轮询做门控。 */
+int PV_Paused(void);
+
 /* 底栏按钮槽几何: 0=格网 1=暂停 2=步进 3=截图 (恒为最右, 紧贴刻度条;
  * 截图键未显示时该槽不存在)。返回 1 = 摆得下, (x,y) 是方块左上角;
  * 0 = 没开/没摆好 (不画也不响应点击)。截图键由 Shot 模块用槽 3 自绘。 */

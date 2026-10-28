@@ -23,6 +23,9 @@
 /* Unsorted::ScenarioStarted - 只有真正进对局才为 1 (大厅/载入为 0)。 */
 #define ADDR_SCEN_STARTED       0xA8ED5Cu
 
+/* Game::SpecialDialog (int) - 非 0 = 有模态对话框/ESC 菜单; 引擎此时不派发命令热键。 */
+#define ADDR_SPECIAL_DIALOG     0xA8EDA0u
+
 /* SessionClass::Instance - 首成员即 GameMode (0=战役/菜单 3=LAN 4=Internet 5=Skirmish)。 */
 #define ADDR_SESSION            0xA8B238u
 #define ADDR_GAMEMODE           0xA8B238u   /* 旧名, 同址 */

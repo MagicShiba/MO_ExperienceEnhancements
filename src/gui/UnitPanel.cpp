@@ -17,12 +17,17 @@
  *
  * 绘制落点: Composite, 由消息帧钩在底栏三件套之后调用 (每帧重铺, 没法缓存到面)。
  * 只读模拟状态 + 只改本机选中集, 联机安全。
+ *
+ * 键盘移动: 第 2 个按钮 (操作模式) 开关; 开后有可动单位选中时, 裸 W/A/S/D
+ * 由 0x55DEE0 门吞掉, 改为对每个单位发标准 Move 事件 (8 方向, 一次一格)。
+ * 键位与语音都不走原命令; 带修饰的组合键不动。
  */
 
 #include <windows.h>
 #include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "PauseView.h"
 #include "PcxImage.h"
 #include "SingleUnload.h"
 #include "UnitPanel.h"
@@ -101,6 +106,8 @@ static int s_Enable = 1;
 static int s_Margin = 0;
 static int s_FontPx = 11;
 static int s_Collapsed = 0;
+static int s_ActionLines = 0;    /* 1=强制开启引擎单位行动线 (原版点击移动线) */
+#define ADDR_GAMEOPT_ACTION_LINES 0x00A8EB7Eu  /* GameOptionsClass::UnitActionLines */
 static int s_Vis = 0;            /* 本帧该不该显示 */
 static int s_LoggedGeom = 0;
 static wchar_t s_Face[FONT_FACE_MAX];
@@ -129,6 +136,38 @@ static int Up_PickHostOK(void);
 /* 悬停 */
 static int s_HoverCell = -1;
 static int s_HoverBtn = -1;
+
+/* 键盘移动 (UP_BTN_MODE): 每个单位记一个"上次下令的目标格"作锚点。
+ * 连按/按住时从锚点往前推, 不按当前格反复下同一个点; 松开一段时间后锚点作废。
+ * 数量按"少量单位"设计, 超出上限的忽略。 */
+#define UP_KM_MAX        64
+#define UP_KM_MIN_GAP    4      /* 同一方向连续令的最小帧间隔 (~15Hz@60fps) */
+#define UP_KM_TIMEOUT    240    /* 单位迟迟没到锚点的兜底重发 (约 4s@60fps) */
+#define UP_KM_ANCHOR_TTL 180    /* 松开后锚点保留时间 (约 3s@60fps), 连按同向可累加 */
+#define UP_KM_COMBO_MS   100    /* 方向键组合判定窗口: W 与 D 前后脚按下也只出一格斜向 */
+
+typedef struct {
+    void* unit;
+    int   id;
+    short tx, ty;       /* 上次下令的目标格 */
+    int   lastFrame;    /* 上次下令帧 */
+    int   has;          /* 是否有过锚点 (帧号 0 也能用) */
+    int   seen;         /* 本轮选中集里是否还有它 */
+} UpKmAnchor;
+
+static int s_KeyMove = 0;        /* 模式开关 */
+static int s_KeyMoveSel = 0;     /* 本帧可动单位数; 钩子只在 >0 时吞键 */
+static int s_KeyPrev[4] = {0, 0, 0, 0};  /* W/A/S/D 上一帧状态 */
+static int s_KeyDirX = 0, s_KeyDirY = 0; /* 上一次真正下令的方向 */
+static int s_KeyPendX = 0, s_KeyPendY = 0; /* 待确认方向 (组合键窗口) */
+static unsigned s_KeyPendMs = 0;
+static int s_KeyPendAnchor = 0;  /* 0=从当前格起, 1=从锚点累加 */
+static int s_KeyPendActive = 0;
+static int s_ActionKickFrame = -1;
+static UpKmAnchor s_Km[UP_KM_MAX];
+static int s_KmN = 0;
+static void Up_KmClear(void);
+static void Up_KmReset(void);
 
 /* 选中快照 */
 static UpEnt s_List[UP_LIST_CAP];
@@ -305,6 +344,7 @@ void UP_EnsureInit(void)
     s_Margin = GetPrivateProfileIntA(UP_SECTION, "Margin", 0, g_IniPath);
     s_FontPx = GetPrivateProfileIntA(UP_SECTION, "FontPx", 11, g_IniPath);
     s_Collapsed = GetPrivateProfileIntA(UP_SECTION, "Collapsed", 0, g_IniPath) ? 1 : 0;
+    s_ActionLines = GetPrivateProfileIntA(UP_SECTION, "ActionLines", 0, g_IniPath) ? 1 : 0;
     if (s_Margin < 0) s_Margin = 0;
     if (s_Margin > 200) s_Margin = 200;
     if (s_FontPx < 8) s_FontPx = 8;
@@ -329,7 +369,14 @@ void UP_SetEnabled(int enable)
 {
     UP_EnsureInit();
     s_Enable = enable ? 1 : 0;
-    if (!s_Enable) { s_Vis = 0; s_Pend = 0; }
+    if (!s_Enable)
+    {
+        s_Vis = 0;
+        s_Pend = 0;
+        s_KeyMove = 0;
+        s_KeyMoveSel = 0;
+        Up_KmClear();
+    }
     LogLine(s_Enable ? "up: ON" : "up: OFF");
 }
 
@@ -425,6 +472,321 @@ static int Up_HitBtn(int x, int y)
     for (i = 0; i < UP_BTN_N; i++)
         if (Up_PtIn(x, y, s_Bx, s_By[i], UP_BTN_W, UP_BTN_H)) return i;
     return -1;
+}
+
+/* ---------------- 键盘移动 ---------------- */
+
+static void Up_KmClear(void)
+{
+    s_KmN = 0;
+    s_KeyPendActive = 0;
+    s_KeyPendAnchor = 0;
+}
+
+static void Up_KmReset(void)
+{
+    Up_KmClear();
+    s_KeyPrev[0] = OU_KeyDown('W') ? 1 : 0;
+    s_KeyPrev[1] = OU_KeyDown('A') ? 1 : 0;
+    s_KeyPrev[2] = OU_KeyDown('S') ? 1 : 0;
+    s_KeyPrev[3] = OU_KeyDown('D') ? 1 : 0;
+    s_KeyDirX = 0;
+    s_KeyDirY = 0;
+    s_KeyPendActive = 0;
+    s_KeyPendAnchor = 0;
+    s_ActionKickFrame = -1;
+}
+
+/* 按 unit 指针 + id 找锚点; add=1 时没有就建。指针被复用 (id 变了) 时重置。 */
+static UpKmAnchor* Up_KmFind(void* unit, int id, int add)
+{
+    int i;
+    for (i = 0; i < s_KmN; i++)
+    {
+        if (s_Km[i].unit != unit) continue;
+        if (s_Km[i].id != id)
+        {
+            if (!add) return NULL;
+            s_Km[i].id = id;
+            s_Km[i].tx = 0;
+            s_Km[i].ty = 0;
+            s_Km[i].lastFrame = 0;
+            s_Km[i].has = 0;
+            s_Km[i].seen = 0;
+        }
+        return &s_Km[i];
+    }
+    if (!add || s_KmN >= UP_KM_MAX) return NULL;
+    s_Km[s_KmN].unit = unit;
+    s_Km[s_KmN].id = id;
+    s_Km[s_KmN].tx = 0;
+    s_Km[s_KmN].ty = 0;
+    s_Km[s_KmN].lastFrame = 0;
+    s_Km[s_KmN].has = 0;
+    s_Km[s_KmN].seen = 0;
+    return &s_Km[s_KmN++];
+}
+
+static void Up_KmPrune(void)
+{
+    int i, n = 0;
+    for (i = 0; i < s_KmN; i++)
+        if (s_Km[i].seen) s_Km[n++] = s_Km[i];
+    s_KmN = n;
+}
+
+/* 8 方向: 屏幕方向 (sx,sy) 折算成地图格偏移。斜向也是一格 (0,-1)/(-1,0) 等,
+ * 不是两个正向相加的两格。 */
+static int Up_KeyDir(int* dx, int* dy)
+{
+    int w = OU_KeyDown('W') ? 1 : 0;
+    int a = OU_KeyDown('A') ? 1 : 0;
+    int s = OU_KeyDown('S') ? 1 : 0;
+    int d = OU_KeyDown('D') ? 1 : 0;
+    int sx = d - a;
+    int sy = s - w;
+    if (!sx && !sy) { *dx = 0; *dy = 0; return 0; }
+    if (sx && sy) { *dx = (sx + sy) / 2; *dy = (sy - sx) / 2; }
+    else { *dx = sx + sy; *dy = sy - sx; }
+    return 1;
+}
+
+static int Up_ChatTyping(void)
+{
+    return *(volatile unsigned char*)(size_t)(ADDR_MSGLIST + OFF_MSGLIST_EDIT) ? 1 : 0;
+}
+
+/* 引擎的"点击后画行动线"计时器 (0x70D150): 只写本地渲染计时, 不改模拟。 */
+#define ADDR_START_ACTION_LINES 0x0070D150u
+typedef void (__stdcall *Fn_StartActionLines)(void);
+
+static void Up_ActionLineKick(int frame)
+{
+    if (!s_ActionLines || s_ActionKickFrame == frame) return;
+    s_ActionKickFrame = frame;
+    ((Fn_StartActionLines)(void*)ADDR_START_ACTION_LINES)();
+}
+
+/* 给一个单位下令。useAnchor=1 (同方向连按/按住) 从锚点往前推, 便于累加;
+ * useAnchor=0 (换方向) 从当前格起, 保证"一次按键 = 当前格旁一格"。 */
+static void Up_KmIssue(int house, void* unit, int uid, int dx, int dy, int frame, int useAnchor)
+{
+    CoordStruct c;
+    UpKmAnchor* a;
+    unsigned char ur = 0, dr = 0;
+    int cx, cy, tx, ty, dst, sid;
+
+    if (!OU_GetCoords(unit, &c)) return;
+    cx = c.X / 256;
+    cy = c.Y / 256;
+    a = Up_KmFind(unit, uid, 1);
+    if (useAnchor && a && a->has &&
+        (unsigned)(frame - a->lastFrame) <= UP_KM_ANCHOR_TTL)
+    {
+        tx = a->tx + dx;
+        ty = a->ty + dy;
+    }
+    else
+    {
+        tx = cx + dx;
+        ty = cy + dy;
+    }
+    if (!OU_CellValid(tx, ty)) return;
+    sid = OU_ObjTgt(unit, &ur);
+    if (sid < 0) return;
+    dst = OU_CellTgt(tx, ty, &dr);
+    /* 标准移动事件: 与手点右键移动同形; 不调 ClickedMission, 不播语音。 */
+    OU_FireMega(house, sid, ur, MISSION_MOVE,
+                0, 0, dst, dr, 0, 0, 0, unit, sid, 1);
+    Up_ActionLineKick(frame);
+    if (a)
+    {
+        a->tx = (short)tx;
+        a->ty = (short)ty;
+        a->lastFrame = frame;
+        a->has = 1;
+    }
+}
+
+/* UP_Poll 每循环调一次。键态每帧都采; 只有模式开 + 有可动单位时才真的下令。 */
+static void Up_KeyMovePoll(void)
+{
+    void* cur;
+    void** items;
+    void* eu[UP_KM_MAX];
+    int   ei[UP_KM_MAX];
+    int n, i, en = 0, selN = 0, house = 0, frame;
+    int w, a, s, d, edge, removed, dx = 0, dy = 0, dir, changed;
+    unsigned now;
+
+    if (!s_Vis) { s_KeyMove = 0; s_KeyMoveSel = 0; Up_KmClear(); return; }
+    if (!s_KeyMove) { s_KeyMoveSel = 0; Up_KmClear(); return; }
+
+    cur = *(void**)ADDR_CURPLAYER;
+    if (!cur || !IsPlausiblePtr(cur)) { s_KeyMoveSel = 0; Up_KmClear(); return; }
+    house = *(int*)((char*)cur + OFF_HOUSE_INDEX);
+    frame = *(int*)ADDR_FRAME;
+    n = OU_VecItems(ADDR_CUR_OBJECTS, &items);
+    if (!items || n <= 0) { s_KeyMoveSel = 0; Up_KmClear(); return; }
+
+    for (i = 0; i < s_KmN; i++) s_Km[i].seen = 0;
+
+    /* 可动 = 自己的、活着的、不在运输/工厂里的 Unit/Infantry/Aircraft。
+     * 建筑、敌方、载员一律不碰 (与手点选中的可下令集合一致)。 */
+    for (i = 0; i < n; i++)
+    {
+        void* u = items[i];
+        int uid, what;
+        if (!u || !IsPlausiblePtr(u)) continue;
+        if (*(void**)((char*)u + OFF_OWNER) != cur) continue;
+        if (!*(unsigned char*)((char*)u + OFF_ISALIVE)) continue;
+        if (*(unsigned char*)((char*)u + OFF_INLIMBO)) continue;
+        what = OU_WhatAmI(u);
+        if (what != WHATAMI_UNIT && what != WHATAMI_INFANTRY && what != WHATAMI_AIRCRAFT) continue;
+        uid = OU_ObjTgt(u, NULL);
+        if (uid < 0) continue;
+        selN++;
+        if (en < UP_KM_MAX)
+        {
+            eu[en] = u;
+            ei[en] = uid;
+            en++;
+            {
+                UpKmAnchor* km = Up_KmFind(u, uid, 1);
+                if (km) km->seen = 1;
+            }
+        }
+    }
+    s_KeyMoveSel = selN;
+    if (!selN) { Up_KmClear(); return; }
+
+    /* 边沿与上一帧键态: 门控期间也更新, 免得松手/关聊天后补触发一次。 */
+    w = OU_KeyDown('W') ? 1 : 0;
+    a = OU_KeyDown('A') ? 1 : 0;
+    s = OU_KeyDown('S') ? 1 : 0;
+    d = OU_KeyDown('D') ? 1 : 0;
+    edge = (w && !s_KeyPrev[0]) || (a && !s_KeyPrev[1]) ||
+           (s && !s_KeyPrev[2]) || (d && !s_KeyPrev[3]);
+    removed = (!w && s_KeyPrev[0]) || (!a && s_KeyPrev[1]) ||
+              (!s && s_KeyPrev[2]) || (!d && s_KeyPrev[3]);
+    s_KeyPrev[0] = w; s_KeyPrev[1] = a; s_KeyPrev[2] = s; s_KeyPrev[3] = d;
+
+    if (!GtGameFocused() || Up_ChatTyping() ||
+        *(volatile int*)(size_t)ADDR_SPECIAL_DIALOG || PV_Paused() ||
+        OU_KeyDown('Z') || OU_KeyDown(VK_CONTROL) ||
+        OU_KeyDown(VK_SHIFT) || OU_KeyDown(VK_MENU))
+    {
+        s_KeyPendActive = 0;
+        s_KeyPendAnchor = 0;
+        Up_KmPrune();
+        return;
+    }
+
+    dir = Up_KeyDir(&dx, &dy);
+    if (!dir)
+    {
+        /* 松手: 组合窗口里还没发出的那一下必须补发, 否则快速点按会丢输入。 */
+        if (s_KeyPendActive)
+        {
+            for (i = 0; i < en; i++)
+                Up_KmIssue(house, eu[i], ei[i],
+                           s_KeyPendX, s_KeyPendY, frame, s_KeyPendAnchor);
+            s_KeyDirX = s_KeyPendX;
+            s_KeyDirY = s_KeyPendY;
+            s_KeyPendActive = 0;
+            s_KeyPendAnchor = 0;
+        }
+        Up_KmPrune();
+        return;
+    }
+
+    now = GetTickCount();
+    changed = (dx != s_KeyDirX || dy != s_KeyDirY);
+
+    /* 组合键窗口: 新方向/新按键先记下, 等窗口过去再出令。
+     * W 和 D 前后脚到达时, 第一帧只有 W、第二帧才变成 W+D; 若第一帧就下令,
+     * 单位会先走一格 W 再改斜向, 看起来就是"选了两个地方"。
+     * 松开一个键 (removed) 不立刻改待确认方向: 斜向点按常常先松 D 再松 W,
+     * 若一松手就降成 W, 会丢掉斜向。 */
+    if (s_KeyPendActive)
+    {
+        if (edge && (dx != s_KeyPendX || dy != s_KeyPendY))
+        {
+            s_KeyPendX = dx;
+            s_KeyPendY = dy;
+            s_KeyPendAnchor = 0;
+            s_KeyPendMs = now;
+        }
+        else if (edge)
+        {
+            s_KeyPendAnchor = 1;
+            s_KeyPendMs = now;
+        }
+        /* removed 且方向变了: 保持原待确认方向, 等窗口到期/全松时结算 */
+    }
+    else if (edge || (changed && !removed))
+    {
+        s_KeyPendActive = 1;
+        s_KeyPendX = dx;
+        s_KeyPendY = dy;
+        s_KeyPendAnchor = changed ? 0 : 1;
+        s_KeyPendMs = now;
+    }
+    else if (changed)
+    {
+        /* 纯松开导致的方向变化 (如 W+D 松 D 变 W): 不另发一格,
+         * 改成跟随到达旧目标后的按住推进。 */
+        s_KeyDirX = dx;
+        s_KeyDirY = dy;
+    }
+
+    if (s_KeyPendActive)
+    {
+        if (dx == s_KeyPendX && dy == s_KeyPendY &&
+            (unsigned)(now - s_KeyPendMs) >= UP_KM_COMBO_MS)
+        {
+            for (i = 0; i < en; i++)
+                Up_KmIssue(house, eu[i], ei[i],
+                           s_KeyPendX, s_KeyPendY, frame, s_KeyPendAnchor);
+            /* 若按键已部分松开 (当前方向只剩 W), 把"上次方向"记成当前方向,
+             * 避免下一帧又为 W 补发一格; 需要继续走 W 时, 到锚点后会由按住逻辑接上。 */
+            if (dx || dy)
+            {
+                s_KeyDirX = dx;
+                s_KeyDirY = dy;
+            }
+            else
+            {
+                s_KeyDirX = s_KeyPendX;
+                s_KeyDirY = s_KeyPendY;
+            }
+            s_KeyPendActive = 0;
+            s_KeyPendAnchor = 0;
+        }
+        Up_KmPrune();
+        return;
+    }
+
+    /* 方向没变、也没有新按键: 单位到达锚点后继续推进下一格。 */
+    for (i = 0; i < en; i++)
+    {
+        UpKmAnchor* km = Up_KmFind(eu[i], ei[i], 0);
+        if (km && km->has)
+        {
+            CoordStruct c;
+            if (OU_GetCoords(eu[i], &c))
+            {
+                int cx = c.X / 256, cy = c.Y / 256;
+                int gap = frame - km->lastFrame;
+                /* 到达上一个目标格再发下一格: 频率自然跟着单位速度走
+                 * (慢单位间隔长, 快单位间隔短); 卡住时用 TIMEOUT 兜底。 */
+                if ((cx == km->tx && cy == km->ty && gap >= UP_KM_MIN_GAP) ||
+                    gap >= UP_KM_TIMEOUT)
+                    Up_KmIssue(house, eu[i], ei[i], dx, dy, frame, 1);
+            }
+        }
+    }
+    Up_KmPrune();
 }
 
 int UP_Over(int mx, int my)
@@ -1571,7 +1933,8 @@ static void Up_DrawButtons(unsigned char* base, int pitch, int W, int H)
     {
         int x = s_Bx, y = s_By[i];
         int hot = (s_HoverBtn == i);
-        int active = (i == UP_BTN_FOLD && s_Collapsed);
+        int active = (i == UP_BTN_FOLD && s_Collapsed) ||
+                     (i == UP_BTN_MODE && s_KeyMove);
         unsigned char cr, cg, cb;
         Up_BtnBg(base, pitch, W, H, x, y, hot, active);
         /* 图标按 18px 框居中: 三角 6x11, 三条 10x2, 星 11x11 */
@@ -1780,14 +2143,24 @@ static void Up_ClickAt(int mx, int my)
         s_Collapsed = s_Collapsed ? 0 : 1;
         s_HoverCell = -1;
         s_Pend = 0;
+        /* 折叠后看不到模式指示, 必须关掉; 否则 WASD 被吞却没有任何提示。 */
+        if (s_Collapsed) { s_KeyMove = 0; s_KeyMoveSel = 0; Up_KmClear(); }
         LogLine(s_Collapsed ? "up: collapsed" : "up: expanded");
         return;
     }
     if (s_Collapsed) return;
+    if (btn == UP_BTN_MODE)
+    {
+        s_KeyMove = s_KeyMove ? 0 : 1;
+        s_KeyMoveSel = 0;
+        Up_KmReset();
+        LogLine(s_KeyMove ? "up: keymove on" : "up: keymove off");
+        return;
+    }
     if (btn >= 0)
     {
-        /* 操作模式 / 收藏: 功能待定, 先只记日志, 不吞其它行为 */
-        LogLine(btn == UP_BTN_MODE ? "up: mode btn (todo)" : "up: fav btn (todo)");
+        /* 收藏: 功能待定, 先只记日志, 不吞其它行为 */
+        LogLine("up: fav btn (todo)");
         return;
     }
     cell = Up_HitCell(mx, my);
@@ -1873,9 +2246,25 @@ void UP_Poll(void)
 {
     int mx = -1, my = -1;
     UP_EnsureInit();
-    if (!s_Enable) { s_Vis = 0; return; }
+    /* 1=强制开启引擎自带的单位行动线 (右键移动时那条); 0=不改游戏内设置。 */
+    if (s_ActionLines) *(volatile unsigned char*)(size_t)ADDR_GAMEOPT_ACTION_LINES = 1;
+    if (!s_Enable)
+    {
+        s_Vis = 0;
+        s_KeyMove = 0;
+        s_KeyMoveSel = 0;
+        Up_KmClear();
+        return;
+    }
     s_Vis = (*(volatile unsigned char*)(size_t)ADDR_SCEN_STARTED) ? 1 : 0;
-    if (!s_Vis) { s_Pend = 0; return; }
+    if (!s_Vis)
+    {
+        s_Pend = 0;
+        s_KeyMove = 0;
+        s_KeyMoveSel = 0;
+        Up_KmClear();
+        return;
+    }
     /* 先刷模型再排版: 格数决定面板宽高, 反过来会让几何滞后一帧 */
     Up_Refresh();
     Up_Layout();
@@ -1905,6 +2294,9 @@ void UP_Poll(void)
         Up_ClickAt(px, py);
     }
 
+    /* 模式刚在本帧被点开/关掉时也走这里: 开的那一拍会立即更新可动单位数。 */
+    Up_KeyMovePoll();
+
     if (!GtMouseGameXY(&mx, &my)) { s_HoverCell = -1; s_HoverBtn = -1; return; }
     s_HoverBtn = Up_HitBtn(mx, my);
     s_HoverCell = (s_HoverBtn >= 0) ? -1 : Up_HitCell(mx, my);
@@ -1933,4 +2325,37 @@ extern "C" __declspec(dllexport) unsigned __cdecl UP_ClickGate(void* regs)
     if (lb || rb) UP_NoteClick(mx, my, lb, rb);
     /* 落在面板上就不许引擎再拿它当地图点击 (否则会取消选择/下令)。 */
     return (unsigned)ADDR_CLICKGATE_SKIP;
+}
+
+/* ---------------- 键盘门 (Syringe 0x55DEE0, 5B) ----------------
+ * KeyboardProcess 入口, ECX = &输入 DWORD。只在"键盘移动开 + 有可动单位"时
+ * 把裸 W/A/S/D 清零, 原函数继续跑 (查不到命令)。带修饰的组合键不碰
+ * (Alt+A 结盟 / Ctrl+S 截图等仍走原版)。语音由原命令派发, 键被吞后自然不响。 */
+
+extern "C" __declspec(dllexport) unsigned __cdecl UP_KeyGate(void* regs)
+{
+    void* p;
+    unsigned v;
+
+    if (!s_KeyMove || s_KeyMoveSel <= 0) return 0;
+    if (!*(volatile unsigned char*)(size_t)ADDR_SCEN_STARTED) return 0;
+    if (*(volatile int*)(size_t)ADDR_SPECIAL_DIALOG) return 0;
+    if (Up_ChatTyping()) return 0;
+    if (!regs) return 0;
+    p = *(void**)((char*)regs + 0x20);   /* Syringe: +0x20 = 入口 ECX */
+    if (!p || !IsPlausiblePtr(p) || ((size_t)p & 3u)) return 0;
+    v = *(unsigned*)p;
+    if (v & 0x700u) return 0;            /* Shift/Ctrl/Alt: 留给原版组合键 */
+    switch (v & 0xFFu)
+    {
+    case 'W':
+    case 'A':
+    case 'S':
+    case 'D':
+        *(unsigned*)p = 0;
+        break;
+    default:
+        break;
+    }
+    return 0;
 }

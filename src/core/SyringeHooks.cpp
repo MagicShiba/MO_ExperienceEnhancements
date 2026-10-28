@@ -35,7 +35,7 @@ struct SyHookDecl
 
 #define SYHOOK(a, s, n) { (a), (s), (n), 0u }
 
-/* 与 dist/MOExperience.dll.inj 逐行对应 (50 项, 顺序一致)。 */
+/* 与 dist/MOExperience.dll.inj 逐行对应 (51 项, 顺序一致)。 */
 static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(16))) =
 {
     SYHOOK(0x5D3BA0u, 6u, "MsgText_AddMessageHook"),
@@ -66,6 +66,7 @@ static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(
     SYHOOK(0x692419u, 7u, "SWS_ClickGate"),
     SYHOOK(0x692406u, 6u, "FullMap_RadarClickGate"),
     SYHOOK(0x692361u, 6u, "UP_ClickGate"),
+    SYHOOK(0x55DEE0u, 5u, "UP_KeyGate"),
     SYHOOK(0x536FA0u, 7u, "RepairAll_HotKey"),
     SYHOOK(0x6A78D9u, 6u, "RepairAll_Button"),
     SYHOOK(0x55D360u, 5u, "PV_MainGate"),
