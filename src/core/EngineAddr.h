@@ -378,6 +378,34 @@
  * 0x55B6CF `add eax,0x9c` 之后连读 3 个 dword (X/Y/Z)。 */
 #define OFF_OBJ_LOCATION        0x009Cu
 
+/* ==================== 通信信标 (BeaconManagerClass) ==================== */
+
+/* BeaconManagerClass::Instance (YRpp BeaconManagerClass.h, sizeof 0x80)。
+ * Beacons[8][3] 在 +0x00，AllocatedCount 在 +0x60。
+ * 布署模式字节 = DisplayClass+0x11B4，即绝对地址 0x88099C
+ * (0x87F7E8+0x11B4)；SWSBar.cpp 的 OFF_DISP_BEACON 是同址的旧名。 */
+#define ADDR_BEACON_MGR         0x0089C3B0u
+#define OFF_BC_PERIOD           0x7Cu     /* int RadarBeaconAnimPeriod = 雷达帧数*4, 三处 idiv 的除数 */
+
+/* 美术: LoadArt 0x4309D0 把两个 SHP 整个读进内存, 只取头部宽高帧数并填
+ * +0x64/68/6C (BeaconSize+帧数) 与 +0x70/74/78/7C (RadarBeaconSize+帧数+周期);
+ * 读不进来就留 NULL, +0x7C 停在 0。 */
+#define ADDR_BC_ART             0x0089C474u  /* PBEACON.SHP 头指针 */
+#define ADDR_BC_RADARART        0x0089C478u  /* RDRBEACN.SHP 头指针 */
+#define ADDR_BC_LOADART         0x004309D0u  /* __thiscall(self=0x89C3B0) */
+
+/* 单机早退三处 (全是 `mov eax,[0xA8B238]` 起的 GameMode 判定)。
+ * 见 notes/通信信标.md。 */
+#define ADDR_BC_HOTKEY          0x005370A0u  /* Execute 入口, 5B mov eax,[sess] */
+#define ADDR_BC_HOTKEY_GO       0x005370AEu  /* 跳过判定, call 0x731A30 */
+#define ADDR_BC_HOTKEY_NEXT     0x005370A5u  /* 原指令之后 */
+#define ADDR_BC_PLACETAIL       0x00430CD4u  /* PlaceBeacon 尾, 5B 同上 */
+#define ADDR_BC_PLACETAIL_GO    0x00430CEAu  /* EVA + 操作提示段 */
+#define ADDR_BC_PLACETAIL_NEXT  0x00430CD9u
+#define ADDR_BC_SENDBUILD       0x00430D99u  /* 组 IPX 包起点, 6B mov ecx,[0xA8DA78] */
+#define ADDR_BC_SENDBUILD_SKIP  0x00430E50u  /* 共享收尾 (pop edi/esi/ebp/ebx) */
+#define ADDR_BC_SENDBUILD_NEXT  0x00430D9Fu
+
 /* ==================== 事件 (EventClass) ==================== */
 
 #define EVT_SIZE                111u      /* EventClass 结构的字节数 */

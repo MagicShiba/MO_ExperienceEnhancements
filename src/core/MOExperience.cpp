@@ -36,6 +36,7 @@
 #include "SWPanel.h"
 #include "TreeChop.h"
 #include "WaypointCap.h"
+#include "BeaconSP.h"
 #include "MegaListCap.h"
 #include "WeaponRange.h"
 #include "ScaleBar.h"
@@ -328,6 +329,8 @@ static void PowerDrawBoth(void)
     tSeg = Perf_Now(); MindSelect_Poll(); Perf_Add(PF_A_MS, tSeg);
     tSeg = Perf_Now(); OrderThrottle_Poll(); Perf_Add(PF_A_OT, tSeg);
     tSeg = Perf_Now(); WpCap_Poll();      Perf_Add(PF_A_WPC, tSeg);
+    /* 通信信标 (B 键) 单机启用: 联机不装钩 (见 BeaconSP.cpp)。 */
+    tSeg = Perf_Now(); BeaconSP_Poll();   Perf_Add(PF_A_BC, tSeg);
     tSeg = Perf_Now(); MlCap_Poll();      Perf_Add(PF_A_MLC, tSeg);
     tSeg = Perf_Now(); SWS_Poll();        Perf_Add(PF_A_SWS, tSeg);
     tSeg = Perf_Now(); RepairAll_Poll();  Perf_Add(PF_A_RA, tSeg);

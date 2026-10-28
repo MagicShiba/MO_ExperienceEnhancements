@@ -62,7 +62,7 @@ enum
     /* prepare 里逐个 Poll (A 段: 输入/战斗类) */
     PF_A_AW, PF_A_BQ, PF_A_PC, PF_A_SO, PF_A_RP, PF_A_TC, PF_A_FA, PF_A_AM,
     PF_A_SA, PF_A_DP, PF_A_MS, PF_A_OT, PF_A_WPC, PF_A_MLC, PF_A_SWS,
-    PF_A_RA, PF_A_PS, PF_A_AG, PF_A_OB, PF_A_LIGHT,
+    PF_A_RA, PF_A_PS, PF_A_AG, PF_A_OB, PF_A_LIGHT, PF_A_BC,
     /* prepare 后段 (B 段: 底栏/绘制类) */
     PF_B_PV, PF_B_SHOT, PF_B_VTS, PF_B_PUB, PF_B_MHK, PF_B_PWR, PF_B_PIPB,
     PF_B_SKIN, PF_B_PVP,
