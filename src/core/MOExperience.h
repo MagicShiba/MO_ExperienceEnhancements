@@ -76,6 +76,10 @@ extern void* g_CameraSetTramp;
  * (si=格X, di=格Y), 交 PiP_OnRadarRawCell (小窗按自己尺寸重钳)。 */
 void MOExperience_RadarClampEntry(void);
 extern void* g_RadarCellTramp;
+/* Follow 命令 (0x537A10) 入口钩: 小窗聚焦时把 F 抢给小窗跟随, 主窗口不动。
+ * 原函数收尾 ret 4, 吞掉时同样 ret 4。 */
+void MOExperience_FollowEntry(void);
+extern void* g_FollowTramp;
 /* DrawPixelEffects (迷雾) 入口钩: 先把 [0x887314] 换成大面挡越界写。 */
 void MOExperience_ShroudEntry(void);
 extern void* g_ShroudTramp;

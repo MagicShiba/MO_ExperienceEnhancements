@@ -40,3 +40,7 @@ void PiP_DrawOnComposite(void* surf);
 
 /* 侧栏开关按钮: 画进侧栏面, 在条带上屏前调 (同底部电量)。 */
 void PiP_DrawButton(void);
+
+/* 小窗跟随 (F 键): Follow 命令 (0x537A10) 钩的回调。
+ * 返回 1 = 小窗已接管 (调用方按原函数 ret 4 收尾), 0 = 放行原版 (主窗口跟随)。 */
+int PiP_FollowCommand(void);

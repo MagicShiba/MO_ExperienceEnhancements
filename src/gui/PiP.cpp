@@ -11,6 +11,7 @@
 #include "ScaleBar.h"
 #include "PcxImage.h"
 #include "SidebarSkin.h"
+#include "OrderUtil.h"      /* OU_ObjId / OU_PtrAliveRaw: 跟随目标跨帧验活 */
 #include "PiP.h"
 
 #define PIP_SECTION "PiP"
@@ -51,6 +52,7 @@ static int g_PadX = 8, g_PadY = 8;   /* 小窗在地图区内的落点 (右上�
 static int g_Border = 1;
 static int g_AutoJump = 0;    /* [PiP] AutoJump: 自动跟随最新雷达事件 (窗内按钮) */
 static int g_Operate  = 0;    /* [PiP] Operate: 窗内左键操作 (窗内按钮) */
+static int g_FollowCfg = 1;   /* [PiP] Follow: 小窗跟随 (F) 总开关 */
 
 static int   g_InRender = 0;
 static void* g_Comp = 0;      /* 离屏"合成"面 (最终画面) */
@@ -97,6 +99,18 @@ static int g_CamWX = 0, g_CamWY = 0, g_CamWZ = 0, g_CamW = 0; /* 本帧程序化
 static unsigned g_AutoSeq = 0; /* 已跟随的雷达事件序号 */
 static int g_AutoSeen = 0;     /* g_AutoSeq 是否有意义 (开窗/开按钮后先跳一次最新事件) */
 static int g_LastRtX = 0x7fffffff, g_LastRtY = 0x7fffffff;  /* 上次记日志的目标 */
+
+/* ---- 小窗跟随 (F) ----
+ * 引擎的跟随挂在选中集上: 换选择/取消选中/下别的令都会把它清掉, 主窗口当场停下。
+ * 小窗跟随时独立状态, 定下目标后与选中集无关, 只有用户明确"要看别处"才取消。 */
+static int   g_FolOn = 0;      /* 小窗跟随中 */
+static void* g_FolObj = 0;     /* 目标 ObjectClass* (跨帧持有, 每帧验活) */
+static int   g_FolId = 0;      /* 目标 Fetch_ID (验活用) */
+static int   g_FolIdxOk = 0;   /* Fetch_ID 索引自检通过 (否则只靠字节判据) */
+
+/* 定义在后面 (需要 PiP_IsGameCode / PiP_ClampScreen 等), 这里先声明给前面的调用点。 */
+static void PiP_FollowClear(const char* why);
+static void PiP_FollowTick(void);
 
 /* 侧栏按钮坐标。[PiP] ButtonPos 依次是盟军/苏联/厄普西隆/焚风的 X,Y:
  * X 相对侧栏列左缘 (= 侧栏面局部 x), Y 相对屏幕顶边 (= 侧栏面局部 y)。 */
@@ -268,6 +282,7 @@ void PiP_EnsureInit(void)
     g_PanMax   = PiP_IniRange("PanMax", 6, 1, 32);
     g_AutoJump = PiP_IniBool("AutoJump", 0);
     g_Operate  = PiP_IniBool("Operate", 0);
+    g_FollowCfg = PiP_IniBool("Follow", 1);
     GetPrivateProfileStringA(PIP_SECTION, "ButtonPos",
                              "8,155,25,158,0,160,0,168", raw, sizeof(raw), g_IniPath);
     if (PiP_ParseInts(raw, pos, 8) == 8)
@@ -421,6 +436,7 @@ static void PiP_Toggle(void)
     g_Focus = g_Drag = g_Pan = g_PendingUnfocus = g_HasContent = 0;
     if (!g_Show)
     {
+        PiP_FollowClear("pip: follow OFF (window closed)");
         PiP_DropSurfs();
         g_PipX = g_PipY = g_PipW = g_PipH = 0;
         LogLine("pip: window OFF (sidebar button)");
@@ -639,6 +655,8 @@ static void PiP_PanBy(int ox, int oy)
     int sx = ox > 0 ? 1 : (ox < 0 ? -1 : 0);
     int sy = oy > 0 ? 1 : (oy < 0 ? -1 : 0);
     int speed = PiP_PanDist(ox, oy) * g_PanRate / PIP_PAN_DIV;
+    /* 手动拖视野 = "我要看别处", 跟随让路 (否则下一帧就被拉回目标)。 */
+    PiP_FollowClear("pip: follow OFF (pan)");
     if (ay * 2 <= ax) sy = 0; else if (ax * 2 <= ay) sx = 0;    /* 8 方向量化 */
     if (speed > g_PanMax * g_PanRate) speed = g_PanMax * g_PanRate;
     if (speed < 1) speed = 1;
@@ -708,6 +726,9 @@ void PiP_PreRender(void)
     else if (g_Focus && g_HaveLastMain && g_RadarSteal)
     {
         int tx = cx, ty = cy;       /* 默认: 退用引擎(被主视野钳过的)中心 */
+        /* 小地图点击 / 雷达事件点击都会重定小窗视野 = 用户要看别处, 跟随让路
+         * (否则下一帧就被拉回目标, 点了等于没点)。 */
+        PiP_FollowClear("pip: follow OFF (radar)");
         /* 有本帧小地图原始格 => 换成小窗摄像机屏幕坐标, 再按小窗自己的视口尺寸
          * 走"缩放档同款"防出界钳制。 */
         if (g_RawAt >= 0 && g_Frame - g_RawAt <= 1)
@@ -749,6 +770,126 @@ void PiP_OnRadarRawCell(int cx, int cy)
 {
     if (PiP_Off() || g_InRender || !g_Show) return;
     g_RawCX = cx; g_RawCY = cy; g_RawAt = g_Frame;
+}
+
+/* ---------------- 小窗跟随 (F) ---------------- */
+
+/* 引擎代码段 / rdata 区间: 判"这个指针是不是引擎的代码 / 对象虚表"。
+ * 跟随目标跨帧验活与下面点击重映射的对象过滤共用同一口径。 */
+#define PIP_GAME_TEXT_LO   0x00401000u
+#define PIP_GAME_TEXT_HI   0x007E038Du
+#define PIP_GAME_RDATA_LO  0x007E1000u
+#define PIP_GAME_RDATA_HI  0x00811074u
+
+static int PiP_IsGameCode(const void* p)
+{
+    size_t v = (size_t)p;
+    return v >= PIP_GAME_TEXT_LO && v < PIP_GAME_TEXT_HI;
+}
+
+/* 目标还活着吗 (跨帧持有 ObjectClass*, 每帧必须验一遍)。
+ * 先查字节判据 (不碰 Fetch_ID 索引), 再按索引反查 —— 索引自检不过时 fail-open,
+ * 只留字节判据, 与 OrderUtil 各处同一口径。 */
+static int PiP_FolUsable(void* o)
+{
+    void** vt;
+    if (!o || !IsPlausiblePtr(o)) return 0;
+    vt = *(void***)o;
+    if (!vt || (size_t)vt < PIP_GAME_RDATA_LO || (size_t)vt >= PIP_GAME_RDATA_HI)
+        return 0;
+    if (!PiP_IsGameCode(vt[0x2C / 4]) || !PiP_IsGameCode(vt[0x48 / 4])) return 0;
+    if (!((unsigned char*)o)[OFF_ISALIVE]) return 0;   /* 已死 (尸体/正在移除) */
+    if (((unsigned char*)o)[OFF_INLIMBO]) return 0;    /* 进工厂/运输/已离场 */
+    return OU_PtrAlive(o, g_FolId, g_FolIdxOk);
+}
+
+/* 关跟随并清引擎侧状态 (主窗口不会再跟着它)。why 只用于日志。 */
+static void PiP_FollowClear(const char* why)
+{
+    if (!g_FolOn) return;
+    g_FolOn = 0;
+    g_FolObj = 0;
+    g_FolId = 0;
+    /* 引擎自己的跟随如果还挂着同一个对象, 一并清掉, 免得主窗口替我们继续跟。 */
+    ((void (__attribute__((thiscall)) *)(void*, void*))FN_DISP_SETFOLLOW)(
+        (void*)(size_t)ADDR_DISPLAY, 0);
+    if (why) LogLine(why);
+}
+
+/* 把目标设为小窗跟随对象。返回 1 = 已开始跟随。 */
+static int PiP_FollowSet(void* o)
+{
+    void** vt;
+    if (!o || !IsPlausiblePtr(o)) return 0;
+    vt = *(void***)o;
+    if (!vt || (size_t)vt < PIP_GAME_RDATA_LO || (size_t)vt >= PIP_GAME_RDATA_HI)
+        return 0;
+    if (!PiP_IsGameCode(vt[0x2C / 4]) || !PiP_IsGameCode(vt[0x48 / 4])) return 0;
+    if (!((unsigned char*)o)[OFF_ISALIVE]) return 0;
+
+    g_FolObj = o;
+    g_FolId = OU_ObjId(o);
+    /* 索引自检: 拿目标本身查一遍, 查得到才启用严格验活。 */
+    {
+        void* base = *(void**)ADDR_IDBASE;
+        int cnt = *(int*)ADDR_IDCOUNT;
+        g_FolIdxOk = (base && IsPlausiblePtr(base) && cnt > 0 && cnt <= 200000 &&
+                      g_FolId > 0 && OU_PtrAliveRaw(o, g_FolId)) ? 1 : 0;
+    }
+    g_FolOn = 1;
+    /* 与"自动跟随雷达事件"互斥: 两者都写小窗目标, 同时开会互相拉。 */
+    g_AutoJump = 0;
+    /* 主窗口不动: 清掉引擎的跟随状态。 */
+    ((void (__attribute__((thiscall)) *)(void*, void*))FN_DISP_SETFOLLOW)(
+        (void*)(size_t)ADDR_DISPLAY, 0);
+    LogLine("pip: follow ON (F, window-only)");
+    return 1;
+}
+
+/* Follow 命令 (0x537A10) 钩回调。返回 1 = 小窗接管, 0 = 放行原版。 */
+int PiP_FollowCommand(void)
+{
+    void** items;
+    int n;
+    void* o;
+
+    PiP_EnsureInit();
+    if (!g_Enable || !g_FollowCfg) return 0;
+    /* 跟随开着时 F 一律是"关", 不管此刻焦点在哪 —— 否则焦点一丢就没法关。 */
+    if (g_FolOn)
+    {
+        PiP_FollowClear("pip: follow OFF (F)");
+        return 1;
+    }
+    /* 只有"小窗开着 + 被点中"才把 F 抢过来; 其余位置留给主窗口原版跟随。 */
+    if (!g_Show || !g_Focus || g_PipW <= 0) return 0;
+    items = *(void***)(size_t)(ADDR_CUR_OBJECTS + OFF_VEC_ITEMS);
+    n = *(int*)(size_t)(ADDR_CUR_OBJECTS + OFF_VEC_COUNT);
+    if (!items || !IsPlausiblePtr(items) || n <= 0) return 0;
+    o = items[0];
+    if (!PiP_FollowSet(o)) return 0;
+    g_ForceDue = 2;              /* 立刻补渲, 别等 Interval */
+    return 1;
+}
+
+/* 每帧推进 (PiP_AfterMap 里调): 目标 Location → 小窗摄像机屏幕坐标 → 防出界。
+ * 换算与引擎 0x6D6070 同式 (含 256 取整), 与 PiP_PreRender 里那份一致。 */
+static void PiP_FollowTick(void)
+{
+    int* loc;
+    int x, y;
+    if (!g_FolOn) return;
+    if (!g_Show || !PiP_FolUsable(g_FolObj))
+    {
+        PiP_FollowClear("pip: follow OFF (target gone)");
+        return;
+    }
+    loc = (int*)((char*)g_FolObj + OFF_OBJ_LOCATION);
+    x = PiP_Div256(30 * (loc[0] - loc[1]));
+    y = PiP_Div256(15 * (loc[0] + loc[1])) - MsgText_ZToScreen(loc[2]);
+    PiP_ClampScreen(&x, &y);
+    g_PinX = x; g_PinY = y;
+    g_Pinned = 1;
 }
 
 /* ---------------- 降采样贴窗 ---------------- */
@@ -819,10 +960,10 @@ static int PiP_Blit(void* dst, int X, int Y, int dW, int dH)
             (unsigned short*)((unsigned char*)db + (size_t)(Y + y) * dp) + X;
         for (x = 0; x < dW; x++) drow[x] = srow[x * sc];
     }
-    /* 聚焦=绿框, 否则灰框; 1 像素宽 */
+    /* 聚焦=绿框, 跟随时=琥珀框 (跟随时主窗口不动, 这个色就是状态提示) */
     if (g_Border)
         PiP_PxFrame(db, dp, cw, ch, X, Y, dW, dH,
-                    g_Focus ? PIP_C_GREEN : PIP_C_GRAY);
+                    g_FolOn ? PIP_C_AMBER : (g_Focus ? PIP_C_GREEN : PIP_C_GRAY));
     /* 三个窗内按钮无论画不画边框都画 (它们是控件, 不是装饰)。 */
     for (i = 0; i < PIP_ICON_N; i++)
     {
@@ -925,17 +1066,8 @@ static int g_ClkSelN = 0;
 static int g_ClkSelCount = 0;
 
 /* 小窗表是上一帧快照, 对象可能已销毁。ProcessClickCoords 会直接调用
- * [obj->vtable+0x88]; 装入前过滤对象/vtable 与关键槽, 失效项丢弃。 */
-#define PIP_GAME_TEXT_LO   0x00401000u
-#define PIP_GAME_TEXT_HI   0x007E038Du
-#define PIP_GAME_RDATA_LO  0x007E1000u
-#define PIP_GAME_RDATA_HI  0x00811074u
-
-static int PiP_IsGameCode(const void* p)
-{
-    size_t v = (size_t)p;
-    return v >= PIP_GAME_TEXT_LO && v < PIP_GAME_TEXT_HI;
-}
+ * [obj->vtable+0x88]; 装入前过滤对象/vtable 与关键槽, 失效项丢弃。
+ * (PIP_GAME_* 与 PiP_IsGameCode 在前面小窗跟随那节定义, 两处共用。) */
 
 static int PiP_SelEntryUsable(const unsigned char* e)
 {
@@ -1211,12 +1343,22 @@ void PiP_AfterMap(void)
         if (MsgText_LatestRadar(&acx, &acy, &aseq) &&
             (!g_AutoSeen || aseq != g_AutoSeq))
         {
+            /* 跳新事件 = 用户要看别处, 小窗跟随让路。 */
+            PiP_FollowClear("pip: follow OFF (auto-jump)");
             PiP_CellToScreen(acx, acy, &tx, &ty);
             PiP_ClampScreen(&tx, &ty);
             g_PinX = tx; g_PinY = ty; g_Pinned = 1;
             g_AutoSeq = aseq; g_AutoSeen = 1;
             due = 1;
         }
+    }
+
+    /* 小窗跟随: 每帧把目标钉成小窗视野中心, 并强制重渲 (不能按 Interval 节流,
+     * 否则跟随会一卡一顿)。放在自动跟随之后: 两者互斥, 同时只会有一种在跑。 */
+    if (g_FolOn)
+    {
+        PiP_FollowTick();
+        if (g_FolOn) due = 1;
     }
 
     if (due)

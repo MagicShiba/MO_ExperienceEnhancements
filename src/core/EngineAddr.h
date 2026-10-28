@@ -356,6 +356,25 @@
  * tint 分量的单位是"真实值 ×1000", 上限 1000 (=1.0), 引擎内部会夹紧。 */
 #define FN_RECALC_LIGHTING     0x0053AD00u
 
+/* ==================== 跟随 (Follow) ==================== */
+
+/* DisplayClass 的跟随状态 (对象本身就是 0x87F7E8, 与 MapClass/MouseClass 同址)。
+ * YRpp DisplayClass.h 的 FollowObject / ObjectToFollow:
+ *   0x4AEB10 getter = `mov al,[ecx+0x119c]; test; mov eax,[ecx+0x11a0]`
+ *   0x4AEB30 setter = `mov eax,[esp+4]; test; mov [ecx+0x11a0],eax; setne al;
+ *                      mov [ecx+0x119c],al; ret 4` */
+#define OFF_DISP_FOLLOW         0x119Cu      /* bool FollowObject */
+#define OFF_DISP_FOLLOWOBJ      0x11A0u      /* ObjectClass* ObjectToFollow */
+#define FN_DISP_SETFOLLOW       0x004AEB30u  /* __thiscall(self, obj), ret 4 */
+
+/* CommandClass "Follow" 的 Execute (F 键, KeyboardMD.ini 的 Follow=70)。
+ * 0x537A10 = `a1 c8 ec a8 00` (mov eax,[0xA8ECC8], 5 字节), 收尾 `ret 4`。 */
+#define ADDR_CMD_FOLLOW         0x00537A10u
+
+/* ObjectClass::Location (CoordStruct, leptons)。引擎跟随每帧取坐标就在这里:
+ * 0x55B6CF `add eax,0x9c` 之后连读 3 个 dword (X/Y/Z)。 */
+#define OFF_OBJ_LOCATION        0x009Cu
+
 /* ==================== 事件 (EventClass) ==================== */
 
 #define EVT_SIZE                111u      /* EventClass 结构的字节数 */

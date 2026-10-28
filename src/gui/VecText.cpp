@@ -2643,6 +2643,7 @@ static const unsigned char kW_AfterMap[5]   = { 0xA0, 0x19, 0xB5, 0xB0, 0x00 };
 static const unsigned char kW_EdgeFix[7]    = { 0x83, 0xEC, 0x18, 0x53, 0x55, 0x56, 0x57 };
 static const unsigned char kW_ClickCoord[7] = { 0x8B, 0x44, 0x24, 0x10, 0x83, 0xEC, 0x18 };
 static const unsigned char kW_CamSet[5]     = { 0x83, 0xEC, 0x08, 0x53, 0x55 };
+static const unsigned char kW_Follow[5]     = { 0xA1, 0xC8, 0xEC, 0xA8, 0x00 };
 static const unsigned char kW_RadarCell[6]  = { 0x8B, 0x0D, 0xA8, 0x6F, 0x88, 0x00 };
 static const unsigned char kW_BlitGuard[5]  = { 0x83, 0xEC, 0x14, 0x55, 0x56 };
 static const unsigned char kW_Shroud[5]     = { 0x83, 0xEC, 0x48, 0x56, 0x57 };
@@ -2826,6 +2827,8 @@ void VecText_Install(void)
               &g_CameraSetTramp, "pip: cameraset" },
             { 0x653D92u, kW_RadarCell, 6, (void*)MOExperience_RadarClampEntry,
               &g_RadarCellTramp, "pip: radarraw" },
+            { 0x537A10u, kW_Follow, 5, (void*)MOExperience_FollowEntry,
+              &g_FollowTramp, "pip: follow" },
             { 0x6BA580u, kW_BlitGuard, 5, (void*)MOExperience_BlitGuardEntry,
               &g_BlitGuardTramp, "vtext: blitguard" },
             { 0x6D7840u, kW_Shroud, 5, (void*)MOExperience_ShroudEntry,

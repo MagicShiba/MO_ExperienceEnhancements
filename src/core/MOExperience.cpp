@@ -831,6 +831,34 @@ __attribute__((naked)) void MOExperience_RadarClampEntry(void)
         : "memory", "cc");
 }
 
+/* Follow 命令 (0x537A10) 入口钩: 小窗聚焦时 F 改成"小窗跟随", 主窗口不动。
+ * 原函数收尾是 ret 4 (0x537A39 = c2 04 00), 吞掉时同样 ret 4。
+ * popal 不改 EFLAGS, 所以 test/popal/jnz 的顺序是安全的。 */
+void* g_FollowTramp = NULL;
+static int FollowC(void* regs)
+{
+    (void)regs;
+    return PiP_FollowCommand();
+}
+static void* g_CallFollow = (void*)FollowC;
+__attribute__((naked)) void MOExperience_FollowEntry(void)
+{
+    __asm__ volatile (
+        "pushal\n\t"
+        "pushl %%esp\n\t"
+        "call *%0\n\t"
+        "addl $4, %%esp\n\t"
+        "testl %%eax, %%eax\n\t"
+        "popal\n\t"
+        "jnz 1f\n\t"
+        "jmp *%1\n\t"                     /* 0 = 放行原版 (主窗口跟随) */
+        "1:\n\t"
+        "ret $4\n\t"                      /* 1 = 小窗接管, 按原函数收尾返回 */
+        :
+        : "m" (g_CallFollow), "m" (g_FollowTramp)
+        : "memory", "cc");
+}
+
 
 /* 迷雾 DrawPixelEffects 入口钩: ViewBounds=R 而面是窗口面即越界, 先换大面挡。
  * 挂函数入口 (跳回 0x6D7845), 不挂 E8 调用点。引擎自己还原。 */
