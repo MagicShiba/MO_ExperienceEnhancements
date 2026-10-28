@@ -195,6 +195,42 @@
 /* 雷达点击门 (点击是否已被 UI 消费)。 */
 #define ADDR_CLICKGATE_SKIP     0x006925FCu
 
+/* ==================== 覆盖物 / 格子 (OverlayClass / CellClass) ==================== */
+
+/* OverlayClass::Array (DynamicVectorClass<OverlayClass*>), 布局同其它容器:
+ * +0x00 虚表 / +0x04 数据指针 / +0x08 容量 / +0x10 个数。
+ * 实证: 0x5FC3FF 构造时 `inc [0xA8EC60]` 再 `mov [ecx+eax*4],esi` (ecx=[0xA8EC54]);
+ * 0x5345B2 遍历时先读 [0xA8EC60] 再取 [0xA8EC54]。
+ * 注意: 覆盖物对象的 Location 不是格子坐标 (0x5FC4A5 起只在特定条件下才 SetLocation),
+ * 别拿 OU_GetCoords 反推箱子所在格 —— 一律走格子数组。 */
+#define ADDR_OVERLAYS_ITEMS     0x00A8EC54u
+#define ADDR_OVERLAYS_COUNT     0x00A8EC60u
+
+/* OverlayTypeClass::Array (DynamicVectorClass<OverlayTypeClass*>)。 */
+#define ADDR_OVLTYPES_ITEMS     0x00A83D84u
+#define ADDR_OVLTYPES_COUNT     0x00A83D90u   /* 0x5FD9BB 遍历用 */
+
+/* OverlayClass::Type: 0x5FD0A6 `mov edx,[eax+0xac]` (PlaceOverlay 读图像)。
+ * 覆盖物对象 sizeof = 0xB0, Type 是最后一个成员 (0x4A194D `push 0xb0`)。 */
+#define OFF_OVL_TYPE            0x00ACu
+/* OverlayTypeClass::Crate (bool) —— 0x481A31 `mov bl,[edx+0x2aa]`;
+ * 相邻 0x2A9=Wall, 0x2AB=CrateTrigger (0x5FD9F1 / 0x481A70)。 */
+#define OFF_OVLTYPE_CRATE       0x02AAu
+
+/* CellClass::OverlayTypeIndex (int, -1 = 无覆盖物): 0x481A1C `mov eax,[esi+0x44]`。
+ * CellClass::OverlayData (uchar, 箱子的类型字节): 0x481AC8 `mov bl,[esi+0x11e]`,
+ * 0x5FD105 放箱子时写 0xFF (= 未定型), 0x56BFF9 由 PlacePowerupCrate 写实际类型。 */
+#define OFF_CELL_OVERLAY        0x0044u
+#define OFF_CELL_OVDATA         0x011Eu
+
+/* CellClass::AltFlags: bit1 = 格内有建筑 (幽灵地基占位也用) / bit3 = 已揭示。
+ * 揭示时 CellClass::Unshroud 0x4876F6 `or al,0x18` 置 bit3|bit4; 重新压黑时
+ * MapClass::Reshroud 0x577B48 `and ecx,0xffffffe7` 一起清掉。ShroudClass::GetLevel
+ * 0x6D88F4 判黑幕入口就是 `test byte [cell+0x12c],0x18` 再 `test al,8`。 */
+#define OFF_CELL_ALTFLAGS       0x012Cu
+#define CELL_ALT_BUILDING       0x0002u
+#define CELL_SHROUD_REVEALED    0x0008u
+
 /* ==================== 动画类型 (天气 SHp 来源) ==================== */
 
 /* AnimTypeClass::Array (DynamicVectorClass<AnimTypeClass*>)。

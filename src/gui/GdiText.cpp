@@ -518,6 +518,19 @@ int FileExists(const char* path)
     return (a != (DWORD)-1 && !(a & FILE_ATTRIBUTE_DIRECTORY));
 }
 
+/* 游戏根目录下是否有该文件。g_GameDir 无尾分隔符, 这里自己补。 */
+int FileAtGameRoot(const char* name)
+{
+    char path[MAX_PATH_LEN];
+    const char* dir = GtGameDir();
+    unsigned n;
+    if (!dir[0]) return 0;
+    n = AppendCStr(path, 0, dir, MAX_PATH_LEN);
+    n = AppendCh(path, n, '\\', MAX_PATH_LEN);
+    AppendCStr(path, n, name, MAX_PATH_LEN);
+    return FileExists(path);
+}
+
 /* 按 游戏目录 -> 系统字体目录 顺序找文件 (原样匹配)。
  * 找到写全路径进 outPath, 返回 1=游戏目录, 2=系统目录; 都没有返回 0。 */
 int FindFontFile(const char* name, char* outPath, int cap, const char** tag)

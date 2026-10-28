@@ -13,7 +13,6 @@
  * 渲染: Microsoft YaHei 经 GDI 光栅化到 32 位内存 DIB (灰度抗锯齿取覆盖率),
  * 经启动校准得到的 16 位格式 (565/555) alpha 混入 Composite。
  * 取色: ColorScheme BaseColor (HSV) 经 0x517440 转显示色 (Phobos 同用法)。
- * 构建见 build-fast.bat (32 位 mingw, 无 CRT)。
  */
 
 #include <windows.h>

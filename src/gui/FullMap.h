@@ -1,6 +1,6 @@
 /* FullMap.h - 隐藏原版建造/生产侧栏, 地图铺满整个窗口宽度, 小地图保留在原角。
  * 实现见 FullMap.cpp (地址全部来自 gamemd.exe 反汇编实证), 根因/不变量见
- * notes/隐藏侧栏.md。构建见 build-fast.bat。 */
+ * notes/隐藏侧栏.md。*/
 #pragma once
 
 #include "GdiText.h"

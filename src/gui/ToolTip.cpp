@@ -25,8 +25,6 @@
  * 开关关/类型非法/求值失败一律返回 0 跑原指令 (=原版行为)。
  * 配置 [Features] ToolTips (缺失=默认值, 改后重启):
  *   ToolTips=1 (1=追加第三行, 0=原版两行)
- *
- * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
  */
 
 #include <windows.h>

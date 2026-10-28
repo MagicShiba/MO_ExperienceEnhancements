@@ -18,8 +18,6 @@
  *   0x732B28 = TypeSelect_SetCtx, 6 (mov edx,[ebx+4] + mov esi,[edx+edi*4])
  *   0x465D40 = TypeSelect_BuildingGate, 6 (mov eax,[ecx+408])
  *   0x732C20 = TypeSelect_Clear, 8 (pop edi + pop ebx + add esp,208, 唯一出口)
- *
- * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
  */
 
 #include <windows.h>

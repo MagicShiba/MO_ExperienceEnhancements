@@ -1,6 +1,5 @@
 /* GdiText.h - MOExperience.dll 内共享的无 CRT 工具 / 日志 / 字体解析 /
  * GDI 光栅 / 16 位混合管线 / 画面虚表底座 (全 DLL 共用)。
- * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 单 DLL 多源文件)。
  */#pragma once
 
 #include <windows.h>
@@ -164,6 +163,8 @@ unsigned GtClockNow(void);
 void CopyFace(wchar_t* dst, const wchar_t* src);
 int FaceSame(const wchar_t* a, const wchar_t* b);
 int FileExists(const char* path);
+/* 游戏根目录下是否有该文件 (g_GameDir 无尾分隔符, 内部补齐) */
+int FileAtGameRoot(const char* name);
 /* 找到写全路径进 outPath, 返回 1=游戏目录, 2=系统目录; 都没有返回 0 */
 int FindFontFile(const char* name, char* outPath, int cap, const char** tag);
 void ResolveFontFace(const char* cfg, const char* tag, wchar_t* out,

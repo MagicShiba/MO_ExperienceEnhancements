@@ -1,36 +1,27 @@
 /* MindSelect.cpp - Shift+P 结尾只剩心控单位 (收敛式过滤)。
  *
- * 原生 Shift+P 走的是全选 (P 处理无视 Shift), 所以单次加法/单次过滤都会被
- * 原生全选盖掉, 必须多轮收敛。用法: 点按 Shift+P (别长按)。作用域继承当前
- * 选中 (P 一次屏内/两次全图, 原生先全选, 本模块再收)。
- * 每轮 (Shift+P 上升沿跑一次: 原生全选在消息泵同步落地, 渲染钩子看到边沿
- * 时已生效, 无需连打):
+ * 原生 Shift+P 走的是全选 (P 处理无视 Shift), 所以单次加法/单次过滤都会被原生全选
+ * 盖掉, 必须多轮收敛。用法: 点按 Shift+P (别长按)。作用域继承当前选中 (P 一次屏内,
+ * 两次全图, 原生先全选, 本模块再收)。
+ *
+ * 每轮 (Shift+P 上升沿跑一次; 原生全选在消息泵同步落地, 渲染钩子看到边沿时已生效):
  *   1. 屏内 selectables 扫心控 → 原生 Select() 加入 (加法, 非心控零触碰)。
  *   2. 当前选中里非心控 → 清 IsSelected 标记并原地压缩 (只摘杂, 心控不动)。
  *   3. 两处都无心控 → 碰都不碰 (不清空原选中, 只记日志)。
  *
- * 数据源 (与 P/框选同源, 见 Phobos Misc/Selection.cpp):
- *   TacticalSelectables @0xB0CEC8 (500 项定长, 逐项跳过空/野指针, 不依赖
- *   SelectableCount 偏移); 条目 {Object*, X, Y} (YRpp TacticalClass.h:13)。
- *   CurrentObjects @0xA8ECB8 (YRpp ObjectClass.h:38; +4 Items/+8 Cap/+16 Count)。
+ * 判定口径 (对齐 Phobos Select Captured Units):
+ *   IsMindControlled() && IsSelectable() && !MindControlledByAUnit
+ * 排掉永久心控 (MCV/永久心灵支配者) 与引擎判不可选的 (工程兵/医疗兵等
+ * IsSelectableCombatant=no; 建筑的 WhatAmI 判定由引擎自带)。
  *
  * 引擎调用 (二进制实证):
- *   IsMindControlled = 0x7105E0 (return [ecx+0x2C0] || byte[ecx+0x2C4], 纯读)。
- *   Select() = vtable+0x14C (UnselectAll=0x48DC90 机码逐个 call [vtable+0x150]
- *     即 Deselect, Select 为前一槽; YRpp 声明顺序一致)。
- *   IsSelectable() = vtable+0x64 (实现 0x6F32D0, 纯读; 槽位锚点: 同表
- *     +0x7C=IsSurfaced/+0xAC=GetRenderCoords/+0xB8=GetYSort/+0xE8=
- *     SpawnParachuted 均与 YRpp 记的函数地址对上, +0x48=GetCoords)。
- *   MindControlledByAUnit = +0x2C4 (bool 字节)。
- * 除此之外零引擎调用: 不扫三军数组, 不校准 Owner, 不碰模拟内存。
- * 选中是本机 UI 状态, 无模拟事件, 联机安全。
- *
- * 判定口径对齐 Phobos Select Captured Units (Commands/SelectCaptured.cpp:50):
- *   IsMindControlled() && IsSelectable() && !MindControlledByAUnit
- * → 排掉永久心控 (MCV/永久心灵支配者) 与引擎判不可选的 (工程兵/医疗兵等
- *   IsSelectableCombatant=no, 建筑的 WhatAmI 判定也在引擎内自带)。
- * 只读偏移 (写模拟一律禁止, YRpp ObjectClass.h Westwood 命名):
- *   IsAlive +0x90 / InLimbo +0x81 / IsSelected +0x83 / Health +0x6C
+ *   TacticalSelectables @0xB0CEC8 (500 项定长, 条目 {Object*, X, Y}, 与 P/框选同源);
+ *   CurrentObjects @0xA8ECB8 (+4 Items / +8 Cap / +16 Count);
+ *   IsMindControlled 0x7105E0 (读 +0x2C0 || byte +0x2C4, 纯读);
+ *   Select vtable+0x14C, IsSelectable vtable+0x64 (实现 0x6F32D0, 纯读);
+ *   MindControlledByAUnit +0x2C4 (bool)。
+ * 只读偏移 (写模拟一律禁止): IsAlive +0x90 / InLimbo +0x81 / IsSelected +0x83 /
+ *   Health +0x6C。选中是本机 UI 状态, 无模拟事件, 联机安全。
  */
 
 #include <windows.h>

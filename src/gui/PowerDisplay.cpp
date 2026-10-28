@@ -11,7 +11,7 @@
  * 内容 "闪电+负载/电力" (PowerMode=1 则"闪电+余量纯数字"): 侧栏内居中
  * (PowerX>0 则侧栏绝对 x), y 锚底边 (y0=H-PowerPad-adv, 0 即贴底)。
  * 数值: CurrentPlayer(0xA83D4C)+0x53A4=PowerOutput/+0x53A8=PowerDrain
- * (UpdatePower 0x508C30 反汇编实证, VecText 笔记 v88 节)。
+ * (UpdatePower 0x508C30 反汇编实证, 见 notes/VecText矢量文本.md「底部电量」)。
  * 颜色按游戏比例 (Phobos PowerDelta 默认 0.75/1.0): d*4<o*3 绿, d<=o 黄,
  * 否则红。字号/字体/粗体对标资金: CreditPx>0 即资金真字号 (同 GDI 管线, 面取
  * VecText_FontFace); CreditPx=0 时退原字行高 (无+4)。

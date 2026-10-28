@@ -20,7 +20,6 @@
  * 认领态另画白色轨迹线 (SmartOrder 熄火时补上, 同观感)。
  * 开销: 地基尺寸指纹缓存 (选中签名+500ms), 帧内一次 ClickCoords。
  * 日志: 仅启动一行 (deployprev: ON)。
- * 构建见 build-fast.bat。渲染挂 MOExperience_MessageDrawHook。
  */
 
 #include <windows.h>

@@ -1,5 +1,5 @@
 /* RepairAll.h - 建筑维修操作量简化 (Ctrl+维修 / 双击维修 一键全修, 或全自动修)。
- * 实现见 RepairAll.cpp。构建见 build-fast.bat (同一 DLL)。
+ * 实现见 RepairAll.cpp。
  *
  * 钩子铁律: 钩点必须落在**无直接相对跳转**的指令边界上, 且被偷的字节里不能有
  * E8/E9/0F 8x 之类的直接相对分支 —— 钩子返回 0 时 Syringe 会把被偷字节搬到

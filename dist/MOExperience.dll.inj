@@ -119,7 +119,6 @@
 ; 追加一次半透明 Buildup/Image 静态帧; 只读+渲染面绘制, 检测到 Phobos.dll 时不画。
 ; 见 src/preview/PlacementPreview.cpp
 0x6D528A = PlacementPreview_DrawHook, 6
-
 ; 只卸一个载员: 面板点载员图标 → 标准 MegaMission(Unload) 的 Target.id 带序号,
 ; 派发时记下、状态 3 收尾、弹人点换成 RemovePassenger。见 src/misc/SingleUnload.cpp
 0x4C7462 = SU_EventRecord, 5

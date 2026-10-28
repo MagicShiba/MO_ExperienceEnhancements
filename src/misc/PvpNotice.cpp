@@ -62,20 +62,6 @@ static int      g_Len = 0;
 
 /* ---------------- 文本 ---------------- */
 
-/* 游戏根目录下是否有该文件。 */
-static int PN_FileAtRoot(const char* name)
-{
-    char path[MAX_PATH_LEN];
-    const char* dir = GtGameDir();
-    DWORD a;
-    unsigned n;
-    if (!dir[0]) return 0;
-    n = AppendCStr(path, 0, dir, MAX_PATH_LEN);
-    AppendCStr(path, n, name, MAX_PATH_LEN);
-    a = GetFileAttributesA(path);
-    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
-}
-
 static void PN_MakeText(const wchar_t* head, const wchar_t* mid, const wchar_t* tail)
 {
     int n = 0, i;
@@ -99,7 +85,7 @@ void PvpNotice_EnsureInit(void)
     if (!g_IniPath[0]) BuildPaths();
 
     /* 根目录放了替换用的 shroud.shp = 同时开了透明迷雾, 一并声明。 */
-    shroud = PN_FileAtRoot("shroud.shp");
+    shroud = FileAtGameRoot("shroud.shp");
     if (Lang_IsChinese())
         PN_MakeText(L"大家看我！宣布个事！本机启用了「心灵终结体验拓展 ",
                     shroud ? L"」，也启用了透明迷雾。" : L"」。",

@@ -1,37 +1,29 @@
 /* Aggressive.cpp - 侵略模式。
  *
- * Alt+A (Hotkey 可改) 把当前选中的作战单位 (Unit/Infantry/Aircraft) 加入/移出
- * "侵略标记"集合 (全体已在集合内则整体移出, 否则整体加入)。已标记的单位处于
- * 闲置 (Mission=Guard/Area_Guard/Stop) 时, 每隔 Interval 帧扫一次: 对警戒半径内的
- * 敌方建筑发一条与鼠标左键同形的标准事件 (经 OT_Fire / OutList 广播), 并在其上方
- * 画 icon_aggressive 图像 (内嵌 PCX, 原版 16 位 blit)。
+ * Alt+A (Hotkey 可改) 把选中的作战单位 (Unit/Infantry/Aircraft) 加入/移出"侵略标记"
+ * 集合 (全体已在集合内则整体移出, 否则整体加入)。已标记的单位闲置 (Mission=Guard/
+ * Area_Guard/Stop) 时每隔 Interval 帧扫一次: 对警戒半径内的敌方建筑发一条与鼠标左键
+ * 同形的标准事件 (经 OT_Fire / OutList 广播), 并在其上方画 icon_aggressive 图像。
  *
- * 目标/订单取"鼠标对应的事件" (与左键点同一目标同判):
- *   - 目标只认**敌方**建筑, 忽略中立 (House->Type->MultiplayPassive, 与 SmartArea 同式)。
- *   - 订单 = 复刻引擎左键点击的真实派发链 (见下 AG_UnitMission): 固有光标
- *     (OU_MouseOverObjectNative, ignoreForce=1) → 类内重映射 → FootClass 的
- *     Action→Mission 表。不做单位类型特判 (工程师占领、劫持等一律按实际左键),
- *     所以工程师自动占领、作战单位自动攻击, 打不了的目标不下单。
+ * 目标只认**敌方**建筑, 忽略中立 (House->Type->MultiplayPassive, 与 SmartArea 同式)。
+ * 订单 = 复刻引擎左键点击的真实派发链 (AG_UnitMission): 固有光标
+ * (OU_MouseOverObjectNative, ignoreForce=1) → 类内重映射 → FootClass 的
+ * Action→Mission 表。不做单位类型特判, 所以工程师自动占领、作战单位自动攻击,
+ * 打不了的目标不下单。
  *
- * 联机 (AGENTS.md 铁律): 不写任何模拟内存, 不直调改模拟的引擎函数。
- *   - 标记集合是本机 UI 状态 (同 MindSelect 的选中), 各客户端各自维护。
- *   - 唯一的模拟变更 = 往 OutList 塞标准攻击/占领事件; 各端执行同一份原版代码。
- *   - 其余全只读 (GetGuardRange / GetCoords / MouseOver 判定都是纯读)。
+ * 联机: 不写任何模拟内存, 不直调改模拟的引擎函数。标记集合是本机 UI 状态 (同
+ * MindSelect 的选中); 唯一的模拟变更 = 往 OutList 塞标准攻击/占领事件, 各端执行
+ * 同一份原版代码; 其余全只读。
  *
- * 只读偏移 (反汇编实证, 同 RepairAll/FuzzyAttack):
- *   ObjectClass::IsAlive 0x90 / InLimbo 0x81 / Health 0x6C
- *   TechnoClass::Owner 0x21C
- *   BuildingClass::Array 0xA8EB40 (DynamicVectorClass: Items@+4 / Count@+16)
- *   HouseClass::ArrayIndex (CurrentPlayer+0x30)
- *   Mission 0xAC (虚表槽 0x184)      Frame 0xA8ED84
+ * 只读偏移 (反汇编实证): IsAlive 0x90 / InLimbo 0x81 / Health 0x6C /
+ *   Owner 0x21C / Mission 0xAC (虚表槽 0x184) / Frame 0xA8ED84 /
+ *   BuildingClass::Array 0xA8EB40 (Items@+4 / Count@+16) /
+ *   House.ArrayIndex (CurrentPlayer+0x30)。
  *
- * 引擎调用:
- *   TechnoClass::GetGuardRange(control=1) @ 0x707E60 (thiscall, 纯读): 返回
- *     area-guard 半径 = (GuardRange, 未设则最大武器射程) x2; 本模块 /2 得真射程
- *     (入口必须取 0x707E60, 原因见 notes/侵略模式.md)。
- *   TargetClass 构造器 FN_TGT_OBJ、MegaMission FN_MEGA 见 OrderUtil.h。
- *
- * 构建见 build-fast.bat (32 位 mingw, 无 CRT, 与 MOExperience 同一 DLL)。
+ * TechnoClass::GetGuardRange(control=1) @ 0x707E60 (thiscall, 纯读): 返回 area-guard
+ *   半径 = (GuardRange, 未设则最大武器射程) x2; 本模块 /2 得真射程 (入口必须取
+ *   0x707E60, 原因见 notes/侵略模式.md)。TargetClass 构造器 FN_TGT_OBJ、
+ *   MegaMission FN_MEGA 见 OrderUtil.h。
  */
 
 #include <windows.h>

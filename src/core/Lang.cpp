@@ -108,19 +108,11 @@ static void Lang_MakePath(const char* locale, char* path, int cap)
     AppendCStr(path, i, LANG_FILE_EXT, (unsigned)cap);
 }
 
-static int Lang_FileExists(const char* path)
-{
-    DWORD a;
-    if (!path || !path[0]) return 0;
-    a = GetFileAttributesA(path);
-    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
-}
-
 static int Lang_TryLocale(const char* locale)
 {
     char path[MAX_PATH_LEN];
     Lang_MakePath(locale, path, sizeof(path));
-    if (!Lang_FileExists(path)) return 0;
+    if (!FileExists(path)) return 0;
     Lang_CopyA(s_Path, sizeof(s_Path), path);
     return 1;
 }

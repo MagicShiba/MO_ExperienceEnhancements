@@ -1,7 +1,7 @@
 /* GridView.h - 单机地图格网显示 (缓存 + 绘制)。
  * 从 PauseView.cpp 分离: 逐格自有平面缓存 (停稳重建) + 灰线/红线绘制。
  * 只读查询 + 渲染面写入, 仅单机生效。配置见 [BottomBar] GridCullBack /
- * GridShowBlocked。构建见 build-fast.bat。
+ * GridShowBlocked。
  */
 #pragma once
 
@@ -27,3 +27,7 @@ void GV_PollStable(void);
  * cx0/cy0/cx1/cy1 = 视图区 A 裁剪 (clip=0 时不限)。 */
 void GV_DrawTo(unsigned char* base, int pitch, int W, int H,
                int cx0, int cy0, int cx1, int cy1, int clip);
+
+/* 视图区 A 四角反投影成格坐标, 取外包框 + 2 格余量 (夹进 0..511)。
+ * 回 1 = 成功; 回 0 = 视图区无效或四角全在图外。供只处理视野内格子的模块用。 */
+int GV_ViewCellRect(int* x0, int* y0, int* x1, int* y1);

@@ -1,56 +1,37 @@
 /* RepairAll.cpp - 建筑维修操作量简化。
  *
- * 背景: 原版修建筑要点维修图标 (或按维修快捷键) 进维修光标, 再逐个点带血的
- *       建筑。密集挨打时操作量爆炸。
- * 用法: [RepairAll] Mode 三档
- *       0 = 保持原样 (本模块完全不介入, 两个钩子直接返回 0);
- *       1 = 半自动, 手动触发;
- *       2 = 自动修, 定时扫, 掉了血且未在修的建筑自动进维修流程。
- * 手动触发 (Mode=1/2 都行, DoubleClick=0 可关掉后两条):
- *       Ctrl + 点维修图标 / Ctrl + 维修快捷键 / 双击维修图标 / 连按两下快捷键。
- * 触发点就是原版那两处, 不新增键位; 快捷键 VK 从 KeyboardMD.ini 的
- * [Hotkey] ToggleRepair 读, 玩家改键自动跟随。
+ * 原版修建筑要点维修图标 (或按维修快捷键) 进维修光标, 再逐个点带血的建筑, 密集
+ * 挨打时操作量爆炸。实现与偏移出处见 notes/建筑一键维修.md。
  *
- * 注意 Ctrl+维修快捷键走不了引擎命令派发: 按住 Ctrl 时 0x55DEE0 只按精确的
- * "Ctrl+K" 查命令表 (KeyboardMD 把 ToggleRepair 绑在裸 K 上), 而
- * ToggleRepariModeCommandClass::PreventCombinationOverride (0x535BD0) 恒返回
- * false, 不会退回裸 K 命令, 于是 0x536FA0 的 Execute 根本不被调用。Ctrl 那条
- * 只能由 RepairAll_Poll 自己轮询键态补上 (见文件末尾)。
+ * 用法 [RepairAll] Mode: 0 = 保持原样 (两个钩子直接返回 0);
+ *   1 = 半自动, 手动触发; 2 = 自动修, 定时扫, 掉了血且未在修的建筑自动进维修流程。
+ * 手动触发 (Mode=1/2 都行, DoubleClick=0 可关掉后两条): Ctrl+维修图标 /
+ *   Ctrl+维修快捷键 / 双击维修图标 / 连按两下快捷键。触发点就是原版那两处,
+ *   不新增键位; 快捷键 VK 从 KeyboardMD.ini [Hotkey] ToggleRepair 读。
  *
- * 联机 (AGENTS.md 铁律): **不写任何模拟内存, 不直调改模拟的引擎函数**。
- *   唯一的模拟变更 = 往 OutList 塞标准事件 EventType::Repair (0x15), 构造
- *   方式与玩家手点维修图标**逐字节同形** (照抄引擎 0x4AC0BE 那一段, 连 house
- *   都取 [0xA83D4C]+0x30)。真去改血的是引擎自己的 BuildingClass::Update,
- *   各端拿同一条事件得到同一结果。钱照扣, 与手点维修一致。
- *   其余全是只读。
+ * Ctrl+维修快捷键走不了引擎命令派发: 按住 Ctrl 时 0x55DEE0 只按精确的 "Ctrl+K"
+ * 查命令表 (KeyboardMD 把 ToggleRepair 绑在裸 K 上), 而
+ * ToggleRepairModeCommandClass::PreventCombinationOverride (0x535BD0) 恒返回
+ * false, 不会退回裸 K 命令, 于是 0x536FA0 的 Execute 不被调用。这条路由
+ * RepairAll_Poll 自己轮询键态补上。
  *
- * 只读偏移全部走 EngineAddr.h (OFF_HEALTH / OFF_INLIMBO / OFF_ISALIVE /
- *   OFF_OWNER / OFF_BLD_TYPE / OFF_BLD_REPAIRING / OFF_TYPE_STRENGTH ...),
- *   出处写在那里 —— 类型类布局会偏 0xA00, 不能靠类型头推算。
+ * 联机: **不写任何模拟内存, 不直调改模拟的引擎函数**。唯一的模拟变更 = 往
+ * OutList 塞标准事件 EventType::Repair (0x15), 构造与玩家手点维修图标逐字节
+ * 同形 (照抄引擎 0x4AC0BE 那一段, house 取 [0xA83D4C]+0x30)。真去改血的是引擎
+ * 自己的 BuildingClass::Update, 各端拿同一条事件得到同一结果。其余全是只读。
+ * 只读偏移全部走 EngineAddr.h —— 类型类布局会偏 0xA00, 不能靠类型头推算。
  *
- * 三条引擎/构建铁律 (改本文件前先读):
+ * 三条通用铁律 (详见 notes/崩溃定位.md):
+ *   1) 钩点必须挑**无 rel** 的指令边界: 维修图标钩点 0x6A78D9 偷 6B
+ *      (mov ecx,[0x8871E0]), 不用 0x6A78F6 偷 9B (第三条是 call 0x4AC8C0);
+ *      热键钩点 0x536FA0 偷的 mov ecx,imm32 里那个 E8 只是立即数的一个字节。
+ *   2) bool 返回值只保证在 AL: 引擎里出现 xor al,al / mov al,x 的函数, 指针类型
+ *      必须是 unsigned char (RA_CanRepair 如此), 声明 int 会读到高 24 位垃圾。
+ *   3) IsPlausiblePtr 只判 [64K,2G)+4 对齐, 不能当前置解引用或调虚表: 判对象看
+ *      虚表是否在 exe 映像内 (RA_IsObj), 判函数看目标是否在 exe 内 (OU_InExe)。
  *
- * 1) **钩子返回 0 时 Syringe 把被偷的字节搬到跳板里原样重放**, 里面若有直接
- *    相对跳转 (E8/E9/0F 8x/短 jcc), 基址变了而 rel32 没跟着变 -> 跳野地址。
- *    所以钩点必须挑**无 rel** 的指令边界: 维修图标钩点在 0x6A78D9 偷 6B
- *    (`mov ecx,[0x8871E0]`), 不用 0x6A78F6 偷 9B (第三条是 `call 0x4AC8C0`);
- *    热键钩点 0x536FA0 偷的 `mov ecx,imm32` 里那个 E8 只是 imm32 的一个字节。
- *    改任何 .inj 钩子后先跑 tools/hook-rel-audit.py。
- *
- * 2) **bool 返回值只保证在 AL**。引擎实现里出现 `xor al,al` / `mov al,x` 的,
- *    函数指针返回类型必须声明成 unsigned char —— 声明成 int 会读到 EAX 高 24 位
- *    的垃圾, 把"false"读成 true (RA_CanRepair 必须这么声明)。对照
- *    WhatAmI(0x459EC0) 是 `mov eax,6; ret` 写满 EAX, 那个声明 int 才安全。
- *
- * 3) **IsPlausiblePtr 不能当前置解引用或调虚表** —— 它只判 [64K,2G)+4 对齐,
- *    堆/栈里随便一个数都能过。判"这真是个对象"看虚表指针是否落在 exe 映像内
- *    (RA_IsObj); 判"这真是个函数"看目标是否落在 exe 内 (OU_InExe)。
- *
- * 另: 每帧路径上不允许 GetPrivateProfileIntA (同 SWSBar.cpp), 配置全部在
- *   RA_EnsureInit 读一次; 0x4F42F0 一帧跑 ~142 次, 故 Poll 内自门控帧号;
- *   钩子里只读键态/置标志, 全图扫描一律挪到 RepairAll_Poll 的正常帧上下文。
- *
- * 构建见 build-fast.bat / build-full.bat (32 位 mingw, 无 CRT)。
+ * 每帧路径上不许 GetPrivateProfileIntA: 配置在 RA_EnsureInit 读一次; 0x4F42F0
+ * 一帧跑上百次, 故 Poll 内自门控帧号; 钩子里只读键态/置标志, 全图扫描挪到 Poll。
  */
 
 #include <windows.h>

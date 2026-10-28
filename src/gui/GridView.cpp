@@ -239,6 +239,37 @@ static int GV_ScreenToCell(int sx, int sy, int* cx, int* cy)
     return OU_CellValid(*cx, *cy);
 }
 
+/* 视图区 A 四角 → 外接格框 (与 GV_Rebuild 同一套反投影, 余量 2 格)。 */
+int GV_ViewCellRect(int* x0, int* y0, int* x1, int* y1)
+{
+    RectangleStruct a;
+    int corners[4][2];
+    int cx, cy, i, bx0 = 512, by0 = 512, bx1 = -1, by1 = -1;
+    if (!x0 || !y0 || !x1 || !y1) return 0;
+    FM_GetViewRects(&a, 0);
+    if (a.Width < 32 || a.Height < 32) return 0;
+    corners[0][0] = a.X;               corners[0][1] = a.Y;
+    corners[1][0] = a.X + a.Width - 1; corners[1][1] = a.Y;
+    corners[2][0] = a.X;               corners[2][1] = a.Y + a.Height - 1;
+    corners[3][0] = a.X + a.Width - 1; corners[3][1] = a.Y + a.Height - 1;
+    for (i = 0; i < 4; i++)
+    {
+        if (!GV_ScreenToCell(corners[i][0], corners[i][1], &cx, &cy)) continue;
+        if (cx < bx0) bx0 = cx;
+        if (cy < by0) by0 = cy;
+        if (cx > bx1) bx1 = cx;
+        if (cy > by1) by1 = cy;
+    }
+    if (bx1 < bx0 || by1 < by0) return 0;
+    bx0 -= 2; by0 -= 2; bx1 += 2; by1 += 2;
+    if (bx0 < 0) bx0 = 0;
+    if (by0 < 0) by0 = 0;
+    if (bx1 > 511) bx1 = 511;
+    if (by1 > 511) by1 = 511;
+    *x0 = bx0; *y0 = by0; *x1 = bx1; *y1 = by1;
+    return 1;
+}
+
 /* 按 key 重建缓存。回 1 = 有可画内容; 回 0 = 瞬时失败 (调用方退避重试)。
  * 范围超限 (远缩整图) 则记永久无效回 -1。 */
 static int GV_Rebuild(const GridKey* key)

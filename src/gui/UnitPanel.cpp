@@ -116,6 +116,16 @@ static int s_Cbx, s_Cby;         /* 折叠态那个按钮 */
 /* 半成品: 待处理点击 (门里记, Poll 里做) */
 static int s_Pend = 0, s_PendX = 0, s_PendY = 0;
 static int s_GateLb = 0;         /* 门侧左键按下沿标记: ProcessClickCoords 一次按下会进多趟 */
+/* 载员多选 (shift + 点载员格): 只对单选版式有意义 —— 那一版式里才看得见载员格。
+ * 存的是载员指针, 归属容器一换就整组清掉 (s_PickHost 记归属)。 */
+#define UP_PICK_MAX 10        /* 与 SingleUnload 的 SU_PAX_MAX 对齐, 否则多出的会被静默丢掉 */
+static void* s_Pick[UP_PICK_MAX];
+static int   s_PickN = 0;
+static void* s_PickHost = NULL;
+static int s_PlanWas = 0;                /* 上一帧规划是否在跑 (结束时收名单用) */
+static int s_PlanFired = 0;              /* 上一帧的节点轮数 (同上) */
+static int Up_PickHas(void* o);          /* 定义在输入段, 绘制段要用 */
+static int Up_PickHostOK(void);
 /* 悬停 */
 static int s_HoverCell = -1;
 static int s_HoverBtn = -1;
@@ -1326,17 +1336,27 @@ static void Up_DrawCellBg(unsigned char* base, int pitch, int W, int H,
             10, 10, 12, 90);
 }
 
-/* 悬停框: 必须画在图标**之后**, 否则 60x48 的 cameo 会整个盖掉它 */
+/* 高亮框: 2px 厚 (外 1px 贴格边 + 内 1px 紧贴它), 必须画在图标**之后**,
+ * 否则 60x48 的 cameo 会整个盖掉它。 */
 static void Up_CellFrame(unsigned char* base, int pitch, int W, int H,
                          int x, int y, int hot)
 {
     unsigned char r = 255, g = 205, b = 60;
+    int k;
     if (!hot) return;
-    Up_Fill(base, pitch, W, H, x, y, UP_CELL_W, 1, r, g, b, 255);
-    Up_Fill(base, pitch, W, H, x, y + UP_CELL_H - 1, UP_CELL_W, 1, r, g, b, 255);
-    Up_Fill(base, pitch, W, H, x, y, 1, UP_CELL_H, r, g, b, 255);
-    Up_Fill(base, pitch, W, H, x + UP_CELL_W - 1, y, 1, UP_CELL_H, r, g, b, 255);
+    for (k = 0; k < 2; k++)
+    {
+        int xx = x + k, yy = y + k;
+        int ww = UP_CELL_W - k * 2, hh = UP_CELL_H - k * 2;
+        if (ww <= 0 || hh <= 0) break;
+        Up_Fill(base, pitch, W, H, xx, yy, ww, 1, r, g, b, 255);
+        Up_Fill(base, pitch, W, H, xx, yy + hh - 1, ww, 1, r, g, b, 255);
+        Up_Fill(base, pitch, W, H, xx, yy, 1, hh, r, g, b, 255);
+        Up_Fill(base, pitch, W, H, xx + ww - 1, yy, 1, hh, r, g, b, 255);
+    }
 }
+
+/* 多选/规划中的标记就是上面这圈 2px 黄框, 不另画别的内框。 */
 
 /* 弹药格: MO 的 cameo 底部烧死了单位名 (约 12px), 所以弹药格不贴格底,
  * 而是抬到名字上方、从左下往右铺; 一排几个看 rules 的 `PipWrap=`,
@@ -1607,6 +1627,9 @@ int UP_Draw(void)
     else
     {
         int nslot = s_Cols * s_Rows;
+        /* shift = 多选模式的显式开关: 只在按住时给"选中/参与规划"的载员格描框。
+         * 松开就回到单人视图, 面板上不留任何多选痕迹。 */
+        int sh = (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 1 : 0;
 
         /* 没选中东西时不画九宫格 (只留左侧按钮列), 免得平白占一块黑板 */
         if (s_ListN > 0)
@@ -1619,12 +1642,20 @@ int UP_Draw(void)
             {
                 const UpEnt* e = &s_Cell[i];
                 int hot = (s_HoverCell == i);
+                int pick = 0;
                 Up_CellPos(i, &cx, &cy);
                 if (e->count == -2) Up_DrawMoreCell(base, pitch, w, h, cx, cy, hot);
                 else if (!e->type || !e->obj) Up_DrawCellBg(base, pitch, w, h, cx, cy, 0);
                 else if (e->count == 0) Up_DrawInfoCell(base, pitch, w, h, cx, cy, e, hot);
                 else Up_DrawIconCell(base, pitch, w, h, cx, cy, e, hot);
-                Up_CellFrame(base, pitch, w, h, cx, cy, hot);
+                /* 载员格高亮 (2px 黄框, 与悬停同一个框), 两种来源:
+                 *   · 参与本次规划的载员 —— 一直画, 单人规划也画 (那就是"选中了这个人"),
+                 *     包括 Z+点载员格认下的那个 (他不在 shift 名单里);
+                 *   · shift 名单 —— 只在按住 shift 时画。
+                 * 排除本车那一格用对象比较: 分页版式下第 0/1 格也是载员。 */
+                if (e->obj && e->type && e->count > 0 && e->obj != s_List[0].obj &&
+                    (SU_PlanHasPax(e->obj) || (sh && Up_PickHas(e->obj)))) pick = 1;
+                Up_CellFrame(base, pitch, w, h, cx, cy, hot || pick);
             }
             /* 第二遍: 只补 9px 外框带 —— 它是最外一层, 不能被图标盖住,
              * 而它的内底又不许盖图标, 所以只能拆成两遍贴。 */
@@ -1666,6 +1697,51 @@ int UP_Draw(void)
         LogLine(buf);
     }
     return 1;
+}
+
+/* ---------------- 载员多选 (shift + 点载员格) ---------------- */
+
+/* 归属容器是不是当前这个单选目标。不是就必须清空: 指针会被引擎复用。 */
+static int Up_PickHostOK(void)
+{
+    return (s_ListN == 1 && s_List[0].obj && s_List[0].obj == s_PickHost);
+}
+
+static void Up_PickClear(void)
+{
+    s_PickN = 0;
+    s_PickHost = NULL;
+}
+
+static int Up_PickHas(void* o)
+{
+    int i;
+    if (!o) return 0;
+    for (i = 0; i < s_PickN; i++) if (s_Pick[i] == o) return 1;
+    return 0;
+}
+
+/* 选中集换了容器 / 回到多选版式: 整组丢弃。每帧调一次。 */
+static void Up_PickPrune(void)
+{
+    if (s_PickN <= 0) { Up_PickClear(); return; }
+    if (!Up_PickHostOK()) Up_PickClear();
+}
+
+/* shift + 点一个载员格: 加入 / 移出多选。 */
+static void Up_PickToggle(void* host, void* pax)
+{
+    int i, found = -1;
+
+    if (!host || !pax) return;
+    if (s_PickHost != host) { Up_PickClear(); s_PickHost = host; }
+    for (i = 0; i < s_PickN; i++) if (s_Pick[i] == pax) { found = i; break; }
+    if (found >= 0)
+    {
+        for (i = found; i + 1 < s_PickN; i++) s_Pick[i] = s_Pick[i + 1];
+        s_PickN--;
+    }
+    else if (s_PickN < UP_PICK_MAX) s_Pick[s_PickN++] = pax;
 }
 
 /* ---------------- 输入 ---------------- */
@@ -1715,39 +1791,48 @@ static void Up_ClickAt(int mx, int my)
         return;
     }
     cell = Up_HitCell(mx, my);
-    {
-        /* 排查用: 一次点击一行, 先看门有没有把点击交给面板、命中的是哪一格。 */
-        char buf[96];
-        unsigned q = 0;
-        q = AppendCStr(buf, q, "up: click btn=", sizeof(buf));
-        q = AppendInt(buf, q, sizeof(buf), btn);
-        q = AppendCStr(buf, q, " cell=", sizeof(buf));
-        q = AppendInt(buf, q, sizeof(buf), cell);
-        q = AppendCStr(buf, q, " list=", sizeof(buf));
-        q = AppendInt(buf, q, sizeof(buf), s_ListN);
-        q = AppendCStr(buf, q, " paged=", sizeof(buf));
-        q = AppendInt(buf, q, sizeof(buf), s_Paged);
-        LogLine(buf);
-    }
     if (cell < 0 || cell >= s_Cols * s_Rows) return;
     {
         const UpEnt* e = &s_Cell[cell];
+        /* shift = 多选模式的显式开关: 名单只在按住 shift 时参与决策, 松开回到
+         * "给这一个 / 给全部"的默认语义。 */
+        int sh = (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 1 : 0;
         if (e->count == -2)   /* 更多: 翻页 */
         {
             s_Page = (s_Page + 1) % s_Pages;
             Up_Rebuild();
             return;
         }
+        /* 单选版式第 0/1 格 = 本车/本建筑自己: Z 按住时点它 = 给全部载员规划。
+         * 不对容器本身下令 —— 建筑载员时它本来就不能动, 载具可以直接在地图上点。
+         * 按住 shift 且有多选名单时只给名单里的 (shift 选过就是明确指定)。 */
+        if (s_ListN == 1 && cell < 2 && e->obj && e->type)
+        {
+            if (sh && Up_PickHostOK() && s_PickN > 0)
+            {
+                if (SU_PlanArmList(s_List[0].obj, s_Pick, s_PickN)) return;
+            }
+            if (SU_PlanArmAll(s_List[0].obj)) return;
+        }
         /* 单选版式第 0 格是本车/本建筑、第 1 格是信息格, 第 2 格起才是载员
-         * (分页时前两格每页都在): 点载员 = 只让那一个下车 (SingleUnload.cpp)。
-         * 载员在车内不可选, 所以这一格绝不落到 Up_Select —— 否则 UnselectAll
-         * 之后选不回来, 面板会整块消失。 */
+         * (分页时前两格每页都在)。载员在车内不可选, 所以这里绝不落到 Up_Select ——
+         * 否则 UnselectAll 之后选不回来, 面板会整块消失。
+         * shift = 多选 (只挂名单, 不下令也不下车); 不按 shift = 只给这一个
+         * (Z 按住时开单人规划, 否则单卸)。 */
         if (s_ListN == 1 && cell >= 2)
         {
-            if (e->obj && e->type && e->count > 0)
-                SU_ClickPassenger(s_List[0].obj, e->obj);
-            else
-                LogLine("up: pax cell empty");
+            if (!e->obj || !e->type || e->count <= 0) return;
+            if (sh)
+            {
+                Up_PickToggle(s_List[0].obj, e->obj);
+                /* 已经在给这辆车规划时, 名单变化要立刻反映到参与集合上 */
+                SU_PlanResync(s_List[0].obj, s_Pick, s_PickN);
+                return;
+            }
+            /* 不按 shift = 明确的单人语义: 先把多选名单收掉, 再走单卸/单人规划。
+             * 不收的话下一次按住 shift 按 Z 又会把旧名单整组认下来。 */
+            Up_PickClear();
+            SU_ClickPassenger(s_List[0].obj, e->obj);
             return;
         }
         if (!e->obj || !e->type || e->count == 0) return;
@@ -1795,6 +1880,21 @@ void UP_Poll(void)
     Up_Refresh();
     Up_Layout();
     Up_PrepareIcons();
+    /* 多选名单: 换了容器/换了版式就整组清掉 (载员指针会被引擎复用) */
+    Up_PickPrune();
+    /* 有 shift 名单时按 Z 就直接认下, 之后的地图点击都算名单的路径点。
+     * 认人要早于第一次点击至少一拍, 垫点才排得进第一个节点前面。
+     * 必须按住 shift: 否则名单一留下就没法切回"只给一个单位下路径点"。 */
+    if (!SU_PlanActive() && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
+        Up_PickHostOK() && s_PickN > 0)
+        SU_PlanAutoArm(s_List[0].obj, s_Pick, s_PickN);
+    /* 载员规划: 落点格只能在这里取 (门内调 ProcessClickCoords 会递归)。 */
+    s_PlanWas = SU_PlanActive();
+    s_PlanFired = SU_PlanFiredCount();
+    SU_PlanPoll();
+    /* 这次规划真下过点才收名单: 只按一下 Z 又松开 (误触) 不该清掉。
+     * 留着的话下次按 Z 又被它接管, 想给载具本身下点就下不成。 */
+    if (s_PlanWas && !SU_PlanActive() && s_PlanFired > 0) Up_PickClear();
     /* 松开时清门侧按下沿标记 (松手那一下未必再进门) */
     if (s_GateLb && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) s_GateLb = 0;
 
@@ -1820,20 +1920,17 @@ extern "C" __declspec(dllexport) unsigned __cdecl UP_ClickGate(void* regs)
     UP_EnsureInit();
     if (!s_Enable || !s_Vis) return 0;
     if (!GtMouseGameXY(&mx, &my)) return 0;
-    if (!Up_HitPanel(mx, my)) return 0;
+    if (!Up_HitPanel(mx, my))
+    {
+        /* Z 按住的载员规划: 吞掉这次地图点击 —— 选中表里是载具, 不拦的话引擎
+         * 会顺手给载具也加一个路径点。 */
+        if (SU_PlanClick(mx, my)) return (unsigned)ADDR_CLICKGATE_SKIP;
+        return 0;
+    }
     lb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
     rb = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 1 : 0;
-    if (lb || rb)
-    {
-        char buf[64];
-        unsigned q = 0;
-        q = AppendCStr(buf, q, "up: gate lb=", sizeof(buf));
-        q = AppendInt(buf, q, sizeof(buf), lb);
-        q = AppendCStr(buf, q, " pend=", sizeof(buf));
-        q = AppendInt(buf, q, sizeof(buf), s_Pend);
-        LogLine(buf);
-        UP_NoteClick(mx, my, lb, rb);
-    }
+    /* 这里每帧被引擎重算落点调用多次, 不能写日志。 */
+    if (lb || rb) UP_NoteClick(mx, my, lb, rb);
     /* 落在面板上就不许引擎再拿它当地图点击 (否则会取消选择/下令)。 */
     return (unsigned)ADDR_CLICKGATE_SKIP;
 }

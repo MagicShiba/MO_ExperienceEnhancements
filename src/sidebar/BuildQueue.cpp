@@ -1,97 +1,34 @@
 /* BuildQueue.cpp - 建筑排队 (本地队列 + 复刻点击, 不碰模拟)。
  *
- * 设计: 队列状态只存 DLL 本地, 下的全是"点击会下的标准 PRODUCE 事件",
- * 各端模拟天然一致 (混装原版端也只看到普通订单), 构造上不影响联机。
- *   - 建筑页/防御页天然分开: 条目按 house+heap 匹配 (heap=BuildingType.ArrayIndex,
- *     唯一), 喂单按 (naval,cat) 解析各页工厂; 取消只动本家本型。
- *   - 条目**不存工厂指针**: 工厂对象会死/换, 一律按 (house,naval,cat) 每轮现解析
- *     (GetPrimaryFactory 0x500510), 不缓存结果, 故不存在 stale。
- *   - 左键跨型号点击: 忙时走原版拒绝路径 0x6AB689, 吞掉记入本地; 闲时原生下单
- *     第 1 个并顺手记 4 个 (Shift 一次记 5 个, 槽不够记到满)。
- * 切换清产的原生 abandon 路 (0x6AA7BC/0x6AA884) 零触发, 不钩 (见文件末说明)。
- *   - 图标数字 (DrawStrip 的 CountTotal 取数点 0x6A9C86): 本地有排队则
- *     EAX/EBX=原版数+本地数后跳 0x6A9CC9 借用原版绘制; 无排队跑原指令。
- *   - 就绪文本左对齐 (DrawStrip Ready/状态分支, 纯渲染补丁, 不碰模拟):
- *     原版同一行 (y 同为 ebp+1) 有三套排版 (esi 为图标 X):
- *     数字 (x=esi+0x3C, flag 0x242 右对齐);
- *     有数字时的状态字 (x=esi+2, flag 0x42 左对齐, 如"等待");
- *     无数字时的状态字/就绪 (x=esi+0x1E, flag 0x142 居中)。
- *     flag 高字节位 0=居中/位 1=右对齐 (0x242 右/0x142 中/0x42 左)。
- *     工厂完工且有排队时, 状态块画居中的"就绪" (IsDone→0xD53 经
- *     0x6A9DAB/0x6A9E17) 与右侧数字同行重叠 (CJK 比原版 1bpp 字宽)。
- *     开关开时给状态块加条件排版 (与 0x6A9EE4 处 Ready 块同判据):
- *     本图标画过数字 ([esp+0x13]==1) 则走左分支几何 (x=esi+2,
- *     flag 0x42), 否则走原版居中 (x=esi+0x1E, flag 0x142)。
- *     实现为两处 JMP 桩 (开关开时一次性写入, 指令等长覆盖, 无 rel):
- *       布局点 0x6A9DAB (8B: lea+push) → BQ_StateLay,
- *       绘制点 0x6A9E17 (5B: push) → BQ_StateDraw;
- *     桩内读 [esp+0x13] 判本图标是否画过数字,
- *     原字节照抄执行后跳回原生后继 (0x6A9DB3/0x6A9E1C)。
- *     无数字的就绪/等待保持原版居中; 有数字时"就绪"居左,
- *     右侧数字底框独占右侧不再被挡。
- *     数字底框本身由 VecText 度量 (maxW<=0 不限宽同样给 GDI 真宽)
- *     保证与落墨同宽、正确包裹。字节不符 (版本/Ares 差异) 则静默跳过
- *     (fail-close 回原版)。
- *   - BuildQueue_Poll (每循环, 挂 PowerDrawBoth): 无对账无丢单, 只喂单 ——
- *     逐条目按 (house,naval,cat) 现解析工厂, Object==null (无在产/待放置) 才
- *     复刻一次点击下单; 同一条产线按逻辑帧限速 (BQ_PEND_FRAMES)。
- *     GetPrimaryFactory 只读 house 的缓存槽, 引擎拒单会清空它, 故槽空照发
- *     (引擎 BeginProduction 会按需建厂写回), 认领改用工厂数组扫描。
- *     每轮另采样 Shift 的按下帧 (左键记数用"当前或刚按过", 防单帧竞态)。
- *   - 限造 (rules.ini BuildLimit, 本 mod 大量建筑限 1/2/3): 原版达上限拒收,
- *     本地队列须按同口径算余量 BQ_RoomLeft, 记入时只记还造得出的条数,
- *     每轮喂单前排不进的直接丢 (=原版"点不下"语义, 队列自愈)。
- *   - 认领: 发单不等于成单 (执行侧可能拒收), 条目留着等"本家工厂在造本型"
- *     才删; 放置完成 Object 变空后才喂下一项。
- *   - 权限复查: 科技树变化后失去建造资格 (前置被卖/毁等) 的条目,
- *     本地复刻事件绕过了原版 cameo 校验 (0x6AA781), 永不认领且重发会按
- *     (house,naval,cat) 压住整条产线。每轮喂单前按同口径复查
- *     HouseClass::CanBuild (0x4F7870): ==0 直接丢, >0 (含 -1 临时灰化) 不动。
- *     只读, 联机安全。
- *   - 右键规则 (Shift=清全部): 点一次暂停, 再点取消; 取消时优先减数 (N>1 弹尾,
- *     在产/暂停不动), 最后剩在产单个走原生真取消。Shift+右键=取消全部: 清空本地
- *     后跑原生 0x2E (在产亦清, 显示归零); 未暂停的按住 Shift 点只先暂停
- *     (随后暂停态再 Shift 点清零), 天然两步防误删。
- *   - 右键真分发: [esp+0xB0]&0x10 为右键; [esp+0x18]==null→
- *     0x6AB0AC 明路 (空闲态才到); 在产未暂停→0x6AAFE1 暗暂停 (暂停保持原生);
- *     已暂停/空闲→按 shift 进 0x6AAE4A (0x2E, Shift 清全) 或 0x6AAFBD (0x10,
- *     经 jmp 0x6AB1FF 共享尾构造)。剥离在明取消分支 (0x6AB197) 与暗
- *     分发点 (0x6AAE44) 两处; 明暂停检查 state==1 一律原生暂停。
- *     全程不仿造事件构造 (E8 点一律不碰)。
- *   - Shift 检测走原版键位函数 0x53EC70 (ecx=0x10, AH&0x80 为按下; GetKeyState 后备)。
- *   - 待放置时 Object 非空, 下一个先等着, 放下后自动开工。
- *   - 存档/读档/换 CurrentPlayer 即清空 (未下单=未扣费, 经济一致)。
+ * 队列状态只存 DLL 本地, 下的全是"点击会下的标准 PRODUCE 事件", 各端模拟天然一致
+ * (混装原版端也只看到普通订单)。地址表、事件布局、限造口径见
+ * notes/BuildQueue建造队列.md; 这里只留改代码要守的约束。
+ *
+ *   - 条目按 house+heap 匹配 (heap=BuildingType.ArrayIndex, 唯一), 建筑页/防御页
+ *     天然分开; 喂单按 (naval,cat) 每轮现解析各页工厂。
+ *   - 条目**不存工厂指针**: 工厂对象会死/换, 一律现解析 (GetPrimaryFactory
+ *     0x500510 只读 house 的缓存槽, 槽空照发 —— 引擎拒单会清槽)。认领扫
+ *     FactoryClass::Array, 判工厂 Object 的类型 = 本条类型, 不看槽。
+ *   - 左键跨型号点击: 忙时走原版拒绝路径 0x6AB689 并记入本地; 闲时原生下单第 1 个
+ *     并顺手记 4 个 (Shift 一次记 5 个, 槽不够记到满)。
+ *   - 限造 (BuildLimit): 记入时只记还造得出的条数, 喂单前排不进的直接丢 (=原版
+ *     "点不下", 队列自愈)。权限复查用 HouseClass::CanBuild (0x4F7870): ==0 丢,
+ *     >0 (含 -1 临时灰化) 不动。
+ *   - 右键: 点一次暂停, 再点取消; 取消优先减数 (在产/暂停不动), 最后剩在产单个走
+ *     原生真取消。Shift+右键=清全部。真实分发见 BQ_DarkPauseSeen 前的"真分发"说明。
+ *   - 图标数字 (0x6A9C86) 与就绪文本左对齐 (0x6A9DAB/0x6A9E17 两处 JMP 桩) 是纯
+ *     渲染补丁, 不碰模拟。
  *   - 开关关时钩子全跑原指令、轮询直接返回 (=原版行为)。
  *
- * 铁律: .inj 钩子凡偷了含 rel 的字节 (E8 call / Jcc),
- *   永远不许 return 0; 条件跳转永不跳回钩子自身地址。
- *   本文件钩子皆纯传送字节 (0x6AB689 push/or, 0x6AB6CE mov/mov, 0x6AB0C1 Jcc 永跳,
- *   0x6AB197 push/push/mov, 0x6AAE44 Jcc 永跳, 0x6AAFE1 mov, 0x6A9C86 mov/cmp,
- *   0x6A9C6C mov/mov): return 0 跑原指令安全, 跳转只跳前向原生目标。
- *   大块改用 Jcc 分发点。
+ * 铁律: 钩子凡偷了含 rel 的字节 (E8 call / Jcc), 永远不许 return 0 —— Syringe 把
+ *   副本搬进桩池且不重定位 rel32, 跑副本会跳野地址; 条件跳转永不跳回钩子自身。
+ *   本文件钩点皆无 rel (0x6AB689/0x6AB6CE/0x6AB197/0x6AAFE1/0x6A9C86/0x6A9C6C),
+ *   两个 Jcc 点 (0x6AB0C1/0x6AAE44) 永远跳转。
  *
- * 事件复刻 (与点击路径 0x6AB741-0x6AB7C7 逐字节同义):
- *   EventClass ctor 0x4C6970 (thiscall, this=111 字节栈缓冲,
- *     houseIndex/0xE(Produce)/rtti/heap/naval 入栈),
- *   OutList (0xA802C8 计数, 满 0x80 则下帧重试) 111 字节拷入
- *   0xA802D4+next*111, 同款无参回调 call [0x7E1530],
- *   并行数组 0xA83A54[next]=调用后 EAX, 计数器按原版掩码推进。
- * 参数来源:
- *   rtti=7 (AbstractType::BuildingType, vtable+0x2C 验证);
- *   heap=[type+0xDF8] (BuildingType.ArrayIndex);
- *   naval=[type+0xCCE] (TechnoType.Naval, 原版两次喂给 GetPrimaryFactory);
- *   houseIndex=[house+0x30] (House.ArrayIndex, 原版事件构造同取);
- *   Factory.Object=+0x58, Factory.Owner=+0x6C;
- *   CurrentPlayer=*(0xA83D4C)。
- * 限造字段: BuildLimit=[type+0x3B8]; OwnedBuildingTypes=[house+0x5500],
- *   FactoryProducedBuildingTypes=[house+0x55A0] (CounterClass 取值走 0x49FAE0,
- *   参数=类型 ArrayIndex); 在产判定=Factory.Object→vtable+0x84。
- * 点击钩子寄存器 (0x6AB689/0x6AB6CE): EBP=abs (原版 cmp ebp,7 紧邻在前),
- * EDI=图标类型 (0x6AB602 取自 [esp+0x28], 原版 0x6AB6CE 处 [edi+0xCCE]),
- * ESI=工厂 (0x6AB602 处 GetPrimaryFactory 结果, 0x6AB61E mov esi,eax)。
- * 原版右键流 (0x6AB0AC-0x6AB0A7, 此处不钩仅记录):
- * state==1 则置 2 发 SUSPEND 后跳 0x6AB28f 退出 (暂停),
- * state!=1 才进 0x6AB18d 取消分支 (IsQueued→0x2E/0x10)。
+ * 事件复刻 (与 0x6AB741-0x6AB7C7 逐字节同义): EventClass ctor 0x4C6970 (thiscall,
+ *   111 字节栈缓冲), OutList 计数 0xA802C8 / 缓冲 0xA802D4 / 回调 [0x7E1530];
+ *   rtti=7, heap=[type+0xDF8], naval=[type+0xCCE], houseIndex=[house+0x30]。
+ *   点击钩子寄存器: EBP=abs, EDI=图标类型, ESI=工厂。
  *
  * 钩子经 dist/MOExperience.dll.inj 由 Syringe 挂载 (返回 0=跑原指令, 非0=跳往)。
  */
@@ -716,7 +653,10 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_FreeShift(void* regs)
  * state!=1→跳取消分支 (原生 jne 去向); state==1 (本要暂停):
  * Shift+右键且本地有本型→清空后转取消分支 (原生下 0x2E);
  * 否则一律原生暂停 (暂停优先)。
- * 只读不写。 */
+ * 只读不写。
+ * 注意: 副本里是那 6 字节 jne rel32, Syringe 抄到桩池时不修正 rel32,
+ * 所以这里每个分支都必须返回绝对地址; 一旦 return 0 就会跑去执行副本,
+ * 跳到代码池的零填充上崩 (见 notes/崩溃定位.md)。 */
 extern "C" __declspec(dllexport) DWORD __cdecl BQ_PausePeel(void* regs)
 {
     unsigned abs;
@@ -821,13 +761,10 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_CancelPeel(void* regs)
  * 在产时右键永远走暗路, 明路钩子够不着 —— 剥离必须挂在真分发点上。 */
 
 /* 0x6AAFE1 (5): 暗暂停入口 (mov eax,[0x8871e0], 无 rel)。
- * regs: EDI=图标类型 (存疑时 WhatAmI 守卫), EBP=abs。
  * 纯哨兵: 永远跑原指令 (暂停保持原生)。 */
 extern "C" __declspec(dllexport) DWORD __cdecl BQ_DarkPauseSeen(void* regs)
 {
     (void)regs;
-    BQ_EnsureInit();
-    if (!g_BQEnable) return 0;
     return 0;
 }
 
@@ -885,7 +822,8 @@ static DWORD BQ_DarkPeel(void* regs)
  * 到此=右键+非空闲态 (在产未暂停已由上游 0x6AAE0D 分走暗暂停;
  * 此处为已暂停/空闲)。EDI=图标类型, EBP=abs,
  * [esp+0x13]=shift (0→暗取消 0x6AAFBD, 1→暗清全 0x6AAE4A)。
- * 去向: 剥离跳 0x6AB28F 原生出口; 放行跳回原生去向。 */
+ * 去向: 剥离跳 0x6AB28F 原生出口; 放行跳回原生去向。
+ * 同 BQ_PausePeel: 副本是 je rel32, 每个分支都必须返回绝对地址, 不能 return 0。 */
 extern "C" __declspec(dllexport) DWORD __cdecl BQ_DarkDispatchPeel(
     void* regs)
 {

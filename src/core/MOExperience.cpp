@@ -16,6 +16,7 @@
 #include "Aggressive.h"
 #include "BuildQueue.h"
 #include "ChatEdit.h"
+#include "CrateIcon.h"
 #include "DeployPreview.h"
 #include "FuzzyAttack.h"
 #include "AttackMove.h"
@@ -294,7 +295,7 @@ static int PrepDue(void)
 
 /* 侧栏呈现入口 (BlitSbEntryDraw) 每帧都会补画底部电量与画中画按钮 —— 它们必须
  * 落在**侧栏面**上才跟着条带上屏。prepare 里那两次只是"侧栏不呈现"时的兜底:
- * 侧栏在呈现的那些帧, prepare 再画一遍纯属重复 (实测 pwr 3us + pipb 7us)。
+ * 侧栏在呈现的那些帧, prepare 再画一遍纯属重复。
  * 判据用墙钟而不是帧号: 暂停时帧号冻结, 侧栏照样在呈现。 */
 static unsigned s_BlitSbTick = 0;
 
@@ -386,7 +387,7 @@ static void PowerDrawBoth(void)
     /* 只画侧栏面: 随条带上屏, 层级天然在鼠标之下;
      * 侧栏不呈现时 BlitSidebar 不跑, 字不会冒出来。
      * 每帧一次就够 (呈现前 BlitSbEntryDraw 里还有一次兜底), 不必跟着 prepare
-     * 跑 160 遍 —— 这是实测最大的一笔白烧 (0.85ms + 0.21ms/帧)。 */
+     * 跑 160 遍 —— 那是本模块最大的一笔白烧。 */
     /* 兜底 (只在侧栏最近 100ms 没呈现时跑): 没接管/未呈现时侧栏面没人刷,
      * 这两样必须自己画, 否则底电与画中画按钮整帧不更新。 */
     if ((unsigned)(GetTickCount() - s_BlitSbTick) > 100u)
@@ -1419,6 +1420,9 @@ static DWORD MsgDrawBody(void* regs)
         Perf_Add(PF_D_WTH, tWth);
     }
 
+    /* 箱子类型图标: 压在木箱上、UI 之下。整片被黑幕盖住时自己跳过 (见 CrateIcon.cpp)。 */
+    if (CrateIcon_Draw(surf, surfW, surfH, surfPitch)) drew = 1;
+
     drew |= MOE_DrawUILayers(surf, surfW, surfH, surfPitch, &bitLineH, &screenW, NULL);
 
     {
@@ -1628,6 +1632,48 @@ static int MOE_SurfBuf(unsigned surf, unsigned* base, unsigned* size)
     return 1;
 }
 
+/* 模块表快照 (PEB Ldr 链表, 不用 psapi): 填 (base,size,name) 后返回个数。
+ * 崩溃现场 GetModuleHandleExA 认不出的地址, 靠这张表判断"附近有没有模块"。 */
+#define MOE_MODMAX 128
+static int MOE_Modules(unsigned* bas, unsigned* szs, char (*nm)[24])
+{
+    unsigned peb, ldr, head, cur;
+    int n = 0, guard = 0;
+    __asm__ volatile ("movl %%fs:0x30, %0" : "=r"(peb));
+    if (!peb || !MOE_Readable(peb + 0x0C, 4)) return 0;
+    ldr = *(const unsigned*)(size_t)(peb + 0x0C);
+    if (!ldr || !MOE_Readable(ldr + 0x0C, 4)) return 0;
+    head = ldr + 0x0C;
+    cur = *(const unsigned*)(size_t)head;
+    while (cur && cur != head && n < MOE_MODMAX && guard++ < 512)
+    {
+        unsigned ns, len, bp, k, cnt;
+        if (!MOE_Readable(cur + 0x18, 0x24)) break;
+        bas[n] = *(const unsigned*)(size_t)(cur + 0x18);
+        szs[n] = *(const unsigned*)(size_t)(cur + 0x20);
+        ns = cur + 0x2C;                       /* LDR_DATA_TABLE_ENTRY.BaseDllName */
+        len = *(const unsigned*)(size_t)ns;
+        bp = *(const unsigned*)(size_t)(ns + 4);
+        cnt = len / 2;
+        if (cnt > 23) cnt = 23;
+        if (!MOE_Readable(bp, cnt * 2)) cnt = 0;
+        for (k = 0; k < cnt; k++)
+        {
+            unsigned short w = *(const unsigned short*)(size_t)(bp + k * 2);
+            nm[n][k] = (char)(w & 0x7F);
+        }
+        nm[n][cnt] = 0;
+        n++;
+        cur = *(const unsigned*)(size_t)cur;    /* InLoadOrderLinks.Flink */
+    }
+    return n;
+}
+
+static unsigned s_CrBase[MOE_MODMAX];
+static unsigned s_CrSize[MOE_MODMAX];
+static char     s_CrName[MOE_MODMAX][24];
+static int      s_CrN;
+
 static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
 {
     char b1[16], buf[512];
@@ -1688,6 +1734,12 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         UtoA((unsigned)(size_t)ep->ContextRecord->Edx, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " esp=", sizeof(buf));
         UtoA((unsigned)(size_t)ep->ContextRecord->Esp, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " ebx=", sizeof(buf));
+        UtoA((unsigned)(size_t)ep->ContextRecord->Ebx, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " esi=", sizeof(buf));
+        UtoA((unsigned)(size_t)ep->ContextRecord->Esi, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " edi=", sizeof(buf));
+        UtoA((unsigned)(size_t)ep->ContextRecord->Edi, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " ebp=", sizeof(buf));
         UtoA((unsigned)(size_t)ep->ContextRecord->Ebp, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " eip=", sizeof(buf));
@@ -1811,6 +1863,105 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         }
         LogLine(buf);
 
+        /* 模块表快照 + EIP 归属 (栈回溯也用它)。野跳转时报最近的模块,
+         * 能区分"落在某个模块旁边的私有块"与"真的飞到荒野"。 */
+        s_CrN = MOE_Modules(s_CrBase, s_CrSize, s_CrName);
+        {
+            unsigned ea = (unsigned)(size_t)r->ExceptionAddress;
+            unsigned bestGap = 0xFFFFFFFFu;
+            int k, best = -1;
+            for (k = 0; k < s_CrN; k++)
+            {
+                unsigned lo = s_CrBase[k], hi = lo + s_CrSize[k];
+                unsigned gap = (ea >= lo && ea < hi) ? 0u
+                             : ((ea < lo) ? (lo - ea) : (ea - hi));
+                if (gap < bestGap) { bestGap = gap; best = k; }
+            }
+            if (best >= 0)
+            {
+                p = 0;
+                if (!bestGap)
+                {
+                    p = AppendCStr(buf, p, "CRASH: eipin ", sizeof(buf));
+                    p = AppendCStr(buf, p, s_CrName[best], sizeof(buf));
+                    p = AppendCh(buf, p, '+', sizeof(buf));
+                    MOE_Hex(b1, ea - s_CrBase[best]);
+                }
+                else
+                {
+                    p = AppendCStr(buf, p, "CRASH: eip near ", sizeof(buf));
+                    p = AppendCStr(buf, p, s_CrName[best], sizeof(buf));
+                    p = AppendCStr(buf, p, " gap=", sizeof(buf));
+                    MOE_Hex(b1, bestGap);
+                }
+                p = AppendCStr(buf, p, b1, sizeof(buf));
+                LogLine(buf);
+            }
+        }
+
+        /* 野跳转 (EIP 不在任何模块里): 这块内存是谁的。
+         *   ty=img  → 手工映射的映像
+         *   ty=priv + alloc 64K 对齐 → 堆/自建缓冲: 函数指针或返回地址指进了数据
+         *   ty=priv + alloc 未对齐  → 线程栈: 返回到被覆盖的栈内容上
+         * 再附 16 字节原文, 可离线反汇编确认写的是哪个偏移。 */
+        if (!mod && readable)
+        {
+            MEMORY_BASIC_INFORMATION mb;
+            unsigned ea = (unsigned)(size_t)r->ExceptionAddress;
+            if (VirtualQuery((LPCVOID)(size_t)ea, &mb, sizeof(mb)))
+            {
+                const char* ty = "?";
+                const char* pr = "?";
+                unsigned ab = (unsigned)(size_t)mb.AllocationBase;
+                if (mb.Type == MEM_IMAGE) ty = "img";
+                else if (mb.Type == MEM_MAPPED) ty = "map";
+                else if (mb.Type == MEM_PRIVATE) ty = "priv";
+                switch (mb.Protect & 0xFFu)
+                {
+                case PAGE_NOACCESS: pr = "no"; break;
+                case PAGE_READONLY: pr = "r"; break;
+                case PAGE_READWRITE: pr = "rw"; break;
+                case PAGE_WRITECOPY: pr = "wc"; break;
+                case PAGE_EXECUTE: pr = "x"; break;
+                case PAGE_EXECUTE_READ: pr = "rx"; break;
+                case PAGE_EXECUTE_READWRITE: pr = "rwx"; break;
+                case PAGE_EXECUTE_WRITECOPY: pr = "rwcx"; break;
+                default: break;
+                }
+                p = 0;
+                p = AppendCStr(buf, p, "CRASH: eipmem ty=", sizeof(buf));
+                p = AppendCStr(buf, p, ty, sizeof(buf));
+                p = AppendCStr(buf, p, " pr=", sizeof(buf));
+                p = AppendCStr(buf, p, pr, sizeof(buf));
+                p = AppendCStr(buf, p, " alloc=", sizeof(buf));
+                MOE_Hex(b1, ab); p = AppendCStr(buf, p, b1, sizeof(buf));
+                p = AppendCStr(buf, p, " +", sizeof(buf));
+                MOE_Hex(b1, ea - ab); p = AppendCStr(buf, p, b1, sizeof(buf));
+                p = AppendCStr(buf, p, " reg=", sizeof(buf));
+                MOE_Hex(b1, (unsigned)(size_t)mb.BaseAddress); p = AppendCStr(buf, p, b1, sizeof(buf));
+                p = AppendCh(buf, p, '+', sizeof(buf));
+                UtoA((unsigned)mb.RegionSize, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+                LogLine(buf);
+
+                if (MOE_Readable(ea, 16))
+                {
+                    p = 0;
+                    p = AppendCStr(buf, p, "CRASH: eipcode", sizeof(buf));
+                    for (i = 0; i < 16; i++)
+                    {
+                        b1[0] = "0123456789ABCDEF"[(((const unsigned char*)(size_t)ea)[i] >> 4) & 15];
+                        b1[1] = "0123456789ABCDEF"[((const unsigned char*)(size_t)ea)[i] & 15];
+                        b1[2] = 0;
+                        p = AppendCh(buf, p, ' ', sizeof(buf));
+                        p = AppendCStr(buf, p, b1, sizeof(buf));
+                    }
+                    LogLine(buf);
+                }
+            }
+            else LogLine("CRASH: eipmem VirtualQuery failed");
+        }
+
+
         /* 栈回溯: 栈上落在本 DLL / 游戏 exe 里的字按 模块+偏移 记下来。
          * 崩溃点落在第三方代码或野地址时, 只有这条链能指出是谁调进来的。 */
         {
@@ -1844,14 +1995,39 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
             for (i = 0; i < 0x800 && n < 18; i += 4)
             {
                 unsigned v = *(const unsigned*)(size_t)(sp + i);
-                unsigned base;
-                const char* tag;
+                unsigned base = 0;
+                const char* tag = NULL;
+                int k;
                 if (v < 0x10000u) continue;
                 if (self && v - (unsigned)(size_t)self < selfSz)
                 { tag = " MOE+"; base = (unsigned)(size_t)self; }
                 else if (exe && v - (unsigned)(size_t)exe < exeSz)
                 { tag = " exe+"; base = (unsigned)(size_t)exe; }
-                else continue;
+                else
+                {
+                    for (k = 0; k < s_CrN; k++)
+                    {
+                        if (v - s_CrBase[k] < s_CrSize[k])
+                        {
+                            if (col == 6)
+                            {
+                                LogLine(buf);
+                                p = 0;
+                                p = AppendCStr(buf, p, "CRASH: stk", sizeof(buf));
+                                col = 0;
+                            }
+                            p = AppendCh(buf, p, ' ', sizeof(buf));
+                            UtoA(i, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+                            p = AppendCh(buf, p, ':', sizeof(buf));
+                            p = AppendCStr(buf, p, s_CrName[k], sizeof(buf));
+                            p = AppendCh(buf, p, '+', sizeof(buf));
+                            MOE_Hex(b1, v - s_CrBase[k]); p = AppendCStr(buf, p, b1, sizeof(buf));
+                            col++; n++;
+                            break;
+                        }
+                    }
+                    continue;
+                }
                 if (col == 6)
                 {
                     LogLine(buf);

@@ -38,7 +38,6 @@
 #define PS_OFF_OBJ_NEXT 0x30u
 #define PS_OFF_CELL_LAND 0xECu
 #define PS_OFF_CELL_WALLOWN 0x50u     /* WallOwnerIndex (-1=无覆盖物墙) */
-#define PS_OFF_CELL_ALTFLAGS 0x12Cu   /* AltFlags (0x2=格内有建筑; 幽灵地基占位也用此位) */
 #define LAND_WATER 2
 #define LAND_ROCK 3
 #define PS_ABS_TERRAIN 36
@@ -193,7 +192,7 @@ static int PS_BlockedEx(int cx, int cy, int skipFnd)
     /* 覆盖物墙不在对象链里, 认 WallOwnerIndex (-1=无墙)。 */
     if (*(int*)((char*)cell + PS_OFF_CELL_WALLOWN) != -1) return 1;
     /* 格内建筑占位标记, 与对象链双保险。 */
-    if (!skipFnd && (*(unsigned*)((char*)cell + PS_OFF_CELL_ALTFLAGS) & 0x2u)) return 1;
+    if (!skipFnd && (*(unsigned*)((char*)cell + OFF_CELL_ALTFLAGS) & CELL_ALT_BUILDING)) return 1;
     for (k = 0; k < 2; k++)
     {
         void* o = (k == 0) ? *(void**)((char*)cell + PS_OFF_CELL_FIRST)

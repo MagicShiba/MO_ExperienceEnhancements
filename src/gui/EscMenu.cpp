@@ -25,6 +25,7 @@
 #include "FrameCap.h"
 #include "GameSpeed.h"
 #include "LightingPreset.h"
+#include "CrateIcon.h"
 
 #define ESC_SECTION          "EscMenu"
 #define ESC_REG_ESI          0x0Cu          /* Syringe REGISTERS: ESI */
@@ -68,7 +69,7 @@
 #define ESC_TEXT_SS          2
 #define ESC_LABEL_CAP        96
 #define ESC_LEFT_ROWS        2
-#define ESC_GUI_DISPLAY      32
+#define ESC_GUI_DISPLAY      33
 #define ESC_SEP_H            14
 #define ESC_SKIN_N           5
 #define ESC_SCATTER_N        3
@@ -152,6 +153,7 @@ enum {
     GUI_ITEM_WTH_FIRE,
     GUI_ITEM_WTH_CLOUD,
     GUI_ITEM_WTH_STYLE,
+    GUI_ITEM_CRATE,
     GUI_ITEM_COUNT
 };
 
@@ -330,7 +332,7 @@ static const char* const kLabelKey[GUI_ITEM_COUNT] = {
     "GuiGameSpeed", "GuiFps",
     "GuiLightPreset", "GuiLightParm", "GuiLightAmbient", "GuiLightRed",
     "GuiLightGreen", "GuiLightBlue", "GuiWthMode", "GuiWthRain",
-    "GuiWthSnow", "GuiWthFire", "GuiWthCloud", "GuiWthStyle"
+    "GuiWthSnow", "GuiWthFire", "GuiWthCloud", "GuiWthStyle", "GuiCrate"
 };
 static const char* const kLightKey[LIGHT_PRESET_COUNT + 1] = {
     "GuiLightOrig", "GuiLightStandard", "GuiLightMorning", "GuiLightAfternoon",
@@ -642,6 +644,7 @@ static const EscGuiRowInfo s_GuiLayout[ESC_GUI_DISPLAY] = {
     { EG_COLOR,  GUI_ITEM_COLOR },
     { EG_SKIN,   GUI_ITEM_SKIN },
     { EG_GROUP,  GUI_GROUP_MISC },
+    { EG_SWITCH, GUI_ITEM_CRATE },
     { EG_CHOICE, GUI_ITEM_WTH_MODE },
     { EG_SWITCH, GUI_ITEM_WTH_RAIN },
     { EG_SWITCH, GUI_ITEM_WTH_SNOW },
@@ -1127,7 +1130,8 @@ static const EscToggle s_Toggle[] = {
     { GUI_ITEM_WTH_RAIN,     NULL, NULL, Weather_Rain, Weather_SetRain },
     { GUI_ITEM_WTH_SNOW,     NULL, NULL, Weather_Snow, Weather_SetSnow },
     { GUI_ITEM_WTH_FIRE,     NULL, NULL, Weather_Fire, Weather_SetFire },
-    { GUI_ITEM_WTH_CLOUD,    "Weather", "CloudEnable", Weather_Cloud, Weather_SetCloud }
+    { GUI_ITEM_WTH_CLOUD,    "Weather", "CloudEnable", Weather_Cloud, Weather_SetCloud },
+    { GUI_ITEM_CRATE,        "CrateIcon", "Enable",     CrateIcon_On,      CrateIcon_SetOn }
 };
 
 /* 行控件表的 item 都是首字段, 五张表的查找长得一样, 用宏生成。 */
