@@ -10,7 +10,6 @@
 #define PC_FN_HOUSE_COLOR     0x0050B840u
 #define PC_FN_HOUSE_LASER     0x0050BA00u
 #define PC_FN_UPDATE_COLORS   0x00556090u
-#define PC_FN_DIRTY_AREA      0x006D2790u
 
 #define PC_LC_BPP             0x004u
 #define PC_LC_SHADE_COUNT     0x16Cu
@@ -227,7 +226,7 @@ static void Pc_RefreshTacticalView(int full)
             r.Width = w - s_Band * part + 128;
         if (++s_Band >= PC_RAINBOW_DIRTY_PARTS) s_Band = 0;
     }
-    ((PcFnDirtyArea)(void*)PC_FN_DIRTY_AREA)(tactical, r, 1);
+    ((PcFnDirtyArea)(void*)ADDR_REG_DIRTY_AREA)(tactical, r, 1);
 }
 
 static void Pc_PreserveNonHouseColors(void)

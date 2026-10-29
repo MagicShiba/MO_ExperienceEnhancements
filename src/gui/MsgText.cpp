@@ -151,17 +151,6 @@ static int ParseWidth(const char* s, int* pmille)
     return neg ? -intPart : intPart;
 }
 
-/* 联机判定: [SessionClass] 的首成员就是 GameMode (同 YRPP SessionClass::IsMultiplayer)
- * 3=LAN / 4=Internet 才是联机; 0=战役 / 5=遭遇战 是单机。
- * 地址读不到时按联机处理: 宁可多显示一次名字, 也不误吞别人的发言归属。 */
-static int GameIsMultiplayer(void)
-{
-    int sess;
-    if (!IsPlausiblePtr((void*)ADDR_SESSION)) return 1;
-    sess = *(int*)ADDR_SESSION;
-    return (sess == 3 || sess == 4);
-}
-
 /* ---------------- 消息存储 ---------------- */
 
 #define MAX_TEXT_W 512
@@ -562,7 +551,6 @@ static void MsgText_LoadConfig(void)
     /* 操作提示行预算必须留在总行数之内, 且至少给雷达事件留一行 */
     if (g_Cfg.HintOpMaxLines < 0) g_Cfg.HintOpMaxLines = 0;
     if (g_Cfg.HintOpMaxLines > g_Cfg.HintMaxLines - 1) g_Cfg.HintOpMaxLines = g_Cfg.HintMaxLines - 1;
-    if (g_Cfg.HintOpMaxLines < 0) g_Cfg.HintOpMaxLines = 0;
     g_Cfg.HintRadarShow = g_Cfg.HintRadarShow ? 1 : 0;
     g_Cfg.HintRadarClick = g_Cfg.HintRadarClick ? 1 : 0;
     if (g_Cfg.HintRadarHold < 1) g_Cfg.HintRadarHold = 1;
@@ -691,42 +679,7 @@ static const char* const kRadarNameDef[RADAR_NAME_N] =
     "盟友基地遭袭"
 };
 
-/* UTF-8 → UTF-16, 返回写完的尾指针。带 BOM 会被吃掉, 坏字节按替换字符。 */
-static wchar_t* Utf8ToWide(wchar_t* dst, wchar_t* end, const unsigned char* s)
-{
-    unsigned c, c2;
-    if (s[0] == 0xEF && s[1] == 0xBB && s[2] == 0xBF) s += 3;
-    while (*s)
-    {
-        if (*s < 0x80)                       c = *s++;
-        else if ((*s & 0xE0) == 0xC0)        { c = *s++ & 0x1Fu; c = (c << 6) | (*s++ & 0x3Fu); }
-        else if ((*s & 0xF0) == 0xE0)
-        {
-            c = *s++ & 0x0Fu;
-            c = (c << 6) | (*s++ & 0x3Fu);
-            c = (c << 6) | (*s++ & 0x3Fu);
-        }
-        else if ((*s & 0xF8) == 0xF0)
-        {
-            c  = *s++ & 0x07u;
-            c2 = *s++ & 0x3Fu;
-            c  = (c << 6) | c2;
-            c  = (c << 6) | (*s++ & 0x3Fu);
-            c2 = *s++ & 0x3Fu;
-            c  = (c << 6) | c2;
-            c -= 0x10000u;
-            if (dst + 1 < end) *dst++ = (wchar_t)(0xD800u + ((c >> 10) & 0x3FFu));
-            if (dst < end)     *dst++ = (wchar_t)(0xDC00u + (c & 0x3FFu));
-            continue;
-        }
-        else { s++; c = 0xFFFDu; }
-        if (dst >= end) break;
-        *dst++ = (wchar_t)c;
-    }
-    if (dst < end) *dst = 0;
-    else if (end > dst) end[-1] = 0;
-    return dst;
-}
+/* UTF-8 → UTF-16 用 Lang_Utf8ToWide (ini 是 UTF-8, 手写解码, 见 Lang.h)。 */
 
 static void MsgText_LoadRadarNames(void)
 {
@@ -746,18 +699,18 @@ static void MsgText_LoadRadarNames(void)
               g_Cfg.RadarNameOther, sizeof(g_Cfg.RadarNameOther));
     /* 顺手转成宽字符 (每帧不转, 只在载入时一次) */
     for (i = 0; i < RADAR_NAME_N; i++)
-        Utf8ToWide(g_Cfg.RadarNameW[i], g_Cfg.RadarNameW[i] + FONT_FACE_MAX,
-                   (const unsigned char*)g_Cfg.RadarName[i]);
-    Utf8ToWide(g_Cfg.RadarNameOtherW, g_Cfg.RadarNameOtherW + FONT_FACE_MAX,
-               (const unsigned char*)g_Cfg.RadarNameOther);
+        Lang_Utf8ToWide(g_Cfg.RadarNameW[i], g_Cfg.RadarNameW[i] + FONT_FACE_MAX,
+                        (const unsigned char*)g_Cfg.RadarName[i]);
+    Lang_Utf8ToWide(g_Cfg.RadarNameOtherW, g_Cfg.RadarNameOtherW + FONT_FACE_MAX,
+                    (const unsigned char*)g_Cfg.RadarNameOther);
     /* 配成空串就退回默认, 不让用户一条空行把整个提示搞没 */
     for (i = 0; i < RADAR_NAME_N; i++)
         if (!g_Cfg.RadarNameW[i][0])
-            Utf8ToWide(g_Cfg.RadarNameW[i], g_Cfg.RadarNameW[i] + FONT_FACE_MAX,
-                       (const unsigned char*)kRadarNameDef[i]);
+            Lang_Utf8ToWide(g_Cfg.RadarNameW[i], g_Cfg.RadarNameW[i] + FONT_FACE_MAX,
+                            (const unsigned char*)kRadarNameDef[i]);
     if (!g_Cfg.RadarNameOtherW[0])
-        Utf8ToWide(g_Cfg.RadarNameOtherW, g_Cfg.RadarNameOtherW + FONT_FACE_MAX,
-                   (const unsigned char*)"雷达事件");
+        Lang_Utf8ToWide(g_Cfg.RadarNameOtherW, g_Cfg.RadarNameOtherW + FONT_FACE_MAX,
+                        (const unsigned char*)"雷达事件");
 }
 
 static int g_InitDone = 0;
@@ -878,7 +831,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgText_AddMessageHook(void* regs
      * 联机一律不插手: 联机回声游戏自带真名+真方案号, 且 MatchSent 只按文本
      * 匹配, 同名同句会误伤别人的发言归属。
      * 直接改栈上颜色参数: 原生标签和我方环同色 (纯显示, 非模拟)。 */
-    if (!GameIsMultiplayer())
+    if (!OU_IsMP())
     {
         if (ChatEdit_MatchSent(argMsg))
         {
@@ -1098,7 +1051,7 @@ static int PickLines(MsgRing* R, int wantSp, int ignoreTimeout, unsigned tmoMul,
     int opRows = 0, radarRows = 0;
     int radarCap = rowBudget - opRowCap;
     /* 名字前缀: 联机恒显示 (要区分发言者), 单机默认不显示 (只有自己一个名字, 是噪音)。 */
-    int showName = GameIsMultiplayer() || ChatEdit_ShowNameSP();
+    int showName = OU_IsMP() || ChatEdit_ShowNameSP();
 
     if (radarCap < 0) radarCap = 0;
     for (i = R->count - 1; i >= 0 && picked < MAX_PICKED && rows < rowBudget; i--)

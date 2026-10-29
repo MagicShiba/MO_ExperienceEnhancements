@@ -28,6 +28,7 @@
 #include <emmintrin.h>          /* 贴层内核 SSE2 版 (见 SwsBlitRunSse2) */
 #endif
 #include "GdiText.h"
+#include "IconSnap.h"
 #include "OrderUtil.h"
 #include "VecText.h"
 #include "PcxImage.h"
@@ -43,8 +44,6 @@
  *   +0 vtable / +4 Items / +8 Capacity / +12 IsInit+IsAlloc /
  *   +16 Count / +20 CapInc。
  * 传的是**对象基址**, 不是字段地址。 */
-#define ARR_ITEMS(base) (*(void***)((base) + 4u))
-#define ARR_COUNT(base) (*(int*)((base) + 16u))
 
 /* 容器自洽检查 —— **只判容器自己, 一个对象都不碰**。
  *   +0x00 vtable / +0x04 Items / +0x08 Capacity / +0x0C IsInit+IsAlloc
@@ -875,17 +874,13 @@ static int SwsArrayIndexOf(void* type, const char* id)
 /* ---------------- 超武图标: 全部走引擎现成设施 ----------------
  * 图标优先 PCX (`SidebarPCX=`, 在 MIX 里, 磁盘上没有), 由引擎 (Ares) 的
  * `CameoPCX` 抓像素; 没写 `SidebarPCX=` 的走 SHP 兜底 (`SidebarImage`,
- * 用 `CC_Draw_Shape` 渲进自有 BSurface, 见 SwsRenderShp)。
+ * 用 `CC_Draw_Shape` 渲进自有 BSurface, 见 IconSnap_Shp)。
  *   读键: CCINIClass::INI_Rules (ADDR_INI_RULES) -> INIClass::ReadString (0x528A10)
- *   载图: PCX::Instance (0xAC4848) -> GetSurface / ForceLoadFile
+ *   载图: PCX::Instance (0xAC4848) -> GetSurface / ForceLoadFile (IconSnap)
  * 两条命门: GetSurface 未加载给的是占位图 (必须先 ForceLoadFile);
  * BSurface* 不可跨帧缓存 (切页签/重载美术会失效), 每次重建现取。 */
 
-typedef void* (__thiscall *SwsPcxGetSurfFn)(void* pcx, const char* name, void* pal);
-#define FN_PCXGETSURF ((SwsPcxGetSurfFn)(void*)0x6BA140u)
-typedef int (__thiscall *SwsPcxLoadFn)(void* pcx, const char* name, int f1, int f2);
-#define FN_PCXLOAD ((SwsPcxLoadFn)(void*)0x6B9D00u)
-#define PCX_TRANS_PARENT 0xF81Fu   /* COLOR_PURPLE = COLOR_RED|COLOR_BLUE */
+#define PCX_TRANS_PARENT ICONSNAP_KEY   /* COLOR_PURPLE = COLOR_RED|COLOR_BLUE */
 
 /* ---- 每类型缓存 ----
  * ArrayIndex、阵营、ini 优先级/隐藏都是类型的固有属性 (类型对象静态),
@@ -957,27 +952,6 @@ static void SwsFlagsOf(SwsTypeCache* tc, void* type)
      * `Actions::SuperWeaponAllowed` (0x7F), 落在 else 分支要选格。 */
     tc->actionNone = (*(int*)((char*)type + OFF_SWT_ACTION) == 0) ? 1 : 0;
 }
-
-/* 取 PCX 面 (GetSurface 命中直接用, 未命中则 ForceLoadFile 再取)。
- * **只允许在扫描期 (SWS_Poll) 调**: 会往引擎的 PCX/BSurface 池里装载,
- * 放在渲染帧里做就是"绘制途中动引擎面池" (崩单里两条都崩在贴 cameo 的最内层)。
- * 取到的面**不得跨帧持有**, 调用方拿到就立刻拷像素 (见 SwsSnapPcxCap)。 */
-static void* SwsPcxRawSurf(const char* file)
-{
-    void* pcx, *surf;
-    if (!file || !file[0]) return NULL;
-    pcx = (void*)ADDR_PCX_INSTANCE;
-    if (!pcx || !IsPlausiblePtr(pcx)) return NULL;
-    surf = FN_PCXGETSURF(pcx, file, NULL);
-    if (!surf)
-    {
-        FN_PCXLOAD(pcx, file, 2, 0);
-        surf = FN_PCXGETSURF(pcx, file, NULL);
-    }
-    if (surf && !IsPlausiblePtr(surf)) return NULL;
-    return surf;
-}
-
 
 /* 首次遇到某超武类型时算一遍 (阵营/优先级/隐藏/旗标/图标/悬停名/即时类),
  * 类型对象静态, 只算一次。抽成独立函数是因为去重 (SwsDedupRemove/Restore)
@@ -1158,55 +1132,11 @@ static unsigned short* SwsCaptured(void* type)
     return NULL;
 }
 
-/* ---- SHP 图标: 用引擎 `CC_Draw_Shape` 把 `SidebarImage` 渲进自有 BSurface ----
+/* ---- SHP 图标兜底 ----
  * 没写 `SidebarPCX=` 的超武 (含地图内嵌 ini 新增的节) Ares 的 `CameoPCX` 为
- * NULL, 抓取钩拿不到; 引擎又要等防御页画过一次才有。这里复刻引擎那次调用
- * (调色板 `CAMEO_PAL`, frame 0, flags 0x400, brightness 0x3e8) 渲进自有面,
- * 扫描时即时出图。只读类型字段 + 现成调色板, 联机安全。
- *
- * BSurface (0x20): +0 虚表 / +4 W / +8 H / +0xC LockLevel / +0x10 字节数 /
- * +0x14 缓冲指针 / +0x18 字节长 / +0x1C own。`CC_Draw_Shape` 只用 GetRect 不锁面,
- * 直接写 +0x14, 栈上拼个假面就够。 */
-#define ADDR_CAMEO_PAL   0x0087F6B0u   /* FileSystem::CAMEO_PAL (ConvertClass*) */
-#define BSHAPE_VTBL      0x007E2070u   /* gamemd BSurface 虚表 */
-typedef struct { int x, y, w, h; } SwsRect;
-typedef struct { int x, y; } SwsPt;
-/* gamemd 0x4Aed70 `CC_Draw_Shape` (__fastcall: ecx=Surface, edx=Palette, ret 0x38)。
- * 栈参顺序与 YRpp `DrawSHP` 一致: SHP, Frame, Position, Bounds, Flags, Remap,
- * ZAdjust, ZGradient, Brightness, Tint, ZShape, ZFrame, XOff, YOff。 */
-typedef void (__fastcall *SwsDrawShpFn)(void* surf, void* pal, void* shp,
-    int frame, SwsPt* pos, SwsRect* bounds, int flags, int remap, int zadjust,
-    int zgrad, int bright, int tint, void* zshape, int zframe, int xoff, int yoff);
-
-static int SwsRenderShp(void* shp, unsigned short* out)
-{
-    unsigned int surf[8];          /* 0x20 假 BSurface */
-    unsigned char* s = (unsigned char*)surf;
-    void* pal;
-    SwsRect bounds;
-    SwsPt pos;
-    int i;
-    if (!shp || !IsPlausiblePtr(shp)) return 0;
-    if (!IsPlausiblePtr((void*)ADDR_CAMEO_PAL)) return 0;
-    pal = *(void**)ADDR_CAMEO_PAL;
-    if (!pal || !IsPlausiblePtr(pal)) return 0;
-    for (i = 0; i < 0x20; i++) s[i] = 0;
-    *(void**)(s + 0x00) = (void*)BSHAPE_VTBL;
-    *(int*)(s + 0x04) = SWS_ICON_W;
-    *(int*)(s + 0x08) = SWS_ICON_H;
-    *(int*)(s + 0x0C) = 0;
-    *(int*)(s + 0x10) = 2;
-    *(void**)(s + 0x14) = (void*)out;
-    *(int*)(s + 0x18) = SWS_ICON_W * SWS_ICON_H * 2;
-    *(int*)(s + 0x1C) = 1;
-    /* 先铺色键 (紫), 让 SHP 的透明像素落成色键 (绘制层会跳过)。 */
-    for (i = 0; i < SWS_ICON_W * SWS_ICON_H; i++) out[i] = PCX_TRANS_PARENT;
-    pos.x = 0; pos.y = 0;
-    bounds.x = 0; bounds.y = 0; bounds.w = SWS_ICON_W; bounds.h = SWS_ICON_H;
-    ((SwsDrawShpFn)(void*)0x004AED70u)(surf, pal, shp, 0, &pos, &bounds, 0x400,
-        0, 0, 0, 0x3e8, 0, NULL, 0, 0, 0);
-    return 1;
-}
+ * NULL, 抓取钩拿不到; 引擎又要等防御页画过一次才有。扫描时用 IconSnap_Shp
+ * 复刻引擎那次调用即时出图 (CAMEO_PAL, frame 0), 只读类型字段 + 现成调色板,
+ * 联机安全。 */
 
 /* 扫描时直接给某个类型渲染 SHP 图标 (不等引擎画过一次防御页才抓)。
  * 只用于"无 SidebarPCX"的类型, 且**不**登记进 s_Cap[] —— 引擎抓取 (可能是
@@ -1214,50 +1144,20 @@ static int SwsRenderShp(void* shp, unsigned short* out)
 static unsigned short* SwsRenderShpCap(void* type)
 {
     void* shp = *(void**)((char*)type + OFF_SWT_SIDEBARIMAGE);
-    unsigned short* dst;
     if (!shp || !IsPlausiblePtr(shp)) return NULL;
-    dst = (unsigned short*)LocalAlloc(LMEM_FIXED,
-                     (SIZE_T)(SWS_ICON_W * SWS_ICON_H) * sizeof(unsigned short));
-    if (!dst) return NULL;
-    if (!SwsRenderShp(shp, dst)) { LocalFree(dst); return NULL; }
-    return dst;
+    return IconSnap_Shp(shp, SWS_ICON_W, SWS_ICON_H);
 }
 
-/* PCX 图标快照: 取面 → 立刻缩样拷进自有 60x48 缓冲 → 丢弃引擎面指针。
- * 之后绘制层只读自有内存, SWS_Draw 里不再出现 PCX::GetSurface / ForceLoadFile,
- * 也不会跨帧攥着 BSurface*。
+/* PCX 图标快照 (IconSnap_Pcx): 取面 → 立刻缩样拷进自有 60x48 缓冲 → 丢弃引擎面
+ * 指针。之后绘制层只读自有内存, SWS_Draw 里不再出现 PCX::GetSurface /
+ * ForceLoadFile, 也不会跨帧攥着 BSurface*。
  * **不登记进 s_Cap[]**: 那张表是"引擎抓到的像素"的权威源 (地图内嵌/战役改写的
  * PCX 会更准), 一旦占了槽位 Sws_CaptureCameo 就会因 SwsCaptured() 命中而跳过。
  * 这里只当"引擎还没抓到时的临时图", 引擎抓到后由调用方覆盖并释放本块。
  * 失败返回 NULL (调用方按次数退避, 不会每轮都 ForceLoadFile)。 */
 static unsigned short* SwsSnapPcxCap(const char* file)
 {
-    void* surf;
-    const unsigned short* src;
-    unsigned short* dst;
-    int w, h, bpp, r, c;
-    surf = SwsPcxRawSurf(file);
-    if (!surf || !IsPlausiblePtr(surf)) return NULL;
-    if (!IsPlausiblePtr(*(void**)surf)) return NULL;   /* 虚表必须指向代码段 */
-    w = *(int*)((char*)surf + 0x04);
-    h = *(int*)((char*)surf + 0x08);
-    bpp = *(int*)((char*)surf + 0x10);
-    src = *(const unsigned short**)((char*)surf + 0x14);
-    if (w < 1 || w > 256 || h < 1 || h > 256 || bpp != 2) return NULL;
-    if (!src || !IsPlausiblePtr((void*)src)) return NULL;
-    if (*(int*)((char*)surf + 0x18) != w * h * 2) return NULL;
-    dst = (unsigned short*)LocalAlloc(LMEM_FIXED,
-                     (SIZE_T)(SWS_ICON_W * SWS_ICON_H) * sizeof(unsigned short));
-    if (!dst) return NULL;
-    /* 缩放取样一次做完 (与 SwsCPSrc 同一套映射), 色键原样保留 (绘制层跳过)。 */
-    for (r = 0; r < SWS_ICON_H; r++)
-    {
-        const unsigned short* srow = src + (size_t)((r * h) / SWS_ICON_H) * w;
-        unsigned short* drow = dst + (size_t)r * SWS_ICON_W;
-        for (c = 0; c < SWS_ICON_W; c++)
-            drow[c] = srow[(c * w) / SWS_ICON_W];
-    }
-    return dst;
+    return IconSnap_Pcx(file, SWS_ICON_W, SWS_ICON_H, NULL, NULL);
 }
 
 /* 壳里调的抓取函数。**必须**被 pushad/popad 包住 (调用方是机器码壳) —— 真实 call

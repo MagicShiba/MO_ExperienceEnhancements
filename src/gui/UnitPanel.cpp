@@ -4,13 +4,16 @@
  *  1. 图标装载 (PCX) 与 SHP 现渲都会动引擎面池 → 只在 UP_Poll 里备, 绘制帧只读缓存。
  *  2. 面板压在视口上, 引擎会把落点当地图点击 → 由 0x692361 的门吞掉; 门里只记坐标,
  *     真正的选中动作放到下一次 UP_Poll (那时已不在引擎的点击链路里)。
- *  3. 只读模拟状态 + 只改本机选中集, 联机安全。
+ *  3. 只读模拟状态 + 只改本机选中集, 联机安全。例外是 WASD 索敌换目标 (直接
+ *     SetTarget, 不走事件), 它只在单机启用 —— 见 Up_KmDropStale。
  */
 
 #include <windows.h>
 #include "EngineAddr.h"
 #include "Favorite.h"
+#include "FullMap.h"
 #include "GdiText.h"
+#include "IconSnap.h"
 #include "OrderUtil.h"
 #include "PauseView.h"
 #include "PcxImage.h"
@@ -47,8 +50,8 @@
 #define UP_PAGES    3
 #define UP_ENT_MAX  (UP_CELLN * UP_PAGES)
 
-#define UP_ICON_W   60
-#define UP_ICON_H   48
+#define UP_ICON_W   UP_CELL_W    /* 图标缓存尺寸 = 格子尺寸, 恒不缩放 */
+#define UP_ICON_H   UP_CELL_H
 #define UP_LIST_CAP 512
 #define UP_CAP_N    384
 
@@ -105,14 +108,11 @@ static int s_GateLb = 0;         /* 门侧左键按下沿标记: ProcessClickCoo
 static int s_GateRb = 0;         /* 同上, 右键 */
 /* 载员多选 (shift + 点载员格): 只对单选版式有意义 —— 那一版式里才看得见载员格。
  * 存的是载员指针, 归属容器一换就整组清掉 (s_PickHost 记归属)。 */
-#define UP_PICK_MAX 10        /* 与 SingleUnload 的 SU_PAX_MAX 对齐, 否则多出的会被静默丢掉 */
+#define UP_PICK_MAX SU_PAX_MAX   /* SingleUnload.h 导出: 两张表口径必须一致 */
 static void* s_Pick[UP_PICK_MAX];
 static int   s_PickN = 0;
 static void* s_PickHost = NULL;
-static int s_PlanWas = 0;                /* 上一帧规划是否在跑 (结束时收名单用) */
-static int s_PlanFired = 0;              /* 上一帧的节点轮数 (同上) */
 static int Up_PickHas(void* o);          /* 定义在输入段, 绘制段要用 */
-static int Up_PickHostOK(void);
 /* 悬停 */
 static int s_HoverCell = -1;
 static int s_HoverBtn = -1;
@@ -120,17 +120,29 @@ static int s_HoverBtn = -1;
 /* 键盘移动 (UP_BTN_MODE): 每个单位记一个"上次下令的目标格"作锚点。
  * 连按/按住时从锚点往前推, 不按当前格反复下同一个点; 松开一段时间后锚点作废。
  * 数量按"少量单位"设计, 超出上限的忽略。 */
+/* 时间量一律用帧: 引擎帧锁定, 一帧 = 一次逻辑步进, 帧率就是游戏速度。
+ * 只有 UP_KM_COMBO_MS 用墙钟 —— 它量的是人的手速。 */
 #define UP_KM_MAX        64
-#define UP_KM_MIN_GAP    4      /* 同一方向连续令的最小帧间隔 (~15Hz@60fps) */
-#define UP_KM_TIMEOUT    240    /* 单位迟迟没到锚点的兜底重发 (约 4s@60fps) */
-#define UP_KM_ANCHOR_TTL 180    /* 松开后锚点保留时间 (约 3s@60fps), 连按同向可累加 */
-#define UP_KM_COMBO_MS   100    /* 方向键组合判定窗口: W 与 D 前后脚按下也只出一格斜向 */
+#define UP_KM_MIN_GAP    4      /* 同向连续令的最小间隔(帧) */
+#define UP_KM_STUCK      30     /* 坐标一个 lepton 都没挪这么多帧 = 走不动, 重发一格 */
+#define UP_KM_TIMEOUT    240    /* 坐标在动却始终到不了目标格 (绕路/被挤) 的兜底重发 */
+#define UP_KM_ANCHOR_TTL 180    /* 松手后锚点保留(帧), 连按同向可累加 */
+#define UP_KM_COMBO_MS   100    /* 方向键组合窗口(ms): W 与 D 前后脚按下也只出一格斜向 */
+#define UP_KM_AIR_GAP    6      /* 战机续令间隔(帧) */
+#define UP_KM_AIR_AHEAD  12     /* 战机续令目标 = 当前格前方 N 格; 悬在正前方恒定距离,
+                                 * 快慢都追不上, 不甩尾 */
+#define UP_KM_DROP_TTL   15     /* 目标飘出射程后的重估间隔(帧) */
 
 typedef struct {
     void* unit;
     int   id;
     short tx, ty;       /* 上次下令的目标格 */
+    short fx, fy;       /* 发那次令时单位所在格: 令后挪没挪窝, 区分"在走"和"卡死" */
+    short mdx, mdy;     /* 那次令的方向: 和当前按住方向比, 判断是不是改向 */
     int   lastFrame;    /* 上次下令帧 */
+    int   lastX, lastY; /* 上次采样到的原始坐标 (判"原地不动") */
+    int   still;        /* 连续几次采样坐标没变 */
+    int   lastDrop;     /* 上次换掉超程目标的帧 (限速用; -1 = 还没有过) */
     int   has;          /* 是否有过锚点 (帧号 0 也能用) */
     int   seen;         /* 本轮选中集里是否还有它 */
 } UpKmAnchor;
@@ -146,8 +158,9 @@ static int s_KeyPendActive = 0;
 static int s_ActionKickFrame = -1;
 static UpKmAnchor s_Km[UP_KM_MAX];
 static int s_KmN = 0;
-static void Up_KmClear(void);
-static void Up_KmReset(void);
+static int s_KmMp = 0;           /* 本局是否联机 (GameMode 3/4): 换目标那套不启用 */
+static wchar_t s_KmMap[0x2D];    /* 上一局的地图名 ([Basic] Name, 读档同名时恢复开关) */
+static int s_KmWant = 0;         /* 离开对局的那一刻 WASD 是开的 */
 
 /* 选中快照 */
 static UpEnt s_List[UP_LIST_CAP];
@@ -158,7 +171,6 @@ static unsigned s_ListSig = 0;
 /* 当前页的格子 (s_Page 变或模型变时重建)。只有前 s_Cols*s_Rows 个有效:
  * 单选 = 2 格, 4 架 = 2x2, 9 个以上才铺满 3x3 —— 不留空槽。 */
 static UpEnt s_Cell[UP_CELLN];
-static int s_CellN = 0;
 static int s_Cols = 1;
 static int s_Rows = 1;
 static int s_Pages = 1;
@@ -185,11 +197,6 @@ static int s_CapN = 0;
 typedef int (__attribute__((thiscall)) *Fn_WhatAmI)(void*);
 typedef int (__attribute__((thiscall)) *Fn_Select)(void*);
 typedef void (__fastcall *Fn_UnselectAll)(void);
-/* CC_Draw_Shape: __fastcall ecx=Surface, edx=Palette, ret 0x38。 */
-typedef void (__fastcall *UpDrawShpFn)(void* surf, void* pal, void* shp,
-    int frame, Point2D* pos, RectangleStruct* bounds, int flags, int remap,
-    int zadjust, int zgrad, int bright, int tint, void* zshape, int zframe,
-    int xoff, int yoff);
 
 /* ---------------- 小工具 ---------------- */
 
@@ -299,6 +306,21 @@ static int Up_Percent(wchar_t* dst, int cap, int pc, int isMax)
     return n;
 }
 
+/* 日志里的类型 ID (id = 类型对象 + OFF_TYPE_ID): 可读且非空时限长逐字符抄,
+ * 否则填一个占位符。 */
+static unsigned Up_AppendId(char* buf, unsigned cap, unsigned q, const char* id,
+                            int maxn, char fill)
+{
+    if (MemReadableBytes(id, 0x18) >= 0x18 && id[0])
+    {
+        int m;
+        for (m = 0; m < maxn && id[m] && q + 1 < cap; m++) buf[q++] = id[m];
+        buf[q] = 0;
+    }
+    else q = AppendCh(buf, q, fill, cap);
+    return q;
+}
+
 /* ---------------- 配置 ---------------- */
 
 void UP_EnsureInit(void)
@@ -348,15 +370,14 @@ void UP_EnsureInit(void)
 
 static void Up_Layout(void)
 {
-    const int* vc = (const int*)(size_t)ADDR_VIEWCACHE;
-    int vx = vc[0], vy = vc[1], vw = vc[2], vh = vc[3];
+    /* 基准 = 满视图区 A (1x 时 == 引擎视口)。缩放档把 ViewBounds 缓存
+     * (0xB0CE28) 改成左上锚定的 R = A*scale, 拿它当界线的 UI 会跟着缩放跑,
+     * 与 MsgText/CCToolTip 同一批问题 —— 锚定一律用 A。 */
+    RectangleStruct va;
+    int vx, vy, vh;
     int i, by;
-    if (vw < 160 || vh < 160)
-    {
-        vx = 0; vy = 0;
-        vw = GtGameW(); vh = GtGameH() - 32;
-        if (vw < 160 || vh < 160) { vw = 1024; vh = 600; }
-    }
+    FM_GetViewRects(&va, 0);
+    vx = va.X; vy = va.Y; vh = va.Height;
     /* 九宫格只包格子; 按钮列在框外左侧, 整块贴视口左下角。
      * 上/下内边距不对称 (8/6): 框带上方留宽一点压住标题感, 下方留给页码块。 */
     s_Pw = UP_PAD_L + UP_PAD_R + s_Cols * UP_CELL_W + (s_Cols - 1) * UP_CELL_GAP;
@@ -450,6 +471,13 @@ static void Up_KmClear(void)
     s_KeyPendAnchor = 0;
 }
 
+/* 键盘移动关停时的统一收尾 (模式指示熄掉 + 锚点表作废)。 */
+static void Up_KmOff(void)
+{
+    s_KeyMoveSel = 0;
+    Up_KmClear();
+}
+
 static void Up_KmReset(void)
 {
     Up_KmClear();
@@ -459,9 +487,101 @@ static void Up_KmReset(void)
     s_KeyPrev[3] = OU_KeyDown('D') ? 1 : 0;
     s_KeyDirX = 0;
     s_KeyDirY = 0;
-    s_KeyPendActive = 0;
-    s_KeyPendAnchor = 0;
     s_ActionKickFrame = -1;
+}
+
+/* 当前地图名 (ScenarioClass::Name)。FileName 读档后是存档名, 比不出图;
+ * Name 没写的地图退到 UIName。空名/读不到/脏数据都回 0, 调用方放弃比对。 */
+static int Up_KmMapName(wchar_t* out)
+{
+    char* sc = *(char**)ADDR_SCENARIO;
+    int i;
+
+    out[0] = 0;
+    if (!sc || !IsPlausiblePtr(sc)) return 0;
+    if (MemReadableBytes(sc + OFF_SCEN_NAME, 0x2D * 2) >= 0x2D * 2)
+    {
+        for (i = 0; i < 0x2C; i++)
+        {
+            wchar_t c = *(wchar_t*)(sc + OFF_SCEN_NAME + i * 2);
+            if (!c) break;
+            if (c < 0x20 || c == 0xFFFF) { i = 0; break; }   /* 脏数据 */
+            out[i] = c;
+        }
+        out[i] = 0;
+        if (i > 0) return 1;
+    }
+    if (MemReadableBytes(sc + OFF_SCEN_UINAME, 0x20) >= 0x20)
+    {
+        for (i = 0; i < 0x1F; i++)
+        {
+            char c = sc[OFF_SCEN_UINAME + i];
+            if (!c) break;
+            if ((unsigned char)c < 0x20) return 0;
+            out[i] = (wchar_t)(unsigned char)c;
+        }
+        out[i] = 0;
+        return i > 0;
+    }
+    return 0;
+}
+
+static int Up_KmWStrEq(const wchar_t* a, const wchar_t* b)
+{
+    int i;
+    for (i = 0; a[i] || b[i]; i++)
+        if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+/* 刚进一局: 记下地图名, 与上一局同名就恢复 WASD 开关 (读档接着用, 换图保持
+ * 关闭)。锚点不恢复 —— 它们按单位指针+id 索引, 读档后旧对象已经没了。 */
+static void Up_KmMatchEnter(void)
+{
+    wchar_t buf[0x2D];
+    int i;
+
+    if (Up_KmMapName(buf))
+    {
+        /* 折叠态没有模式指示, 恢复等于"键被吞却看不到提示", 所以不恢复 */
+        if (s_KmWant && !s_Collapsed && s_KmMap[0] && Up_KmWStrEq(buf, s_KmMap))
+        {
+            s_KeyMove = 1;
+            Up_KmReset();
+        }
+        for (i = 0; i < 0x2C && buf[i]; i++) s_KmMap[i] = buf[i];
+        s_KmMap[i] = 0;
+    }
+    else s_KmMap[0] = 0;
+    s_KmWant = 0;
+}
+
+/* 进/出对局的判定: ScenarioStarted 的 0->1 边沿, 或帧号倒退 (每局开始把
+ * 0xA8ED84 写 0)。读档时主循环停着, 0->1 那一拍轮不到 Poll, 只能靠帧号倒退认。
+ * 离开对局时记下当时 WASD 的开关状态, 供下次进局比对。 */
+static void Up_KmMatchEdge(int started, int frame)
+{
+    static int prev = 0;
+    static int lastFrame = -1;
+
+    if (!started)
+    {
+        if (prev) s_KmWant = s_KeyMove ? 1 : 0;   /* 只在 1 -> 0 那一拍照一次 */
+        prev = 0;
+        return;
+    }
+    if (!prev || frame < lastFrame) Up_KmMatchEnter();
+    prev = 1;
+    lastFrame = frame;
+}
+
+/* 新锚点: 清零后 lastDrop 记 -1 (还没有放弃过任何目标)。 */
+static void Up_KmInitEntry(UpKmAnchor* e, void* unit, int id)
+{
+    ZeroMemory(e, sizeof(*e));
+    e->unit = unit;
+    e->id = id;
+    e->lastDrop = -1;
 }
 
 /* 按 unit 指针 + id 找锚点; add=1 时没有就建。指针被复用 (id 变了) 时重置。 */
@@ -474,23 +594,12 @@ static UpKmAnchor* Up_KmFind(void* unit, int id, int add)
         if (s_Km[i].id != id)
         {
             if (!add) return NULL;
-            s_Km[i].id = id;
-            s_Km[i].tx = 0;
-            s_Km[i].ty = 0;
-            s_Km[i].lastFrame = 0;
-            s_Km[i].has = 0;
-            s_Km[i].seen = 0;
+            Up_KmInitEntry(&s_Km[i], unit, id);
         }
         return &s_Km[i];
     }
     if (!add || s_KmN >= UP_KM_MAX) return NULL;
-    s_Km[s_KmN].unit = unit;
-    s_Km[s_KmN].id = id;
-    s_Km[s_KmN].tx = 0;
-    s_Km[s_KmN].ty = 0;
-    s_Km[s_KmN].lastFrame = 0;
-    s_Km[s_KmN].has = 0;
-    s_Km[s_KmN].seen = 0;
+    Up_KmInitEntry(&s_Km[s_KmN], unit, id);
     return &s_Km[s_KmN++];
 }
 
@@ -503,13 +612,9 @@ static void Up_KmPrune(void)
 }
 
 /* 8 方向: 屏幕方向 (sx,sy) 折算成地图格偏移。斜向也是一格 (0,-1)/(-1,0) 等,
- * 不是两个正向相加的两格。 */
-static int Up_KeyDir(int* dx, int* dy)
+ * 不是两个正向相加的两格。键态由调用方传入 (同帧只采一次), 有方向回 1。 */
+static int Up_KeyDir(int w, int a, int s, int d, int* dx, int* dy)
 {
-    int w = OU_KeyDown('W') ? 1 : 0;
-    int a = OU_KeyDown('A') ? 1 : 0;
-    int s = OU_KeyDown('S') ? 1 : 0;
-    int d = OU_KeyDown('D') ? 1 : 0;
     int sx = d - a;
     int sy = s - w;
     if (!sx && !sy) { *dx = 0; *dy = 0; return 0; }
@@ -533,14 +638,133 @@ static void Up_ActionLineKick(int frame)
     ((Fn_StartActionLines)(void*)FN_START_ACTIONLINES)();
 }
 
-/* 给一个单位下令。useAnchor=1 (同方向连按/按住) 从锚点往前推, 便于累加;
- * useAnchor=0 (换方向) 从当前格起, 保证"一次按键 = 当前格旁一格"。 */
-static void Up_KmIssue(int house, void* unit, int uid, int dx, int dy, int frame, int useAnchor)
+#define UP_KM_LEP_CELL 256      /* 1 格 = 256 leptons; 判定留一格余量给目标体积 */
+
+typedef void* (__attribute__((thiscall)) *Fn_UpGetWeapon)(void* self, int idx);
+typedef void* (__attribute__((thiscall)) *Fn_UpThreat)(void* self, int threat,
+                                                       CoordStruct* from, int onlyEnemy);
+typedef void  (__attribute__((thiscall)) *Fn_UpSetTarget)(void* self, void* target);
+
+/* 对象的虚表指针; 不可信回 NULL。 */
+static void** Up_KmVT(void* o)
+{
+    void** vt;
+    if (!o || !IsPlausiblePtr(o)) return NULL;
+    vt = *(void***)o;
+    return (vt && IsPlausiblePtr(vt)) ? vt : NULL;
+}
+
+/* 单位身上最远的武器射程 (leptons); 0 = 没有武器。 */
+static int Up_KmMaxRange(void* unit)
+{
+    void** vt;
+    Fn_UpGetWeapon gw;
+    int i, best = 0;
+
+    vt = Up_KmVT(unit);
+    if (!vt) return 0;
+    gw = (Fn_UpGetWeapon)vt[OFF_VT_GETWEAPON / 4];
+    if (!gw || !IsPlausiblePtr((const void*)gw)) return 0;
+    for (i = 0; i < 3; i++)   /* 0=主 1=副 2=精英/部署 */
+    {
+        void* ws = gw(unit, i);
+        void* wt;
+        int r;
+        if (!ws || !IsPlausiblePtr(ws)) continue;
+        wt = *(void**)ws;
+        if (!wt || !IsPlausiblePtr(wt)) continue;
+        r = *(int*)((char*)wt + OFF_WT_RANGE);
+        if (r > best) best = r;
+    }
+    return best;
+}
+
+/* 单位到目标的平面距离平方; 取不到回 -1。高度差不参与 —— 山顶/桥上的目标
+ * 中心距本来就会偏大。只比大小, 不开方。 */
+static long long Up_KmDistSq(void* unit, void* tar)
+{
+    CoordStruct a, b;
+    long long dx, dy;
+
+    if (!OU_GetCoords(unit, &a) || !OU_GetCoords(tar, &b)) return -1;
+    dx = (long long)a.X - (long long)b.X;
+    dy = (long long)a.Y - (long long)b.Y;
+    return dx * dx + dy * dy;
+}
+
+/* 目标此刻是否值得保留/回填: 活着、可作战类型、武器射程够得着。
+ * 射程自己算。引擎的 IsCloseEnoughToAttack (0x6F7780) 在武器类型取不到时走
+ * "武器为空"分支, 返回值不反映真实射程, 而"超程就弃"全靠这一个判据。 */
+static int Up_KmKeepable(void* unit, void* tar)
+{
+    int what, range;
+    long long d2, lim;
+
+    if (!tar || !IsPlausiblePtr(tar)) return 0;
+    if (!*(unsigned char*)((char*)tar + OFF_ISALIVE)) return 0;
+    what = OU_WhatAmI(tar);
+    if (what != ABS_UNIT && what != ABS_INFANTRY &&
+        what != ABS_AIRCRAFT && what != ABS_BUILDING) return 0;
+    range = Up_KmMaxRange(unit);
+    if (range <= 0) return 0;
+    d2 = Up_KmDistSq(unit, tar);
+    if (d2 < 0) return 0;
+    lim = (long long)range + UP_KM_LEP_CELL;
+    return (d2 <= lim * lim) ? 1 : 0;
+}
+
+#define THREAT_RANGE 1  /* Yrpp ThreatType::Range: 只在本单位射程内选 */
+
+/* 挑一个"现在就能开火"的目标 (只读): 借引擎的最大威胁扫描在射程内选, 再用
+ * Up_KmKeepable 复核。必须主动给目标 —— 只传空让引擎重选, 它会立刻把够不着的
+ * 远处目标选回来, 它仍是最"近"的敌人。 */
+static void* Up_KmBestTarget(void* unit)
+{
+    void** vt;
+    Fn_UpThreat f;
+    void* t;
+    CoordStruct c;
+
+    vt = Up_KmVT(unit);
+    if (!vt) return NULL;
+    f = (Fn_UpThreat)vt[OFF_VT_GREATEST_THREAT / 4];
+    if (!f) return NULL;
+    if (!OU_GetCoords(unit, &c)) return NULL;
+    t = f(unit, THREAT_RANGE, &c, 0);
+    if (!t || !IsPlausiblePtr(t)) return NULL;
+    if (*(void**)((char*)t + OFF_OWNER) == *(void**)((char*)unit + OFF_OWNER)) return NULL;
+    return Up_KmKeepable(unit, t) ? t : NULL;
+}
+
+/* 一条标准移动令: 与手点右键移动同形, 不调 ClickedMission, 不播语音。
+ * tgt 槽 = 0 表示清掉攻击目标 (原版事件执行会 SetTarget(事件Target槽))。 */
+static void Up_KmFireMove(int house, void* unit, int sid, int ur,
+                          int tx, int ty, int tid, int tr, int frame)
+{
+    unsigned char dr = 0;
+    int dst = OU_CellTgt(tx, ty, &dr);
+    OU_FireMega(house, sid, ur, MISSION_MOVE,
+                tid, tr, dst, dr, 0, 0, 0, unit, sid, 1);
+    Up_ActionLineKick(frame);
+}
+
+/* 给一个单位下令。useAnchor=1 (同向连按/按住) 从锚点往前推, 便于累加;
+ * useAnchor=0 (换方向) 从当前格起 —— 一次按键 = 当前格旁一格。
+ * steps = 一次推进几格, 只有战机按住推进才 >1。同时记下所在格与方向, 供推进
+ * 循环区分"在走"和"卡死"。
+ *
+ * 目标槽: 移动令会把事件 Target 槽原样 SetTarget, 所以只给"此刻真能开火"的
+ * 目标 —— 够得着就原样回填 (保持锁定, 边走边打), 够不着就换射程内目标, 一个
+ * 都没有才传空。
+ * 联机 (s_KmMp) 留空: 移动令与手点右键同形, 索敌交回引擎。 */
+static void Up_KmIssue(int house, void* unit, int uid, int dx, int dy, int frame,
+                       int useAnchor, int steps, int keepTgt)
 {
     CoordStruct c;
     UpKmAnchor* a;
-    unsigned char ur = 0, dr = 0;
-    int cx, cy, tx, ty, dst, sid;
+    unsigned char ur = 0, tr = 0;
+    int cx, cy, tx, ty, sid, tid = 0;
+    void* tar, *alt;
 
     if (!OU_GetCoords(unit, &c)) return;
     cx = c.X / 256;
@@ -549,29 +773,74 @@ static void Up_KmIssue(int house, void* unit, int uid, int dx, int dy, int frame
     if (useAnchor && a && a->has &&
         (unsigned)(frame - a->lastFrame) <= UP_KM_ANCHOR_TTL)
     {
-        tx = a->tx + dx;
-        ty = a->ty + dy;
+        tx = a->tx + dx * steps;
+        ty = a->ty + dy * steps;
     }
     else
     {
-        tx = cx + dx;
-        ty = cy + dy;
+        tx = cx + dx * steps;
+        ty = cy + dy * steps;
     }
     if (!OU_CellValid(tx, ty)) return;
     sid = OU_ObjTgt(unit, &ur);
     if (sid < 0) return;
-    dst = OU_CellTgt(tx, ty, &dr);
-    /* 标准移动事件: 与手点右键移动同形; 不调 ClickedMission, 不播语音。 */
-    OU_FireMega(house, sid, ur, MISSION_MOVE,
-                0, 0, dst, dr, 0, 0, 0, unit, sid, 1);
-    Up_ActionLineKick(frame);
+    tar = (keepTgt && !s_KmMp) ? *(void**)((char*)unit + OFF_TECH_TARGET) : NULL;
+    if (Up_KmKeepable(unit, tar))
+        alt = tar;
+    else if (tar)
+        /* 够不着才去找替代 (空目标不扫, 交给引擎自己按原版移动攻击选) */
+        alt = Up_KmBestTarget(unit);
+    else
+        alt = NULL;
+    if (alt)
+    {
+        tid = OU_ObjTgt(alt, &tr);
+        if (tid < 0) { tid = 0; tr = 0; }
+    }
+    Up_KmFireMove(house, unit, sid, ur, tx, ty, tid, tr, frame);
     if (a)
     {
         a->tx = (short)tx;
         a->ty = (short)ty;
+        a->fx = (short)cx;
+        a->fy = (short)cy;
+        a->mdx = (short)dx;
+        a->mdy = (short)dy;
         a->lastFrame = frame;
+        a->lastX = c.X;
+        a->lastY = c.Y;
+        a->still = 0;
         a->has = 1;
     }
+}
+
+/* 手上的目标打不到了就换掉, 只调 SetTarget, 不碰 Mission/Destination/Path
+ * (重发移动令会反复重置寻路, 单位迈不开步)。
+ * 不记"这个目标已弃过": 引擎会把它选回来, 记死就再也清不掉。
+ * 只在按住方向键时管; 松手后目标状态交回原版 (玩家可能刚点了远处敌人要追)。
+ * 联机跳过: SetTarget 只改本机模拟, 不走事件, 两边会分叉。 */
+static void Up_KmDropStale(void* unit, int uid, int frame)
+{
+    UpKmAnchor* a = Up_KmFind(unit, uid, 0);   /* 锚点按 指针+id 索引, id 不能省 */
+    void** vt;
+    Fn_UpSetTarget f;
+    void* tar, *alt;
+
+    if (s_KmMp) return;
+    if (!a || !a->has) return;
+    if ((unsigned)(frame - a->lastFrame) > UP_KM_ANCHOR_TTL) return;
+    if ((unsigned)(frame - a->lastDrop) < UP_KM_DROP_TTL) return;
+    tar = *(void**)((char*)unit + OFF_TECH_TARGET);
+    if (!tar || !IsPlausiblePtr(tar)) return;
+    if (Up_KmKeepable(unit, tar)) return;
+    alt = Up_KmBestTarget(unit);
+    if (alt == tar) return;
+    vt = Up_KmVT(unit);
+    if (!vt) return;
+    f = (Fn_UpSetTarget)vt[OFF_VT_SETTARGET / 4];
+    if (!f) return;
+    a->lastDrop = frame;
+    f(unit, alt);
 }
 
 /* UP_Poll 每循环调一次。键态每帧都采; 只有模式开 + 有可动单位时才真的下令。 */
@@ -581,19 +850,21 @@ static void Up_KeyMovePoll(void)
     void** items;
     void* eu[UP_KM_MAX];
     int   ei[UP_KM_MAX];
+    int   ew[UP_KM_MAX];
     int n, i, en = 0, selN = 0, house = 0, frame;
     int w, a, s, d, edge, removed, dx = 0, dy = 0, dir, changed;
     unsigned now;
 
-    if (!s_Vis) { s_KeyMove = 0; s_KeyMoveSel = 0; Up_KmClear(); return; }
-    if (!s_KeyMove) { s_KeyMoveSel = 0; Up_KmClear(); return; }
+    s_KmMp = OU_IsMP();
+    if (!s_Vis) { s_KeyMove = 0; Up_KmOff(); return; }
+    if (!s_KeyMove) { Up_KmOff(); return; }
 
     cur = *(void**)ADDR_CURPLAYER;
-    if (!cur || !IsPlausiblePtr(cur)) { s_KeyMoveSel = 0; Up_KmClear(); return; }
+    if (!cur || !IsPlausiblePtr(cur)) { Up_KmOff(); return; }
     house = *(int*)((char*)cur + OFF_HOUSE_INDEX);
     frame = *(int*)ADDR_FRAME;
     n = OU_VecItems(ADDR_CUR_OBJECTS, &items);
-    if (!items || n <= 0) { s_KeyMoveSel = 0; Up_KmClear(); return; }
+    if (!items || n <= 0) { Up_KmOff(); return; }
 
     for (i = 0; i < s_KmN; i++) s_Km[i].seen = 0;
 
@@ -608,25 +879,25 @@ static void Up_KeyMovePoll(void)
         if (!*(unsigned char*)((char*)u + OFF_ISALIVE)) continue;
         if (*(unsigned char*)((char*)u + OFF_INLIMBO)) continue;
         what = OU_WhatAmI(u);
-        if (what != WHATAMI_UNIT && what != WHATAMI_INFANTRY && what != WHATAMI_AIRCRAFT) continue;
+        if (what != ABS_UNIT && what != ABS_INFANTRY && what != ABS_AIRCRAFT) continue;
         uid = OU_ObjTgt(u, NULL);
         if (uid < 0) continue;
         selN++;
         if (en < UP_KM_MAX)
         {
+            UpKmAnchor* km;
             eu[en] = u;
             ei[en] = uid;
+            ew[en] = what;
             en++;
-            {
-                UpKmAnchor* km = Up_KmFind(u, uid, 1);
-                if (km) km->seen = 1;
-            }
+            km = Up_KmFind(u, uid, 1);
+            if (km) km->seen = 1;
         }
     }
     s_KeyMoveSel = selN;
     if (!selN) { Up_KmClear(); return; }
 
-    /* 边沿与上一帧键态: 门控期间也更新, 免得松手/关聊天后补触发一次。 */
+    /* 键态每帧采一次, 门控期间也更新: 免得松手/关聊天后补触发。 */
     w = OU_KeyDown('W') ? 1 : 0;
     a = OU_KeyDown('A') ? 1 : 0;
     s = OU_KeyDown('S') ? 1 : 0;
@@ -648,7 +919,7 @@ static void Up_KeyMovePoll(void)
         return;
     }
 
-    dir = Up_KeyDir(&dx, &dy);
+    dir = Up_KeyDir(w, a, s, d, &dx, &dy);
     if (!dir)
     {
         /* 松手: 组合窗口里还没发出的那一下必须补发, 否则快速点按会丢输入。 */
@@ -656,7 +927,7 @@ static void Up_KeyMovePoll(void)
         {
             for (i = 0; i < en; i++)
                 Up_KmIssue(house, eu[i], ei[i],
-                           s_KeyPendX, s_KeyPendY, frame, s_KeyPendAnchor);
+                           s_KeyPendX, s_KeyPendY, frame, s_KeyPendAnchor, 1, 1);
             s_KeyDirX = s_KeyPendX;
             s_KeyDirY = s_KeyPendY;
             s_KeyPendActive = 0;
@@ -669,11 +940,13 @@ static void Up_KeyMovePoll(void)
     now = GetTickCount();
     changed = (dx != s_KeyDirX || dy != s_KeyDirY);
 
-    /* 组合键窗口: 新方向/新按键先记下, 等窗口过去再出令。
-     * W 和 D 前后脚到达时, 第一帧只有 W、第二帧才变成 W+D; 若第一帧就下令,
-     * 单位会先走一格 W 再改斜向, 看起来就是"选了两个地方"。
-     * 松开一个键 (removed) 不立刻改待确认方向: 斜向点按常常先松 D 再松 W,
-     * 若一松手就降成 W, 会丢掉斜向。 */
+    /* 按住期间目标飘出射程就换掉; 只换目标, 与下面的推进下令互不干扰。 */
+    for (i = 0; i < en; i++)
+        Up_KmDropStale(eu[i], ei[i], frame);
+
+    /* 组合键窗口: 先记下方向, 窗口过了再出令 —— W 与 D 前后脚到达时不会被
+     * 拆成"先走一格 W 再改斜向"。
+     * 松键不改待确认方向: 斜向点按常常先松一个键, 一松就降级会丢掉斜向。 */
     if (s_KeyPendActive)
     {
         if (edge && (dx != s_KeyPendX || dy != s_KeyPendY))
@@ -708,24 +981,16 @@ static void Up_KeyMovePoll(void)
 
     if (s_KeyPendActive)
     {
-        if (dx == s_KeyPendX && dy == s_KeyPendY &&
-            (unsigned)(now - s_KeyPendMs) >= UP_KM_COMBO_MS)
+        if ((unsigned)(now - s_KeyPendMs) >= UP_KM_COMBO_MS)
         {
+            /* 按当前真实键态结算, 不按 pend 锁的方向 (中途松键会让 dx 永远
+             * 不等于 pend)。方向相对 pend 变了就按点按处理, 从当前格起。 */
+            int ax = s_KeyPendAnchor;
+            if (dx != s_KeyPendX || dy != s_KeyPendY) ax = 0;
             for (i = 0; i < en; i++)
-                Up_KmIssue(house, eu[i], ei[i],
-                           s_KeyPendX, s_KeyPendY, frame, s_KeyPendAnchor);
-            /* 若按键已部分松开 (当前方向只剩 W), 把"上次方向"记成当前方向,
-             * 避免下一帧又为 W 补发一格; 需要继续走 W 时, 到锚点后会由按住逻辑接上。 */
-            if (dx || dy)
-            {
-                s_KeyDirX = dx;
-                s_KeyDirY = dy;
-            }
-            else
-            {
-                s_KeyDirX = s_KeyPendX;
-                s_KeyDirY = s_KeyPendY;
-            }
+                Up_KmIssue(house, eu[i], ei[i], dx, dy, frame, ax, 1, 1);
+            s_KeyDirX = dx;
+            s_KeyDirY = dy;
             s_KeyPendActive = 0;
             s_KeyPendAnchor = 0;
         }
@@ -733,7 +998,11 @@ static void Up_KeyMovePoll(void)
         return;
     }
 
-    /* 方向没变、也没有新按键: 单位到达锚点后继续推进下一格。 */
+    /* 方向没变: 持续推进下一格。
+     * - 挪过窝 = 还在走 (绕路/慢), 等它到, 保住"走完这一格再接新方向"的手感;
+     * - 坐标完全不动 UP_KM_STUCK 帧 = 令被吃掉或目标格不可达, 立刻重发一格;
+     * - 没挪过窝且方向已改 = 旧目标不可达, 立即从当前格改向。
+     * 战机不等到达: 按固定间隔把目标往前叠, 消除"到点减速-再加速"的顿挫。 */
     for (i = 0; i < en; i++)
     {
         UpKmAnchor* km = Up_KmFind(eu[i], ei[i], 0);
@@ -744,11 +1013,54 @@ static void Up_KeyMovePoll(void)
             {
                 int cx = c.X / 256, cy = c.Y / 256;
                 int gap = frame - km->lastFrame;
-                /* 到达上一个目标格再发下一格: 频率自然跟着单位速度走
-                 * (慢单位间隔长, 快单位间隔短); 卡住时用 TIMEOUT 兜底。 */
-                if ((cx == km->tx && cy == km->ty && gap >= UP_KM_MIN_GAP) ||
-                    gap >= UP_KM_TIMEOUT)
-                    Up_KmIssue(house, eu[i], ei[i], dx, dy, frame, 1);
+                if (ew[i] == ABS_AIRCRAFT)
+                {
+                    /* 从当前格起算, 不从旧锚点累加: 锚点累加会让目标前移速度
+                     * 固定, 快战机抖、慢战机目标逃逸。 */
+                    if (gap >= UP_KM_AIR_GAP)
+                        Up_KmIssue(house, eu[i], ei[i], dx, dy, frame,
+                                   0, UP_KM_AIR_AHEAD, 1);
+                }
+                else
+                {
+                    int moved = (cx != km->fx || cy != km->fy);
+                    int turned = (km->mdx != dx || km->mdy != dy);
+                    int go = 0, anchor = 1, keepTgt = 1;
+                    /* 每次 Poll 采样一次坐标: 一个 lepton 都没挪就累加, 挪了清零 */
+                    if (c.X == km->lastX && c.Y == km->lastY)
+                    {
+                        if (km->still < 100000) km->still++;
+                    }
+                    else
+                    {
+                        km->lastX = c.X;
+                        km->lastY = c.Y;
+                        km->still = 0;
+                    }
+                    if (cx == km->tx && cy == km->ty && gap >= UP_KM_MIN_GAP)
+                    {
+                        /* 到了上一个目标格再发下一格, 频率跟着单位速度走 */
+                        go = 1;
+                    }
+                    else if (km->still >= UP_KM_STUCK)
+                    {
+                        /* 一动不动: 从当前格重发一格, 且不带目标 —— 挂着射程内
+                         * 的目标重发, 单位会站在原地打不挪窝。 */
+                        go = 1;
+                        anchor = 0;
+                        keepTgt = 0;
+                    }
+                    else if (gap >= UP_KM_TIMEOUT)
+                        go = 1;
+                    else if (turned && !moved && gap >= UP_KM_MIN_GAP)
+                    {
+                        go = 1;
+                        anchor = 0;
+                    }
+                    if (go)
+                        Up_KmIssue(house, eu[i], ei[i], dx, dy, frame, anchor, 1,
+                                   keepTgt);
+                }
             }
         }
     }
@@ -773,10 +1085,10 @@ static void* Up_TypeOf(void* o, int am)
 {
     unsigned off;
     void* t;
-    if (am == WHATAMI_UNIT) off = OFF_UNIT_TYPE;
-    else if (am == WHATAMI_AIRCRAFT) off = OFF_AIRCRAFT_TYPE;
-    else if (am == WHATAMI_INFANTRY) off = OFF_INFANTRY_TYPE;
-    else if (am == WHATAMI_BUILDING) off = OFF_BLD_TYPE;
+    if (am == ABS_UNIT) off = OFF_UNIT_TYPE;
+    else if (am == ABS_AIRCRAFT) off = OFF_AIRCRAFT_TYPE;
+    else if (am == ABS_INFANTRY) off = OFF_INFANTRY_TYPE;
+    else if (am == ABS_BUILDING) off = OFF_BLD_TYPE;
     else return NULL;
     t = *(void**)((char*)o + off);
     if (!t || !IsPlausiblePtr(t)) return NULL;
@@ -921,9 +1233,8 @@ static int Up_NoManualUnload(void* type)
     {
         char buf[112];
         unsigned q = 0;
-        int k;
         q = AppendCStr(buf, q, "up: nmu id=", sizeof(buf));
-        for (k = 0; k < 16 && id[k] && q + 1 < sizeof(buf); k++) buf[q++] = id[k];
+        q = Up_AppendId(buf, sizeof(buf), q, id, 16, '?');
         q = AppendCStr(buf, q, " v=", sizeof(buf));
         q += UtoA((unsigned)v, buf + q);
         q = AppendCStr(buf, q, " ini=", sizeof(buf));
@@ -979,7 +1290,7 @@ static void Up_Rebuild(void)
         all[0].obj = o; all[0].type = s_List[0].type; all[0].count = 1;
         all[1].obj = o; all[1].type = s_List[0].type; all[1].count = 0;   /* 0 => 信息格 */
         n = 2;
-        if (showPax && Up_WhatAmI(o) == WHATAMI_BUILDING)
+        if (showPax && Up_WhatAmI(o) == ABS_BUILDING)
         {
             n = Up_AddOccupants(o, all, n);
         }
@@ -1063,37 +1374,6 @@ static void Up_Rebuild(void)
             for (j = i - 1; j >= 0 && g[j].count < k.count; j--) g[j + 1] = g[j];
             g[j + 1] = k;
         }
-        /* 分组体检: 同一类型的号/图标被拆成两组时要能一眼看出来 */
-        if (g_Log)
-        {
-            static unsigned s_GrpSig = 0;
-            unsigned hs = (unsigned)gn * 2654435761u;
-            for (i = 0; i < gn; i++)
-                hs = hs * 31u + (unsigned)(size_t)g[i].type * 7u + (unsigned)g[i].count;
-            if (hs != s_GrpSig)
-            {
-                int k;
-                s_GrpSig = hs;
-                for (k = 0; k < gn && k < 9; k++)
-                {
-                    const char* id = (const char*)((char*)g[k].type + OFF_TYPE_ID);
-                    char buf[96];
-                    unsigned q = 0;
-                    q = AppendCStr(buf, q, "up: grp ", sizeof(buf));
-                    if (MemReadableBytes(id, 0x18) >= 0x18 && id[0])
-                    {
-                        int m;
-                        for (m = 0; m < 16 && id[m] && q + 1 < sizeof(buf); m++)
-                            buf[q++] = id[m];
-                        buf[q] = 0;
-                    }
-                    else q = AppendCStr(buf, q, "?", sizeof(buf));
-                    q = AppendCStr(buf, q, " n=", sizeof(buf));
-                    q += UtoA((unsigned)g[k].count, buf + q);
-                    LogLine(buf);
-                }
-            }
-        }
         for (i = 0; i < gn && i < UP_ENT_MAX; i++) all[i] = g[i];
         n = Up_Min(gn, UP_ENT_MAX);
         s_Trunc = (gn > UP_ENT_MAX) ? 1 : 0;
@@ -1123,7 +1403,6 @@ static void Up_Rebuild(void)
         s_Cell[UP_CELLN - 1].type = NULL;
         s_Cell[UP_CELLN - 1].count = -2;   /* -2 => 更多 */
     }
-    s_CellN = n;
     Up_FitGrid(n);
 }
 
@@ -1175,8 +1454,7 @@ static void Up_Refresh(void)
 static unsigned short* Up_Cameo(void* type);
 static unsigned short* Up_CapFind(void* type);
 
-/* 备齐当前页的图标: PCX 装载/ SHP 现渲都动引擎, 必须在扫描期做。
- * 布局变化时顺手打一条自检 (没有截图时靠它确认"图标到底取到没有")。 */
+/* 备齐当前页的图标: PCX 装载/ SHP 现渲都动引擎, 必须在扫描期做。 */
 static void Up_PrepareIcons(void)
 {
     int i;
@@ -1185,42 +1463,6 @@ static void Up_PrepareIcons(void)
     {
         const UpEnt* e = &s_Cell[i];
         if (e->type && e->count >= 0) Up_Cameo(e->type);
-    }
-    if (g_Log)
-    {
-        static unsigned s_PrepSig = 0;
-        unsigned hs = (unsigned)s_Cols * 131u + (unsigned)s_Rows * 17u + (unsigned)s_Pages * 7u;
-        int nslot = s_Cols * s_Rows;
-        for (i = 0; i < nslot; i++)
-            hs = hs * 31u + (unsigned)(size_t)s_Cell[i].type * 7u + (unsigned)(s_Cell[i].count + 3);
-        if (hs != s_PrepSig)
-        {
-            s_PrepSig = hs;
-            for (i = 0; i < nslot; i++)
-            {
-                const UpEnt* e = &s_Cell[i];
-                char buf[96];
-                unsigned q = 0;
-                q = AppendCStr(buf, q, "up: cell ", sizeof(buf));
-                q += UtoA((unsigned)i, buf + q);
-                q = AppendCh(buf, q, ' ', sizeof(buf));
-                if (e->type && MemReadableBytes((char*)e->type + OFF_TYPE_ID, 0x18) >= 0x18)
-                {
-                    const char* id = (const char*)((char*)e->type + OFF_TYPE_ID);
-                    int m;
-                    for (m = 0; m < 12 && id[m] && q + 1 < sizeof(buf); m++) buf[q++] = id[m];
-                }
-                else q = AppendCh(buf, q, '-', sizeof(buf));
-                q = AppendCStr(buf, q, " cameo=", sizeof(buf));
-                q += UtoA((unsigned)((e->type && Up_CapFind(e->type)) ? 1 : 0), buf + q);
-                q = AppendCStr(buf, q, " cnt=", sizeof(buf));
-                if (e->count == -2) q = AppendCStr(buf, q, "more", sizeof(buf));
-                else if (e->count == -1) q = AppendCStr(buf, q, "empty", sizeof(buf));
-                else if (e->count == 0) q = AppendCStr(buf, q, "info", sizeof(buf));
-                else q += UtoA((unsigned)e->count, buf + q);
-                LogLine(buf);
-            }
-        }
     }
 }
 
@@ -1233,96 +1475,15 @@ static void Up_ForceRebuild(void)
 /* ---------------- 图标 (cameo) ----------------
  * MO 的单位图标绝大多数是 `Cameo=xxx.pcx` (Ares 键), 这时 `TechnoTypeClass::Cameo`
  * 指向 XXICON.SHP 占位图 —— 照 SHP 画出来的就是那个紫球。所以先读 CameoFile:
- * 是 .pcx 就走引擎 PCX (与超武侧栏 SwsSnapPcxCap 同一条路), 否则才用 SHP +
- * CAMEO_PAL 现渲 (旧式固定调色板图标)。
+ * 是 .pcx 就走 IconSnap_Pcx (与超武侧栏同一条快照路), 否则才用 IconSnap_Shp
+ * 现渲 (旧式固定调色板图标)。
  * PCX 装载会动引擎的面池, 只能在 UP_Poll (扫描期) 做, 绘制帧里只读缓存。 */
-
-typedef void* (__attribute__((thiscall)) *Fn_PcxGetSurf)(void* pcx, const char* name, void* pal);
-typedef int (__attribute__((thiscall)) *Fn_PcxLoad)(void* pcx, const char* name, int f1, int f2);
 
 static unsigned short* Up_CapFind(void* type)
 {
     int i;
     for (i = 0; i < s_CapN; i++) if (s_Cap[i].type == type) return s_Cap[i].pix;
     return NULL;
-}
-
-/* 取 PCX 面 (未加载则现装一次)。**只能在 UP_Poll 里调**。 */
-static void* Up_PcxSurf(const char* file)
-{
-    void* pcx = (void*)ADDR_PCX_INSTANCE;
-    void* surf;
-    if (!pcx || !IsPlausiblePtr(pcx)) return NULL;
-    surf = ((Fn_PcxGetSurf)(void*)FN_PCX_GETSURF)(pcx, file, NULL);
-    if (!surf)
-    {
-        ((Fn_PcxLoad)(void*)FN_PCX_LOAD)(pcx, file, 2, 0);
-        surf = ((Fn_PcxGetSurf)(void*)FN_PCX_GETSURF)(pcx, file, NULL);
-    }
-    if (surf && !IsPlausiblePtr(surf)) return NULL;
-    if (surf && !IsPlausiblePtr(*(void**)surf)) return NULL;
-    return surf;
-}
-
-/* 把 PCX 面缩成 60x48 (最近邻), 色键统一换成 UP_KEY。
- * 源尺寸记到 s_PcxLastW/H, 只给日志看 (cameo 该是 60x48)。 */
-static int s_PcxLastW = 0, s_PcxLastH = 0;
-static int Up_SnapPcx(void* surf, unsigned short* dst)
-{
-    const unsigned short* src;
-    unsigned short key;
-    int w, h, bpp, r, c;
-    if (!surf) return 0;
-    w = *(int*)((char*)surf + 0x04);
-    h = *(int*)((char*)surf + 0x08);
-    bpp = *(int*)((char*)surf + 0x10);
-    src = *(const unsigned short**)((char*)surf + 0x14);
-    if (w < 1 || w > 256 || h < 1 || h > 256 || bpp != 2) return 0;
-    if (!src || !IsPlausiblePtr((void*)src)) return 0;
-    if (*(int*)((char*)surf + 0x18) != w * h * 2) return 0;
-    s_PcxLastW = w; s_PcxLastH = h;
-    key = src[0];
-    for (r = 0; r < UP_ICON_H; r++)
-    {
-        const unsigned short* srow = src + (size_t)((r * h) / UP_ICON_H) * w;
-        unsigned short* drow = dst + (size_t)r * UP_ICON_W;
-        for (c = 0; c < UP_ICON_W; c++)
-        {
-            unsigned short v = srow[(c * w) / UP_ICON_W];
-            drow[c] = (v == key) ? UP_KEY : v;
-        }
-    }
-    return 1;
-}
-
-/* SHP 现渲 (旧式 cameo, 固定调色板 CAMEO_PAL)。 */
-static int Up_RenderShp(void* shp, unsigned short* out)
-{
-    unsigned int surf[8];
-    unsigned char* s = (unsigned char*)surf;
-    void* pal;
-    Point2D pos;
-    RectangleStruct b;
-    int i;
-    if (!shp || !IsPlausiblePtr(shp)) return 0;
-    if (!IsPlausiblePtr((void*)ADDR_CAMEO_PAL)) return 0;
-    pal = *(void**)ADDR_CAMEO_PAL;
-    if (!pal || !IsPlausiblePtr(pal)) return 0;
-    for (i = 0; i < 0x20; i++) s[i] = 0;
-    *(void**)(s + 0x00) = (void*)ADDR_BSHAPE_VTBL;
-    *(int*)(s + 0x04) = UP_ICON_W;
-    *(int*)(s + 0x08) = UP_ICON_H;
-    *(int*)(s + 0x0C) = 0;
-    *(int*)(s + 0x10) = 2;
-    *(void**)(s + 0x14) = (void*)out;
-    *(int*)(s + 0x18) = UP_ICON_W * UP_ICON_H * 2;
-    *(int*)(s + 0x1C) = 1;
-    for (i = 0; i < UP_ICON_W * UP_ICON_H; i++) out[i] = UP_KEY;
-    pos.X = 0; pos.Y = 0;
-    b.X = 0; b.Y = 0; b.Width = UP_ICON_W; b.Height = UP_ICON_H;
-    ((UpDrawShpFn)(void*)FN_DRAW_SHAPE)(surf, pal, shp, 0, &pos, &b,
-        CAMEO_BLIT_FLAGS, 0, 0, 0, CAMEO_BRIGHTNESS, 0, NULL, 0, 0, 0);
-    return 1;
 }
 
 /* 图标文件名: 先问 art ini 的 `CameoPCX=` (Ares 键, MO 的单位图标都在这), 没有再
@@ -1337,14 +1498,19 @@ static int Up_CameoPcxName(void* type, char* out, int cap, char* secOut, int sec
                                                         char* buf, unsigned size);
     const char* img = (const char*)((char*)type + OFF_TYPE_IMAGEFILE);
     const char* id = (const char*)((char*)type + OFF_TYPE_ID);
-    const char* use = img;
+    const char* use;
     int n, i;
 
     out[0] = 0;
     if (secOut && secCap > 0) secOut[0] = 0;
-    if (!MemReadableBytes(img, 0x19) && !MemReadableBytes(id, 0x18)) return 0;
-    if (!img[0]) use = id;
-    if (!use[0]) return 0;
+    /* img/id 各自判可读再选: 任一边不可读都不能解引用, 两边都不可读才放弃。 */
+    if (MemReadableBytes(img, 0x19) >= 0x19 && img[0])
+        use = img;
+    else
+    {
+        if (MemReadableBytes(id, 0x18) < 0x18 || !id[0]) return 0;
+        use = id;
+    }
     if (secOut)
     {
         int k;
@@ -1385,29 +1551,25 @@ static unsigned short* Up_Cameo(void* type)
     char name[64];
     char sec[32];
     int fromPcx = 0;
+    int pcxW = 0, pcxH = 0;   /* 源面尺寸, 只给日志看 (cameo 该是 60x48) */
     void* shp;
 
     if (!type || !IsPlausiblePtr(type)) return NULL;
     px = Up_CapFind(type);
     if (px) return px;
 
-    px = (unsigned short*)LocalAlloc(LMEM_FIXED,
-            (SIZE_T)(UP_ICON_W * UP_ICON_H) * sizeof(unsigned short));
-    if (!px) return NULL;
-
     name[0] = 0;
     sec[0] = 0;
-    if (Up_CameoPcxName(type, name, (int)sizeof(name), sec, (int)sizeof(sec)) &&
-        Up_SnapPcx(Up_PcxSurf(name), px))
-        fromPcx = 1;
-    else
+    if (Up_CameoPcxName(type, name, (int)sizeof(name), sec, (int)sizeof(sec)))
+    {
+        px = IconSnap_Pcx(name, UP_ICON_W, UP_ICON_H, &pcxW, &pcxH);
+        fromPcx = (px != NULL);
+    }
+    if (!px)
     {
         shp = *(void**)((char*)type + OFF_TT_CAMEO);
-        if (!shp || !IsPlausiblePtr(shp) || !Up_RenderShp(shp, px))
-        {
-            LocalFree(px);
-            return NULL;
-        }
+        if (shp && IsPlausiblePtr(shp)) px = IconSnap_Shp(shp, UP_ICON_W, UP_ICON_H);
+        if (!px) return NULL;
     }
 
     if (s_CapN < 12 && g_Log)
@@ -1417,13 +1579,7 @@ static unsigned short* Up_Cameo(void* type)
         unsigned q = 0;
         const char* id = (const char*)((char*)type + OFF_TYPE_ID);
         q = AppendCStr(buf, q, "up: icon id=", sizeof(buf));
-        if (MemReadableBytes(id, 0x18) >= 0x18 && id[0])
-        {
-            int k;
-            for (k = 0; k < 16 && id[k] && q + 1 < sizeof(buf); k++) buf[q++] = id[k];
-            buf[q] = 0;
-        }
-        else q = AppendCStr(buf, q, "?", sizeof(buf));
+        q = Up_AppendId(buf, sizeof(buf), q, id, 16, '?');
         q = AppendCStr(buf, q, " sec=", sizeof(buf));
         q = AppendCStr(buf, q, sec[0] ? sec : "?", sizeof(buf));
         q = AppendCStr(buf, q, fromPcx ? " pcx=" : " shp=", sizeof(buf));
@@ -1431,9 +1587,9 @@ static unsigned short* Up_Cameo(void* type)
         if (fromPcx && q + 8 < sizeof(buf))
         {
             q = AppendCh(buf, q, ' ', sizeof(buf));
-            q += UtoA((unsigned)s_PcxLastW, buf + q);
+            q += UtoA((unsigned)pcxW, buf + q);
             q = AppendCh(buf, q, 'x', sizeof(buf));
-            q += UtoA((unsigned)s_PcxLastH, buf + q);
+            q += UtoA((unsigned)pcxH, buf + q);
         }
         LogLine(buf);
     }
@@ -1876,9 +2032,8 @@ static void Up_DrawInfoCell(unsigned char* base, int pitch, int W, int H,
     level = Up_Level(e->obj);
     vet = *(float*)((char*)e->obj + OFF_TECH_VETERANCY);
 
-    /* 血量色: 与游戏同口径 (>=50% 绿, >=25% 黄, 否则红) */
-    if (pc >= 50) { r = 60; g = 210; b = 60; }
-    else if (pc >= 25) { r = 235; g = 210; b = 60; }
+    /* 血量色: 与游戏同口径 (>=50% 绿即默认色, >=25% 黄, 否则红) */
+    if (pc >= 25) { r = 235; g = 210; b = 60; }
     else { r = 230; g = 60; b = 60; }
     /* 经验条颜色即等级: 新兵蓝 / 老兵青 / 精英金 */
     if (level >= 2) { er = 255; eg = 200; eb = 80; }
@@ -2087,7 +2242,7 @@ int UP_Draw(void)
         q += UtoA((unsigned)s_Py, buf + q); q = AppendCStr(buf, q, " ", sizeof(buf));
         q += UtoA((unsigned)s_Pw, buf + q); q = AppendCh(buf, q, 'x', sizeof(buf));
         q += UtoA((unsigned)s_Ph, buf + q); q = AppendCStr(buf, q, " cells=", sizeof(buf));
-        q += UtoA((unsigned)s_CellN, buf + q); q = AppendCStr(buf, q, " pages=", sizeof(buf));
+        q += UtoA((unsigned)(s_Cols * s_Rows), buf + q); q = AppendCStr(buf, q, " pages=", sizeof(buf));
         q += UtoA((unsigned)s_Pages, buf + q);
         LogLine(buf);
     }
@@ -2174,7 +2329,6 @@ static void Up_ClickAt(int mx, int my)
     {
         s_Collapsed = s_Collapsed ? 0 : 1;
         s_HoverCell = -1;
-        s_Pend = 0;
         s_PendRb = 0;
         /* 折叠后看不到模式指示, 必须关掉; 否则 WASD 被吞却没有任何提示。 */
         if (s_Collapsed) { s_KeyMove = 0; s_KeyMoveSel = 0; Up_KmClear(); }
@@ -2258,7 +2412,6 @@ static void Up_ClickAt(int mx, int my)
 /* 右键落在星星按钮上: 切换指示箭头类型 (贴边 / 中心同心圆)。 */
 static void Up_RightClickAt(int mx, int my)
 {
-    if (s_Collapsed) return;
     if (Up_HitBtn(mx, my) >= UP_BTN_FAV1) Fav_ToggleArrowMode();
 }
 
@@ -2321,6 +2474,7 @@ void UP_Poll(void)
         return;
     }
     s_Vis = (*(volatile unsigned char*)(size_t)ADDR_SCEN_STARTED) ? 1 : 0;
+    Up_KmMatchEdge(s_Vis, *(int*)ADDR_FRAME);
     if (!s_Vis)
     {
         s_Pend = 0;
@@ -2342,13 +2496,16 @@ void UP_Poll(void)
     if (!SU_PlanActive() && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
         Up_PickHostOK() && s_PickN > 0)
         SU_PlanAutoArm(s_List[0].obj, s_Pick, s_PickN);
-    /* 载员规划: 落点格只能在这里取 (门内调 ProcessClickCoords 会递归)。 */
-    s_PlanWas = SU_PlanActive();
-    s_PlanFired = SU_PlanFiredCount();
-    SU_PlanPoll();
-    /* 这次规划真下过点才收名单: 只按一下 Z 又松开 (误触) 不该清掉。
-     * 留着的话下次按 Z 又被它接管, 想给载具本身下点就下不成。 */
-    if (s_PlanWas && !SU_PlanActive() && s_PlanFired > 0) Up_PickClear();
+    /* 载员规划: 落点格只能在这里取 (门内调 ProcessClickCoords 会递归)。
+     * 本轮 SU_PlanPoll() 之前先记下规划状态: 真下过点才收名单。 */
+    {
+        int planWas = SU_PlanActive();        /* 本轮结算前规划是否在跑 (结束时收名单用) */
+        int planFired = SU_PlanFiredCount();  /* 本轮结算前的节点轮数 (同上) */
+        SU_PlanPoll();
+        /* 这次规划真下过点才收名单: 只按一下 Z 又松开 (误触) 不该清掉。
+         * 留着的话下次按 Z 又被它接管, 想给载具本身下点就下不成。 */
+        if (planWas && !SU_PlanActive() && planFired > 0) Up_PickClear();
+    }
     /* 松开时清门侧按下沿标记 (松手那一下未必再进门) */
     if (s_GateLb && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) s_GateLb = 0;
     if (s_GateRb && !(GetAsyncKeyState(VK_RBUTTON) & 0x8000)) s_GateRb = 0;

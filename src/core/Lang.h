@@ -24,3 +24,8 @@ void Lang_GetA(const char* section, const char* key, const char* def,
                char* buf, int cap);
 int  Lang_GetW(const char* section, const char* key, const wchar_t* def,
                wchar_t* buf, int cap);
+
+/* UTF-8 → UTF-16 解码 (ini 是 UTF-8, 无 CRT, 不能走 MultiByteToWideChar ——
+ * 那按 ACP 解码会把中文吃坏)。开头的 BOM 被吃掉, 坏字节出替换字符;
+ * 写满 dst..end 后停止并保证 0 终止。返回写完的尾指针。 */
+wchar_t* Lang_Utf8ToWide(wchar_t* dst, wchar_t* end, const unsigned char* s);

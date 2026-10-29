@@ -78,93 +78,10 @@ static void SO_EnsureInit(void)
 
 /* ---------------- 小工具 (通用部分见 OrderUtil.h) ---------------- */
 
-/* ---------------- 类型自校准 ---------------- */
+/* ---------------- 类型自校准 (公共实现见 OrderUtil.h) ---------------- */
 
 static int g_SoTypeOff[3] = { -1, -1, -1 }; /* 按类别 pin: 0=Unit 1=Aircraft 2=Infantry */
 static int g_SoIdOff = -1;                  /* 类型内 ID 字符串偏移 pin */
-
-static int SO_ClassSlot(int w)
-{
-    if (w == ABS_UNIT) return 0;
-    if (w == ABS_AIRCRAFT) return 1;
-    if (w == ABS_INFANTRY) return 2;
-    return -1;
-}
-
-static int SO_StrOk(const char* s)
-{
-    int n = 0;
-    if (!s) return 0;
-    while (n < 24)
-    {
-        char c = s[n];
-        if (!c) return (n > 0) ? 1 : 0;
-        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-              c == '_' || c == '.' || c == '-')) return 0;
-        n++;
-    }
-    return 0;
-}
-
-/* 类型指针 p 的 ID 是否可读; 可读则拷入 out (24 字节) 并 pin 偏移。 */
-static int SO_TypeID(void* p, char* out)
-{
-    static const unsigned cands[3] = { 0x20u, 0x24u, 0x28u };
-    int i;
-    if (!p || !IsPlausiblePtr(p)) return 0;
-    if (g_SoIdOff >= 0)
-    {
-        const char* s = (const char*)p + (unsigned)g_SoIdOff;
-        int k;
-        if (!SO_StrOk(s)) { g_SoIdOff = -1; }
-        else
-        {
-            for (k = 0; k < 24; k++) out[k] = s[k];
-            return 1;
-        }
-    }
-    for (i = 0; i < 3; i++)
-    {
-        const char* s = (const char*)p + cands[i];
-        int k;
-        if (!SO_StrOk(s)) continue;
-        g_SoIdOff = (int)cands[i];
-        for (k = 0; k < 24; k++) out[k] = s[k];
-        return 1;
-    }
-    return 0;
-}
-
-/* 是否静态类型数组的成员 (类型指针判定的共同底座, 见 OrderUtil.h)。 */
-static int SO_InTypeSet(void* p) { return OU_InVec(ADDR_TYPARRAY, p); }
-
-/* 单位取 Type 指针 (pin 命中则快路, 否则全扫; 跨单位一致即自证)。 */
-static void* SO_TypeOf(void* u, int w)
-{
-    int slot = SO_ClassSlot(w);
-    unsigned off;
-    char idb[24];
-    int k;
-    if (slot < 0) return 0;
-    if (g_SoTypeOff[slot] >= 0)
-    {
-        void* p = *(void**)((char*)u + (unsigned)g_SoTypeOff[slot]);
-        if (p && IsPlausiblePtr(p) && SO_InTypeSet(p) && SO_TypeID(p, idb))
-            return p;
-        g_SoTypeOff[slot] = -1;
-    }
-    for (off = 0x40u; off < 0x900u; off += 4u)
-    {
-        void* p = *(void**)((char*)u + off);
-        if (!p || !IsPlausiblePtr(p)) continue;
-        if (!SO_InTypeSet(p)) continue;
-        for (k = 0; k < 24; k++) idb[k] = 0;
-        if (!SO_TypeID(p, idb)) continue;
-        g_SoTypeOff[slot] = (int)off;
-        return p;
-    }
-    return 0;
-}
 
 /* ---------------- 快照与触发 ---------------- */
 
@@ -254,7 +171,7 @@ static void SO_Press(void)
         if (u->w == ABS_AIRCRAFT) u->fly = 1;
         else
         {
-            tp = SO_TypeOf(u->unit, u->w);
+            tp = OU_TypeOf(u->unit, u->w, g_SoTypeOff, ADDR_TYPARRAY, &g_SoIdOff);
             if (tp)
             {
                 mz = *(int*)((char*)tp + SO_OFF_MZ);

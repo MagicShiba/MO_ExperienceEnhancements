@@ -2827,7 +2827,7 @@ void VecText_Install(void)
               &g_CameraSetTramp, "pip: cameraset" },
             { 0x653D92u, kW_RadarCell, 6, (void*)MOExperience_RadarClampEntry,
               &g_RadarCellTramp, "pip: radarraw" },
-            { 0x537A10u, kW_Follow, 5, (void*)MOExperience_FollowEntry,
+            { ADDR_CMD_FOLLOW, kW_Follow, 5, (void*)MOExperience_FollowEntry,
               &g_FollowTramp, "pip: follow" },
             { 0x6BA580u, kW_BlitGuard, 5, (void*)MOExperience_BlitGuardEntry,
               &g_BlitGuardTramp, "vtext: blitguard" },

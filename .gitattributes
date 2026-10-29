@@ -7,5 +7,8 @@
 *.cpp text eol=lf
 *.h   text eol=lf
 *.md  text eol=lf
+# cmd.exe 解析不了 LF 行尾的 .bat (会把首字符吃掉、报 "不是内部或外部命令"),
+# 所以构建脚本必须保持 CRLF 检出。
+*.bat text eol=crlf
 
 dist/MOExperience.dll.inj -text

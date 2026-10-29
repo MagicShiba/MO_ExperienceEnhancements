@@ -336,16 +336,11 @@ extern "C" __declspec(dllexport) unsigned __cdecl SU_EventRecord(void* regs)
     if (ev[SU_OFF_MISSION] != MISSION_UNLOAD) return 0;
     /* 联机不建记录: 钩子仍在, 没有记录就全部落回原生整批卸载。 */
     if (OU_IsMP()) return 0;
-    if (ev[SU_OFF_TGT_RTTI] != 0)
-    {
-        /* 带真目标的卸载令: 不是我们的单卸令, 旧记录要清掉, 否则整批
-         * 卸载会被截成只放一个。 */
-        SU_ClearUnit(unit);
-        return 0;
-    }
     id = *(int*)(ev + SU_OFF_TGT_ID);
-    if (((unsigned)id & SU_MAGIC_MASK) != SU_MAGIC)
+    if (ev[SU_OFF_TGT_RTTI] != 0 || ((unsigned)id & SU_MAGIC_MASK) != SU_MAGIC)
     {
+        /* 带真目标的卸载令 / 无 SU_MAGIC 前缀: 都不是我们的单卸令,
+         * 旧记录要清掉, 否则整批卸载会被截成只放一个。 */
         SU_ClearUnit(unit);
         return 0;
     }
@@ -513,8 +508,6 @@ extern "C" __declspec(dllexport) unsigned __cdecl SU_BldTail(void* regs)
  *
  * 手势、垫点判据、任务类型映射见 notes/载具内成员路径点.md。 */
 
-#define SU_PAX_MAX   10     /* 一次最多同时给几个载员规划; 垫点表按同一上限开 */
-
 typedef struct
 {
     void* pax;
@@ -631,21 +624,6 @@ static SuPad* SU_PadSlot(void* pax)
     return e;
 }
 
-/* 单位 token 上的节点数 (只读; token 不存在/野指针回 0)。 */
-static int SU_TokNodes(void* unit)
-{
-    void* t;
-    void** arr;
-    int n;
-    if (!unit || !IsPlausiblePtr(unit)) return 0;
-    t = *(void**)((char*)unit + OFF_TECH_TOKEN);
-    if (!t || !IsPlausiblePtr(t)) return 0;
-    arr = *(void***)((char*)t + OFF_TOK_NODES);
-    n = *(int*)((char*)t + OFF_TOK_NCOUNT);
-    if (!arr || !IsPlausiblePtr(arr) || n < 0 || n > 1000) return 0;
-    return n;
-}
-
 /* 一逻辑帧扫一次: 见到 token 上有节点就记 seen, 之后又清空 = 计划跑完,
  * 下一条路径重新垫点。 */
 static void SU_PadPoll(void)
@@ -671,7 +649,7 @@ static void SU_PadPoll(void)
             e->pax = 0;
             continue;
         }
-        n = SU_TokNodes(e->pax);
+        n = OU_TokenNodes(e->pax);
         if (n > 0) e->seen = 1;                /* 节点确实挂上了 token */
         else if (e->seen) { e->padded = 0; e->seen = 0; }   /* 计划跑完: 下次进车重新垫 */
     }
@@ -742,7 +720,7 @@ static void SU_PlanPadOne(void* pax)
     pad = SU_PadSlot(pax);
     if (pad->padded) return;
     /* 已经有计划留在 token 上: 往队尾垫一个只会多走一段。 */
-    if (SU_TokNodes(pax) > 0) { pad->padded = 1; return; }
+    if (OU_TokenNodes(pax) > 0) { pad->padded = 1; return; }
     owner = *(void**)((char*)pax + OFF_OWNER);
     if (!owner) { SU_LogClick("plan pad owner", s_PlanHost, pax, 0); return; }
     houseIdx = *(int*)((char*)owner + OFF_HOUSE_INDEX);

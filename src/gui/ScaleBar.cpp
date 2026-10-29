@@ -30,7 +30,6 @@
 #define ADDR_ABUF_SB         0x0087E8A4u   /* ABufferClass* */
 #define ADDR_FRAME_SB        0x00A8ED84u   /* 引擎帧号 */
 #define ADDR_TACTICAL_SB     0x00887324u   /* TacticalClass::Instance */
-#define ADDR_REG_DIRTY_SB    0x006D2790u   /* TacticalClass::RegisterDirtyArea */
 #define ADDR_CUR_SURF_SB     0x00887314u   /* 引擎"当前绘制面" (Render 入口 = Composite) */
 /* chrome 脏缓存: [0xB0CD44] 为 0 ⇒ 引擎下帧重画整个 chrome。 */
 #define SB_CHROME_DIRTY_N 0xB0CD44u
@@ -596,7 +595,7 @@ static void Sb_MarkViewDirty(void)
     r.Y = 0;
     r.Width = vb->Width;
     r.Height = vb->Height;
-    fn = (FnRegDirtyArea)(size_t)ADDR_REG_DIRTY_SB;
+    fn = (FnRegDirtyArea)(size_t)ADDR_REG_DIRTY_AREA;
     fn(tac, r, 1);
 }
 
@@ -1321,7 +1320,7 @@ void SB_PrepareSurface(void)
             {
                 RectangleStruct dr;
                 dr.X = 0; dr.Y = 0; dr.Width = r.Width; dr.Height = r.Height;
-                ((FnRegDirtyArea)(size_t)ADDR_REG_DIRTY_SB)(tac, dr, 1);
+                ((FnRegDirtyArea)(size_t)ADDR_REG_DIRTY_AREA)(tac, dr, 1);
             }
         }
     }

@@ -5,3 +5,7 @@
 
 /* 每循环轮询，挂 PowerDrawBoth。 */
 void Observer_Poll(void);
+
+/* 本机是否为观战者（只读，与 [Features] Observer 开关无关）。
+ * 判据同 Observer_Poll：CurrentPlayer == Observer，或本机房是任一观战槽。 */
+int Observer_LocalIsSpectator(void);

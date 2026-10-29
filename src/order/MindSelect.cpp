@@ -37,7 +37,6 @@
 #define SEL_CAP          500u        /* DEFINE_ARRAY_REFERENCE 上限 */
 #define OFF_SEL_NEXT     12u         /* {Object*, X, Y} (YRpp TacticalClass.h:13) */
 
-#define ADDR_CUROBJ    0xA8ECB8u     /* ObjectClass::CurrentObjects (当前选中) */
 #define OFF_VEC_CAP    8u
 
 #define OFF_ISSELECTED 0x83u
@@ -98,9 +97,7 @@ static int MS_IsMCd(void* u)
     if (!u || !IsPlausiblePtr(u)) return 0;
     w = OU_WhatAmI(u);
     if (w != ABS_UNIT && w != ABS_INFANTRY && w != ABS_AIRCRAFT) return 0;
-    if (!((unsigned char*)u)[OFF_ISALIVE]) return 0;
-    if (((unsigned char*)u)[OFF_INLIMBO]) return 0;
-    if (*(int*)((char*)u + OFF_HEALTH) <= 0) return 0;
+    if (!OU_TechAliveRaw(u)) return 0;                 /* 存活三连 */
     if (((unsigned char*)u)[OFF_MCBYAUNIT]) return 0;   /* 永久心控不算 */
     if (!MS_IsSelectable(u)) return 0;                 /* 引擎可选性 */
     return FN_ISMC(u) ? 1 : 0;             /* 心控判定 (只读调用) */
@@ -133,9 +130,9 @@ static void MS_Round(void)
         if (MS_IsMCd(u)) scrMC[nS++] = u;
     }
     /* 2. 当前选中清点 (只读, 不动)。 */
-    items = *(void***)(ADDR_CUROBJ + OFF_VEC_ITEMS);
-    cap = *(int*)(ADDR_CUROBJ + OFF_VEC_CAP);
-    count = *(int*)(ADDR_CUROBJ + OFF_VEC_COUNT);
+    items = *(void***)(ADDR_CUR_OBJECTS + OFF_VEC_ITEMS);
+    cap = *(int*)(ADDR_CUR_OBJECTS + OFF_VEC_CAP);
+    count = *(int*)(ADDR_CUR_OBJECTS + OFF_VEC_COUNT);
     if (!items || !IsPlausiblePtr(items)) return;
     if (cap <= 0 || cap > 8192 || count < 0 || count > cap) return;
     for (i = 0; i < count; i++)
@@ -155,7 +152,7 @@ static void MS_Round(void)
             ((unsigned char*)u)[OFF_ISSELECTED] = 0;
         }
     }
-    *(int*)(ADDR_CUROBJ + OFF_VEC_COUNT) = kept;
+    *(int*)(ADDR_CUR_OBJECTS + OFF_VEC_COUNT) = kept;
     /* 5. 屏内心控原生加入 (已在选中里挂 IsSelected=1 的会被引擎去重, 不双收)。 */
     for (i = 0; i < nS; i++) MS_SelectOne(scrMC[i]);
 }

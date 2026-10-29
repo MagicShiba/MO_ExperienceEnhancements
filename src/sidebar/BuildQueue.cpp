@@ -15,14 +15,14 @@
  *     "点不下", 队列自愈)。权限复查用 HouseClass::CanBuild (0x4F7870): ==0 丢,
  *     >0 (含 -1 临时灰化) 不动。
  *   - 右键: 点一次暂停, 再点取消; 取消优先减数 (在产/暂停不动), 最后剩在产单个走
- *     原生真取消。Shift+右键=清全部。真实分发见 BQ_DarkPauseSeen 前的"真分发"说明。
+ *     原生真取消。Shift+右键=清全部。真实分发见下方"真分发"说明。
  *   - 图标数字 (0x6A9C86) 与就绪文本左对齐 (0x6A9DAB/0x6A9E17 两处 JMP 桩) 是纯
  *     渲染补丁, 不碰模拟。
  *   - 开关关时钩子全跑原指令、轮询直接返回 (=原版行为)。
  *
  * 铁律: 钩子凡偷了含 rel 的字节 (E8 call / Jcc), 永远不许 return 0 —— Syringe 把
  *   副本搬进桩池且不重定位 rel32, 跑副本会跳野地址; 条件跳转永不跳回钩子自身。
- *   本文件钩点皆无 rel (0x6AB689/0x6AB6CE/0x6AB197/0x6AAFE1/0x6A9C86/0x6A9C6C),
+ *   本文件钩点皆无 rel (0x6AB689/0x6AB6CE/0x6AB197/0x6A9C86/0x6A9C6C),
  *   两个 Jcc 点 (0x6AB0C1/0x6AAE44) 永远跳转。
  *
  * 事件复刻 (与 0x6AB741-0x6AB7C7 逐字节同义): EventClass ctor 0x4C6970 (thiscall,
@@ -759,14 +759,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_CancelPeel(void* regs)
  *     无 shift→0x6AAFBD 暗取消 (0x10), 有 shift→0x6AAE4A 暗清全部 (0x2E),
  *     两者经 jmp 0x6AB1FF 共享尾构造。
  * 在产时右键永远走暗路, 明路钩子够不着 —— 剥离必须挂在真分发点上。 */
-
-/* 0x6AAFE1 (5): 暗暂停入口 (mov eax,[0x8871e0], 无 rel)。
- * 纯哨兵: 永远跑原指令 (暂停保持原生)。 */
-extern "C" __declspec(dllexport) DWORD __cdecl BQ_DarkPauseSeen(void* regs)
-{
-    (void)regs;
-    return 0;
-}
 
 /* 清空本家本型全部本地 (shift+右键清全部用)。返回清空前数量。 */
 static int BQ_ClearType(void* house, int heap)

@@ -77,7 +77,7 @@ typedef int (__attribute__((thiscall)) *PpFloorHeight)(void* cell,
     const Point2D* p);
 typedef void* (__attribute__((thiscall)) *PpGetDrawer)(void* building);
 typedef void* (__attribute__((thiscall)) *PpTypeFn)(void* type);
-/* 与 SWSBar.cpp 的 SwsDrawShpFn 同签名: __fastcall ecx=Surface, edx=Palette,
+/* 与 IconSnap.cpp 的 Fn_DrawShape 同签名: __fastcall ecx=Surface, edx=Palette,
  * 其余按栈传, ret 0x38。 */
 typedef void (__fastcall *PpDrawShp)(void* surf, void* pal, void* shp,
     int frame, Point2D* pos, RectangleStruct* bounds, int flags, int remap,

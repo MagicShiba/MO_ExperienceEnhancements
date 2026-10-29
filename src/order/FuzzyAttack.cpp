@@ -87,32 +87,9 @@ static int FA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
                        tgtID, tgtRtti, 0, 0, 0, 0, 0, unit, uid, idxOk);
 }
 
-/* ---------------- Owner 自校准 (敌我判定, 双单位确认) ---------------- */
+/* ---------------- Owner 自校准 (敌我判定; 公共实现见 OrderUtil.h) ---------------- */
 
 static int g_FaOwnerOff = -1;  /* Techno 内 Owner 指针偏移 pin */
-
-/* pin 命中直验, 否则全扫; 两个选中单位同偏移命中才算 (防偶发撞值)。
- * 只做值比较不解引用, 安全。 */
-static int FA_CalOwner(void* u0, void* u1, void* house)
-{
-    unsigned off;
-    if (!u0 || !house) return 0;
-    if (g_FaOwnerOff >= 0)
-    {
-        if (*(void**)((char*)u0 + (unsigned)g_FaOwnerOff) == house &&
-            (!u1 || *(void**)((char*)u1 + (unsigned)g_FaOwnerOff) == house))
-            return 1;
-        g_FaOwnerOff = -1;
-    }
-    for (off = 0x40u; off < 0x900u; off += 4u)
-    {
-        if (*(void**)((char*)u0 + off) != house) continue;
-        if (u1 && *(void**)((char*)u1 + off) != house) continue;
-        g_FaOwnerOff = (int)off;
-        return 1;
-    }
-    return 0;
-}
 
 /* ---------------- 找敌 (环扫 + 链走) ---------------- */
 
@@ -276,7 +253,7 @@ static void FA_Preview(void)
     for (i = 0; i < selN && nu < FA_UNIT_CAP; i++)
         if (OU_IsUnit(items[i])) s_pu[nu++] = items[i];
     if (nu <= 0) { s_FaPrevN = 0; return; }
-    if (!FA_CalOwner(s_pu[0], nu > 1 ? s_pu[1] : 0, cur))
+    if (!OU_CalOwner(s_pu[0], nu > 1 ? s_pu[1] : 0, cur, &g_FaOwnerOff))
     { s_FaPrevN = 0; return; }
     ne = FA_FindEnemies(cx, cy, cur, s_pf, s_pfid);
     if (ne <= 0) { s_FaPrevN = 0; return; }
@@ -332,7 +309,7 @@ static void FA_Press(void)
     }
     if (nu <= 0) return;
     /* Owner 自校准 (双确认; 失败直接放弃, 绝不误击友军)。 */
-    if (!FA_CalOwner(s_units[0], nu > 1 ? s_units[1] : 0, cur)) return;
+    if (!OU_CalOwner(s_units[0], nu > 1 ? s_units[1] : 0, cur, &g_FaOwnerOff)) return;
     if (!OU_MouseCell(&cx, &cy)) return;
     /* 快照单位 Fetch_ID (存活校验用; 选中单位必活, 此处 vcall 安全) */
     for (i = 0; i < nu; i++) s_uids[i] = OU_ObjId(s_units[i]);

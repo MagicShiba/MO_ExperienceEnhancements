@@ -19,7 +19,6 @@
 #include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
-#include "OrderThrottle.h"
 #include "DeployPreview.h"
 #include "SmartArea.h"
 
@@ -37,7 +36,7 @@ static int g_SaEnable = 1;
 static OU_Hotkey g_SaHk;      /* Hotkey=Shift+Middle (含 Ctrl/Z 时被别家抢走) */
 static int g_SaRange = 4;       /* 扫描块边长 (格, 2~16) */
 static int g_SaSquad = 4;       /* 几打一 (1~16, 同一目标首轮几个, 满分流) */
-static int g_SaOwnerOff = -1;   /* Techno 内 Owner 指针偏移 (FuzzyAttack 同式) */
+static int g_SaOwnerOff = -1;   /* Techno 内 Owner 指针偏移 (校准见 OU_CalOwner) */
 
 static void SA_EnsureInit(void)
 {
@@ -57,16 +56,14 @@ static void SA_EnsureInit(void)
     if (g_SaSquad > 16) g_SaSquad = 16;
     /* 报实际生效热键 (vk=5 是 X1 侧键/4 是中键; mods bit0=Ctrl,bit1=Shift,bit2=Alt)。 */
     {
-        char buf[80], b1[16];
+        char buf[80];
         unsigned q = 0;
         q = AppendCStr(buf, q, "smartarea: ON hk-vk=", sizeof(buf));
-        UtoA((unsigned)g_SaHk.vk, b1);
-        q = AppendCStr(buf, q, b1, sizeof(buf));
+        q = OU_AppendU(buf, q, (unsigned)g_SaHk.vk, sizeof(buf));
         q = AppendCStr(buf, q, " mods=", sizeof(buf));
-        UtoA((unsigned)g_SaHk.mods, b1);
-        q = AppendCStr(buf, q, b1, sizeof(buf));
-    (void)q;
-    LogLine(buf);
+        q = OU_AppendU(buf, q, (unsigned)g_SaHk.mods, sizeof(buf));
+        (void)q;
+        LogLine(buf);
     }
     if (!g_SaEnable) LogLine("smartarea: OFF");
 }
@@ -122,92 +119,12 @@ static int SA_DirtyHeld(void)
 
 /* ---------------- 决策 ---------------- */
 
-/* ---------------- 类型自校准 (SmartOrder 同式, 工程师判定用) ---------------- */
+/* ---------------- 类型自校准 (公共实现见 OrderUtil.h, 工程师判定用) ---------------- */
 
 static int g_SaTypeOff[3] = { -1, -1, -1 }; /* 0=Unit 1=Aircraft 2=Infantry */
 static int g_SaIdOff = -1;
 
-static int SA_ClassSlot(int w)
-{
-    if (w == ABS_UNIT) return 0;
-    if (w == ABS_AIRCRAFT) return 1;
-    if (w == ABS_INFANTRY) return 2;
-    return -1;
-}
-
-static int SA_StrOk(const char* s)
-{
-    int n = 0;
-    if (!s) return 0;
-    while (n < 24)
-    {
-        char c = s[n];
-        if (!c) return (n > 0) ? 1 : 0;
-        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-              c == '_' || c == '.' || c == '-')) return 0;
-        n++;
-    }
-    return 0;
-}
-
-static int SA_TypeID(void* p, char* out)
-{
-    static const unsigned cands[3] = { 0x20u, 0x24u, 0x28u };
-    int i;
-    if (!p || !IsPlausiblePtr(p)) return 0;
-    if (g_SaIdOff >= 0)
-    {
-        const char* s = (const char*)p + (unsigned)g_SaIdOff;
-        int k;
-        if (!SA_StrOk(s)) { g_SaIdOff = -1; }
-        else
-        {
-            for (k = 0; k < 24; k++) out[k] = s[k];
-            return 1;
-        }
-    }
-    for (i = 0; i < 3; i++)
-    {
-        const char* s = (const char*)p + cands[i];
-        int k;
-        if (!SA_StrOk(s)) continue;
-        g_SaIdOff = (int)cands[i];
-        for (k = 0; k < 24; k++) out[k] = s[k];
-        return 1;
-    }
-    return 0;
-}
-
 static int SA_TypeCount(void*** o) { return OU_VecItems(ADDR_TYPARRAY, o); }
-
-static int SA_InTypeSet(void* p) { return OU_InVec(ADDR_TYPARRAY, p); }
-
-static void* SA_TypeOf(void* u, int w)
-{
-    int slot = SA_ClassSlot(w);
-    unsigned off;
-    char idb[24];
-    int k;
-    if (slot < 0) return 0;
-    if (g_SaTypeOff[slot] >= 0)
-    {
-        void* p = *(void**)((char*)u + (unsigned)g_SaTypeOff[slot]);
-        if (p && IsPlausiblePtr(p) && SA_InTypeSet(p) && SA_TypeID(p, idb))
-            return p;
-        g_SaTypeOff[slot] = -1;
-    }
-    for (off = 0x40u; off < 0x900u; off += 4u)
-    {
-        void* p = *(void**)((char*)u + off);
-        if (!p || !IsPlausiblePtr(p)) continue;
-        if (!SA_InTypeSet(p)) continue;
-        for (k = 0; k < 24; k++) idb[k] = 0;
-        if (!SA_TypeID(p, idb)) continue;
-        g_SaTypeOff[slot] = (int)off;
-        return p;
-    }
-    return 0;
-}
 
 static int SA_Streq(const char* a, const char* b)
 {
@@ -227,24 +144,24 @@ static int SA_IsEngineer(void* u)
     char id[24];
     int k, e;
     if (OU_WhatAmI(u) != ABS_INFANTRY) return 0;
-    tp = SA_TypeOf(u, ABS_INFANTRY);
+    tp = OU_TypeOf(u, ABS_INFANTRY, g_SaTypeOff, ADDR_TYPARRAY, &g_SaIdOff);
     if (!tp) return 0;
     for (k = 0; k < 24; k++) id[k] = 0;
-    if (!SA_TypeID(tp, id)) return 0;
+    if (!OU_TypeID(tp, id, &g_SaIdOff)) return 0;
     for (e = 0; e < 4; e++)
         if (SA_Streq(id, engs[e])) return 1;
     return 0;
 }
 
 /* 工程师判定 (读 InfantryType+0xEC3, 即 Engineer=yes 本体; ID 表保留作交叉)。
- * 类型指针走 SA_TypeOf 步兵槽。 */
+ * 类型指针走 OU_TypeOf 步兵槽。 */
 static int SA_IsEngUnit(void* u)
 {
     void* tp;
     if (!u || !IsPlausiblePtr(u)) return 0;
     if (OU_WhatAmI(u) != ABS_INFANTRY) return 0;
     if (SA_IsEngineer(u)) return 1;
-    tp = SA_TypeOf(u, ABS_INFANTRY);
+    tp = OU_TypeOf(u, ABS_INFANTRY, g_SaTypeOff, ADDR_TYPARRAY, &g_SaIdOff);
     if (!tp || !IsPlausiblePtr(tp)) return 0;
     return (*(unsigned char*)((char*)tp + 0xEC3u)) ? 1 : 0;
 }
@@ -304,7 +221,6 @@ static int SA_UnitMission(void* u, void* t, int* actOut)
  * 步兵对建筑: 工程师按占领, 非工程师跳过留待命。
  * 强制攻击须有肯定攻击光标 (OU_CanAttack); 调用失败时不猜, 留待命重判。
  * 回 mission, 无规则回 -1。 */
-static int SA_IsEngUnit(void* u);   /* 前置声明 (定义在类型自校准后) */
 static int SA_Fallback(void* u, void* t, int act, void* house)
 {
     int uw, tw;
@@ -340,23 +256,17 @@ static int SA_Fallback(void* u, void* t, int act, void* house)
 
 /* ---------------- 下令 (MegaMission 形状同 SmartOrder/FuzzyAttack; 唯一区别是排队) ---------------- */
 
-static int SA_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
-                         int tgtID, unsigned char tgtRtti,
-                         void* unit, int uid, int idxOk)
+/* 发一条对象令: 攻击放 Target 槽, 进驻/占领/破坏放 Destination 槽 (与手点同形)。
+ * 按住 Z = 路径点(排队, 按序追加不覆盖); 不按 Z 直接下令 (与手点同形)。 */
+static int SA_Fire(int houseIdx, int srcID, unsigned char srcRtti, int mission,
+                   int tgtID, unsigned char tgtRtti,
+                   void* unit, int uid, int idxOk)
 {
-    /* 按住 Z = 路径点(排队, 按序追加不覆盖); 不按 Z 直接下令 (与手点同形)。 */
-    return OU_FireMega(houseIdx, srcID, srcRtti, MISSION_ATTACK,
-                       tgtID, tgtRtti, 0, 0, 0, 0, OU_KeyDown('Z') ? 1 : 0,
-                       unit, uid, idxOk);
-}
-
-static int SA_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
-                       int dstID, unsigned char dstRtti, int mission,
-                       void* unit, int uid, int idxOk)
-{
-    /* 按住 Z = 路径点(排队, 按序追加不覆盖); 不按 Z 直接下令 (与手点同形)。 */
+    int atk = (mission == MISSION_ATTACK) ? 1 : 0;
     return OU_FireMega(houseIdx, srcID, srcRtti, mission,
-                       0, 0, dstID, dstRtti, 0, 0, OU_KeyDown('Z') ? 1 : 0,
+                       atk ? tgtID : 0, atk ? tgtRtti : 0,
+                       atk ? 0 : tgtID, atk ? 0 : tgtRtti,
+                       0, 0, OU_KeyDown('Z') ? 1 : 0,
                        unit, uid, idxOk);
 }
 
@@ -375,14 +285,7 @@ static int g_SaPrevTrig = 0;
 static void SA_ShiftDown(void)
 {
     int k;
-    for (k = 0; k + 1 < g_SaPendCount; k++)
-    {
-        g_SaPend[k].unit = g_SaPend[k + 1].unit;
-        g_SaPend[k].uid = g_SaPend[k + 1].uid;
-        g_SaPend[k].tgt = g_SaPend[k + 1].tgt;
-        g_SaPend[k].tid = g_SaPend[k + 1].tid;
-        g_SaPend[k].mission = g_SaPend[k + 1].mission;
-    }
+    for (k = 0; k + 1 < g_SaPendCount; k++) g_SaPend[k] = g_SaPend[k + 1];
     g_SaPendCount--;
 }
 
@@ -403,16 +306,8 @@ static void SA_Drain(void)
         if (!OU_PtrAlive(e->tgt, e->tid, g_SaIdxOk)) { SA_ShiftDown(); continue; }
         if ((tgtID = OU_ObjTgt(e->tgt, &tgtR)) < 0) { SA_ShiftDown(); continue; }
         if ((srcID = OU_ObjTgt(e->unit, &srcR)) < 0) { SA_ShiftDown(); continue; }
-        if (e->mission == MISSION_ATTACK)
-        {
-            if (!SA_FireAttack(houseIdx, srcID, srcR, tgtID, tgtR,
-                                 e->unit, e->uid, g_SaIdxOk)) return;
-        }
-        else
-        {
-            if (!SA_FireDest(houseIdx, srcID, srcR, tgtID, tgtR, e->mission,
-                              e->unit, e->uid, g_SaIdxOk)) return;
-        }
+        if (!SA_Fire(houseIdx, srcID, srcR, e->mission, tgtID, tgtR,
+                     e->unit, e->uid, g_SaIdxOk)) return;
         SA_ShiftDown();
         sent++;
     }
@@ -436,9 +331,6 @@ static int s_SnapNt = 0;
 static unsigned char s_SnapEnterTaken[SA_TGT_CAP]; /* 占车已派标记 (按目标限1个) */
 static unsigned char s_SnapRepairSent[SA_TGT_CAP]; /* 按目标单派标记 (修楼/中立科技/民房预轮) */
 
-#define SA_OFF_BLD_TYPE      0x520u  /* BuildingClass::Type */
-#define SA_OFF_TYPE_STRENGTH 0xA0u   /* ObjectTypeClass::Strength */
-
 /* 建筑是否掉血 (0<hp<max; 指针/类型有一项读不到按没掉血处理, 绝不浪费工程师)。 */
 static int SA_BuildingDamaged(void* b)
 {
@@ -448,26 +340,14 @@ static int SA_BuildingDamaged(void* b)
     if (OU_WhatAmI(b) != ABS_BUILDING) return 0;
     hp = *(int*)((char*)b + OFF_HEALTH);
     if (hp <= 0) return 0;
-    type = *(void**)((char*)b + SA_OFF_BLD_TYPE);
+    type = *(void**)((char*)b + OFF_BLD_TYPE);
     if (!type || !IsPlausiblePtr(type)) return 0;
-    str = *(int*)((char*)type + SA_OFF_TYPE_STRENGTH);
+    str = *(int*)((char*)type + OFF_TYPE_STRENGTH);
     if (str <= 0 || str > 1000000) return 0;
     return (hp < str) ? 1 : 0;
 }
 
 /* ---------------- 找目标 (环扫 + 链走, 不分敌我) ---------------- */
-
-static void* SA_CellPtr(int cx, int cy)
-{
-    void** cells;
-    int maxc, idx;
-    if (!OU_CellValid(cx, cy)) return 0;
-    cells = *(void***)(ADDR_DISPLAY + OFF_MAP_CELLS);
-    maxc = *(int*)(ADDR_DISPLAY + OFF_MAP_MAXC);
-    idx = (cy << 9) + cx;
-    if (idx < 0 || idx >= maxc) return 0;
-    return cells[idx];
-}
 
 /* 链收集: 不分敌我 (决策交给 MouseOver), 其余与模糊同式。 */
 static void SA_CollectChain(void* first, void** out, int* tids, int* nio)
@@ -514,7 +394,7 @@ static void SA_ScanBlock(int cx, int cy, void** out, int* tids, int* nio)
                 void* cell;
                 if ((adx >= ady ? adx : ady) != d) continue;
                 if (dx < lo || dx > hi || dy < lo || dy > hi) continue;
-                cell = SA_CellPtr(cx + dx, cy + dy);
+                cell = OU_CellPtr(cx + dx, cy + dy);
                 if (!cell) continue;
                 for (t = 0; t < 4; t++)
                 {
@@ -560,28 +440,6 @@ static int g_SaShiftSeen = 0;     /* 本轮按住途中组合成立过 (防裸�
 static int g_SaHaveSnapshot = 0;  /* 快照待命: 组合键松开即重判下令 (步兵对建筑等) */
 static int g_SaSnapAge = 0;       /* 快照年龄 (轮询计, 超 300 丢弃防 stale) */
 
-/* Owner 自校准 (双单位确认, 纯指针比较不解引用; 失败则本轮无 fallback)。 */
-static int SA_CalOwner(void* u0, void* u1, void* house)
-{
-    unsigned off;
-    if (!u0 || !house) return 0;
-    if (g_SaOwnerOff >= 0)
-    {
-        if (*(void**)((char*)u0 + (unsigned)g_SaOwnerOff) == house &&
-            (!u1 || *(void**)((char*)u1 + (unsigned)g_SaOwnerOff) == house))
-            return 1;
-        g_SaOwnerOff = -1;
-    }
-    for (off = 0x40u; off < 0x900u; off += 4u)
-    {
-        if (*(void**)((char*)u0 + off) != house) continue;
-        if (u1 && *(void**)((char*)u1 + off) != house) continue;
-        g_SaOwnerOff = (int)off;
-        return 1;
-    }
-    return 0;
-}
-
 static int SA_Snapshot(void)
 {
     void* cur;
@@ -623,7 +481,7 @@ static int SA_Snapshot(void)
             g_SaIdxOk = 1;
     }
     /* Owner 自校准 (fallback 用; 失败则本轮无强制攻击)。 */
-    if (!SA_CalOwner(s_SnapUnits[0], nu > 1 ? s_SnapUnits[1] : 0, cur))
+    if (!OU_CalOwner(s_SnapUnits[0], nu > 1 ? s_SnapUnits[1] : 0, cur, &g_SaOwnerOff))
         g_SaOwnerOff = -1;
     /* 目标: 松开格直接点中的排首, 再沿轨迹各节点逐块环扫 (去重)。 */
     if (direct && IsPlausiblePtr(direct) && OU_IsTarget(direct))
@@ -722,7 +580,7 @@ static void* SA_FindTypeById(const char* want)
         int c;
         if (!items[i] || !IsPlausiblePtr(items[i])) continue;
         for (c = 0; c < 24; c++) id[c] = 0;
-        if (!SA_TypeID(items[i], id) || !id[0]) continue;
+        if (!OU_TypeID(items[i], id, &g_SaIdOff) || !id[0]) continue;
         if (SA_Streq(id, want)) return items[i];
     }
     return 0;
@@ -745,35 +603,27 @@ static void SA_TechLevelSelfCheck(void)
     else g_SaTlBad = 1;
 }
 /* 平民楼房 (TL=-1 的建筑类型; 科技类 TL=11)。
- * 实例→类型用 SA_OFF_BLD_TYPE (+0x520)。 */
+ * 实例→类型用 OFF_BLD_TYPE (+0x520)。 */
 static int SA_IsCivHouse(void* t)
 {
     void* tp;
     if (!g_SaTlOk || g_SaTlBad) return 0;
     if (!t || !IsPlausiblePtr(t)) return 0;
-    tp = *(void**)((char*)t + SA_OFF_BLD_TYPE);
+    tp = *(void**)((char*)t + OFF_BLD_TYPE);
     if (!tp || !IsPlausiblePtr(tp)) return 0;
     return (SA_TechLevelOf(tp) == -1) ? 1 : 0;
 }
 
-/* 中立阵营判定 (只读 House->Type(+0x34)->MultiplayPassive(+0x1A6))。
+/* 中立阵营判定 (OU_HouseNeutral, 读不到按非中立)。
  * 自检: 本家不可能是被动中立, 读出 1 则永久停用 (回敌方 Squad 路径)。
- * 无主不算中立; 读不到按非中立。全程只读。 */
+ * 无主不算中立。全程只读。 */
 static int g_SaNeutOk = 0;
 static int g_SaNeutBad = 0;
-static int SA_HouseNeutralRaw(void* h)
-{
-    void* t;
-    if (!h || !IsPlausiblePtr(h)) return 0;
-    t = *(void**)((char*)h + 0x34u);
-    if (!IsPlausiblePtr(t)) return 0;
-    return (*(unsigned char*)((char*)t + 0x1A6u)) ? 1 : 0;
-}
 /* 本家自检一次 (Distribute 入口调, house 即本家)。 */
 static void SA_NeutSelfCheck(void* house)
 {
     if (g_SaNeutOk || g_SaNeutBad) return;
-    if (SA_HouseNeutralRaw(house)) g_SaNeutBad = 1;
+    if (OU_HouseNeutral(house)) g_SaNeutBad = 1;
     else g_SaNeutOk = 1;
 }
 /* 目标归中立阵营。 */
@@ -784,7 +634,7 @@ static int SA_TargetNeutral(void* t)
     if (!t || !IsPlausiblePtr(t) || g_SaOwnerOff < 0) return 0;
     oh = *(void**)((char*)t + (unsigned)g_SaOwnerOff);
     if (!oh || !IsPlausiblePtr(oh)) return 0;
-    return SA_HouseNeutralRaw(oh);
+    return OU_HouseNeutral(oh);
 }
 
 /* 分配期缓存 (一次 Distribute 内有效): AssignOne 逐对必问 MouseOver,
@@ -1170,7 +1020,6 @@ void SmartArea_Draw(void* surf, int w, int h, int pitch)
 {
     unsigned char* locked;
     int lo, hi, x0, y0, x1, y1, x2, y2, x3, y3;
-    extern int g_Calibrated;
     int showBox, showLines;
     if (!g_SaEnable || (!g_SaBHas && !g_SaHaveSnapshot && s_PrevN <= 0)) return;
     /* 快照待命时框保持 (MMB 已松, 认领必掉, 靠待命旗续画)。

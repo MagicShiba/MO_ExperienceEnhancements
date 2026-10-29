@@ -371,9 +371,6 @@ static void PowerDrawBoth(void)
     tSeg = Perf_Now();
     Shot_Poll();
     Perf_Add(PF_B_SHOT, tSeg);
-    }
-    if (due)
-    {
     /* 鼠标源头折算 (缩放): 注入可能早于 WWMouse 构造, 没装上就在这里重试。
      * 放进门控里 —— 161 次/循环的空检查 + 计时要 4us/帧, 装上了就不必每遍问。 */
     tSeg = Perf_Now();
@@ -455,8 +452,8 @@ static void BlitSbEntryDraw(void)
      * 排在 PowerDisplay 之后 = 层级最上, 不被底电那行字盖住。 */
     tOne = Perf_Now(); SS_Draw();               Perf_Add(PF_SB_SS, tOne);
     s_BlitSbTick = GetTickCount();   /* 上面那两样已由本次呈现代画, prepare 兜底可跳过 */
-    tOne = Perf_Now(); PowerDisplay_DrawSb();   Perf_Add(PF_SB_PWR, tOne);  /* 与 prepare 里那次重复? */
-    tOne = Perf_Now(); PiP_DrawButton();        Perf_Add(PF_SB_PIP, tOne);  /* 与 prepare 里那次重复? */
+    tOne = Perf_Now(); PowerDisplay_DrawSb();   Perf_Add(PF_SB_PWR, tOne);
+    tOne = Perf_Now(); PiP_DrawButton();        Perf_Add(PF_SB_PIP, tOne);
     tOne = Perf_Now();
     tramp = (void*)(size_t)FM_BlitSb();   /* 0 = 不接管, 返回引擎跳板 */
     Perf_Add(PF_SB_FM, tOne);
@@ -839,9 +836,8 @@ __attribute__((naked)) void MOExperience_RadarClampEntry(void)
  * 原函数收尾是 ret 4 (0x537A39 = c2 04 00), 吞掉时同样 ret 4。
  * popal 不改 EFLAGS, 所以 test/popal/jnz 的顺序是安全的。 */
 void* g_FollowTramp = NULL;
-static int FollowC(void* regs)
+static int FollowC(void)
 {
-    (void)regs;
     return PiP_FollowCommand();
 }
 static void* g_CallFollow = (void*)FollowC;
@@ -849,9 +845,7 @@ __attribute__((naked)) void MOExperience_FollowEntry(void)
 {
     __asm__ volatile (
         "pushal\n\t"
-        "pushl %%esp\n\t"
         "call *%0\n\t"
-        "addl $4, %%esp\n\t"
         "testl %%eax, %%eax\n\t"
         "popal\n\t"
         "jnz 1f\n\t"
@@ -1716,6 +1710,30 @@ static unsigned s_CrSize[MOE_MODMAX];
 static char     s_CrName[MOE_MODMAX][24];
 static int      s_CrN;
 
+/* 栈回溯单项: 追加 " i:label+off" (label 含冒号后的空格, self/exe 传 " MOE"/" exe",
+ * 第三方传模块文件名)。每行 6 项, 满了先收行再重起表头 "CRASH: stk"。
+ * col/n 跨项累计, 由调用方持句柄传入。 */
+static void StkOne(char* buf, unsigned* p, int* col, int* n,
+                   unsigned i, const char* label, unsigned off)
+{
+    char b1[16];
+    if (*col == 6)
+    {
+        LogLine(buf);
+        *p = 0;
+        *p = AppendCStr(buf, *p, "CRASH: stk", sizeof(buf));
+        *col = 0;
+    }
+    *p = AppendCh(buf, *p, ' ', sizeof(buf));
+    UtoA(i, b1); *p = AppendCStr(buf, *p, b1, sizeof(buf));
+    *p = AppendCh(buf, *p, ':', sizeof(buf));
+    *p = AppendCStr(buf, *p, label, sizeof(buf));
+    *p = AppendCh(buf, *p, '+', sizeof(buf));
+    MOE_Hex(b1, off); *p = AppendCStr(buf, *p, b1, sizeof(buf));
+    (*col)++;
+    (*n)++;
+}
+
 static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
 {
     char b1[16], buf[512];
@@ -1787,7 +1805,7 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         p = AppendCStr(buf, p, " eip=", sizeof(buf));
         UtoA((unsigned)(size_t)ep->ContextRecord->Eip, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " fr=", sizeof(buf));
-        UtoA(*(const unsigned*)(size_t)0xA8ED84u, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        UtoA(*(const unsigned*)(size_t)ADDR_FRAME, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         LogLine(buf);
 
         /* 阶段名 + 两个栈窗口 (esp / ebp, ebp 窗是返回地址所在)。 */
@@ -1808,19 +1826,19 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
          * 判断崩溃现场的面是不是我们的 (泄漏残留/退休面/野面)。 */
         p = 0;
         p = AppendCStr(buf, p, "MOE: surf sb=", sizeof(buf));
-        UtoA(*(const unsigned*)(size_t)0x00887300u, b1);
+        UtoA(*(const unsigned*)(size_t)ADDR_SURF_SIDEBAR, b1);
         p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " alt=", sizeof(buf));
-        UtoA(*(const unsigned*)(size_t)0x00887310u, b1);
+        UtoA(*(const unsigned*)(size_t)ADDR_SURF_ALT, b1);
         p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " cur=", sizeof(buf));
         UtoA(*(const unsigned*)(size_t)0x00887314u, b1);
         p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " comp=", sizeof(buf));
-        UtoA(*(const unsigned*)(size_t)0x0088731Cu, b1);
+        UtoA(*(const unsigned*)(size_t)ADDR_SURF_COMPOSITE, b1);
         p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " map=", sizeof(buf));
-        UtoA(*(const unsigned*)(size_t)0x008872FCu, b1);
+        UtoA(*(const unsigned*)(size_t)ADDR_SURF_MAP, b1);
         p = AppendCStr(buf, p, b1, sizeof(buf));
         SB_AppendCrashSurfs(buf, &p, sizeof(buf));
         LogLine(buf);
@@ -1831,8 +1849,8 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
          *   tgtin=none → 不是这两张面: 更可能是已释放的旧面缓冲 / 我们的块 / 第三方
          * 这一条就是崩单里 0x00125CB4、0x1B480A 缺的那半个证据。 */
         {
-            unsigned sbv = *(const unsigned*)(size_t)0x00887300u;
-            unsigned cpv = *(const unsigned*)(size_t)0x0088731Cu;
+            unsigned sbv = *(const unsigned*)(size_t)ADDR_SURF_SIDEBAR;
+            unsigned cpv = *(const unsigned*)(size_t)ADDR_SURF_COMPOSITE;
             unsigned b0 = 0, s0 = 0, b2 = 0, s2 = 0, tg = 0;
             int have0, have2;
             if (r->NumberParameters >= 2)
@@ -2041,48 +2059,22 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
                 int k;
                 if (v < 0x10000u) continue;
                 if (self && v - (unsigned)(size_t)self < selfSz)
-                { tag = " MOE+"; base = (unsigned)(size_t)self; }
+                { tag = " MOE"; base = (unsigned)(size_t)self; }
                 else if (exe && v - (unsigned)(size_t)exe < exeSz)
-                { tag = " exe+"; base = (unsigned)(size_t)exe; }
+                { tag = " exe"; base = (unsigned)(size_t)exe; }
                 else
                 {
                     for (k = 0; k < s_CrN; k++)
                     {
                         if (v - s_CrBase[k] < s_CrSize[k])
                         {
-                            if (col == 6)
-                            {
-                                LogLine(buf);
-                                p = 0;
-                                p = AppendCStr(buf, p, "CRASH: stk", sizeof(buf));
-                                col = 0;
-                            }
-                            p = AppendCh(buf, p, ' ', sizeof(buf));
-                            UtoA(i, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-                            p = AppendCh(buf, p, ':', sizeof(buf));
-                            p = AppendCStr(buf, p, s_CrName[k], sizeof(buf));
-                            p = AppendCh(buf, p, '+', sizeof(buf));
-                            MOE_Hex(b1, v - s_CrBase[k]); p = AppendCStr(buf, p, b1, sizeof(buf));
-                            col++; n++;
+                            StkOne(buf, &p, &col, &n, i, s_CrName[k], v - s_CrBase[k]);
                             break;
                         }
                     }
                     continue;
                 }
-                if (col == 6)
-                {
-                    LogLine(buf);
-                    p = 0;
-                    p = AppendCStr(buf, p, "CRASH: stk", sizeof(buf));
-                    col = 0;
-                }
-                p = AppendCh(buf, p, ' ', sizeof(buf));
-                UtoA(i, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-                p = AppendCh(buf, p, ':', sizeof(buf));
-                p = AppendCStr(buf, p, tag, sizeof(buf));
-                MOE_Hex(b1, v - base); p = AppendCStr(buf, p, b1, sizeof(buf));
-                col++;
-                n++;
+                StkOne(buf, &p, &col, &n, i, tag, v - base);
             }
             if (col) LogLine(buf);
         }

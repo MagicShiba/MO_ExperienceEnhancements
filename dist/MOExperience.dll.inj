@@ -21,7 +21,6 @@
 ; 右键: N>1 直接减数不暂停(暂停检查点), N==1 走原生暂停取消
 0x6AB197 = BQ_CancelPeel, 8
 0x6AAE44 = BQ_DarkDispatchPeel, 6
-0x6AAFE1 = BQ_DarkPauseSeen, 5
 ; 右键取消: 只钩无rel 的分支入口做本地剥离, E8 事件构造点一律不碰
 ; (0x6AA7E7 / 0x6AB1B5 / 0x6AB231 / 0x6AB1FF / 0x6AAFDC 全部撤钩, 见 notes)
 0x6AB6CE = BQ_FreeShift, 10

@@ -192,7 +192,7 @@ void Lang_GetA(const char* section, const char* key, const char* def,
     if (!buf[0]) Lang_CopyA(buf, cap, def);
 }
 
-static wchar_t* Lang_Utf8ToWide(wchar_t* dst, wchar_t* end, const unsigned char* s)
+wchar_t* Lang_Utf8ToWide(wchar_t* dst, wchar_t* end, const unsigned char* s)
 {
     unsigned c, c2;
     if (s[0] == 0xEF && s[1] == 0xBB && s[2] == 0xBF) s += 3;

@@ -102,7 +102,6 @@ int OU_DirectToDoList(const char* ev)
     if (OU_IsMP()) return 0;
     if (count >= DO_CAP) return 0;
     next = *(unsigned*)ADDR_DO_NEXT & DO_MASK;
-    if (next >= DO_CAP) return 0;
     OU_CopyEvt((char*)(ADDR_DO_BUF + next * EVT_SIZE), ev);
     *(unsigned*)(ADDR_DO_PAR + next * 4u) = OU_SndTimings();
     slot = (char*)(ADDR_DO_BUF + next * EVT_SIZE);
@@ -198,7 +197,6 @@ int OU_Enqueue(char ev[EVT_SIZE])
     count = *(unsigned*)ADDR_OUT_COUNT;
     if (count >= EVT_CAP) return 0;
     next = *(unsigned*)ADDR_OUT_NEXT & 0x7Fu;
-    if (next >= EVT_CAP) return 0;
     OU_CopyEvt((char*)(ADDR_OUT_BUF + next * EVT_SIZE), ev);
     *(unsigned*)(ADDR_OUT_PAR + next * 4u) = OU_SndTimings();
     *(unsigned*)ADDR_OUT_NEXT = (next + 1u) & 0x7Fu;
@@ -291,6 +289,115 @@ int OU_InVec(unsigned vecAddr, const void* p)
     cnt = OU_VecItems(vecAddr, &items);
     for (i = 0; i < cnt; i++)
         if (items[i] == p) return 1;
+    return 0;
+}
+
+/* ---- 类型指针自校准 (SmartArea/SmartOrder/TreeChop 共用, 声明见 OrderUtil.h) ----
+ * pin 缓存留在各模块, 经出参传入; 判定顺序与各模块原实现逐行等价。 */
+
+int OU_StrOk(const char* s)
+{
+    int n = 0;
+    if (!s) return 0;
+    while (n < 24)
+    {
+        char c = s[n];
+        if (!c) return (n > 0) ? 1 : 0;
+        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              c == '_' || c == '.' || c == '-')) return 0;
+        n++;
+    }
+    return 0;
+}
+
+int OU_TypeID(void* p, char* out, int* idOff)
+{
+    static const unsigned cands[3] = { 0x20u, 0x24u, 0x28u };
+    int i;
+    if (!p || !IsPlausiblePtr(p)) return 0;
+    if (*idOff >= 0)
+    {
+        const char* s = (const char*)p + (unsigned)*idOff;
+        int k;
+        if (!OU_StrOk(s)) { *idOff = -1; }
+        else
+        {
+            for (k = 0; k < 24; k++) out[k] = s[k];
+            return 1;
+        }
+    }
+    for (i = 0; i < 3; i++)
+    {
+        const char* s = (const char*)p + cands[i];
+        int k;
+        if (!OU_StrOk(s)) continue;
+        *idOff = (int)cands[i];
+        for (k = 0; k < 24; k++) out[k] = s[k];
+        return 1;
+    }
+    return 0;
+}
+
+/* Type 指针扫描核心 (单 pin): pin 命中直验, 任一判据不过即弃 pin 回扫。 */
+void* OU_ScanTypeOf(void* u, int* pinnedOff, unsigned vecAddr, int* idOff)
+{
+    unsigned off;
+    char idb[24];
+    int k;
+    if (*pinnedOff >= 0)
+    {
+        void* p = *(void**)((char*)u + (unsigned)*pinnedOff);
+        if (p && IsPlausiblePtr(p) && OU_InVec(vecAddr, p) && OU_TypeID(p, idb, idOff))
+            return p;
+        *pinnedOff = -1;
+    }
+    for (off = 0x40u; off < 0x900u; off += 4u)
+    {
+        void* p = *(void**)((char*)u + off);
+        if (!p || !IsPlausiblePtr(p)) continue;
+        if (!OU_InVec(vecAddr, p)) continue;
+        for (k = 0; k < 24; k++) idb[k] = 0;
+        if (!OU_TypeID(p, idb, idOff)) continue;
+        *pinnedOff = (int)off;
+        return p;
+    }
+    return 0;
+}
+
+/* Techno 三类别槽位 (0=Unit 1=Aircraft 2=Infantry, 未知 -1)。 */
+static int OU_ClassSlot(int w)
+{
+    if (w == ABS_UNIT) return 0;
+    if (w == ABS_AIRCRAFT) return 1;
+    if (w == ABS_INFANTRY) return 2;
+    return -1;
+}
+
+void* OU_TypeOf(void* u, int w, int* off3, unsigned vecAddr, int* idOff)
+{
+    int slot = OU_ClassSlot(w);
+    if (slot < 0) return 0;
+    return OU_ScanTypeOf(u, &off3[slot], vecAddr, idOff);
+}
+
+int OU_CalOwner(void* u0, void* u1, void* house, int* ownerOff)
+{
+    unsigned off;
+    if (!u0 || !house) return 0;
+    if (*ownerOff >= 0)
+    {
+        if (*(void**)((char*)u0 + (unsigned)*ownerOff) == house &&
+            (!u1 || *(void**)((char*)u1 + (unsigned)*ownerOff) == house))
+            return 1;
+        *ownerOff = -1;
+    }
+    for (off = 0x40u; off < 0x900u; off += 4u)
+    {
+        if (*(void**)((char*)u0 + off) != house) continue;
+        if (u1 && *(void**)((char*)u1 + off) != house) continue;
+        *ownerOff = (int)off;
+        return 1;
+    }
     return 0;
 }
 
@@ -581,15 +688,48 @@ int OU_PtrAlive(void* u, int id, int idxOk)
     return OU_PtrAliveRaw(u, id);
 }
 
+/* 存活三连 (IsAlive/InLimbo/Health; 不碰 Fetch_ID 索引)。 */
+int OU_TechAliveRaw(void* p)
+{
+    if (!p || !IsPlausiblePtr(p)) return 0;
+    if (!((unsigned char*)p)[OFF_ISALIVE]) return 0;
+    if (((unsigned char*)p)[OFF_INLIMBO]) return 0;
+    if (*(int*)((char*)p + OFF_HEALTH) <= 0) return 0;
+    return 1;
+}
+
+/* 中立阵营判定 (House->Type->MultiplayPassive)。读不到按非中立。 */
+int OU_HouseNeutral(void* h)
+{
+    void* t;
+    if (!h || !IsPlausiblePtr(h)) return 0;
+    t = *(void**)((char*)h + OFF_HOUSE_TYPE);
+    if (!IsPlausiblePtr(t)) return 0;
+    return (*(unsigned char*)((char*)t + OFF_HTYPE_PASSIVE)) ? 1 : 0;
+}
+
+/* 单位 PlanningToken 上的节点数 (只读; token 不存在/野指针回 0)。 */
+int OU_TokenNodes(void* unit)
+{
+    void* t;
+    void** arr;
+    int n;
+    if (!unit || !IsPlausiblePtr(unit)) return 0;
+    t = *(void**)((char*)unit + OFF_TECH_TOKEN);
+    if (!t || !IsPlausiblePtr(t)) return 0;
+    arr = *(void***)((char*)t + OFF_TOK_NODES);
+    n = *(int*)((char*)t + OFF_TOK_NCOUNT);
+    if (!arr || !IsPlausiblePtr(arr) || n < 0 || n > 1000) return 0;
+    return n;
+}
+
 /* ---------------- 规划线共享 (红绿线投影/取高/细线/线缓冲) ---------------- */
 
 typedef int __attribute__((thiscall)) (*Fn_OUC2C)(void* tac,
     const CoordStruct* c, Point2D* out);
-typedef int __attribute__((thiscall)) (*Fn_OUFloorH)(void* cell, const Point2D* p);
 typedef int __attribute__((thiscall)) (*Fn_OUFloorZAt)(void* map, const CoordStruct* c);
 #define FN_OU_C2C ((Fn_OUC2C)(void*)0x6D2140u)
 #define OU_TAC_INSTANCE 0x887324u
-#define FN_OU_FLOORH ((Fn_OUFloorH)(void*)0x47B3A0u)
 #define FN_OU_FLOORZAT ((Fn_OUFloorZAt)(void*)0x578080u)
 
 /* CellClass::Flags +0x140, BridgeHead|BridgeBody; 桥高
@@ -613,23 +753,8 @@ int OU_ProjWorld(int lx, int ly, int lz, int* px, int* py)
     return 1;
 }
 
-int OU_CellGroundZ(int cx, int cy, int* zOut)
-{
-    void* cell;
-    Point2D zero;
-    int z;
-    if (!zOut) return 0;
-    cell = OU_CellPtr(cx, cy);
-    if (!cell || !IsPlausiblePtr(cell)) return 0;
-    zero.X = 0; zero.Y = 0;
-    z = FN_OU_FLOORH(cell, &zero);
-    if (z < -8192 || z > 8192) return 0;
-    *zOut = z;
-    return 1;
-}
-
 /* 指定 lepton 坐标处的地面高度 (MapClass::GetCellFloorHeight 0x578080, 只读)。
- * 按 X/Y 低 8 位采子格, 比 OU_CellGroundZ 的格角更精确。 */
+ * 按 X/Y 低 8 位采子格, 比 OU_CellFloorZ 的格角更精确。 */
 int OU_GroundZAt(int x, int y, int* zOut)
 {
     CoordStruct c;
@@ -991,7 +1116,7 @@ int OU_KeyDown(unsigned vk)
     unsigned fr, now;
     int d;
     if (!vk || vk > 255) return 0;
-    fr = *(volatile unsigned*)(size_t)0x00A8ED84u;   /* 引擎帧号 */
+    fr = *(volatile unsigned*)(size_t)ADDR_FRAME;   /* 引擎帧号 */
     now = GetTickCount();
     if (s_KeyFr[vk] == fr && (now - s_KeyTick) < 16u)
         return s_KeyDown[vk] ? 1 : 0;

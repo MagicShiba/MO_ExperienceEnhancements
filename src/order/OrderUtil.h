@@ -62,7 +62,7 @@ static __inline int OU_InExe(unsigned v) { return (v >= OU_EXE_LO && v < OU_EXE_
 void OU_LogTag(const char* tag, const char* msg);
 /* UtoA+AppendCStr 合一 (省去各处手写 tmp[16] 中转)。 */
 unsigned OU_AppendU(char* dst, unsigned pos, unsigned v, unsigned cap);
-/* 取格指针 (越界/空槽回 NULL, OU_CellValid/OU_CellGroundZ 共用)。 */
+/* 取格指针 (越界/空槽回 NULL, OU_CellValid/OU_CellFloorZ 共用)。 */
 void* OU_CellPtr(int cx, int cy);
 /* 111B 事件拷贝 (OU_DirectToDoList/OU_Enqueue/OT_SubmitRaw 共用)。 */
 void OU_CopyEvt(char* dst, const char* src);
@@ -139,6 +139,27 @@ int OU_CellFloorZ(int cx, int cy, int* zOut);
 int OU_VecItems(unsigned vecAddr, void*** itemsOut);
 /* p 是否该 DynamicVector 的成员 (类型数组判定: 只比指针)。 */
 int OU_InVec(unsigned vecAddr, const void* p);
+
+/* ---------------- 类型指针自校准 (SmartArea/SmartOrder/TreeChop 共用) -----
+ * 运行时扫描 Type/Owner 指针在对象内的偏移, 防 mod 数据布局差异。
+ * pin 缓存一律由调用方以指针传入 (各模块独立, 一家失效不连坐别家)。
+ * Type 判据全只读: 指针合理性 + 类型数组成员 (OU_InVec) + ID 字符串可读;
+ * Owner 校准只做指针值比较, 不解引用对象字段, 联机安全。 */
+
+/* 类型 ID 字符串合法性 (24 字节窗口: A-Z 0-9 _ . -, 空串/非法字符/超窗判无效)。 */
+int OU_StrOk(const char* s);
+/* 类型指针 p 的 ID 读出: *idOff pin 命中直读 (读坏即回 -1), 否则扫候选
+ * 偏移 {0x20,0x24,0x28} 命中即 pin; 成功拷 24 字节入 out 回 1。 */
+int OU_TypeID(void* p, char* out, int* idOff);
+/* 单位 u 按类别取 Type 指针 (off3 按槽 pin: 0=Unit 1=Aircraft 2=Infantry):
+ * pin 命中直验 (合理性 + vecAddr 数组成员 + ID 可读), 失效回扫 0x40..0x900
+ * (4 步进, 命中首个双证成员即 pin); 未知类别回 NULL。 */
+void* OU_TypeOf(void* u, int w, int* off3, unsigned vecAddr, int* idOff);
+/* 同上单 pin 变体 (无类别槽的对象: TreeChop 的 TerrainType 树)。 */
+void* OU_ScanTypeOf(void* u, int* pinnedOff, unsigned vecAddr, int* idOff);
+/* Owner 指针偏移自校准 (双单位确认, 防偶发撞值): *ownerOff pin 命中直验
+ * (u0 必中, u1 非空须同中), 失效回扫 0x40..0x900; 命中回 1, 失败回 0。 */
+int OU_CalOwner(void* u0, void* u1, void* house, int* ownerOff);
 /* 玩家主色 (只读): HouseClass::ColorSchemeIndex → ColorScheme::Array[..].Colors[MainShadeIndex]。
  * 与 ESC 玩家色色块 / 单位颜色同一套。成功回 1; r/g/b 可传 0。 */
 int OU_HouseColor(void* house, int* r, int* g, int* b);
@@ -205,6 +226,15 @@ int OU_DecideAction(int cx, int cy, void* tgt);
 int OU_PtrAliveRaw(void* u, int id);
 /* 同上, idxOk=0 时 fail-open 全回活 (索引自检未通过时功能不变)。 */
 int OU_PtrAlive(void* u, int id, int idxOk);
+/* 存活三连 (IsAlive/InLimbo/Health 只读字节判据, 不碰 Fetch_ID 索引;
+ * Aggressive/MindSelect/PlaceScatter 共用)。 */
+int OU_TechAliveRaw(void* p);
+/* 中立阵营判定 (House->Type->MultiplayPassive, 只读, 读不到按非中立;
+ * SmartArea/Aggressive 共用, 自检状态各模块自留)。 */
+int OU_HouseNeutral(void* h);
+/* 单位 PlanningToken 上的节点数 (只读; token 不存在/野指针回 0)。
+ * RallyPath/SingleUnload 共用。 */
+int OU_TokenNodes(void* unit);
 
 /* ---------------- 规划线共享 (FuzzyAttack/SmartArea/SmartOrder 红绿线) -----
  * 端点存 leptons 世界坐标, 绘制期经引擎投影。不存屏像素。
@@ -213,8 +243,6 @@ int OU_PtrAlive(void* u, int id, int idxOk);
 typedef struct { int ulx, uly, ulz, tlx, tly, tlz; } OU_PrevLine;
 /* 世界点 → 屏像素 (引擎 CoordsToClient 0x6D2140 + 缩放折算, 只读)。 */
 int OU_ProjWorld(int lx, int ly, int lz, int* px, int* py);
-/* 格地面高度 (CellClass::GetFloorHeight 0x47B3A0, 只读)。 */
-int OU_CellGroundZ(int cx, int cy, int* zOut);
 /* 指定 lepton 坐标处地面高度 (MapClass::GetCellFloorHeight 0x578080, 只读)。 */
 int OU_GroundZAt(int x, int y, int* zOut);
 /* 指定 lepton 坐标处可站立表面高度 (地形 + 桥面; 只读)。

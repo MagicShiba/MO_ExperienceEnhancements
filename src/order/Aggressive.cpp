@@ -30,16 +30,12 @@
 #include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
-#include "OrderThrottle.h"
 #include "PcxImage.h"
 #include "Aggressive.h"
 
 #define AG_SECTION "Aggressive"
 
 /* ---------------- 只读地址 ---------------- */
-
-#define ARR_ITEMS(base) (*(void***)((base) + 4u))
-#define ARR_COUNT(base) (*(int*)((base) + 16u))
 
 #define VT_GETMISSION (0x184u / 4u)
 
@@ -194,20 +190,10 @@ static AGTrk s_AgTrk[AG_TRK_CAP];
 static int s_AgTrkN = 0;
 static int s_AgIdxOk = 0;   /* Fetch_ID 索引自检通过 (OU_PtrAlive 才严格) */
 
-/* 只读字节判据 (IsAlive/InLimbo/Health; 不碰 Fetch_ID 索引)。 */
-static int AG_AliveRaw(void* p)
-{
-    if (!p || !IsPlausiblePtr(p)) return 0;
-    if (!((unsigned char*)p)[OFF_ISALIVE]) return 0;
-    if (((unsigned char*)p)[OFF_INLIMBO]) return 0;
-    if (*(int*)((char*)p + OFF_HEALTH) <= 0) return 0;
-    return 1;
-}
-
-/* 还活着且可显示 (只读字节判据 + 索引校验 fail-open)。 */
+/* 还活着且可显示 (存活三连 + 索引校验 fail-open)。 */
 static int AG_Alive(void* p, int uid)
 {
-    if (!AG_AliveRaw(p)) return 0;
+    if (!OU_TechAliveRaw(p)) return 0;
     if (!OU_PtrAlive(p, uid, s_AgIdxOk)) return 0;
     return 1;
 }
@@ -289,18 +275,10 @@ typedef struct { void* p; int id; int x, y; } AGBld;
 static AGBld s_AgBld[AG_BLD_CAP];
 static int s_AgBldN = 0;
 
-/* 中立阵营判定 (只读 House->Type(+0x34)->MultiplayPassive(+0x1A6); SmartArea 同式)。
+/* 中立阵营判定 (OU_HouseNeutral: House->Type->MultiplayPassive, SmartArea 同式)。
  * 自检: 本家不可能是被动中立。Mode: 0=未定, 1=启用过滤, 2=停用 (回"非本家即目标")。
  * 读不到一律按非中立 (不误伤候选取舍)。全程只读。 */
 static int g_AgNeutMode = 0;
-static int AG_HouseNeutralRaw(void* h)
-{
-    void* t;
-    if (!h || !IsPlausiblePtr(h)) return 0;
-    t = *(void**)((char*)h + 0x34u);
-    if (!IsPlausiblePtr(t)) return 0;
-    return (*(unsigned char*)((char*)t + 0x1A6u)) ? 1 : 0;
-}
 
 static void* s_AgPrevItems = 0;
 static int s_AgPrevCount = 0;
@@ -328,18 +306,18 @@ static void AG_BuildCands(void* cur)
     if (count <= 0 || count > AG_BLD_CAP) return;
     /* 本家自检一次 (本家不可能是被动中立)。 */
     if (g_AgNeutMode == 0)
-        g_AgNeutMode = AG_HouseNeutralRaw(cur) ? 2 : 1;
+        g_AgNeutMode = OU_HouseNeutral(cur) ? 2 : 1;
     for (i = 0; i < count && s_AgBldN < AG_BLD_CAP; i++)
     {
         void* b = items[i];
         void* own;
         CoordStruct cb;
         if (!b || !IsPlausiblePtr(b)) continue;
-        if (!AG_AliveRaw(b)) continue;
+        if (!OU_TechAliveRaw(b)) continue;
         if (OU_WhatAmI(b) != ABS_BUILDING) continue;
         own = *(void**)((char*)b + OFF_OWNER);
         if (!own || !IsPlausiblePtr(own) || own == cur) continue;   /* 敌/中立 */
-        if (g_AgNeutMode == 1 && AG_HouseNeutralRaw(own)) continue;  /* 忽略中立 */
+        if (g_AgNeutMode == 1 && OU_HouseNeutral(own)) continue;  /* 忽略中立 */
         if (!OU_GetCoords(b, &cb)) continue;
         s_AgBld[s_AgBldN].p = b;
         s_AgBld[s_AgBldN].id = AG_FetchId(b, 0);

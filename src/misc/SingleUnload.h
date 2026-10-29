@@ -2,6 +2,10 @@
  * (实现与引擎事实见 SingleUnload.cpp, 界面入口在 UnitPanel.cpp)。 */
 #pragma once
 
+/* 一次最多同时给几个载员规划; 垫点表按同一上限开。UnitPanel 的载员多选
+ * (UP_PICK_MAX) 直接引用本值 —— 两张表口径必须一致, 多出的会被静默丢掉。 */
+#define SU_PAX_MAX 10
+
 /* unit = 载具/驻军建筑, pax = 面板上被点的那个载员。
  * 回 1 = 已派发 (单卸事件 / 开始规划), 调用方不要再走选中逻辑; 0 = 不归我们管。 */
 int SU_ClickPassenger(void* unit, void* pax);

@@ -18,10 +18,7 @@
 #include "GdiText.h"
 #include "FullMap.h"
 #include "OrderUtil.h"
-#include "OrderThrottle.h"
 #include "RallyPath.h"
-
-extern int g_Calibrated;
 
 #define RP_SECTION "RallyPath"
 
@@ -29,9 +26,6 @@ extern int g_Calibrated;
  * 本文件只提供导出处理函数。 */
 
 #define RP_GATE_SKIP    0x0044384Eu  /* CellClickedAction 函数尾: mov al,1 / ret 0x10 */
-
-/* Syringe REGISTERS 布局见 YRpp Syringe.h, 落点格问 OU_MouseCell (见 RP_Gate)。 */
-#define REG_OFF_EDI 0x08u
 
 /* ---------------- 字段偏移 (gamemd 实测) ---------------- */
 
@@ -116,12 +110,6 @@ static int    g_RpZRecent = 0;    /* Z 宽限剩余逻辑帧数: 画线期间为
 static int    g_RpZLastFrame = -1; /* Z 宽限计时的帧门 (Poll 一帧被调上百次) */
 
 /* ---------------- 小工具 ---------------- */
-
-static int RP_IsFoot(void* p)
-{
-    int w = OU_WhatAmI(p);
-    return (w == ABS_UNIT || w == ABS_AIRCRAFT || w == ABS_INFANTRY) ? 1 : 0;
-}
 
 /* ---------------- 建筑类型识别 ----------------
  * 只支持 ini `[RallyPath] Types=` 白名单 (逗号分隔, 留空不限), 默认取自 mod rules
@@ -414,7 +402,6 @@ static int RP_Gate(void* bld)
     }
     if (!OU_MouseCell(&cx, &cy)) return 0;
     if (!RP_IsFactory(bld)) return 0;
-    if (cx < 0 || cy < 0 || !OU_CellValid(cx, cy)) return 0;
     return RP_Push(bld, cx, cy);
 }
 
@@ -467,7 +454,7 @@ static void RP_Exit(void* bld, void* unit)
     RP_EnsureInit();
     if (!g_RpEnable) return;
     if (!bld || !unit) return;
-    if (!RP_IsFoot(unit)) return;
+    if (!OU_IsUnit(unit)) return;
     if (!RP_Owned(bld)) return;             /* 只追本家工厂出厂的单位 */
     src = RP_Find(bld);
     if (!src || src->n < 1) return;
@@ -541,30 +528,10 @@ static int RP_FireNode(int houseIdx, void* unit, int uid, int idxOk, int cx, int
                        unit, uid, idxOk) ? 1 : 0;
 }
 
-static int RP_FireCommit(int houseIdx)
-{
-    return OU_FirePlanCommit(houseIdx);
-}
-
 static void RP_WalkShiftDown(int i)
 {
     for (; i + 1 < g_RpWalkCount; i++) g_RpWalk[i] = g_RpWalk[i + 1];
     g_RpWalkCount--;
-}
-
-/* 单位 PlanningToken 上的节点数 (只读; token 不存在/野指针回 0)。 */
-static int RP_TokenNodes(void* unit)
-{
-    void* t;
-    void** arr;
-    int n;
-    if (!unit || !IsPlausiblePtr(unit)) return 0;
-    t = *(void**)((char*)unit + OFF_TECH_TOKEN);
-    if (!t || !IsPlausiblePtr(t)) return 0;
-    arr = *(void***)((char*)t + OFF_TOK_NODES);
-    n = *(int*)((char*)t + OFF_TOK_NCOUNT);
-    if (!arr || !IsPlausiblePtr(arr) || n < 0 || n > 1000) return 0;
-    return n;
 }
 
 /* ---------------- 别抢玩家的规划 (只读探测) ----------------
@@ -634,7 +601,7 @@ static void RP_WalkPoll(void)
         RPWalk* w = &g_RpWalk[i];
         int tn, k;
         /* 指针复用即串线: 只认登记时的单位, ID 对不上就丢 (fail-open 仅限抓不到 ID)。 */
-        if (!w->unit || !IsPlausiblePtr(w->unit) || !RP_IsFoot(w->unit) ||
+        if (!w->unit || !IsPlausiblePtr(w->unit) || !OU_IsUnit(w->unit) ||
             !OU_PtrAlive(w->unit, w->uid, w->idxOk))
         {
             RP_WalkShiftDown(i);
@@ -675,7 +642,7 @@ static void RP_WalkPoll(void)
         else
         {
             /* 阶段 2: 等节点挂上 token 再提交。玩家有待提交路径时一直压着不发。 */
-            tn = RP_TokenNodes(w->unit);
+            tn = OU_TokenNodes(w->unit);
             if (tn < w->sent && w->wait < RP_COMMIT_WAIT)
             {
                 w->wait++;
@@ -683,7 +650,7 @@ static void RP_WalkPoll(void)
                 continue;
             }
             if (RP_ForeignPending()) { w->wait++; i++; continue; }
-            RP_FireCommit(houseIdx);
+            OU_FirePlanCommit(houseIdx);
             RP_WalkShiftDown(i);
         }
     }
@@ -732,7 +699,7 @@ void RallyPath_Poll(void)
 static int RP_CellWorld(int cx, int cy, int* lx, int* ly, int* lz)
 {
     int z = 0;
-    if (!OU_CellGroundZ(cx, cy, &z)) return 0;
+    if (!OU_CellFloorZ(cx, cy, &z)) return 0;
     *lx = cx * 256 + 128;
     *ly = cy * 256 + 128;
     *lz = z;

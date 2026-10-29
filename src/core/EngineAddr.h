@@ -81,6 +81,9 @@
 /* 动态向量 (DynamicVectorClass) 通用布局。 */
 #define OFF_VEC_ITEMS           4u
 #define OFF_VEC_COUNT           16u
+/* DynamicVectorClass<T*> 的 items/count 取值样板 (各调用点共用, 防漂移)。 */
+#define ARR_ITEMS(base)         (*(void***)((base) + OFF_VEC_ITEMS))
+#define ARR_COUNT(base)         (*(int*)((base) + OFF_VEC_COUNT))
 
 /* 静态类型数组 (DynamicVector of ObjectTypeClass*)。判定"某 Type 指针是否合法"
  * 只比指针, 不解引用。 */
@@ -95,12 +98,23 @@
 #define ADDR_CUR_OBJECTS        0x00A8ECB8u   /* 容器本体 (items=+4, count=+0x10) */
 
 /* AbstractClass::WhatAmI 虚表槽 (0x692590 `mov eax,[ecx]; call [eax+0x2c]` 后
- * `cmp eax,6` = BuildingClass 实证)。返回值见 AbstractType。 */
+ * `cmp eax,6` = BuildingClass 实证)。返回值是 AbstractType, 取值常量用
+ * OrderUtil.h 的 ABS_* 一套。 */
 #define OFF_VT_WHATAMI          0x2Cu
-#define WHATAMI_UNIT            1
-#define WHATAMI_AIRCRAFT        2
-#define WHATAMI_BUILDING        6
-#define WHATAMI_INFANTRY        15
+
+/* TechnoClass::GreatestThreat 虚表槽 (基类 0x6F8DF0, FootClass 覆写 0x4D9920)。
+ * 签名 (ThreatType, CoordStruct* 原点, bool 只打本方敌人) -> 目标或 NULL。
+ * 引擎自己的自动索敌就是它, THREAT_RANGE 是"只在本单位射程内找"。只读查询。 */
+#define OFF_VT_GREATEST_THREAT  0x3C4u
+
+/* TechnoClass::SetTarget(AbstractClass*) 虚表槽 (0x6FCDB0, 收尾 `ret 4`)。
+ * 只写目标槽 (+0x2B4) 并清掉飞行中子弹对旧目标的引用, 不动
+ * Mission/Destination/Path。换索敌目标用它, 不要重发 Mission=Move ——
+ * 那会反复重置寻路, 单位迈不开步。 */
+#define OFF_VT_SETTARGET        0x3C8u
+
+/* TechnoClass::GetWeapon(int) 虚表槽: 返回 WeaponStruct*, 首成员 WeaponTypeClass*。 */
+#define OFF_VT_GETWEAPON        0x3F8u
 
 /* 具体类的类型指针成员 (YRpp 布局换算, BuildingClass 那项 0x520 与
  * OFF_BLD_TYPE 同值 ⇒ 其余同类可信)。 */
@@ -108,10 +122,17 @@
 #define OFF_AIRCRAFT_TYPE       0x6C4u
 #define OFF_INFANTRY_TYPE       0x6C0u
 
+/* WeaponTypeClass 成员, 单位 leptons。0x6F7248 `mov edi,[ebx+0xB4]` 取出后叠加
+ * 命中/地形加成当射程用; +0xB8 是 MinimumRange (0x6F737F 判非 0)。 */
+#define OFF_WT_RANGE            0xB4u
+
 /* TechnoClass 成员。Veterancy 是 float: 0~1 = 新兵升老兵进度, 1~2 = 老兵升精英,
  * <0 = 不吃经验 (YRpp VeterancyStruct::IsNegative)。Ammo 是当前弹药。 */
 #define OFF_TECH_VETERANCY      0x150u
 #define OFF_TECH_AMMO           0x2FCu
+/* TechnoClass::Target: 当前攻击目标 (TarCom)。SetTarget (0x6FCDB0) 开头读旧值
+ * 比较、末尾写入 0x2B4, 双向实证。 */
+#define OFF_TECH_TARGET         0x2B4u
 /* PassengersClass { int NumPassengers; FootClass* FirstPassenger; }, 链走
  * ObjectClass::NextObject (+0x30)。 */
 #define OFF_TECH_PASSNUM        0x114u
@@ -122,14 +143,10 @@
 /* FootClass::Container: 驻军建筑 / 坦克掩体用的"容器"字段 (0x6EA500 attach
  * 写 0x5D4, 0x457DE0 放人时据此断开)。车下载员恒为 0, 不要拿它判载具归属。 */
 #define OFF_TECH_CONTAINER      0x5D4u
-/* UnitClass::NonPassengerCount: 卸载状态机保留几个不下车 (炮手)。
- * 卸载状态 3 的判据就是 NumPassengers <= 这个值 (0x73D8C5)。 */
-#define OFF_TECH_NONPASS        0x6E4u
 /* BuildingClass::Occupants: DynamicVectorClass<InfantryClass*> 本体 0x684,
  * Items 0x688, Count 0x694 (GetOccupantCount 0x4581F0 直接返回 [ecx+0x694];
  * 0x4585C0 KillOccupants 读 Items/Count, 0x522941 AddOccupant 用
  * lea [ebp+0x684] 实证)。驻军不走 Passengers 链, 是另一套存储。 */
-#define OFF_BLD_OCC_VEC         0x684u
 #define OFF_BLD_OCC_ITEMS       0x688u
 #define OFF_BLD_OCC_COUNT       0x694u
 
@@ -170,7 +187,6 @@
 /* rules 里的 `PipWrap=` (一排显示几个弹药格) 与 `PipScale=`。
  * 偏移由 YRpp 同版本布局算出 (Ammo=0x684 与上面对得上, 可信):
  * PipScale=0x3D4 (枚举 dword), PipWrap=0x3E4 (int)。 */
-#define OFF_TT_PIPSCALE         0x3D4u
 #define OFF_TT_PIPWRAP          0x3E4u
 
 /* ==================== 选中 / 取消选中 (只动本地 UI 选择集) ==================== */
@@ -200,6 +216,7 @@
 #define ADDR_SURF_SIDEBAR       0x00887300u
 #define ADDR_SURF_MAP           0x008872FCu   /* 渲染时与 Composite 互换的持久地图面 */
 #define ADDR_SURF_COMPOSITE     0x0088731Cu
+#define ADDR_SURF_ALT           0x00887310u   /* 备用面 (崩溃诊断的面快照读它) */
 #define ADDR_VIEWBOUNDS         0x00886FA0u   /* ViewBounds (缩放档 = R) */
 #define ADDR_TACTICAL           0x00887324u   /* TacticalClass::Instance (指针) */
 #define ADDR_WWMOUSE            0x00887640u
@@ -219,22 +236,10 @@
 
 /* ==================== 覆盖物 / 格子 (OverlayClass / CellClass) ==================== */
 
-/* OverlayClass::Array (DynamicVectorClass<OverlayClass*>), 布局同其它容器:
- * +0x00 虚表 / +0x04 数据指针 / +0x08 容量 / +0x10 个数。
- * 实证: 0x5FC3FF 构造时 `inc [0xA8EC60]` 再 `mov [ecx+eax*4],esi` (ecx=[0xA8EC54]);
- * 0x5345B2 遍历时先读 [0xA8EC60] 再取 [0xA8EC54]。
- * 注意: 覆盖物对象的 Location 不是格子坐标 (0x5FC4A5 起只在特定条件下才 SetLocation),
- * 别拿 OU_GetCoords 反推箱子所在格 —— 一律走格子数组。 */
-#define ADDR_OVERLAYS_ITEMS     0x00A8EC54u
-#define ADDR_OVERLAYS_COUNT     0x00A8EC60u
-
 /* OverlayTypeClass::Array (DynamicVectorClass<OverlayTypeClass*>)。 */
 #define ADDR_OVLTYPES_ITEMS     0x00A83D84u
 #define ADDR_OVLTYPES_COUNT     0x00A83D90u   /* 0x5FD9BB 遍历用 */
 
-/* OverlayClass::Type: 0x5FD0A6 `mov edx,[eax+0xac]` (PlaceOverlay 读图像)。
- * 覆盖物对象 sizeof = 0xB0, Type 是最后一个成员 (0x4A194D `push 0xb0`)。 */
-#define OFF_OVL_TYPE            0x00ACu
 /* OverlayTypeClass::Crate (bool) —— 0x481A31 `mov bl,[edx+0x2aa]`;
  * 相邻 0x2A9=Wall, 0x2AB=CrateTrigger (0x5FD9F1 / 0x481A70)。 */
 #define OFF_OVLTYPE_CRATE       0x02AAu
@@ -269,7 +274,6 @@
  * 实证: gamemd 0x4279A8..0x4279E1 反复读写 [esi+0xA4]/[esi+0xA8],
  * 且 0x5F70C7 清零 +0xA4、0x5F70CD 清零字节 +0xA8。 */
 #define OFF_ANIMTYPE_ID         0x24u
-#define OFF_ANIMTYPE_IMAGE      0xA4u
 
 /* 动画播放参数 (int, YRpp AnimTypeClass 成员顺序: Rate -> Start -> LoopStart ->
  * LoopEnd)。注意 +0x2B0 里存的**不是** artmo.ini 写的那个 Rate: 活进程实测
@@ -280,7 +284,6 @@
  * 实证: gamemd 0x42477B-0x4247B1 用 [type+0x2B8]/[type+0x2BC] 复位动画帧,
  * 0x4246FC 用 LoopEnd-Start 判循环。 */
 #define OFF_ANIMTYPE_RATE       0x2B0u
-#define OFF_ANIMTYPE_START      0x2B4u
 #define OFF_ANIMTYPE_LOOPSTART  0x2B8u
 #define OFF_ANIMTYPE_LOOPEND    0x2BCu
 
@@ -320,6 +323,9 @@
 /* TacticalClass::MakeSelection(this, filter) 与原版框选物件过滤回调。 */
 #define ADDR_TAC_MAKESEL        0x006D9FF0u
 #define ADDR_TAC_SELFILTER      0x004AC2B0u
+/* TacticalClass::RegisterDirtyArea(this, RECT*, bool): 矩形推进脏区表,
+ * 0x56BE73 实证。侧栏外挂面/玩家色/比例尺重画共用。 */
+#define ADDR_REG_DIRTY_AREA     0x006D2790u
 
 /* TacticalClass 成员偏移 (YRpp TacticalClass.h 换算 + 0x6D6070 / 0x6D9FF0 反汇编实证)。 */
 #define OFF_TAC_TACX            0xB0u    /* 视口原点 X */
@@ -372,6 +378,18 @@
 #define OFF_SCEN_TINT_G        0x3538u   /* NormalLighting.Tint.G (Green) */
 #define OFF_SCEN_TINT_B        0x353Cu   /* NormalLighting.Tint.B (Blue) */
 
+/* ScenarioClass::Name (wchar_t[0x2D], 地图 [Basic] Name, 如 "Tournament Desert")。
+ * 0x686DD0 实证: 以场景文件路径 (FileName, +0x125C) 构造 CCINIClass, 再用
+ * 0x528F00 把 ini 里的 Name 读进 `[scen+0x1360]`。读档时这个 ini 是存档内嵌的
+ * 地图, 所以读档后它仍是原图名 —— 判"是不是同一张图"用这个。
+ * 注意 FileName (+0x125C) 读档后是存档名 (.sav), 比不出图。
+ * 可能为空 (地图没写 Name), 调用方需自行判断。只读。 */
+#define OFF_SCEN_NAME          0x1360u
+
+/* ScenarioClass::UIName (char[0x20], 地图 [Basic] UIName)。多数遭遇战图不填,
+ * 只在战役任务里用。Name 为空时可以当一个较弱的备选。只读。 */
+#define OFF_SCEN_UINAME        0x13BAu
+
 /* ScenarioClass::RecalcLighting(R, G, B, tint) —— __fastcall: ecx=R, edx=G,
  * B 与 tint 走栈且由被调方自己回收 (ret 8)。它内部会重算所有格子的光照
  * 并让地图面重画, 所以改完字段调它一个就够。
@@ -385,8 +403,6 @@
  *   0x4AEB10 getter = `mov al,[ecx+0x119c]; test; mov eax,[ecx+0x11a0]`
  *   0x4AEB30 setter = `mov eax,[esp+4]; test; mov [ecx+0x11a0],eax; setne al;
  *                      mov [ecx+0x119c],al; ret 4` */
-#define OFF_DISP_FOLLOW         0x119Cu      /* bool FollowObject */
-#define OFF_DISP_FOLLOWOBJ      0x11A0u      /* ObjectClass* ObjectToFollow */
 #define FN_DISP_SETFOLLOW       0x004AEB30u  /* __thiscall(self, obj), ret 4 */
 
 /* CommandClass "Follow" 的 Execute (F 键, KeyboardMD.ini 的 Follow=70)。

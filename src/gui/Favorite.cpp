@@ -284,11 +284,13 @@ static void Fav_Reset(void)
 /* ---------------- 验活 ---------------- */
 
 /* 对象还活着吗。id>0 时再按 Fetch_ID 索引反查一遍 (指针被复用时它能兜住);
- * 索引取不到 (id==0) 就只留字节判据, 不因此丢掉收藏。 */
+ * 索引取不到 (id==0) 就只留字节判据, 不因此丢掉收藏。
+ * 首指针必须先验可读: 收藏槽可能留着已释放单位的地址, IsPlausiblePtr 只查
+ * 范围/对齐, 放得过它, 解引用即页错误。 */
 static int Fav_Alive(void* o, int id)
 {
     void** vt;
-    if (!o || !IsPlausiblePtr(o)) return 0;
+    if (!o || MemReadableBytes(o, 4) < 4) return 0;
     vt = *(void***)o;
     if (!vt || !IsPlausiblePtr(vt)) return 0;
     if (!((unsigned char*)o)[OFF_ISALIVE]) return 0;
@@ -801,7 +803,8 @@ static int Fav_CanDraw(void* surf, int w, int h, int pitch)
     return 1;
 }
 
-int Fav_DrawStars(void* surf, int w, int h, int pitch)
+/* 收藏槽标记的公共骨架: 星星 (arrows=0) 与方向箭头 (arrows=1) 只差槽内画什么。 */
+static int Fav_DrawMarks(void* surf, int w, int h, int pitch, int arrows)
 {
     RectangleStruct a;
     unsigned char* base;
@@ -815,28 +818,19 @@ int Fav_DrawStars(void* surf, int w, int h, int pitch)
     for (slot = 0; slot < FAV_SLOT_MAX; slot++)
     {
         if (!s_Used[slot] || s_Slot[slot].n <= 0) continue;
-        Fav_DrawSlotStars(base, pitch, w, h, &a, slot);
+        if (arrows) Fav_DrawSlotArrows(base, pitch, w, h, &a, slot);
+        else Fav_DrawSlotStars(base, pitch, w, h, &a, slot);
     }
     GtUnlock(surf);
     return 1;
 }
 
+int Fav_DrawStars(void* surf, int w, int h, int pitch)
+{
+    return Fav_DrawMarks(surf, w, h, pitch, 0);
+}
+
 int Fav_DrawArrows(void* surf, int w, int h, int pitch)
 {
-    RectangleStruct a;
-    unsigned char* base;
-    int slot;
-
-    if (!Fav_CanDraw(surf, w, h, pitch)) return 0;
-    FM_GetViewRects(&a, NULL);
-    if (a.Width < 64 || a.Height < 64) return 0;
-    base = GtLock(surf);
-    if (!base) return 0;
-    for (slot = 0; slot < FAV_SLOT_MAX; slot++)
-    {
-        if (!s_Used[slot] || s_Slot[slot].n <= 0) continue;
-        Fav_DrawSlotArrows(base, pitch, w, h, &a, slot);
-    }
-    GtUnlock(surf);
-    return 1;
+    return Fav_DrawMarks(surf, w, h, pitch, 1);
 }

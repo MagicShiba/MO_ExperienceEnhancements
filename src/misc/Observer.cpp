@@ -156,3 +156,15 @@ void Observer_Poll(void)
     if (!OB_LocalHouseIsObserver(house)) return;
     *(void**)ADDR_CURRENT = observer;
 }
+
+/* ---------------- 只读查询 ----------------
+ * 关掉观战修复不等于本机变成玩家，所以不看 g_ObEnable。 */
+int Observer_LocalIsSpectator(void)
+{
+    void *house = *(void**)ADDR_CURRENT;
+    void *observer = *(void**)ADDR_OBSERVER;
+
+    if (!IsPlausiblePtr(house)) return 0;
+    if (IsPlausiblePtr(observer) && house == observer) return 1;
+    return OB_LocalHouseIsObserver(house);
+}

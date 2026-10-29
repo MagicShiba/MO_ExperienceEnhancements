@@ -6,6 +6,8 @@
  *         Skirmish(5)          = 单人, 按 [PvpNotice] Single:
  *                                0=不发 (默认) / 1=也发 (自测) / 2=只发一次。
  *       两种都还要求房表里除中立房外没有非人类房, 即没有 AI。
+ *       本机是观战者 (Observer_LocalIsSpectator) 时一句都不发 —— 观战不参与
+ *       对局, 声明没有意义, 只会给真正的玩家刷屏。
  * 文本: 硬编码在本文件, 不走 ini / 语言文件, 只按系统语言选中/英文。
  *       若游戏根目录存在 shroud.shp (替换件 = 透明迷雾), 句中再补一句
  *       "也启用了透明迷雾。", 免得不透明的一方按原版迷雾判断视野。
@@ -29,6 +31,7 @@
 #include "GdiText.h"
 #include "Lang.h"
 #include "MOEVersion.h"
+#include "Observer.h"
 #include "PvpNotice.h"
 
 /* ---------------- 引擎地址 ---------------- */
@@ -203,6 +206,10 @@ void PvpNotice_Poll(void)
         g_SingleDone = 0;
         return;
     }
+
+    /* 观战者不参与对局: 声明对它自己和观众都没意义, 只在玩家聊天里刷屏。
+     * 观战是整局固定身份 (引擎不支持观战转玩家), 命中就一条都不发。 */
+    if (Observer_LocalIsSpectator()) return;
 
     if (!g_InMatch)
     { g_InMatch = 1; g_NextTick = GetTickCount() + PN_WARMUP; }  /* 首条延后 */

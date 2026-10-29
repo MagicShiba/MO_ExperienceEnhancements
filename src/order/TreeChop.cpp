@@ -99,81 +99,10 @@ static int TC_GridCorner(int gx, int gy, int gz, int* px, int* py)
     return TC_ProjLep(gx * 256, gy * 256, gz, px, py);
 }
 
-/* 树查找 */
+/* 树查找 (类型指针自校准公共实现见 OrderUtil.h) */
 
-static int g_TcTypeOff = -1;
-static int g_TcIdOff = -1;
-
-static int TC_StrOk(const char* s)
-{
-    int n = 0;
-    if (!s) return 0;
-    while (n < 24)
-    {
-        char c = s[n];
-        if (!c) return (n > 0) ? 1 : 0;
-        if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-              c == '_' || c == '.' || c == '-')) return 0;
-        n++;
-    }
-    return 0;
-}
-
-/* ID 字符串有效即拷出并记住偏移。 */
-static int TC_TypeID(void* p, char* out)
-{
-    static const unsigned cands[3] = { 0x20u, 0x24u, 0x28u };
-    int i, k;
-    if (!p || !IsPlausiblePtr(p)) return 0;
-    if (g_TcIdOff >= 0)
-    {
-        const char* s = (const char*)p + (unsigned)g_TcIdOff;
-        if (!TC_StrOk(s)) { g_TcIdOff = -1; }
-        else
-        {
-            for (k = 0; k < 24; k++) out[k] = s[k];
-            return 1;
-        }
-    }
-    for (i = 0; i < 3; i++)
-    {
-        const char* s = (const char*)p + cands[i];
-        if (!TC_StrOk(s)) continue;
-        g_TcIdOff = (int)cands[i];
-        for (k = 0; k < 24; k++) out[k] = s[k];
-        return 1;
-    }
-    return 0;
-}
-
-/* 指针是否在 TerrainType 数组内。 */
-static int TC_InTerrainSet(void* p) { return OU_InVec(ADDR_TERRAINTYPES, p); }
-
-/* 树对象取 Type 指针 (命中直取, 否则扫描)。 */
-static void* TC_TerrainTypeOf(void* t)
-{
-    unsigned off;
-    char idb[24];
-    int k;
-    if (g_TcTypeOff >= 0)
-    {
-        void* p = *(void**)((char*)t + (unsigned)g_TcTypeOff);
-        if (p && IsPlausiblePtr(p) && TC_InTerrainSet(p) && TC_TypeID(p, idb))
-            return p;
-        g_TcTypeOff = -1;
-    }
-    for (off = 0x40u; off < 0x900u; off += 4u)
-    {
-        void* p = *(void**)((char*)t + off);
-        if (!p || !IsPlausiblePtr(p)) continue;
-        if (!TC_InTerrainSet(p)) continue;
-        for (k = 0; k < 24; k++) idb[k] = 0;
-        if (!TC_TypeID(p, idb)) continue;
-        g_TcTypeOff = (int)off;
-        return p;
-    }
-    return 0;
-}
+static int g_TcTypeOff = -1;   /* 树对象内 Type 指针偏移 pin */
+static int g_TcIdOff = -1;     /* 类型内 ID 字符串偏移 pin */
 
 /* TREE* / TIBTRE* 为树, 其余排除。 */
 static int TC_IsTreeID(const char* id)
@@ -212,10 +141,10 @@ static int TC_FindTrees(int cx, int cy, void** trees, int* treeIDs)
             for (dup = 0; dup < n; dup++)
                 if (trees[dup] == tr) break;
             if (dup < n) continue;
-            tp = TC_TerrainTypeOf(tr);
+            tp = OU_ScanTypeOf(tr, &g_TcTypeOff, ADDR_TERRAINTYPES, &g_TcIdOff);
             if (!tp) continue;
             for (k = 0; k < 24; k++) idb[k] = 0;
-            if (!TC_TypeID(tp, idb)) continue;
+            if (!OU_TypeID(tp, idb, &g_TcIdOff)) continue;
             if (!TC_IsTreeID(idb)) continue;
             for (ti = 0; ti < 8; ti++) tb[ti] = 0;
             if (!FN_TGT_OBJ(tb, tr)) continue;

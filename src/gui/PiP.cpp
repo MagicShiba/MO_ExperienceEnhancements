@@ -816,6 +816,13 @@ static int PiP_FolUsable(void* o)
     return OU_PtrAlive(o, g_FolId, g_FolIdxOk);
 }
 
+/* 清掉引擎侧的显示跟随 (Display::Set_Follow(0)): 主窗口恢复由雷达/玩家自己管。 */
+static void PiP_EngineFollowOff(void)
+{
+    ((void (__attribute__((thiscall)) *)(void*, void*))FN_DISP_SETFOLLOW)(
+        (void*)(size_t)ADDR_DISPLAY, 0);
+}
+
 /* 关跟随并清引擎侧状态 (主窗口不会再跟着它)。why 只用于日志。 */
 static void PiP_FollowClear(const char* why)
 {
@@ -824,8 +831,7 @@ static void PiP_FollowClear(const char* why)
     g_FolObj = 0;
     g_FolId = 0;
     /* 引擎自己的跟随如果还挂着同一个对象, 一并清掉, 免得主窗口替我们继续跟。 */
-    ((void (__attribute__((thiscall)) *)(void*, void*))FN_DISP_SETFOLLOW)(
-        (void*)(size_t)ADDR_DISPLAY, 0);
+    PiP_EngineFollowOff();
     if (why) LogLine(why);
 }
 
@@ -847,8 +853,7 @@ static int PiP_FollowSet(void* o)
     /* 与"自动跟随雷达事件"互斥: 两者都写小窗目标, 同时开会互相拉。 */
     g_AutoJump = 0;
     /* 主窗口不动: 清掉引擎的跟随状态。 */
-    ((void (__attribute__((thiscall)) *)(void*, void*))FN_DISP_SETFOLLOW)(
-        (void*)(size_t)ADDR_DISPLAY, 0);
+    PiP_EngineFollowOff();
     LogLine("pip: follow ON (F, window-only)");
     return 1;
 }

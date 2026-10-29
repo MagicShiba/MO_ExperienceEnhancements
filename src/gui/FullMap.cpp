@@ -88,8 +88,7 @@
  *  (pop edi/esi/ebp / xor al,al / pop ebx / add esp,0x18 / ret 0x18),
  *  栈形在该落点上完全对齐。做法与 SWSBar 的 SWS_ClickGate 同一套路。 */
 
-#define VT_COPY_FROM_PART 0x08   /* DSurface::CopyFromPart */
-#define VT_FILL_RECT      0x14   /* DSurface::FillRect */
+#define VT_COPY_FROM_PART 0x08   /* DSurface::CopyFromPart (填矩形用 GdiText.h 的 GtVT_FILL_RECT) */
 /* WWMouse 构造器 0x7B8850 写入虚表 0x7F7B2C。
  * +0x38=SetCoords (0x7BA380), +0x3C=绘制/保存背景 (0x7B90C0),
  * +0x40=恢复背景 (0x7B92D0)。flag 只选择面坐标/背景缓存, 不选择光标形状。
@@ -219,6 +218,21 @@ static int Fm_ModeTrim(void)
     return Fm_ModeFull() ? 0 : !Fm_ModeBare();
 }
 
+/* 侧栏条带面的宽高; 拿不到 (NULL / GtSurfGet 失败) 退回原版默认 168x1080。 */
+static void Fm_StripSize(int* sw, int* sh)
+{
+    void* strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
+    int w = 168, h = 1080;
+    if (strip)
+    {
+        int gw = GtSurfGet(strip, GtVT_GET_WIDTH);
+        int gh = GtSurfGet(strip, GtVT_GET_HEIGHT);
+        if (gw > 0 && gh > 0) { w = gw; h = gh; }
+    }
+    *sw = w;
+    *sh = h;
+}
+
 /* ---------------- 要保留的那一块: 侧栏面顶部整块 ----------------
  * SidebarBounds.Y (实测 158) 正好是"顶上一簇"与"面板"的分界:
  *   y <  158 : 资金条 + 小地图 + 它的边框 + 右边两个按钮   <- 保留
@@ -228,13 +242,8 @@ static int Fm_ModeTrim(void)
 static int Fm_KeepRect(RectangleStruct* out, int* swOut, int* shOut)
 {
     RectangleStruct* sb = (RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS;
-    void* strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
-    int sw = 168, sh = 1080, k;
-    if (strip) {
-        int w = GtSurfGet(strip, GtVT_GET_WIDTH);
-        int h = GtSurfGet(strip, GtVT_GET_HEIGHT);
-        if (w > 0 && h > 0) { sw = w; sh = h; }
-    }
+    int sw, sh, k;
+    Fm_StripSize(&sw, &sh);
     /* 态2 一块都不保留 (小地图也不画); 态0 是整条侧栏面 */
     if (!Fm_ModeKeep()) return 0;
     if (Fm_ModeFull())
@@ -266,16 +275,10 @@ static int Fm_KeepRect(RectangleStruct* out, int* swOut, int* shOut)
 static int Fm_KeepTopRect(RectangleStruct* out)
 {
     RectangleStruct* sb = (RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS;
-    void* strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
-    int sw = 168, sh = 1080, k;
+    int sw, sh, k;
     if (!out) return 0;
     if (Fm_ModeBare()) return 0;
-    if (strip && IsPlausiblePtr(strip))
-    {
-        int w = GtSurfGet(strip, GtVT_GET_WIDTH);
-        int h = GtSurfGet(strip, GtVT_GET_HEIGHT);
-        if (w > 0 && h > 0) { sw = w; sh = h; }
-    }
+    Fm_StripSize(&sw, &sh);
     if (sw < 32 || sh < 32) return 0;
     k = sb->Y;
     if (k < 32 || k > 512) k = 158;
@@ -360,7 +363,7 @@ static void Fm_ClearStripExceptRadar(const RectangleStruct* keep, int sw, int sh
     if (!strip || !IsPlausiblePtr(strip)) return;
     if (sw <= 0 || sh <= 0) { sw = 168; sh = 1080; }
     vt = *(void***)(size_t)strip;
-    fn = (FnFillRect)vt[VT_FILL_RECT >> 2];
+    fn = (FnFillRect)vt[GtVT_FILL_RECT >> 2];
     if (!fn) return;
     if (!keep) {                          /* 全屏: 整块抹黑 */
         r.X = 0; r.Y = 0; r.Width = sw; r.Height = sh;
@@ -717,13 +720,8 @@ static int s_RadarLockSH = 0;
 static int Fm_RadarRect(RectangleStruct* out)
 {
     RectangleStruct* r = (RectangleStruct*)(size_t)ADDR_RADAR_RECT;
-    int sw = 168, sh = 1080;
-    void* strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
-    if (strip) {
-        int w = GtSurfGet(strip, GtVT_GET_WIDTH);
-        int h = GtSurfGet(strip, GtVT_GET_HEIGHT);
-        if (w > 0 && h > 0) { sw = w; sh = h; }
-    }
+    int sw, sh;
+    Fm_StripSize(&sw, &sh);
     if (s_RadarLockOk && sw == s_RadarLockSW && sh == s_RadarLockSH)
     {
         if (r->Width > s_RadarLock.Width) s_RadarLock.Width = r->Width;
@@ -1078,7 +1076,6 @@ static RectangleStruct* __fastcall Fm_ViewRectStub(RectangleStruct* out)
 }
 
 /* 换几何后催地图重画: 增量面只重画标脏格, 新露出的边必须连推几帧整窗脏区。 */
-#define ADDR_REG_DIRTY_AREA 0x006D2790u
 typedef void (__fastcall *FnRegDirtyArea)(void*, RectangleStruct, int);
 
 static void Fm_DirtyRedraw(void)
@@ -1615,7 +1612,7 @@ static void Fm_CoverColumnTail(void* surf, const RectangleStruct* dst, int w, in
     if (r.Height <= 0) return;
     vt = *(void***)(size_t)surf;
     if (!vt || !IsPlausiblePtr(vt)) return;
-    fn = (FnFillRect)vt[VT_FILL_RECT >> 2];
+    fn = (FnFillRect)vt[GtVT_FILL_RECT >> 2];
     if (fn) fn(surf, &r, 0);
 }
 
@@ -1761,10 +1758,6 @@ int FM_DrawRadarTo(void* surf)
 
 /* 视口 gadget 收窄: 容器摆在 ViewBounds 上会吞掉侧栏列, 在命中前收成"视口减侧栏"。
  * XYWH 也要收 (缩小档 R 高超窗口)。命中区按 A 算。 */
-#define GAD_LOG_X       0x0Cu
-#define GAD_LOG_Y       0x10u
-#define GAD_LOG_W       0x14u
-#define GAD_LOG_H       0x18u
 
 
 static void* s_ViewGadget = NULL;
@@ -1808,10 +1801,10 @@ void FM_TrimViewGadget(void)
     if (!g || !IsPlausiblePtr(g)) return;
     if ((unsigned)(size_t)g < 0x00400000u
         || (unsigned)(size_t)g > 0x008A0000u) { s_ViewGadget = NULL; return; }
-    gx = *(int*)(g + GAD_LOG_X);
-    gy = *(int*)(g + GAD_LOG_Y);
-    gw = *(int*)(g + GAD_LOG_W);
-    gh = *(int*)(g + GAD_LOG_H);
+    gx = *(int*)(g + GAD_X);
+    gy = *(int*)(g + GAD_Y);
+    gw = *(int*)(g + GAD_W);
+    gh = *(int*)(g + GAD_H);
     if (gx < 0 || gw <= 0 || gy < 0 || gh <= 0) return;
     if (!Fm_ModeTrim())
     {
@@ -1820,10 +1813,10 @@ void FM_TrimViewGadget(void)
         if (vb->Width < 64 || vb->Width > 8192) return;
         if (gx == vb->X && gy == vb->Y && gw == vb->Width && gh == vb->Height)
             return;
-        *(int*)(g + GAD_LOG_X) = vb->X;
-        *(int*)(g + GAD_LOG_Y) = vb->Y;
-        *(int*)(g + GAD_LOG_W) = vb->Width;
-        *(int*)(g + GAD_LOG_H) = vb->Height;
+        *(int*)(g + GAD_X) = vb->X;
+        *(int*)(g + GAD_Y) = vb->Y;
+        *(int*)(g + GAD_W) = vb->Width;
+        *(int*)(g + GAD_H) = vb->Height;
         g[0x20] = 1;
         return;
     }
@@ -1832,10 +1825,10 @@ void FM_TrimViewGadget(void)
      * ViewBounds 重设, 所以每次命中都要重做。*/
     if (gx == keep.X && gy == keep.Y && gw == keep.Width && gh == keep.Height)
         return;
-    *(int*)(g + GAD_LOG_X) = keep.X;
-    *(int*)(g + GAD_LOG_Y) = keep.Y;
-    *(int*)(g + GAD_LOG_W) = keep.Width;
-    *(int*)(g + GAD_LOG_H) = keep.Height;
+    *(int*)(g + GAD_X) = keep.X;
+    *(int*)(g + GAD_Y) = keep.Y;
+    *(int*)(g + GAD_W) = keep.Width;
+    *(int*)(g + GAD_H) = keep.Height;
     g[0x20] = 1;                         /* NeedsRedraw */
     /* 日志只在形状真的变了时打一条 (缩放档下 Y/Height 一直跟 R 变, 否则刷屏)。*/
     {
@@ -1886,8 +1879,8 @@ void FM_NoteGadgetInput(void* gadget)
         || (unsigned)(size_t)vt > 0x008A0000u) return;
     sbw = *(int*)(size_t)ADDR_SIDEBAR_W;
     if (sbw < 64 || sbw > 512) return;
-    gx = *(int*)(g + GAD_LOG_X);
-    gw = *(int*)(g + GAD_LOG_W);
+    gx = *(int*)(g + GAD_X);
+    gw = *(int*)(g + GAD_W);
     /* 认它 = 矩形恒等于 ViewBounds (判据只比 X/Width, Y/H 随 R 变认不准)。 */
     if (gw <= 0) return;
     if (gw != vb->Width) return;
@@ -1916,19 +1909,6 @@ void FM_NoteGadgetInput(void* gadget)
  * ProcessClickCoords 里, 侧栏自己的 widget 分派 (0x6D0680) 不受影响。
  * 联机安全: 只动本地摄像机, 不写模拟对象、不发事件。*/
 
-/* ---------------- 小地图点击: 自己接手 + 吞掉穿透 ----------------
- * 引擎把这一块当普通地图点击 (框单位/打靶/下单), 所以在
- * DisplayClass::ProcessClickCoords 里挂一道门: 落点在那块小地图矩形内就自己
- * 完成视口跳转, 再跳 0x6925FC (原函数的"未处理"出口, 栈形在该落点对齐) 吞掉。
- * 只吞左键 (右键是取消/强制移动); "一次按下只处理一次"由门里直接读
- * GetAsyncKeyState + "已处理"标记实现 —— 不能靠 FM_Poll 采边沿, 点击事件与
- * prepare (一帧能被调好几次) 的先后不可控, 边沿可能在 press **之后**才采到。
- * 命中范围是**侧栏顶部那一块** (资金条 + 小地图 + 那两个按钮, Fm_KeepTopRect):
- * 这一块是我们画的 UI, 点击不该再落到地图上。⚠️ **不能**用 Fm_KeepRect ——
- * 态0 它是整条侧栏面, 缩放档开门后会把页签/cameo 一起吞掉 (那两样点了是要
- * 下单的)。吞没只发生在 ProcessClickCoords 里, 侧栏自己的 widget 分派
- * (0x6D0680) 不受影响, 顶部两个按钮的原生响应照旧。
- * 联机安全: 只动本地摄像机, 不写模拟对象、不发事件。 */
 unsigned FM_RadarClickGate(void* regs)
 {
     RectangleStruct radar, keep;

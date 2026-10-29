@@ -18,12 +18,8 @@
 #define PS_OFF_TOPLEFT 0x1178u   /* CellStruct: X +0 / Y +2 (中心到左上角) */
 #define PS_OFF_DATA 0x117Cu      /* CellStruct* (空=不在放置模式) */
 
-#define PS_ADDR_FRAME 0xA8ED84u
-
 #define PS_ARR_UNIT 0x8B4108u
 #define PS_ARR_INF 0xA83DE8u
-#define ARR_ITEMS(base) (*(void***)((base) + 4u))
-#define ARR_COUNT(base) (*(int*)((base) + 16u))
 
 /* 格子内容链: [cell+0xE4]=地面层首对象, [cell+0xE8]=桥面层首对象,
  * 链后继 [obj+0x30], WhatAmI 槽同 OrderUtil (+0x2C)。
@@ -170,17 +166,11 @@ static int s_CacheFrame = -100000;
  * 只改本模块判定。 */
 static int PS_BlockedEx(int cx, int cy, int skipFnd)
 {
-    void** cells;
-    int maxc, idx, k;
+    int k;
     void* cell;
     int land;
-    if (cx < 0 || cy < 0 || cx >= 512 || cy >= 512) return 1;
-    cells = *(void***)(ADDR_DISPLAY + OFF_MAP_CELLS);
-    maxc = *(int*)(ADDR_DISPLAY + OFF_MAP_MAXC);
-    if (!cells || !IsPlausiblePtr(cells) || maxc <= 0 || maxc > 512 * 512) return 1;
-    idx = (cy << 9) + cx;
-    if (idx >= maxc) return 1;
-    cell = cells[idx];
+    /* 越界/地图未加载/空槽由 OU_CellPtr 一手判 (与手写四层检查逐项同义)。 */
+    cell = OU_CellPtr(cx, cy);
     if (!cell || !IsPlausiblePtr(cell)) return 1;
     land = *(int*)((char*)cell + PS_OFF_CELL_LAND);
     if (land == LAND_WATER || land == LAND_ROCK) return 1;
@@ -363,15 +353,12 @@ static void PS_ScanArr(unsigned arrBase, void* cur, int cells[][2], int nCell)
     for (i = 0; i < count; i++)
     {
         void* o = items[i];
-        int w, hp, cx, cy;
+        int w, cx, cy;
         CoordStruct cs;
         if (s_PsQTail >= PS_QCAP) return;
         if (!o || !IsPlausiblePtr(o)) continue;
         if (*(void**)((char*)o + OFF_OWNER) != cur) continue;
-        if (!((unsigned char*)o)[OFF_ISALIVE]) continue;
-        if (((unsigned char*)o)[OFF_INLIMBO]) continue;
-        hp = *(int*)((char*)o + OFF_HEALTH);
-        if (hp <= 0) continue;
+        if (!OU_TechAliveRaw(o)) continue;   /* IsAlive/InLimbo/Health 三连 */
         w = OU_WhatAmI(o);   /* 虚调用, 放最后 (前面几项已滤掉大半对象) */
         if (w != ABS_UNIT && w != ABS_INFANTRY) continue;
         if (!OU_GetCoords(o, &cs)) continue;
@@ -534,7 +521,7 @@ void PlaceScatter_Poll(void)
     PS_EnsureInit();
     if (!g_PsMode) return;
     /* PowerDrawBoth 每循环调多次, 按帧号门控每帧只跑一次。 */
-    fr = *(int*)PS_ADDR_FRAME;
+    fr = *(int*)ADDR_FRAME;
     if (fr == s_PsLastFrame) return;
     s_PsLastFrame = fr;
     cur = *(void**)ADDR_CURPLAYER;

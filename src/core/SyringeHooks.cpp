@@ -35,7 +35,7 @@ struct SyHookDecl
 
 #define SYHOOK(a, s, n) { (a), (s), (n), 0u }
 
-/* 与 dist/MOExperience.dll.inj 逐行对应 (51 项, 顺序一致)。 */
+/* 与 dist/MOExperience.dll.inj 逐行对应 (53 项, 顺序一致)。 */
 static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(16))) =
 {
     SYHOOK(0x5D3BA0u, 6u, "MsgText_AddMessageHook"),
@@ -56,7 +56,6 @@ static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(
     SYHOOK(0x6AB0C1u, 6u, "BQ_PausePeel"),
     SYHOOK(0x6AB197u, 8u, "BQ_CancelPeel"),
     SYHOOK(0x6AAE44u, 6u, "BQ_DarkDispatchPeel"),
-    SYHOOK(0x6AAFE1u, 5u, "BQ_DarkPauseSeen"),
     SYHOOK(0x6AB6CEu, 10u, "BQ_FreeShift"),
     SYHOOK(0x6A9C86u, 5u, "BQ_ShowCount"),
     SYHOOK(0x6A9C6Cu, 6u, "BQ_DrawNullFac"),

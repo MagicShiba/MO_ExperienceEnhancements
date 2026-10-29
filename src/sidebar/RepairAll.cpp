@@ -42,9 +42,7 @@
 
 #define RA_SECTION "RepairAll"
 
-/* DynamicVectorClass 容器 (同 SWSBar): 传对象基址, items/count 是它的首两成员。 */
-#define ARR_ITEMS(base) (*(void***)((base) + OFF_VEC_ITEMS))
-#define ARR_COUNT(base) (*(int*)((base) + OFF_VEC_COUNT))
+/* DynamicVectorClass 容器: 传对象基址, items/count 是它的首两成员。 */
 
 #define EVT_REPAIR        0x15    /* EventType::Repair */
 #define ADDR_SKIP_HOTKEY  0x00536FACu  /* 0x536FA0 偷 7B 后的落点 (ret 4) */

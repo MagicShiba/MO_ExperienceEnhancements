@@ -55,12 +55,10 @@ void FM_TrimViewGadget(void);
  * 两个指针都可传 0 表示不要那个。FM_Poll 每循环刷新; 关闭时报引擎当前视口。*/
 void FM_GetViewRects(RectangleStruct* a, RectangleStruct* r);
 
-/* DisplayClass::ProcessClickCoords (0x692300) 落点 0x692406 的点击门 (Syringe 钩,
- * 见 MOExperience.dll.inj): 点击落在屏幕上那块小地图矩形里时, 自己把视口对准
- * 那一格 (RadarClass::ScrollTo 0x653F70), 再返回 0x6925FC (原函数的"未处理"出口)
- * 把这次点击吞掉, 不让它穿透去框单位/打靶。返回 0 = 交回原版。
- * 格范围由 Fm_ScanTacticalMapRect 只读扫 TacticalClass 得到, 没扫到就只吞不跳。
- * 纯本地摄像机, 联机安全。 */
+/* DisplayClass::ProcessClickCoords (0x692300) 内的点击门 (Syringe 钩, 见
+ * MOExperience.dll.inj): 左键落在侧栏顶部块 (Fm_KeepTopRect) 内就跳原函数
+ * "未处理"出口 0x6925FC 吞掉; 视口跳转交给引擎原生 RadarClass::Action
+ * (0x653A3F 补丁)。返回 0 = 交回原版。纯本地摄像机, 联机安全。 */
 unsigned FM_RadarClickGate(void* regs);
 
 /* 物理游戏坐标是否落在小地图矩形内 (PiP 用: 点小地图 = 给小窗重新定位, 不丢聚焦)。
@@ -75,11 +73,6 @@ int  FM_SidebarColumnX(void);
  * FM_RadarHit / FM_RadarClickGate 同源。返回 0 = 该块此刻不呈现 (全隐藏档)。
  * PiP 用它把小窗从这块上挤开: 只留顶部块时视口铺到屏幕右缘, 不躲就压住小地图。*/
 int  FM_KeepTopRectScreen(RectangleStruct* out);
-
-
-
-
-
 
 /* ProcessClickCoords 拒点门要不要为"侧栏顶部那一块"(资金条/小地图/顶部两按钮)
  * 放行。= 点击门武装好了 且物理鼠标点落在那一块 ⇒ 与点击门必然同进同退 (两处判定
