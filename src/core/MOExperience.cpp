@@ -18,6 +18,7 @@
 #include "ChatEdit.h"
 #include "CrateIcon.h"
 #include "DeployPreview.h"
+#include "Favorite.h"
 #include "FuzzyAttack.h"
 #include "AttackMove.h"
 #include "MindSelect.h"
@@ -1369,6 +1370,7 @@ int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch,
     tOne = Perf_Now(); DeployPreview_Draw(surf, surfW, surfH, surfPitch);  Perf_Add(PF_D_DP, tOne);
     tOne = Perf_Now(); WeaponRange_Draw(surf, surfW, surfH, surfPitch);    Perf_Add(PF_D_WR, tOne);
     tOne = Perf_Now(); Aggressive_Draw(surf, surfW, surfH, surfPitch);     Perf_Add(PF_D_AG, tOne);
+    tOne = Perf_Now(); Fav_DrawArrows(surf, surfW, surfH, surfPitch);      Perf_Add(PF_D_FAV, tOne);
     tOne = Perf_Now(); if (FM_DrawRadarTo(surf)) drew = 1;                 Perf_Add(PF_D_RADAR, tOne);
     Perf_Add(PF_MSG_DRAWS, tSeg);
     }
@@ -1453,6 +1455,14 @@ static DWORD MsgDrawBody(void* regs)
 
     /* 箱子类型图标: 压在木箱上、UI 之下。整片被黑幕盖住时自己跳过 (见 CrateIcon.cpp)。 */
     if (CrateIcon_Draw(surf, surfW, surfH, surfPitch)) drew = 1;
+
+    /* 收藏星星: 必须在 UI 层之前, 超武侧栏/面板要能盖住星 (星星只标单位位置,
+     * 不该盖在面板上)。指向箭头相反, 画在 UI 层最后 (见下方 Fav_DrawArrows)。 */
+    {
+        long long tFav = Perf_Now();
+        if (Fav_DrawStars(surf, surfW, surfH, surfPitch)) drew = 1;
+        Perf_Add(PF_D_FAV, tFav);
+    }
 
     drew |= MOE_DrawUILayers(surf, surfW, surfH, surfPitch, &bitLineH, &screenW, NULL);
 

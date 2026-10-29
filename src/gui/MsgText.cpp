@@ -40,8 +40,7 @@
 #define RE_OFF_CELL              0x20u
 #define RE_MAX_SCAN              48          /* 一帧最多扫几个 (引擎容量 10 起, 会长) */
 
-/* 视口跳转: 见下面 MsgText_JumpToCell。 */
-#define ADDR_SET_TACTICAL_POS    0x006D6070u  /* TacticalClass::SetTacticalPosition(CoordStruct*) */
+/* 视口跳转: 见下面 MsgText_JumpToCell。ADDR_SET_TACTICAL_POS 在 EngineAddr.h。 */
 #define ADDR_MAP_INSTANCE        0x0087F7E8u  /* MapClass::Instance */
 #define ADDR_MAP_GET_CELL        0x005657A0u  /* CellClass* MapClass::GetCellAt(CellStruct*) */
 #define ADDR_CELL_GET_COORDS     0x00480A30u  /* CoordStruct* CellClass::GetCellCoords(CoordStruct*) */

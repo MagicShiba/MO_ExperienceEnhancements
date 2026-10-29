@@ -194,6 +194,9 @@
 #define ADDR_VIEWBOUNDS         0x00886FA0u   /* ViewBounds (缩放档 = R) */
 #define ADDR_TACTICAL           0x00887324u   /* TacticalClass::Instance (指针) */
 #define ADDR_WWMOUSE            0x00887640u
+/* TacticalClass::SetTacticalPosition(CoordStruct const*) (__thiscall)。
+ * 只改本机摄像机: 不写模拟、不发事件, 雷达点行/收藏跳转共用。 */
+#define ADDR_SET_TACTICAL_POS   0x006D6070u
 
 /* 雷达点击门 (点击是否已被 UI 消费)。 */
 #define ADDR_CLICKGATE_SKIP     0x006925FCu

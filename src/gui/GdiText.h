@@ -89,7 +89,7 @@ enum
     /* ---- 调用时机 (谁在每帧重复跑 / 谁在空转) ---- */
     PF_SB_SS, PF_SB_PWR, PF_SB_PIP, PF_SB_FM,   /* BlitSb 入口四段 (含与 prepare 重复的两段) */
     PF_D_SWS, PF_D_SO, PF_D_PC, PF_D_RP, PF_D_FA, PF_D_SA, PF_D_TC, PF_D_DP,
-    PF_D_WR, PF_D_AG, PF_D_RADAR,               /* msgdraw 里 10 个 *_Draw + 雷达上屏 */
+    PF_D_WR, PF_D_AG, PF_D_FAV, PF_D_RADAR,      /* msgdraw 里 11 个 *_Draw + 雷达上屏 */
     PF_T_CE, PF_T_PWR, PF_T_SB, PF_T_PV, PF_T_SHOT,  /* msgtail 五段 */
     PF_VHIT, PF_VMISS,         /* VecGlyph 字形缓存 命中/未命中 (未命中 = 一次 GDI 光栅) */
     PF_LOCK,                   /* 全部 GtLock+GtUnlock 的 vtable 调用累计 */

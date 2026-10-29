@@ -2,8 +2,9 @@
  *
  * 版式: 九宫格外框 (border_mental_n9.pcx, 边距 9px) 只包格子, 格数按内容定
  * (单选 2 格 = 2x1, 4 架 = 2x2, 9 个以上才 3x3), 中间留 1px 缝; 没选中东西
- * 时整块框不显示。框外左侧竖排 5 个 18px 按钮 (自下而上: 折叠 / 操作模式 /
- * 收藏 1..3), 底边钉在视口底, 整块贴视口左下角。外框最后画, 压在所有图标之上。
+ * 时整块框不显示。框外左侧竖排按钮 (自下而上: 折叠 / 操作模式 / 收藏 1..4),
+ * 收藏按钮按"用过的槽"逐个露出, 个数见 Fav_RevealCount(); 底边钉在视口底,
+ * 整块贴视口左下角。外框最后画, 压在所有图标之上。
  *
  * 图标: art ini 的 CameoPCX= 指向 pcx 时走 PCX::Instance + 最近邻缩到 60x48;
  * 否则回退 CC_Draw_Shape (0x4AED70) + CAMEO_PAL 现渲。装载/渲染都放在 UP_Poll,
@@ -25,6 +26,7 @@
 
 #include <windows.h>
 #include "EngineAddr.h"
+#include "Favorite.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "PauseView.h"
@@ -53,7 +55,8 @@
 #define UP_BTN_W    18
 #define UP_BTN_H    18
 #define UP_BTN_GAP  2
-#define UP_BTN_N    5
+#define UP_BTN_FIXED 2          /* 折叠 / 操作模式: 恒定两个 */
+#define UP_BTN_MAX  (UP_BTN_FIXED + FAV_SLOT_MAX)
 #define UP_GAP      1           /* 按钮列与九宫格的间距 */
 #define UP_COLS_MAX 3           /* 每页最多 3x3; 实际用几行几列由 s_Cols/s_Rows 决定 */
 #define UP_ROWS_MAX 3
@@ -73,12 +76,10 @@
 #define UP_GDI_SLOT 12          /* GdiText 槽: 左下选中面板 */
 #define UP_BADGE_SLOT 13        /* GdiText 槽: 数量角标 (资金/顶栏资源那套字体与字号) */
 
-/* 按钮下标 (自下而上) */
+/* 按钮下标 (自下而上)。收藏槽 0..FAV_SLOT_MAX-1 对应 UP_BTN_FAV1 + 槽号。 */
 #define UP_BTN_FOLD 0
 #define UP_BTN_MODE 1
 #define UP_BTN_FAV1 2
-#define UP_BTN_FAV2 3
-#define UP_BTN_FAV3 4
 
 /* 格子种类 */
 #define UP_CELL_EMPTY 0
@@ -116,13 +117,16 @@ static char s_FaceCfg[64];
 /* 版式 */
 static int s_Px, s_Py, s_Pw, s_Ph;
 static int s_Gx, s_Gy;
-static int s_Bx, s_By[UP_BTN_N];
+static int s_Bx, s_By[UP_BTN_MAX];
+static int s_BtnN = UP_BTN_FIXED;  /* 本帧真实按钮数 = 2 + 露出的收藏槽数 */
 static int s_BtnTop;             /* 按钮列顶端 (框比按钮列矮时, 命中区要往上扩) */
 static int s_Cbx, s_Cby;         /* 折叠态那个按钮 */
 
 /* 半成品: 待处理点击 (门里记, Poll 里做) */
 static int s_Pend = 0, s_PendX = 0, s_PendY = 0;
+static int s_PendRb = 0, s_PendRbX = 0, s_PendRbY = 0;   /* 右键: 只用于星星按钮切换箭头 */
 static int s_GateLb = 0;         /* 门侧左键按下沿标记: ProcessClickCoords 一次按下会进多趟 */
+static int s_GateRb = 0;         /* 同上, 右键 */
 /* 载员多选 (shift + 点载员格): 只对单选版式有意义 —— 那一版式里才看得见载员格。
  * 存的是载员指针, 归属容器一换就整组清掉 (s_PickHost 记归属)。 */
 #define UP_PICK_MAX 10        /* 与 SingleUnload 的 SU_PAX_MAX 对齐, 否则多出的会被静默丢掉 */
@@ -373,6 +377,7 @@ void UP_SetEnabled(int enable)
     {
         s_Vis = 0;
         s_Pend = 0;
+        s_PendRb = 0;
         s_KeyMove = 0;
         s_KeyMoveSel = 0;
         Up_KmClear();
@@ -405,9 +410,14 @@ static void Up_Layout(void)
     s_Bx = vx + s_Margin;
     s_Gx = s_Px + UP_PAD_L;
     s_Gy = s_Py + UP_PAD_T;
-    /* 按钮列自下而上排; 底边钉在视口底 (== 框底), 不随面板格数浮动 */
+    /* 按钮列自下而上排; 底边钉在视口底 (== 框底), 不随面板格数浮动。
+     * 收藏按钮按用过的槽逐个露出, 新按钮出现在上一格上方; [Favorite] 关掉时
+     * Fav_RevealCount() 回 0, 这里就只剩两个固定按钮。 */
+    s_BtnN = UP_BTN_FIXED + Fav_RevealCount();
+    if (s_BtnN > UP_BTN_MAX) s_BtnN = UP_BTN_MAX;
+    if (s_BtnN < UP_BTN_FIXED) s_BtnN = UP_BTN_FIXED;
     by = vy + vh - s_Margin;
-    for (i = 0; i < UP_BTN_N; i++)
+    for (i = 0; i < s_BtnN; i++)
     {
         s_By[i] = by - UP_BTN_H;
         by = s_By[i] - UP_BTN_GAP;
@@ -464,12 +474,12 @@ static int Up_HitCell(int x, int y)
     return cy * s_Cols + cx;
 }
 
-/* 按钮命中: 0..4, -1 = 不在按钮上 (折叠态用 UP_BTN_FOLD) */
+/* 按钮命中: 0..s_BtnN-1, -1 = 不在按钮上 (折叠态用 UP_BTN_FOLD) */
 static int Up_HitBtn(int x, int y)
 {
     int i;
     if (s_Collapsed) return Up_PtIn(x, y, s_Cbx, s_Cby, UP_BTN_W, UP_BTN_H) ? UP_BTN_FOLD : -1;
-    for (i = 0; i < UP_BTN_N; i++)
+    for (i = 0; i < s_BtnN; i++)
         if (Up_PtIn(x, y, s_Bx, s_By[i], UP_BTN_W, UP_BTN_H)) return i;
     return -1;
 }
@@ -1929,7 +1939,7 @@ static void Up_DrawMoreCell(unsigned char* base, int pitch, int W, int H,
 static void Up_DrawButtons(unsigned char* base, int pitch, int W, int H)
 {
     int i;
-    for (i = 0; i < UP_BTN_N; i++)
+    for (i = 0; i < s_BtnN; i++)
     {
         int x = s_Bx, y = s_By[i];
         int hot = (s_HoverBtn == i);
@@ -1952,7 +1962,25 @@ static void Up_DrawButtons(unsigned char* base, int pitch, int W, int H)
                         cr, cg, cb, 255);
         }
         else
-            Up_Star(base, pitch, W, H, x + 4, y + 4, cr, cg, cb, 255);
+        {
+            /* 收藏槽: 有收藏 = 该槽满色星; 空槽 = 同色暗星 (提示"这里还能收藏")。 */
+            int slot = i - UP_BTN_FAV1;
+            unsigned r = 0, g = 0, b = 0;
+            Fav_Color(slot, &r, &g, &b);
+            if (!Fav_Used(slot))
+            {
+                r = r / 3 + 20;
+                g = g / 3 + 20;
+                b = b / 3 + 20;
+            }
+            else if (hot)
+            {
+                r = (r + 255) / 2;
+                g = (g + 255) / 2;
+                b = (b + 255) / 2;
+            }
+            Up_Star(base, pitch, W, H, x + 4, y + 4, r, g, b, 255);
+        }
     }
 }
 
@@ -2143,6 +2171,7 @@ static void Up_ClickAt(int mx, int my)
         s_Collapsed = s_Collapsed ? 0 : 1;
         s_HoverCell = -1;
         s_Pend = 0;
+        s_PendRb = 0;
         /* 折叠后看不到模式指示, 必须关掉; 否则 WASD 被吞却没有任何提示。 */
         if (s_Collapsed) { s_KeyMove = 0; s_KeyMoveSel = 0; Up_KmClear(); }
         LogLine(s_Collapsed ? "up: collapsed" : "up: expanded");
@@ -2157,10 +2186,16 @@ static void Up_ClickAt(int mx, int my)
         LogLine(s_KeyMove ? "up: keymove on" : "up: keymove off");
         return;
     }
-    if (btn >= 0)
+    if (btn >= UP_BTN_FAV1)
     {
-        /* 收藏: 功能待定, 先只记日志, 不吞其它行为 */
-        LogLine("up: fav btn (todo)");
+        /* 收藏槽: Ctrl+左键 = 收藏当前选中集 (整组); 不按 Ctrl 时按下只记起点,
+         * 长按清空 / 松开跳转都在 Favorite 的 PressPoll 里结算。 */
+        void* sel[FAV_GROUP_MAX];
+        int n = 0, i;
+        int ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) ? 1 : 0;
+        for (i = 0; i < s_ListN && n < FAV_GROUP_MAX; i++)
+            if (s_List[i].obj) sel[n++] = s_List[i].obj;
+        Fav_PressBegin(btn - UP_BTN_FAV1, sel, n, ctrl);
         return;
     }
     cell = Up_HitCell(mx, my);
@@ -2213,17 +2248,36 @@ static void Up_ClickAt(int mx, int my)
     }
 }
 
+/* 右键落在星星按钮上: 切换指示箭头类型 (贴边 / 中心同心圆)。 */
+static void Up_RightClickAt(int mx, int my)
+{
+    if (s_Collapsed) return;
+    if (Up_HitBtn(mx, my) >= UP_BTN_FAV1) Fav_ToggleArrowMode();
+}
+
 void UP_NoteClick(int mx, int my, int left, int right)
 {
-    (void)right;
-    if (!left) { s_GateLb = 0; return; }
-    /* 一次按下可能多次进 ProcessClickCoords (引擎按帧重算落点), 只认按下沿,
-     * 否则点一下折叠键会来回折十几次。 */
-    if (s_GateLb) return;
-    s_GateLb = 1;
-    s_Pend = 1;
-    s_PendX = mx;
-    s_PendY = my;
+    if (!left) s_GateLb = 0;
+    if (!right) s_GateRb = 0;
+    if (left)
+    {
+        /* 一次按下可能多次进 ProcessClickCoords (引擎按帧重算落点), 只认按下沿,
+         * 否则点一下折叠键会来回折十几次。 */
+        if (s_GateLb) return;
+        s_GateLb = 1;
+        s_Pend = 1;
+        s_PendX = mx;
+        s_PendY = my;
+        return;
+    }
+    if (right)
+    {
+        if (s_GateRb) return;
+        s_GateRb = 1;
+        s_PendRb = 1;
+        s_PendRbX = mx;
+        s_PendRbY = my;
+    }
 }
 
 int UP_WheelIn(int mx, int my, int dir)
@@ -2246,6 +2300,9 @@ void UP_Poll(void)
 {
     int mx = -1, my = -1;
     UP_EnsureInit();
+    /* 收藏槽先走一拍 (换图清空 / 成员剪枝 / 结算挂起的取消), 再取本帧点击;
+     * 面板关掉时也要跑: 星星/箭头还在, 换图后不能让旧指针留着。 */
+    Fav_Poll();
     /* 1=强制开启引擎自带的单位行动线 (右键移动时那条); 0=不改游戏内设置。 */
     if (s_ActionLines) *(volatile unsigned char*)(size_t)ADDR_GAMEOPT_ACTION_LINES = 1;
     if (!s_Enable)
@@ -2260,6 +2317,7 @@ void UP_Poll(void)
     if (!s_Vis)
     {
         s_Pend = 0;
+        s_PendRb = 0;
         s_KeyMove = 0;
         s_KeyMoveSel = 0;
         Up_KmClear();
@@ -2286,6 +2344,7 @@ void UP_Poll(void)
     if (s_PlanWas && !SU_PlanActive() && s_PlanFired > 0) Up_PickClear();
     /* 松开时清门侧按下沿标记 (松手那一下未必再进门) */
     if (s_GateLb && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) s_GateLb = 0;
+    if (s_GateRb && !(GetAsyncKeyState(VK_RBUTTON) & 0x8000)) s_GateRb = 0;
 
     if (s_Pend)
     {
@@ -2293,6 +2352,15 @@ void UP_Poll(void)
         s_Pend = 0;
         Up_ClickAt(px, py);
     }
+    if (s_PendRb)
+    {
+        int px = s_PendRbX, py = s_PendRbY;
+        s_PendRb = 0;
+        Up_RightClickAt(px, py);
+    }
+    /* 收藏星星按钮的按住状态: 长按到时清空 / 松开跳转。
+     * 每循环都要走 (按下沿只来一次, 松开未必再进点击门)。 */
+    Fav_PressPoll();
 
     /* 模式刚在本帧被点开/关掉时也走这里: 开的那一拍会立即更新可动单位数。 */
     Up_KeyMovePoll();

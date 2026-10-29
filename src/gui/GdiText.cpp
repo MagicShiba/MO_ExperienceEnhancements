@@ -242,7 +242,7 @@ static const char* const kPfName[] =
     "swpm", "swpb", "swpt",
     "vprint", "vsimple", "vprtO", "vsmpO", "vb1", "vb2", "clr",
     "sbSS", "sbPWR", "sbPIP", "sbFM",
-    "dSWS", "dSO", "dPC", "dRP", "dFA", "dSA", "dTC", "dDP", "dWR", "dAG", "dRAD",
+    "dSWS", "dSO", "dPC", "dRP", "dFA", "dSA", "dTC", "dDP", "dWR", "dAG", "dFAV", "dRAD",
     "tCE", "tPWR", "tSB", "tPV", "tSHOT",
     "vhit", "vmiss", "lock", "sbSet", "sbFill", "sbLbl",
     "swsB", "swsL", "dWTH", "dCLD", "upP", "upD"
