@@ -35,7 +35,6 @@ extern int g_Calibrated;
 
 /* ---------------- 字段偏移 (gamemd 实测) ---------------- */
 
-#define OFF_BLD_OWNER     0x21Cu   /* TechnoClass::Owner -> HouseClass* (归属判定) */
 #define OFF_TYP_UNDEPLOY  0x16B9u  /* BuildingTypeClass::UndeploysInto */
 #define VT_ISUNITFACTORY  0x284u   /* TechnoClass::IsUnitFactory() */
 #define OFF_BLD_ARCHIVE   0x218u   /* TechnoClass::ArchiveTarget: 引擎画聚集点线读的目标
@@ -267,7 +266,7 @@ static int RP_Owned(void* b)
     if (!b || !IsPlausiblePtr(b)) return 0;
     cur = *(void**)ADDR_CURPLAYER;
     if (!cur || !IsPlausiblePtr(cur)) return 0;
-    own = *(void**)((char*)b + OFF_BLD_OWNER);
+    own = *(void**)((char*)b + OFF_OWNER);
     return (own && own == cur) ? 1 : 0;
 }
 
@@ -426,38 +425,6 @@ extern "C" __declspec(dllexport) unsigned __cdecl RallyPath_GateHook(void* regs)
     if (!r) return 0;
     if (!RP_Gate((void*)r[REG_OFF_ESI / 4u])) return 0;
     return RP_GATE_SKIP;
-}
-
-/* ---------------- 取色 ----------------
- * HouseClass::CurrentPlayer + 0x16054 即配色下标, 取
- * ColorScheme::Array[下标].Colors[MainShadeIndex] 即玩家色。
- * Colors @+0x04, MainShadeIndex @+0x330; 取不到回黄。 */
-#define ADDR_HOUSE_CUR     0xA83D4Cu  /* HouseClass::CurrentPlayer */
-#define OFF_HOUSE_SCHEME   0x16054u   /* HouseClass::ColorSchemeIndex */
-#define ADDR_SCHEME_ITEMS  0xB054D4u  /* ColorScheme::Array.items */
-#define ADDR_SCHEME_COUNT  0xB054D8u
-#define OFF_SCHEME_PAL     0x04u     /* ColorScheme::Colors[256] */
-#define OFF_SCHEME_MAIN    0x330u    /* ColorScheme::MainShadeIndex */
-
-static int RP_HouseColor(int* r, int* g, int* b)
-{
-    void* house = *(void**)ADDR_HOUSE_CUR;
-    void** items;
-    int cnt, idx, main;
-    unsigned char* sc;
-    if (!house || !IsPlausiblePtr(house)) return 0;
-    idx = *(int*)((char*)house + OFF_HOUSE_SCHEME);
-    items = *(void***)ADDR_SCHEME_ITEMS;
-    cnt = *(int*)ADDR_SCHEME_COUNT;
-    if (!items || !IsPlausiblePtr(items) || cnt <= 0 || idx < 0 || idx >= cnt) return 0;
-    sc = (unsigned char*)items[idx];
-    if (!sc || !IsPlausiblePtr(sc)) return 0;
-    main = *(int*)(sc + OFF_SCHEME_MAIN);
-    if (main < 0 || main > 255) return 0;
-    *r = sc[OFF_SCHEME_PAL + main * 3 + 0];
-    *g = sc[OFF_SCHEME_PAL + main * 3 + 1];
-    *b = sc[OFF_SCHEME_PAL + main * 3 + 2];
-    return 1;
 }
 
 /* ---------------- 输入采集 (Poll 侧) ----------------
@@ -832,7 +799,7 @@ void RallyPath_Draw(void* surf, int w, int h, int pitch)
     if (n > 0)
     {
         int cr, cg, cb;
-        if (!RP_HouseColor(&cr, &cg, &cb)) { cr = 255; cg = 255; cb = 0; }
+        if (!OU_HouseColor(*(void**)ADDR_CURPLAYER, &cr, &cg, &cb)) { cr = 255; cg = 255; cb = 0; }
         OU_PrevDrawDash(buf, n, locked, w, h, pitch, cr, cg, cb, 220, 2, 6, 4);
     }
     OU_SurfUnlock(surf);

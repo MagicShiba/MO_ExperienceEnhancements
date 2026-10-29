@@ -268,7 +268,7 @@ void Fav_EnsureInit(void)
     LogLine(buf);
 }
 
-void Fav_Reset(void)
+static void Fav_Reset(void)
 {
     int i;
     for (i = 0; i < FAV_SLOT_MAX; i++)
@@ -686,17 +686,9 @@ static void Fav_DrawSlotArrows(unsigned char* base, int pitch, int w, int h,
  * 只给本机看得见的信标画: 先问引擎 BeaconClass::VisibleToPlayer (0x4308B0,
  * 只读: 已放置 + 与本家同盟 + 该房可见), 再叠本地黑幕判据 —— 不能靠箭头把
  * 己方看不到的信标位置漏出来。 */
-#define BC_HOUSE_MAX    8
+#define BC_HOUSE_MAX    8          /* BeaconManagerClass::Beacons[8][3] */
 #define BC_SLOT_MAX     3
 #define BC_MAX          (BC_HOUSE_MAX * BC_SLOT_MAX)
-#define BC_OFF_BITFIELD 0x0Cu      /* BeaconClass::Bitfield, bit0 = 已放置 */
-#define BC_OFF_HOUSEID  0x110u     /* BeaconClass::HouseID */
-#define BC_ADDR_VISIBLE 0x004308B0u
-#define OFF_HOUSE_SCHEME 0x16054u  /* HouseClass::ColorSchemeIndex */
-#define ADDR_SCHEME_ITEMS 0x00B054D4u
-#define ADDR_SCHEME_COUNT 0x00B054E0u
-#define OFF_SCHEME_COLORS 0x04u    /* ColorScheme::Colors[256] (每项 3 字节) */
-#define OFF_SCHEME_MAIN   0x330u   /* ColorScheme::MainShadeIndex */
 
 typedef unsigned char (__attribute__((thiscall)) *Fn_BcVisible)(void* self);
 
@@ -705,41 +697,12 @@ typedef struct {
     unsigned r, g, b;   /* 该信标所属玩家的颜色 */
 } FavBcMark;
 
-/* 房号 → 玩家色 (RGB)。取不到回 0, 调用方跳过该信标。 */
-static int Fav_HouseColor(int houseId, unsigned* r, unsigned* g, unsigned* b)
-{
-    void** houses, **schemes;
-    void* house;
-    void* sc;
-    int hn, sn, idx, main;
-
-    houses = *(void***)(size_t)ADDR_HOUSES_ITEMS;
-    hn = *(int*)(size_t)ADDR_HOUSES_COUNT;
-    if (!houses || !IsPlausiblePtr(houses) || hn <= 0 || hn > 64) return 0;
-    if (houseId < 0 || houseId >= hn) return 0;
-    house = houses[houseId];
-    if (!house || !IsPlausiblePtr(house)) return 0;
-    idx = *(int*)((char*)house + OFF_HOUSE_SCHEME);
-    schemes = *(void***)(size_t)ADDR_SCHEME_ITEMS;
-    sn = *(int*)(size_t)ADDR_SCHEME_COUNT;
-    if (!schemes || !IsPlausiblePtr(schemes) || sn <= 0 || sn > 1000) return 0;
-    if (idx < 0 || idx >= sn) return 0;
-    sc = schemes[idx];
-    if (!sc || !IsPlausiblePtr(sc)) return 0;
-    main = *(int*)((char*)sc + OFF_SCHEME_MAIN);
-    if (main < 0 || main > 255) return 0;
-    *r = ((unsigned char*)sc)[OFF_SCHEME_COLORS + main * 3 + 0];
-    *g = ((unsigned char*)sc)[OFF_SCHEME_COLORS + main * 3 + 1];
-    *b = ((unsigned char*)sc)[OFF_SCHEME_COLORS + main * 3 + 2];
-    return 1;
-}
-
 static int Fav_BeaconVisible(void* b)
 {
     static Fn_BcVisible fn = NULL;
     /* 引擎函数直接解引用本家房指针, 开局前它可能是空。 */
     if (!*(void**)(size_t)ADDR_CURPLAYER) return 0;
-    if (!fn) fn = (Fn_BcVisible)(void*)BC_ADDR_VISIBLE;
+    if (!fn) fn = (Fn_BcVisible)(void*)FN_BC_VISIBLE;
     return fn(b) ? 1 : 0;
 }
 
@@ -766,22 +729,21 @@ int Fav_DrawBeaconArrows(void* surf, int w, int h, int pitch)
     for (i = 0; i < BC_MAX; i++)
     {
         unsigned char* b = *(unsigned char**)((size_t)ADDR_BEACON_MGR + (size_t)i * 4u);
-        int px, py, hid;
-        unsigned r, g, bl;
+        int px, py, hid, r, g, bl;
 
         if (!b || !IsPlausiblePtr(b)) continue;
-        if (!(b[BC_OFF_BITFIELD] & 1)) continue;        /* 只认已放置的槽 */
-        hid = *(int*)(b + BC_OFF_HOUSEID);
-        if (!Fav_HouseColor(hid, &r, &g, &bl)) continue;
+        if (!(b[OFF_BC_BITFIELD] & 1)) continue;        /* 只认已放置的槽 */
+        hid = *(int*)(b + OFF_BC_HOUSEID);
+        if (!OU_HouseIndexColor(hid, &r, &g, &bl)) continue;
         if (!Fav_BeaconVisible(b)) continue;
         if (Fav_CellHidden(*(int*)b, *(int*)(b + 4))) continue;
         if (!OU_ProjWorld(*(int*)b, *(int*)(b + 4), *(int*)(b + 8), &px, &py)) continue;
         if (Fav_InView(&a, px, py)) continue;          /* 在画面上就有信标本体 */
         mk[n].px = px;
         mk[n].py = py;
-        mk[n].r = r;
-        mk[n].g = g;
-        mk[n].b = bl;
+        mk[n].r = (unsigned)r;
+        mk[n].g = (unsigned)g;
+        mk[n].b = (unsigned)bl;
         n++;
     }
     if (n <= 0) return 0;

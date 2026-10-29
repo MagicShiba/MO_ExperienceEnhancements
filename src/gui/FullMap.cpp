@@ -90,15 +90,20 @@
 
 #define VT_COPY_FROM_PART 0x08   /* DSurface::CopyFromPart */
 #define VT_FILL_RECT      0x14   /* DSurface::FillRect */
-#define WW_VT_FIX_CURSOR  0x3C   /* WWMouseClass: 把光标精灵烙到指定面 (第二实参 = isNOD/miniMap 标志) */
+/* WWMouse 构造器 0x7B8850 写入虚表 0x7F7B2C。
+ * +0x38=SetCoords (0x7BA380), +0x3C=绘制/保存背景 (0x7B90C0),
+ * +0x40=恢复背景 (0x7B92D0)。flag 只选择面坐标/背景缓存, 不选择光标形状。
+ * Render 先用 +0x40 擦旧光标, 后用 +0x3C 画新光标;
+ * 接管 BlitSidebar 必须补回 0x6A71C7 的 +0x3C 调用。 */
+#define WW_VT_DRAW_CURSOR 0x3C
 
 /* ---------------- 引擎函数原型 ---------------- */
 
 typedef int (__thiscall *FnCopyFromPart)(void* self,
     RectangleStruct* pDstRect, void* pSrcSurface,
     RectangleStruct* pSrcRect, int bUnk1, int bUnk2);
-typedef void (__thiscall *FnMouseFixSurface)(void* mouse, void* surface, int isNodMiniMap);
 typedef int (__thiscall *FnFillRect)(void* self, RectangleStruct* rect, unsigned color);
+typedef void (__thiscall *FnDrawCursor)(void* mouse, void* surface, int flag);
 
 /* ---------------- 显示模式 (F11 循环切换) ----------------
  * 三态循环, 只改"我们接管多少" + 视口宽度:
@@ -767,6 +772,36 @@ static void Fm_DisarmAt(unsigned g, int colX, int topH)
     p[GAD_REDRAW] = 1;
 }
 
+/* 顶部雷达 gadget 的屏幕矩形不会随 SidebarBounds.X 自动移动。
+ * 全隐藏只禁用这三个控件, 切回后恢复进入全隐藏前的 Disabled 状态。 */
+static void Fm_SyncRadarGadgets(void)
+{
+    static const unsigned kRadar[] = { 0x00B04978u, 0x00B04910u, 0x00B04A10u };
+    static unsigned char saved[3];
+    static int hidden = 0;
+    int i;
+    if (Fm_ModeBare())
+    {
+        for (i = 0; i < 3; ++i)
+        {
+            unsigned char* g = (unsigned char*)(size_t)kRadar[i];
+            if (!hidden) saved[i] = g[GAD_DISAB];
+            g[GAD_DISAB] = 1;
+            /* Input 的捕获路径不检查 Disabled, 只清属于隐藏控件的捕获。 */
+            if (*(void**)(size_t)0x008B3E88u == g) *(void**)(size_t)0x008B3E88u = NULL;
+            if (*(void**)(size_t)0x008B3E90u == g) *(void**)(size_t)0x008B3E90u = NULL;
+            if (*(void**)(size_t)0x008B3E94u == g) *(void**)(size_t)0x008B3E94u = NULL;
+        }
+        hidden = 1;
+    }
+    else if (hidden)
+    {
+        for (i = 0; i < 3; ++i)
+            ((unsigned char*)(size_t)kRadar[i])[GAD_DISAB] = saved[i];
+        hidden = 0;
+    }
+}
+
 static int s_DisarmFrame = -1;
 static void Fm_DisarmSidebarGadgets(int colX, int topH)
 {
@@ -947,7 +982,8 @@ static void Fm_SyncColumn(int bare)
     int colX;
     if (!s_Enable) return;
     colX = Fm_ColumnX(bare);
-    if (colX < 0) return;
+    if (colX == -1) return;
+    if (colX < 0 && !(bare && !*(unsigned char*)(size_t)ADDR_ISNOD_SIDEBAR)) return;
     if (sb->X != colX) sb->X = colX;
 }
 
@@ -1382,6 +1418,7 @@ void FM_Poll(void)
     Fm_ApplyViewWidth();
     /* 几何没变但面换过人 (读档) 时, 上面的 Apply 会早退, 布局脏标记还在这儿。*/
     Fm_ConsumeLayoutDirty();
+    Fm_SyncRadarGadgets();
     /* 催重画 (须在 Apply 之后, 那儿才知道几何变没变)。 */
     Fm_DirtyRedraw();
     sb = (RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS;
@@ -1589,31 +1626,24 @@ __attribute__((naked)) static void Fm_Ret4(void)
     __asm__ volatile ("ret $4\n\t");
 }
 
-/* 把光标精灵烙进侧栏条带, 调用期间借用 ViewBounds.Width 让它落在 blit 真正会去的位置。
- * 不变量: 接管呈现路径时, 引擎在这条路径内部用来推导坐标的全局, 呈现目标与精灵
- * 定位必须继续读同一个 —— 原版 BlitSidebar (0x6A70E0) 用 ViewBounds.Width 同时做
- * 两件事 (烙精灵 0x6A71B7 / 算 blit 落点 0x6A71D0), 而我们把侧栏列钉在 A 的右缘,
- * 缩放档下 A≠R ⇒ 精灵落错位置, 偏差随换挡/滚动在 0..差值间跳 ⇒ 忽隐忽现。
- * 借完立刻还原; flag=1 分支只读这一个字段, 中间没有引擎代码。
- * 盟军侧栏 (isNOD=0) 两边本来就都是 0, 不用动。*/
+/* 条带光标与 blit 必须共用 colX。+0x3C 同时保存下一帧擦除所需背景,
+ * 不能在这里额外调用 +0x40, 否则本帧新光标会被立即恢复成背景。 */
 static void Fm_CursorStampStrip(void* mouse, void* strip, int colX)
 {
     RectangleStruct* vb = (RectangleStruct*)(size_t)ADDR_VIEWBOUNDS;
     void** vt;
-    FnMouseFixSurface fn;
-    int save, want;
+    FnDrawCursor draw;
+    int save;
     if (!mouse || !IsPlausiblePtr(mouse)) return;
     if (!strip || !IsPlausiblePtr(strip)) return;
     vt = *(void***)(size_t)mouse;
     if (!vt || !IsPlausiblePtr(vt)) return;
-    fn = (FnMouseFixSurface)vt[WW_VT_FIX_CURSOR >> 2];
-    if (!fn) return;
-    want = (*(unsigned char*)(size_t)ADDR_ISNOD_SIDEBAR) ? colX : 0;
-    if (!vb) { fn(mouse, strip, 1); return; }
+    draw = (FnDrawCursor)vt[WW_VT_DRAW_CURSOR >> 2];
+    if (!draw) return;
     save = vb->Width;
-    if (want > 0 && want != save) vb->Width = want;
-    fn(mouse, strip, 1);
-    if (want > 0 && want != save) vb->Width = save;
+    if (*(unsigned char*)(size_t)ADDR_ISNOD_SIDEBAR) vb->Width = colX;
+    draw(mouse, strip, 1);
+    vb->Width = save;
 }
 
 int FM_SidebarVisible(void)
@@ -1635,7 +1665,7 @@ unsigned long FM_BlitSb(void)
 
     /* 与原版尾声 (0x6A7481/0x6A748A) 一致: 标脏标记给下帧 Render 用, 清脏旗。
      * 只在真正接管时做 —— 原版提前返回的那几条路并不会置 0xB0B519。 */
-    *(unsigned char*)(size_t)ADDR_SIDEBAR_TOUCH = 1;
+    *(unsigned char*)(size_t)ADDR_SIDEBAR_TOUCH = Fm_ModeKeep() ? 1 : 0;
     *(unsigned char*)(size_t)ADDR_SIDEBAR_DIRTY = 0;
     *(unsigned char*)(size_t)ADDR_SIDEBAR_REDRAW = 0;
 
@@ -1649,13 +1679,11 @@ unsigned long FM_BlitSb(void)
     primW = GtSurfGet(prim, GtVT_GET_WIDTH);
     primH = GtSurfGet(prim, GtVT_GET_HEIGHT);
 
-    /* 全屏: 侧栏面整块抹黑, 一笔都不上屏 (原版整条 blit 已被换掉, 所以屏幕上
-     * 什么都没有 —— 地图本来就已经铺满整宽了)。 */
+    /* 全隐藏: 那一条侧栏列已经整个归地图, 屏幕上没有任何条带内容 —— 这里一笔都不
+     * 用画, 也不能画 (抹黑/烙印都只写离屏面, 但会额外改鼠标对象和条带状态, 让引擎
+     * 按"侧栏还在"的假设做事, 那块区域的光标就跟着错)。只照原版尾声记脏标记。 */
     if (!Fm_ModeKeep())
-    {
-        Fm_ClearStripOnce(NULL, stripW, stripH);
         return (unsigned long)(size_t)Fm_Ret4;
-    }
 
     if (Fm_KeepRect(&src, &stripW, &stripH))
     {
@@ -1677,15 +1705,14 @@ unsigned long FM_BlitSb(void)
         fn = (FnCopyFromPart)vt[VT_COPY_FROM_PART >> 2];
         Fm_ClearStripOnce(&src, stripW, stripH);
         Fm_CoverColumnTail(prim, &dst, primW, primH);
-        /* 原版 blit 前那笔光标烙印: 横坐标基准必须与上面的 blit 目标同源,
-         * 所以只能排在 colX 算出来之后 (原版本来也在 blit 之前)。*/
+        /* 原版那笔光标烙印, 必须在条带上屏之前、且和上面的 dst 用同一个横坐标
+         * 基准 (colX), 否则精灵会落在条带外/偏一段 (见 Fm_CursorStampStrip)。
+         * 这一笔是本帧**唯一**会把侧栏光标送到屏幕上的地方: 本函数挂在
+         * `BlitSidebar 0x6A70E0` 上, 而 `0x7776E0` 的出口次序是
+         * present(Composite->Primary) -> BlitSidebar(条带->Primary) -> Flip,
+         * 也就是说条带这一 blit 是 Flip 之前最后一笔, 想让它上屏就**不能**省。 */
         Fm_CursorStampStrip(mouse, strip, colX);
-        /* 小地图上屏**不再在这里做**: 同一块矩形每帧已经由 FM_DrawRadarTo 画进
-         * Composite (消息帧链路里), 而 present 会把 Composite 整幅送上屏 —— 这里
-         * 再 blit 一次到 Primary 是纯重复 (实测 32~40us/帧), 且两面相同时更是
-         * 逐像素重写。脏标记/抹黑/光标烙印这些副作用照做 (它们和呈现语义绑定),
-         * 只省掉 CopyFromPart 那一趟。回退: 把下面这行 fn(...) 的注释去掉。 */
-        (void)fn;
+        if (fn) fn(prim, &dst, strip, &src, 0, 1);
     }
     else if (!s_Warned && !Fm_ModeBare())
     {
@@ -1695,7 +1722,6 @@ unsigned long FM_BlitSb(void)
     return (unsigned long)(size_t)Fm_Ret4;
 }
 /* 小地图画进 Composite (不再依赖侧栏上屏时机, 构造上不闪)。 */
-static int s_RadarDupLogged = 0;
 int FM_DrawRadarTo(void* surf)
 {
     RectangleStruct src, dst;
@@ -1707,19 +1733,8 @@ int FM_DrawRadarTo(void* surf)
 
     if (!s_Enable || !Fm_ModeKeep()) return 0;
     if (!surf || !IsPlausiblePtr(surf)) return 0;
-    /* 同一块小地图每帧被 blit 两次: 一次进 Composite (这里), 一次进 Primary
-     * (FM_BlitSb 的侧栏呈现)。实测 32us/帧, 占整帧 1%。
-     * 两面相同 (全屏 1:1) 时是逐像素重复, 直接省掉;
-     * 两面不同时 present 会把 Composite 整幅送上屏, 侧栏那一次的落点被覆盖,
-     * 所以这里画的才是留下的那一份 —— 两种情形都只需保留本函数。 */
-    if (!s_RadarDupLogged)
-    {
-        s_RadarDupLogged = 1;
-        if (surf == *(void**)(size_t)ADDR_SURF_PRIMARY)
-            LogLine("fullmap: composite==primary, radar blit in blitsb is redundant");
-        else
-            LogLine("fullmap: composite!=primary, radar blit in blitsb is overwritten by present");
-    }
+    /* 此处复制不含光标的条带; 帧末 BlitSidebar 再绘制光标并呈现。
+     * 两次复制不能合并: Render 的光标绘制在消息帧 UI 链之后。 */
     strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
     if (!strip || !IsPlausiblePtr(strip)) return 0;
     if (!Fm_KeepRect(&src, &stripW, &stripH)) return 0;
@@ -1955,6 +1970,7 @@ int FM_RadarHit(int gx, int gy)
     RectangleStruct* sb = (RectangleStruct*)(size_t)ADDR_SIDEBARBOUNDS;
     int colX;
 
+    if (s_Enable && Fm_ModeBare()) return 0;
     if (!Fm_RadarRect(&radar)) return 0;
     colX = Fm_ColumnX(0);
     if (colX < 0) colX = sb->X;
@@ -2042,4 +2058,31 @@ void FM_SetHideState(int state)
     p = AppendCStr(buf, 0, "fullmap: menu state -> ", sizeof(buf));
     p = AppendCStr(buf, p, kState[state], sizeof(buf));
     LogLine(buf);
+}
+
+/* 地图悬停先于侧栏输入执行。顶部 UI 不能先按背后的地图更新一次光标,
+ * 否则 RadarClass::Action 随后切回 miniMap=true, 每循环都会重置动画计时器。
+ * 原生雷达通过 SetCursor(0x5BDA80) / UpdateCursor(0x5BDC80) 选择 MiniFrame;
+ * 这里只阻止穿透, 不重跑可能包含下令的 RadarClass::Action。 */
+extern "C" __declspec(dllexport) unsigned __cdecl FullMap_MapHoverGate(void*)
+{
+    int x, y;
+    RectangleStruct top;
+    if (!s_Enable || Fm_ModeBare()) return 0;
+    if (!GtMouseGameXY(&x, &y) || !FM_KeepTopRectScreen(&top)) return 0;
+    if (x < top.X || x >= top.X + top.Width || y < top.Y || y >= top.Y + top.Height)
+        return 0;
+    return 0x00693053u;   /* ProcessMouse 的平衡返回出口, 无局部状态要恢复 */
+}
+
+/* 全隐藏时资金条/顶部按钮的几何悬停判定也必须让位给地图。
+ * 这些判定独立于 GadgetClass::Disabled, 不能只摘 gadget。 */
+extern "C" __declspec(dllexport) unsigned __cdecl FullMap_RadarHoverGate(void*)
+{
+    return s_Enable && Fm_ModeBare() ? 0x006538F8u : 0;
+}
+
+extern "C" __declspec(dllexport) unsigned __cdecl FullMap_TopHoverGate(void*)
+{
+    return s_Enable && Fm_ModeBare() ? 0x006D0702u : 0;
 }

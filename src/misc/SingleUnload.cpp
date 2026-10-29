@@ -1,26 +1,21 @@
 /* SingleUnload.cpp - 面板载员格的两件事: 单个下车, 以及按住 Z 给载员规划路径点。
+ * 细节见 notes/单个载员下车.md 与 notes/载具内成员路径点.md。
  *
- * 单卸: 引擎原生卸载只有"全放" —— 载具 0x73D8B7 每 tick 弹链头一个 (0x4DE710),
- * 建筑 0x457DE0 倒序 unlimbo 全部, 参数里都没有"哪一个"。所以仍发标准
- * Mission::Unload, 把序号塞进事件的 Target.id (rtti 留 0 时引擎不解析 id,
- * 0x4C7225), 再由五个钩子在派发/入口/弹人/循环处按记录裁掉其它人。
- *
- * 序号: 载具 = Passengers 链下标 (0x118 沿 NextObject 0x30), 建筑 = Occupants
- * 向量下标 (0x688/0x694)。点击侧与钩子侧同一套数法, 链序由模拟决定、各端一致,
- * 所以序号可以当事件载荷。记录只由事件建立, 不落本地状态。
+ * 单卸: 引擎原生卸载只有"全放" (载具 0x73D8B7 每 tick 弹链头, 建筑 0x457DE0 倒序
+ * unlimbo 全部), 参数里没有"哪一个"。所以仍发标准 Mission::Unload, 把序号塞进事件的
+ * Target.id (rtti 留 0 时引擎不解析 id), 再由五个钩子在派发/入口/弹人/循环处按记录
+ * 裁掉其它人。序号 = 载具 Passengers 链下标 / 建筑 Occupants 向量下标, 链序由模拟
+ * 决定、各端一致, 所以能当事件载荷; 记录只由事件建立, 不落本地状态。
  *
  * 联机 (GameMode 3/4) 一律不启用单卸: 正确性依赖每个端都按同一套规则解释这条令,
- * 本 DLL 是客户端自装的, 对手缺这套钩子就会当场分叉; 引擎也没有可广播的替代做法。
+ * 对手缺这套钩子就会当场分叉, 引擎也没有可广播的替代做法。
  *
- * 路径点: 只发标准 MegaMission (IsPlanningEvent=1), 引擎建节点那条路
- * (0x637E00 → 0x638120) 不看 InLimbo, 所以舱内载员也能挂节点。三条硬约束见下方
- * "载员路径点"段。全程只发标准事件, 各端跑同一份原版代码, 联机安全。
+ * 路径点只发标准 MegaMission (IsPlanningEvent=1): 引擎建节点那条路
+ * (0x637E00 → 0x638120) 不看 InLimbo, 所以舱内载员也能挂节点。
  *
  * 钩子返回值约定: 0 = 跑原指令, 非 0 = 跳该地址。rel 站点要自己跑原指令并返回
  * 绝对地址, 见 notes/崩溃定位.md。
- *
- * 细节 (钩子逐个说明、结构偏移、日志) 见 notes/单个载员下车.md 与
- * notes/载具内成员路径点.md。 */
+ */
 
 #include <windows.h>
 #include "EngineAddr.h"
@@ -518,8 +513,7 @@ extern "C" __declspec(dllexport) unsigned __cdecl SU_BldTail(void* regs)
  *
  * 手势、垫点判据、任务类型映射见 notes/载具内成员路径点.md。 */
 
-#define SU_PAD_MAX   10     /* 跟踪几个载员的垫点状态 (与 SU_PAX_MAX 同) */
-#define SU_PAX_MAX   10     /* 一次最多同时给几个载员规划 */
+#define SU_PAX_MAX   10     /* 一次最多同时给几个载员规划; 垫点表按同一上限开 */
 
 typedef struct
 {
@@ -529,7 +523,7 @@ typedef struct
     int   seen;        /* 见过 token 挂上节点 (计划真建起来了) */
 } SuPad;
 
-static SuPad s_Pad[SU_PAD_MAX];
+static SuPad s_Pad[SU_PAX_MAX];
 static void* s_PadScen = 0;
 static int   s_PadFrame = -1;
 
@@ -607,7 +601,7 @@ static void SU_PlanDisarm(void)
 static void SU_PadClear(void)
 {
     int i;
-    for (i = 0; i < SU_PAD_MAX; i++) s_Pad[i].pax = 0;
+    for (i = 0; i < SU_PAX_MAX; i++) s_Pad[i].pax = 0;
 }
 
 /* 取这个载员的垫点状态; 没有就占一格 (满了丢 0 号, 再老的没有活动可依)。 */
@@ -617,15 +611,15 @@ static SuPad* SU_PadSlot(void* pax)
     int i, uid;
     unsigned char r = 0;
 
-    for (i = 0; i < SU_PAD_MAX; i++)
+    for (i = 0; i < SU_PAX_MAX; i++)
         if (s_Pad[i].pax == pax) return &s_Pad[i];
-    for (i = 0; i < SU_PAD_MAX; i++)
+    for (i = 0; i < SU_PAX_MAX; i++)
         if (!s_Pad[i].pax) break;
-    if (i >= SU_PAD_MAX)
+    if (i >= SU_PAX_MAX)
     {
         SU_LogClick("plan pad drop", s_Pad[0].pax, pax, 0);
-        for (i = 0; i + 1 < SU_PAD_MAX; i++) s_Pad[i] = s_Pad[i + 1];
-        i = SU_PAD_MAX - 1;
+        for (i = 0; i + 1 < SU_PAX_MAX; i++) s_Pad[i] = s_Pad[i + 1];
+        i = SU_PAX_MAX - 1;
     }
     e = &s_Pad[i];
     e->pax = pax;
@@ -668,7 +662,7 @@ static void SU_PadPoll(void)
     fr = *(int*)ADDR_FRAME;
     if (fr == s_PadFrame) return;
     s_PadFrame = fr;
-    for (i = 0; i < SU_PAD_MAX; i++)
+    for (i = 0; i < SU_PAX_MAX; i++)
     {
         SuPad* e = &s_Pad[i];
         if (!e->pax) continue;

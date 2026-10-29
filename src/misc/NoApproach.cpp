@@ -27,8 +27,6 @@
 #define ADDR_NOMOVE_TRUE    0x4D7CC0u   /* NoMove 处理器收尾 (AL=1, ret 0xc), 跳此即当已处理 */
 #define FN_ALLIED           0x4F9A50u   /* HouseClass::IsAlliedWith(HouseClass const*), 只读 */
 
-#define OFF_TECHNO_OWNER    0x21Cu      /* TechnoClass::Owner -> HouseClass* */
-
 /* Syringe REGISTERS 相对偏移 (YRpp Syringe.h, 同 BuildQueue.cpp)。 */
 #define NA_R_ESI 0x0Cu   /* this (FootClass*) */
 #define NA_R_EBX 0x18u   /* pTarget (ObjectClass*) */
@@ -86,9 +84,9 @@ extern "C" __declspec(dllexport) unsigned __cdecl NoApproach_Hook(void* regs)
         w != ABS_AIRCRAFT && w != ABS_BUILDING) return 0;
 
     /* 目标非本家且非盟友才抑制; Owner 不明则保守走原版。 */
-    own = *(void**)((char*)pThis + OFF_TECHNO_OWNER);
+    own = *(void**)((char*)pThis + OFF_OWNER);
     if (!own || !IsPlausiblePtr(own)) return 0;
-    toh = *(void**)((char*)pTarget + OFF_TECHNO_OWNER);
+    toh = *(void**)((char*)pTarget + OFF_OWNER);
     if (toh && !IsPlausiblePtr(toh)) return 0;
     if (((Fn_IsAlliedWith)FN_ALLIED)(own, toh)) return 0;
     return ADDR_NOMOVE_TRUE;

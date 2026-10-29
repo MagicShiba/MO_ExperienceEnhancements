@@ -25,11 +25,6 @@
 #define ARR_ITEMS(base) (*(void***)((base) + 4u))
 #define ARR_COUNT(base) (*(int*)((base) + 16u))
 
-#define PS_OFF_HEALTH 0x6Cu
-#define PS_OFF_INLIMBO 0x81u
-#define PS_OFF_ISALIVE 0x90u
-#define PS_OFF_OWNER 0x21Cu
-
 /* 格子内容链: [cell+0xE4]=地面层首对象, [cell+0xE8]=桥面层首对象,
  * 链后继 [obj+0x30], WhatAmI 槽同 OrderUtil (+0x2C)。
  * 地形 [cell+0xEC]=LandType (Water=2/Rock=3, 不可走)。 */
@@ -372,10 +367,10 @@ static void PS_ScanArr(unsigned arrBase, void* cur, int cells[][2], int nCell)
         CoordStruct cs;
         if (s_PsQTail >= PS_QCAP) return;
         if (!o || !IsPlausiblePtr(o)) continue;
-        if (*(void**)((char*)o + PS_OFF_OWNER) != cur) continue;
-        if (!((unsigned char*)o)[PS_OFF_ISALIVE]) continue;
-        if (((unsigned char*)o)[PS_OFF_INLIMBO]) continue;
-        hp = *(int*)((char*)o + PS_OFF_HEALTH);
+        if (*(void**)((char*)o + OFF_OWNER) != cur) continue;
+        if (!((unsigned char*)o)[OFF_ISALIVE]) continue;
+        if (((unsigned char*)o)[OFF_INLIMBO]) continue;
+        hp = *(int*)((char*)o + OFF_HEALTH);
         if (hp <= 0) continue;
         w = OU_WhatAmI(o);   /* 虚调用, 放最后 (前面几项已滤掉大半对象) */
         if (w != ABS_UNIT && w != ABS_INFANTRY) continue;
@@ -403,7 +398,7 @@ static int PS_Drain(void* cur, int houseIdx,
         o = s_PsQPtr[s_PsQHead];
         s_PsQHead++;
         if (!o || !IsPlausiblePtr(o)) continue;
-        if (*(void**)((char*)o + PS_OFF_OWNER) != cur) continue;
+        if (*(void**)((char*)o + OFF_OWNER) != cur) continue;
         if (!OU_GetCoords(o, &cs)) continue;
         ux = cs.X / 256; uy = cs.Y / 256;
         if (!PS_InFoot(ux, uy, cells, nCell))

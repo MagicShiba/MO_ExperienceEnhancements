@@ -1,6 +1,7 @@
 /* GdiText.h - MOExperience.dll 内共享的无 CRT 工具 / 日志 / 字体解析 /
  * GDI 光栅 / 16 位混合管线 / 画面虚表底座 (全 DLL 共用)。
- */#pragma once
+ */
+#pragma once
 
 #include <windows.h>
 #include "EngineAddr.h"

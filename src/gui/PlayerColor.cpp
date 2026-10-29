@@ -1,29 +1,16 @@
-/* PlayerColor.cpp - local player color switching for the ESC settings page.
- * Only the current player's HouseClass::ColorSchemeIndex and the selected
- * scheme's LightConvert palette are changed.  No simulation state is touched. */
+/* PlayerColor.cpp - ESC 设置页的"玩家颜色"。
+ * 只改本机玩家的 HouseClass::ColorSchemeIndex 和所选方案的 LightConvert 调色板,
+ * 不碰模拟状态。彩虹模式的色相自持 (不写 GameSpeed 那类全局), 换场景/联机自动收。 */
 
 #include <windows.h>
 #include "PlayerColor.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
 
-#define PC_SCHEME_ITEMS       0x00B054D4u
-#define PC_SCHEME_COUNT       0x00B054E0u
-#define PC_HOUSE_CURRENT      0x00A83D4Cu
-#define PC_HOUSE_ITEMS        0x00A8022Cu
-#define PC_HOUSE_COUNT        0x00A80238u
-#define PC_HOUSE_COLOR_SCHEME 0x16054u
 #define PC_FN_HOUSE_COLOR     0x0050B840u
 #define PC_FN_HOUSE_LASER     0x0050BA00u
 #define PC_FN_UPDATE_COLORS   0x00556090u
 #define PC_FN_DIRTY_AREA      0x006D2790u
-#define PC_TACTICAL_INSTANCE  0x00887324u
-
-#define PC_SCHEME_ID          0x304u
-#define PC_SCHEME_LIGHT       0x30Cu
-#define PC_SCHEME_SHADES      0x310u
-#define PC_SCHEME_MAIN_SHADE  0x330u
-#define PC_SCHEME_BASE        0x308u
 
 #define PC_LC_BPP             0x004u
 #define PC_LC_SHADE_COUNT     0x16Cu
@@ -77,8 +64,8 @@ static void Pc_BuildList(void)
     int count, i, n = 0;
 
     if (s_ListTried) return;
-    items = *(unsigned char***)(size_t)PC_SCHEME_ITEMS;
-    count = *(volatile int*)(size_t)PC_SCHEME_COUNT;
+    items = *(unsigned char***)(size_t)ADDR_SCHEME_ITEMS;
+    count = *(volatile int*)(size_t)ADDR_SCHEME_COUNT;
     if (!items || count <= 0) return;
 
     s_ListTried = 1;
@@ -89,14 +76,14 @@ static void Pc_BuildList(void)
         int j, dup = 0;
 
         if (!scheme) continue;
-        if (*(int*)(scheme + PC_SCHEME_SHADES) != PC_SHADE_COUNT) continue;
-        id = *(char**)(scheme + PC_SCHEME_ID);
+        if (*(int*)(scheme + OFF_SCHEME_SHADES) != PC_SHADE_COUNT) continue;
+        id = *(char**)(scheme + OFF_SCHEME_ID);
         if (!id || !id[0]) continue;
 
         for (j = 0; j < n; j++)
         {
             unsigned char* prev = items[s_Index[j]];
-            char* pid = prev ? *(char**)(prev + PC_SCHEME_ID) : NULL;
+            char* pid = prev ? *(char**)(prev + OFF_SCHEME_ID) : NULL;
             if (pid && lstrcmpiA(pid, id) == 0) { dup = 1; break; }
         }
         if (dup) continue;
@@ -108,7 +95,7 @@ static void Pc_BuildList(void)
 
 static void* Pc_CurrentHouse(void)
 {
-    return *(void* const volatile*)(size_t)PC_HOUSE_CURRENT;
+    return *(void* const volatile*)(size_t)ADDR_CURPLAYER;
 }
 
 static int Pc_HouseAlive(void* house)
@@ -117,8 +104,8 @@ static int Pc_HouseAlive(void* house)
     int count, i;
 
     if (!house || !IsPlausiblePtr(house)) return 0;
-    items = *(void***)(size_t)PC_HOUSE_ITEMS;
-    count = *(volatile int*)(size_t)PC_HOUSE_COUNT;
+    items = *(void***)(size_t)ADDR_HOUSES_ITEMS;
+    count = *(volatile int*)(size_t)ADDR_HOUSES_COUNT;
     if (!items || !IsPlausiblePtr(items) || count <= 0 || count > 64) return 0;
     for (i = 0; i < count; i++)
         if (items[i] == house) return 1;
@@ -194,9 +181,9 @@ static void Pc_RestoreLight(void)
     if (!light) return;
     memcpy(s_RainbowColors + 16 * 3, s_RainbowOrigColors, sizeof(s_RainbowOrigColors));
     memcpy(s_RainbowData, s_RainbowOrig, s_RainbowOrigSize);
-    s_RainbowScheme[PC_SCHEME_BASE + 0] = s_RainbowOrigBase[0];
-    s_RainbowScheme[PC_SCHEME_BASE + 1] = s_RainbowOrigBase[1];
-    s_RainbowScheme[PC_SCHEME_BASE + 2] = s_RainbowOrigBase[2];
+    s_RainbowScheme[OFF_SCHEME_BASE + 0] = s_RainbowOrigBase[0];
+    s_RainbowScheme[OFF_SCHEME_BASE + 1] = s_RainbowOrigBase[1];
+    s_RainbowScheme[OFF_SCHEME_BASE + 2] = s_RainbowOrigBase[2];
     for (i = 0; i < 3; i++)
     {
         *(int*)((char*)light + PC_LC_COLOR1 + i * 4) = s_RainbowOrigColor1[i];
@@ -217,7 +204,7 @@ static void Pc_RefreshTacticalView(int full)
     RectangleStruct r;
     int w, h, part;
 
-    tactical = *(void* const volatile*)(size_t)PC_TACTICAL_INSTANCE;
+    tactical = *(void* const volatile*)(size_t)ADDR_TACTICAL;
     if (!tactical || !IsPlausiblePtr(tactical)) return;
 
     w = *(volatile int*)(size_t)(ADDR_SURF_VIEWBOUNDS + 8);
@@ -276,9 +263,9 @@ static void Pc_ApplyRainbow(int full)
     {
         unsigned hue = (unsigned)s_Hue * 255u / PC_RAINBOW_HUE_MAX;
 
-        s_RainbowScheme[PC_SCHEME_BASE + 0] = (unsigned char)hue;
-        s_RainbowScheme[PC_SCHEME_BASE + 1] = s_RainbowOrigBase[1];
-        s_RainbowScheme[PC_SCHEME_BASE + 2] = s_RainbowOrigBase[2];
+        s_RainbowScheme[OFF_SCHEME_BASE + 0] = (unsigned char)hue;
+        s_RainbowScheme[OFF_SCHEME_BASE + 1] = s_RainbowOrigBase[1];
+        s_RainbowScheme[OFF_SCHEME_BASE + 2] = s_RainbowOrigBase[2];
     }
 
     ((PcFnUpdateColors)(void*)PC_FN_UPDATE_COLORS)(s_RainbowLight, 1000, 1000, 1000, 0);
@@ -321,17 +308,17 @@ static int Pc_StartRainbow(void)
     slot = PlayerColor_Current();
     if (slot < 0 || slot >= s_NormalCount) return 0;
 
-    items = *(unsigned char***)(size_t)PC_SCHEME_ITEMS;
+    items = *(unsigned char***)(size_t)ADDR_SCHEME_ITEMS;
     index = s_Index[slot];
     scheme = items ? items[index] : NULL;
     if (!scheme) return 0;
-    light = *(void**)(scheme + PC_SCHEME_LIGHT);
+    light = *(void**)(scheme + OFF_SCHEME_LIGHT);
     if (!light || !IsPlausiblePtr(light)) return 0;
     if (!Pc_SaveLight(light)) return 0;
 
-    s_RainbowOrigBase[0] = scheme[PC_SCHEME_BASE + 0];
-    s_RainbowOrigBase[1] = scheme[PC_SCHEME_BASE + 1];
-    s_RainbowOrigBase[2] = scheme[PC_SCHEME_BASE + 2];
+    s_RainbowOrigBase[0] = scheme[OFF_SCHEME_BASE + 0];
+    s_RainbowOrigBase[1] = scheme[OFF_SCHEME_BASE + 1];
+    s_RainbowOrigBase[2] = scheme[OFF_SCHEME_BASE + 2];
     s_RainbowScheme = scheme;
     s_RainbowHouse = house;
     s_RainbowLight = light;
@@ -356,7 +343,7 @@ int PlayerColor_Current(void)
     if (!house) return -1;
     if (s_Rainbow && house == s_RainbowHouse) return s_NormalCount;
 
-    index = *(volatile int*)((char*)house + PC_HOUSE_COLOR_SCHEME);
+    index = *(volatile int*)((char*)house + OFF_HOUSE_COLORSCHEME);
     Pc_BuildList();
     for (i = 0; i < s_NormalCount; i++)
         if (s_Index[i] == index) return i;
@@ -383,10 +370,10 @@ int PlayerColor_Set(int slot)
     house = Pc_CurrentHouse();
     if (!Pc_HouseAlive(house)) return 0;
     index = s_Index[slot];
-    if (*(volatile int*)((char*)house + PC_HOUSE_COLOR_SCHEME) == index)
+    if (*(volatile int*)((char*)house + OFF_HOUSE_COLORSCHEME) == index)
         return 0;
 
-    *(volatile int*)((char*)house + PC_HOUSE_COLOR_SCHEME) = index;
+    *(volatile int*)((char*)house + OFF_HOUSE_COLORSCHEME) = index;
     Pc_UpdateHouseRaw(house);
     Pc_RefreshTacticalView(1);
     return 1;
@@ -409,22 +396,22 @@ unsigned short PlayerColor_Swatch(int slot)
     }
 
     if (slot < 0 || slot >= s_NormalCount) return 0x7BDE;
-    items = *(unsigned char***)(size_t)PC_SCHEME_ITEMS;
+    items = *(unsigned char***)(size_t)ADDR_SCHEME_ITEMS;
     index = s_Index[slot];
     scheme = items[index];
     if (scheme)
     {
-        unsigned char* light = *(unsigned char**)(scheme + PC_SCHEME_LIGHT);
+        unsigned char* light = *(unsigned char**)(scheme + OFF_SCHEME_LIGHT);
         if (light)
         {
             int bpp = *(int*)(light + PC_LC_BPP);
             unsigned char* palette = *(unsigned char**)(light + PC_LC_PALETTE);
-            int shade = *(int*)(scheme + PC_SCHEME_MAIN_SHADE);
+            int shade = *(int*)(scheme + OFF_SCHEME_MAIN);
             if (bpp == 2 && palette && shade >= 0 && shade < 256)
                 return *(unsigned short*)(palette + shade * 2);
         }
-        return Pc_Rgb565(scheme[PC_SCHEME_BASE], scheme[PC_SCHEME_BASE + 1],
-                         scheme[PC_SCHEME_BASE + 2]);
+        return Pc_Rgb565(scheme[OFF_SCHEME_BASE], scheme[OFF_SCHEME_BASE + 1],
+                         scheme[OFF_SCHEME_BASE + 2]);
     }
     return 0x7BDE;
 }

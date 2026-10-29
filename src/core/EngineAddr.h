@@ -207,6 +207,13 @@
  * 只改本机摄像机: 不写模拟、不发事件, 雷达点行/收藏跳转共用。 */
 #define ADDR_SET_TACTICAL_POS   0x006D6070u
 
+/* 格 → 屏幕换算链。MapClass::Instance 是 0x87F7E8 处的对象本身 (与 DisplayClass 同址),
+ * 不是指针变量, 直接当 this 传。 */
+#define ADDR_MAP_INSTANCE       0x0087F7E8u
+#define FN_MAP_GET_CELL         0x005657A0u   /* CellClass* GetCellAt(CellStruct*) */
+#define FN_CELL_GET_COORDS      0x00480A30u   /* CoordStruct* GetCellCoords(CoordStruct*) */
+#define FN_Z_TO_SCREEN          0x006D20E0u   /* int ZToScreen(int z) */
+
 /* 雷达点击门 (点击是否已被 UI 消费)。 */
 #define ADDR_CLICKGATE_SKIP     0x006925FCu
 
@@ -390,6 +397,22 @@
  * 0x55B6CF `add eax,0x9c` 之后连读 3 个 dword (X/Y/Z)。 */
 #define OFF_OBJ_LOCATION        0x009Cu
 
+/* ==================== 玩家配色 (ColorScheme) ==================== */
+
+/* HouseClass::ColorSchemeIndex → ColorScheme::Array[idx]。Array 是
+ * DynamicVectorClass<ColorScheme*> @ 0xB054D0 (Items +4 / Count +0x10)。
+ * Colors[256] 每项 3 字节 (RGB), MainShadeIndex 选主色 —— ESC 玩家色色块、
+ * 单位颜色、信标箭头用的是同一套。 */
+#define OFF_HOUSE_COLORSCHEME   0x16054u
+#define ADDR_SCHEME_ITEMS       0x00B054D4u
+#define ADDR_SCHEME_COUNT       0x00B054E0u
+#define OFF_SCHEME_COLORS       0x04u     /* unsigned char Colors[256][3] */
+#define OFF_SCHEME_ID           0x304u    /* char* Name */
+#define OFF_SCHEME_BASE         0x308u    /* BaseColor (HSV 三字节) */
+#define OFF_SCHEME_LIGHT        0x30Cu    /* LightConvertClass* */
+#define OFF_SCHEME_SHADES       0x310u    /* 色阶数, 正常配色 53 */
+#define OFF_SCHEME_MAIN         0x330u    /* MainShadeIndex */
+
 /* ==================== 通信信标 (BeaconManagerClass) ==================== */
 
 /* BeaconManagerClass::Instance (YRpp BeaconManagerClass.h, sizeof 0x80)。
@@ -406,6 +429,13 @@
 #define ADDR_BC_RADARART        0x0089C478u  /* RDRBEACN.SHP 头指针 */
 #define ADDR_BC_LOADART         0x004309D0u  /* __thiscall(self=0x89C3B0) */
 
+/* BeaconClass (sizeof 0x114): Coord +0x00 / Bitfield +0x0C (1=已放置, 2=本地选中)
+ * / Text[128] +0x0E / HouseID +0x110。
+ * VisibleToPlayer (0x4308B0, __thiscall, 纯读): 已放置 + 与本家同盟 + 该房可见。 */
+#define OFF_BC_BITFIELD         0x0Cu
+#define OFF_BC_HOUSEID          0x110u
+#define FN_BC_VISIBLE           0x004308B0u
+
 /* 单机早退三处 (全是 `mov eax,[0xA8B238]` 起的 GameMode 判定)。
  * 见 notes/通信信标.md。 */
 #define ADDR_BC_HOTKEY          0x005370A0u  /* Execute 入口, 5B mov eax,[sess] */
@@ -417,6 +447,17 @@
 #define ADDR_BC_SENDBUILD       0x00430D99u  /* 组 IPX 包起点, 6B mov ecx,[0xA8DA78] */
 #define ADDR_BC_SENDBUILD_SKIP  0x00430E50u  /* 共享收尾 (pop edi/esi/ebp/ebx) */
 #define ADDR_BC_SENDBUILD_NEXT  0x00430D9Fu
+
+/* ==================== GameOptions / 渲染计时 ==================== */
+
+/* GameOptionsClass @ 0xA8EB60 (首成员即 GameSpeed), UnitActionLines 在 +0x1E
+ * (byte): 引擎自带的"点击移动时画单位行动线"开关。 */
+#define ADDR_GAMEOPT            0xA8EB60u
+#define OFF_GO_ACTIONLINES      0x1Eu
+
+/* TacticalClass::StartDrawActionLineTimer (0x70D150, __stdcall 无参): 只写本地
+ * 渲染计时, 让行动线从头开始画, 不改模拟。 */
+#define FN_START_ACTIONLINES    0x0070D150u
 
 /* ==================== 事件 (EventClass) ==================== */
 

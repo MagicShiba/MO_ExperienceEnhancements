@@ -1,27 +1,10 @@
-/* UnitPanel.cpp - 左下角选中信息面板, 见 UnitPanel.h。
+/* UnitPanel.cpp - 左下角选中信息面板 (版面/点击语义/角标见 notes/选中信息面板.md)。
  *
- * 版式: 九宫格外框 (border_mental_n9.pcx, 边距 9px) 只包格子, 格数按内容定
- * (单选 2 格 = 2x1, 4 架 = 2x2, 9 个以上才 3x3), 中间留 1px 缝; 没选中东西
- * 时整块框不显示。框外左侧竖排按钮 (自下而上: 折叠 / 操作模式 / 收藏 1..4),
- * 收藏按钮按"用过的槽"逐个露出, 个数见 Fav_RevealCount(); 底边钉在视口底,
- * 整块贴视口左下角。外框最后画, 压在所有图标之上。
- *
- * 图标: art ini 的 CameoPCX= 指向 pcx 时走 PCX::Instance + 最近邻缩到 60x48;
- * 否则回退 CC_Draw_Shape (0x4AED70) + CAMEO_PAL 现渲。装载/渲染都放在 UP_Poll,
- * 绘制只读 s_Cap[] 缓存。类型指针只当键用, 不解引用 (取图标/血量/弹药前都过
- * IsPlausiblePtr)。
- *
- * 点击: 面板压在视口上, 引擎会把点到的位置当地图点击 (取消选择 / 下令)。所以在
- * DisplayClass::ProcessClickCoords 里挂一道门 (Syringe 0x692361), 落点在面板内
- * 就跳 0x6925FC (原函数"未处理"出口) 吞掉; 门里只记坐标, 真正的选中动作放到
- * 下一次 UP_Poll —— 那一帧已经不在引擎的点击链路里, 调 UnselectAll/Select 安全。
- *
- * 绘制落点: Composite, 由消息帧钩在底栏三件套之后调用 (每帧重铺, 没法缓存到面)。
- * 只读模拟状态 + 只改本机选中集, 联机安全。
- *
- * 键盘移动: 第 2 个按钮 (操作模式) 开关; 开后有可动单位选中时, 裸 W/A/S/D
- * 由 0x55DEE0 门吞掉, 改为对每个单位发标准 Move 事件 (8 方向, 一次一格)。
- * 键位与语音都不走原命令; 带修饰的组合键不动。
+ * 三条必须守住的:
+ *  1. 图标装载 (PCX) 与 SHP 现渲都会动引擎面池 → 只在 UP_Poll 里备, 绘制帧只读缓存。
+ *  2. 面板压在视口上, 引擎会把落点当地图点击 → 由 0x692361 的门吞掉; 门里只记坐标,
+ *     真正的选中动作放到下一次 UP_Poll (那时已不在引擎的点击链路里)。
+ *  3. 只读模拟状态 + 只改本机选中集, 联机安全。
  */
 
 #include <windows.h>
@@ -81,12 +64,6 @@
 #define UP_BTN_MODE 1
 #define UP_BTN_FAV1 2
 
-/* 格子种类 */
-#define UP_CELL_EMPTY 0
-#define UP_CELL_ICON  1
-#define UP_CELL_INFO  2
-#define UP_CELL_MORE  3
-
 /* ---------------- 类型 ---------------- */
 
 typedef struct {
@@ -108,9 +85,8 @@ static int s_Margin = 0;
 static int s_FontPx = 11;
 static int s_Collapsed = 0;
 static int s_ActionLines = 0;    /* 1=强制开启引擎单位行动线 (原版点击移动线) */
-#define ADDR_GAMEOPT_ACTION_LINES 0x00A8EB7Eu  /* GameOptionsClass::UnitActionLines */
 static int s_Vis = 0;            /* 本帧该不该显示 */
-static int s_LoggedGeom = 0;
+static int s_LoggedGeom = 0;     /* 摆位只记一次日志 (没有截图时靠它核对几何) */
 static wchar_t s_Face[FONT_FACE_MAX];
 static char s_FaceCfg[64];
 
@@ -176,8 +152,7 @@ static void Up_KmReset(void);
 /* 选中快照 */
 static UpEnt s_List[UP_LIST_CAP];
 static int s_ListN = 0;
-static int s_ListFrame = -1;
-static unsigned s_ListMs = 0;
+static unsigned s_ListMs = 0;      /* 上次重排格子的墙钟 */
 static unsigned s_ListSig = 0;
 
 /* 当前页的格子 (s_Page 变或模型变时重建)。只有前 s_Cols*s_Rows 个有效:
@@ -369,24 +344,6 @@ void UP_EnsureInit(void)
     LogLine(buf);
 }
 
-void UP_SetEnabled(int enable)
-{
-    UP_EnsureInit();
-    s_Enable = enable ? 1 : 0;
-    if (!s_Enable)
-    {
-        s_Vis = 0;
-        s_Pend = 0;
-        s_PendRb = 0;
-        s_KeyMove = 0;
-        s_KeyMoveSel = 0;
-        Up_KmClear();
-    }
-    LogLine(s_Enable ? "up: ON" : "up: OFF");
-}
-
-int UP_Enabled(void) { UP_EnsureInit(); return s_Enable; }
-
 /* ---------------- 版式 ---------------- */
 
 static void Up_Layout(void)
@@ -566,15 +523,14 @@ static int Up_ChatTyping(void)
     return *(volatile unsigned char*)(size_t)(ADDR_MSGLIST + OFF_MSGLIST_EDIT) ? 1 : 0;
 }
 
-/* 引擎的"点击后画行动线"计时器 (0x70D150): 只写本地渲染计时, 不改模拟。 */
-#define ADDR_START_ACTION_LINES 0x0070D150u
+/* 让引擎的行动线从头开始画 (只写本地渲染计时)。 */
 typedef void (__stdcall *Fn_StartActionLines)(void);
 
 static void Up_ActionLineKick(int frame)
 {
     if (!s_ActionLines || s_ActionKickFrame == frame) return;
     s_ActionKickFrame = frame;
-    ((Fn_StartActionLines)(void*)ADDR_START_ACTION_LINES)();
+    ((Fn_StartActionLines)(void*)FN_START_ACTIONLINES)();
 }
 
 /* 给一个单位下令。useAnchor=1 (同方向连按/按住) 从锚点往前推, 便于累加;
@@ -797,13 +753,6 @@ static void Up_KeyMovePoll(void)
         }
     }
     Up_KmPrune();
-}
-
-int UP_Over(int mx, int my)
-{
-    UP_EnsureInit();
-    if (!s_Enable || !s_Vis) return 0;
-    return Up_HitPanel(mx, my);
 }
 
 /* ---------------- 选中集快照 ---------------- */
@@ -1202,23 +1151,24 @@ static unsigned Up_Sig(void)
     return s;
 }
 
+/* 快照每轮重建 (选中集会随时变), 但**重排格子只在签名变了或 250ms 到点时做**:
+ * 排序/分组每帧跑一遍是白烧, 而弹药顺序只影响显示顺序, 250ms 的滞后看不出来。 */
 static void Up_Refresh(void)
 {
-    int fr = *(volatile int*)(size_t)ADDR_FRAME;
     unsigned now = GetTickCount();
-    int due = 0;
-    if (fr != s_ListFrame) { s_ListFrame = fr; due = 1; }
-    if ((unsigned)(now - s_ListMs) >= 250u) { s_ListMs = now; due = 1; }
-    if (!due) return;
+    unsigned sig;
+    int msDue;
+
     Up_BuildList();
+    sig = Up_Sig();
+    msDue = (unsigned)(now - s_ListMs) >= 250u;
+    if (sig != s_ListSig)
     {
-        unsigned sig = Up_Sig();
-        if (sig != s_ListSig)
-        {
-            s_ListSig = sig;
-            s_Page = 0;
-        }
+        s_ListSig = sig;
+        s_Page = 0;
     }
+    else if (!msDue) return;
+    s_ListMs = now;
     Up_Rebuild();
 }
 
@@ -1278,7 +1228,6 @@ static void Up_ForceRebuild(void)
 {
     s_ListSig = 0;
     s_ListMs = 0;
-    s_ListFrame = -1;
 }
 
 /* ---------------- 图标 (cameo) ----------------
@@ -1376,14 +1325,10 @@ static int Up_RenderShp(void* shp, unsigned short* out)
     return 1;
 }
 
-/* 图标文件名: 先问 art ini 的 `CameoPCX=` (Ares 键, MO 全部单位图标都在这),
- * 没有再退回类型自己的 Cameo= 字段 (老式 SHP 时为空)。返回 1 = 拿到 .pcx 名。
- *
- * ⚠ `INIClass` 内部按**指针**缓存上一次查的节 (`obj+4` 存节名字符串指针,
- * `obj+8` 存该节数据)。传栈上的局部数组时, 每次调用地址相同 → 第二次起
- * 直接命中第一次的缓存, 于是所有类型都读到同一个 `CameoPCX`。所以这里必须
- * 直接把类型对象里的持久字符串 (`ImageFile` / `ID`) 传进去, 一份不动。
- *
+/* 图标文件名: 先问 art ini 的 `CameoPCX=` (Ares 键, MO 的单位图标都在这), 没有再
+ * 退回类型自己的 `Cameo=` 字段。返回 1 = 拿到 .pcx 名。
+ * ⚠ 节名必须传类型对象里的持久字符串 (ImageFile / ID): INIClass 按**指针**缓存上一次
+ * 查的节, 传栈上数组会让所有类型都命中第一次的缓存 (详见 EngineAddr.h 的 ADDR_INI_ART)。
  * secOut 只回带节名给日志看, 不参与查询。 */
 static int Up_CameoPcxName(void* type, char* out, int cap, char* secOut, int secCap)
 {
@@ -1664,7 +1609,6 @@ static void Up_Bar(unsigned char* base, int pitch, int W, int H,
     Up_Fill(base, pitch, W, H, x, y, w, 1, 60, 60, 70, 200);
 }
 
-/* 等级小三角 (军衔): n=1 老兵, 2 精英, 画在图标左上 */
 /* 军衔标记: 与游戏一致 —— 一级一个金色 ︿, 二级金色星星。
  * 两者都先按 3x3 铺一层深色轮廓再压金色芯, 压在亮 cameo 上也看得清。 */
 static const char* const k_Vet1[5] = {
@@ -1767,9 +1711,8 @@ static void Up_BtnBg(unsigned char* base, int pitch, int W, int H,
 /* ---------------- 绘制: 格子 ---------------- */
 
 static void Up_DrawCellBg(unsigned char* base, int pitch, int W, int H,
-                          int x, int y, int hot)
+                          int x, int y)
 {
-    (void)hot;
     Up_Fill(base, pitch, W, H, x + 1, y + 1, UP_CELL_W - 2, UP_CELL_H - 2,
             10, 10, 12, 90);
 }
@@ -1793,8 +1736,6 @@ static void Up_CellFrame(unsigned char* base, int pitch, int W, int H,
         Up_Fill(base, pitch, W, H, xx + ww - 1, yy, 1, hh, r, g, b, 255);
     }
 }
-
-/* 多选/规划中的标记就是上面这圈 2px 黄框, 不另画别的内框。 */
 
 /* 弹药格: MO 的 cameo 底部烧死了单位名 (约 12px), 所以弹药格不贴格底,
  * 而是抬到名字上方、从左下往右铺; 一排几个看 rules 的 `PipWrap=`,
@@ -1882,19 +1823,15 @@ static void Up_CountBadge(unsigned char* base, int pitch, int W, int H,
 
 /* 单格图标 + 角标 (等级/弹药/数量) */
 static void Up_DrawIconCell(unsigned char* base, int pitch, int W, int H,
-                            int x, int y, const UpEnt* e, int hot)
+                            int x, int y, const UpEnt* e)
 {
     unsigned short* cameo;
     int enemy, ammoMax, ammo, level, wrap;
 
-    Up_DrawCellBg(base, pitch, W, H, x, y, hot);
+    Up_DrawCellBg(base, pitch, W, H, x, y);
     if (!e || !e->type || !e->obj) return;
     cameo = Up_Cameo(e->type);
-    if (cameo) Up_BlitIcon(base, pitch, W, H, x, y, cameo);
-    else
-    {
-        /* 没有 cameo: 留空 (只画角标), 不做假图 */
-    }
+    if (cameo) Up_BlitIcon(base, pitch, W, H, x, y, cameo);   /* 没有 cameo 就只留底与角标 */
     enemy = Up_IsEnemy(e->obj);
     ammoMax = Up_AmmoMax(e->type);
     ammo = Up_Ammo(e->obj);
@@ -1916,7 +1853,7 @@ static void Up_DrawIconCell(unsigned char* base, int pitch, int W, int H,
  * 纵向排布按字号算 (by/ty/ey/ec 都是绝对 y): 血条 -> 血量文本 -> 经验条 -> 经验文本。
  * 字号大到最后一行放不下时只丢经验文本, 条仍然画, 绝不越出 48px。 */
 static void Up_DrawInfoCell(unsigned char* base, int pitch, int W, int H,
-                            int x, int y, const UpEnt* e, int hot)
+                            int x, int y, const UpEnt* e)
 {
     int hp, mx, pc, enemy, level, adv;
     float vet;
@@ -1926,7 +1863,7 @@ static void Up_DrawInfoCell(unsigned char* base, int pitch, int W, int H,
     unsigned char er = 90, eg = 150, eb = 240;
     int by, ty, ey, ec, bar1 = 5, bar2 = 4;
 
-    Up_DrawCellBg(base, pitch, W, H, x, y, hot);
+    Up_DrawCellBg(base, pitch, W, H, x, y);
     if (!e || !e->obj || !e->type) return;
     adv = g_G->adv;
     hp = Up_Hp(e->obj);
@@ -1992,10 +1929,10 @@ static void Up_DrawInfoCell(unsigned char* base, int pitch, int W, int H,
 }
 
 static void Up_DrawMoreCell(unsigned char* base, int pitch, int W, int H,
-                            int x, int y, int hot)
+                            int x, int y)
 {
     static const wchar_t s_more[] = { 0x66F4, 0x591A, 0 };   /* 更多 */
-    Up_DrawCellBg(base, pitch, W, H, x, y, hot);
+    Up_DrawCellBg(base, pitch, W, H, x, y);
     Up_Text(base, pitch, W, H, 0, y + (UP_CELL_H - g_G->adv) / 2, s_more, 2,
             235, 235, 235, 1, x, UP_CELL_W);
 }
@@ -2101,10 +2038,11 @@ int UP_Draw(void)
                 int hot = (s_HoverCell == i);
                 int pick = 0;
                 Up_CellPos(i, &cx, &cy);
-                if (e->count == -2) Up_DrawMoreCell(base, pitch, w, h, cx, cy, hot);
-                else if (!e->type || !e->obj) Up_DrawCellBg(base, pitch, w, h, cx, cy, 0);
-                else if (e->count == 0) Up_DrawInfoCell(base, pitch, w, h, cx, cy, e, hot);
-                else Up_DrawIconCell(base, pitch, w, h, cx, cy, e, hot);
+                /* 悬停/选中高亮统一由下面的 Up_CellFrame 画, 格内容不区分状态。 */
+                if (e->count == -2) Up_DrawMoreCell(base, pitch, w, h, cx, cy);
+                else if (!e->type || !e->obj) Up_DrawCellBg(base, pitch, w, h, cx, cy);
+                else if (e->count == 0) Up_DrawInfoCell(base, pitch, w, h, cx, cy, e);
+                else Up_DrawIconCell(base, pitch, w, h, cx, cy, e);
                 /* 载员格高亮 (2px 黄框, 与悬停同一个框), 两种来源:
                  *   · 参与本次规划的载员 —— 一直画, 单人规划也画 (那就是"选中了这个人"),
                  *     包括 Z+点载员格认下的那个 (他不在 shift 名单里);
@@ -2324,7 +2262,7 @@ static void Up_RightClickAt(int mx, int my)
     if (Up_HitBtn(mx, my) >= UP_BTN_FAV1) Fav_ToggleArrowMode();
 }
 
-void UP_NoteClick(int mx, int my, int left, int right)
+static void UP_NoteClick(int mx, int my, int left, int right)
 {
     if (!left) s_GateLb = 0;
     if (!right) s_GateRb = 0;
@@ -2373,7 +2311,7 @@ void UP_Poll(void)
      * 面板关掉时也要跑: 星星/箭头还在, 换图后不能让旧指针留着。 */
     Fav_Poll();
     /* 1=强制开启引擎自带的单位行动线 (右键移动时那条); 0=不改游戏内设置。 */
-    if (s_ActionLines) *(volatile unsigned char*)(size_t)ADDR_GAMEOPT_ACTION_LINES = 1;
+    if (s_ActionLines) *(volatile unsigned char*)(size_t)(ADDR_GAMEOPT + OFF_GO_ACTIONLINES) = 1;
     if (!s_Enable)
     {
         s_Vis = 0;

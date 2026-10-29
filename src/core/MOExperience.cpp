@@ -2003,7 +2003,6 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
             else LogLine("CRASH: eipmem VirtualQuery failed");
         }
 
-
         /* 栈回溯: 栈上落在本 DLL / 游戏 exe 里的字按 模块+偏移 记下来。
          * 崩溃点落在第三方代码或野地址时, 只有这条链能指出是谁调进来的。 */
         {

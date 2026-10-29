@@ -46,6 +46,9 @@
 ; 落点雷达矩形内就自己调引擎原生 RadarClass::Action 跳转并跳 0x6925FC 吞掉,
 ; 见 src/gui/FullMap.cpp 的"小地图点击: 自己接手 + 吞掉穿透"
 0x692406 = FullMap_RadarClickGate, 6
+0x692F3D = FullMap_MapHoverGate, 6
+0x653865 = FullMap_RadarHoverGate, 6
+0x6D06D2 = FullMap_TopHoverGate, 5
 
 ; 左下角选中面板点击吞没 (DisplayClass::ProcessClickCoords 内, 6 字节 =
 ; mov ecx,ds:0x887324): 落面板内跳 0x6925FC 吞掉, 免去"点格子 = 对地图下令",

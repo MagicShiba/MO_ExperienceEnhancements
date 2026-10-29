@@ -436,7 +436,6 @@ static int s_SnapNt = 0;
 static unsigned char s_SnapEnterTaken[SA_TGT_CAP]; /* 占车已派标记 (按目标限1个) */
 static unsigned char s_SnapRepairSent[SA_TGT_CAP]; /* 按目标单派标记 (修楼/中立科技/民房预轮) */
 
-#define SA_OFF_HEALTH        0x6Cu   /* ObjectClass::Health */
 #define SA_OFF_BLD_TYPE      0x520u  /* BuildingClass::Type */
 #define SA_OFF_TYPE_STRENGTH 0xA0u   /* ObjectTypeClass::Strength */
 
@@ -447,7 +446,7 @@ static int SA_BuildingDamaged(void* b)
     int hp, str;
     if (!b || !IsPlausiblePtr(b)) return 0;
     if (OU_WhatAmI(b) != ABS_BUILDING) return 0;
-    hp = *(int*)((char*)b + SA_OFF_HEALTH);
+    hp = *(int*)((char*)b + OFF_HEALTH);
     if (hp <= 0) return 0;
     type = *(void**)((char*)b + SA_OFF_BLD_TYPE);
     if (!type || !IsPlausiblePtr(type)) return 0;

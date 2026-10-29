@@ -139,6 +139,11 @@ int OU_CellFloorZ(int cx, int cy, int* zOut);
 int OU_VecItems(unsigned vecAddr, void*** itemsOut);
 /* p 是否该 DynamicVector 的成员 (类型数组判定: 只比指针)。 */
 int OU_InVec(unsigned vecAddr, const void* p);
+/* 玩家主色 (只读): HouseClass::ColorSchemeIndex → ColorScheme::Array[..].Colors[MainShadeIndex]。
+ * 与 ESC 玩家色色块 / 单位颜色同一套。成功回 1; r/g/b 可传 0。 */
+int OU_HouseColor(void* house, int* r, int* g, int* b);
+/* 同上, 按房号查 Houses 表 (信标这类只拿得到房号的场合)。 */
+int OU_HouseIndexColor(int houseId, int* r, int* g, int* b);
 /* ---- TARGET 编码 (8 字节: id@0, rtti@4) ----
  * 目标槽统一走这两个: 清缓冲 + 调引擎编码 + 取 id/rtti 一手包办。
  * OU_ObjTgt 解不出回 -1 (id 本身可以是 0, 不能用 0 当失败); rttiOut 可传 0。

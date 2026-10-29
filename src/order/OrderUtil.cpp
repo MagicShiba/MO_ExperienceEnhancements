@@ -244,6 +244,44 @@ int OU_VecItems(unsigned vecAddr, void*** itemsOut)
     return cnt;
 }
 
+/* ---- 玩家主色 (只读) ----
+ * HouseClass::ColorSchemeIndex (+0x16054) → ColorScheme::Array[..].Colors[MainShadeIndex]。
+ * 与 ESC 玩家色色块、单位颜色是同一套。 */
+
+int OU_HouseColor(void* house, int* r, int* g, int* b)
+{
+    void** items;
+    unsigned char* sc;
+    int cnt, idx, main;
+
+    if (!house || !IsPlausiblePtr(house)) return 0;
+    idx = *(int*)((char*)house + OFF_HOUSE_COLORSCHEME);
+    items = *(void***)(size_t)ADDR_SCHEME_ITEMS;
+    cnt = *(int*)(size_t)ADDR_SCHEME_COUNT;
+    if (!items || !IsPlausiblePtr(items) || cnt <= 0 || cnt > 1000) return 0;
+    if (idx < 0 || idx >= cnt) return 0;
+    sc = (unsigned char*)items[idx];
+    if (!sc || !IsPlausiblePtr(sc)) return 0;
+    main = *(int*)(sc + OFF_SCHEME_MAIN);
+    if (main < 0 || main > 255) return 0;
+    if (r) *r = sc[OFF_SCHEME_COLORS + main * 3 + 0];
+    if (g) *g = sc[OFF_SCHEME_COLORS + main * 3 + 1];
+    if (b) *b = sc[OFF_SCHEME_COLORS + main * 3 + 2];
+    return 1;
+}
+
+int OU_HouseIndexColor(int houseId, int* r, int* g, int* b)
+{
+    void** houses;
+    int cnt;
+
+    houses = *(void***)(size_t)ADDR_HOUSES_ITEMS;
+    cnt = *(int*)(size_t)ADDR_HOUSES_COUNT;
+    if (!houses || !IsPlausiblePtr(houses) || cnt <= 0 || cnt > 64) return 0;
+    if (houseId < 0 || houseId >= cnt) return 0;
+    return OU_HouseColor(houses[houseId], r, g, b);
+}
+
 /* p 是否该 DynamicVector 的成员 (静态类型数组判定: 只比指针, 不解引用)。 */
 int OU_InVec(unsigned vecAddr, const void* p)
 {

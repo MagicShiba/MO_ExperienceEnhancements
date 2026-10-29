@@ -121,25 +121,22 @@ static BS_Site g_BsSites[] =
 static void BS_Log(const char* tag, const char* msg)
 {
     char buf[64];
-    unsigned q = 0;
-    q = AppendCStr(buf, q, "beaconsp: ", sizeof(buf));
-    q = AppendCStr(buf, q, tag ? tag : "?", sizeof(buf));
-    (void)q;
+    unsigned n = AppendCStr(buf, 0, "beaconsp: ", sizeof(buf));
+    AppendCStr(buf, n, tag ? tag : "?", sizeof(buf));
     OU_LogTag(buf, msg);
 }
 
 static void BS_EnsureInit(void)
 {
     char buf[48];
-    unsigned q = 0;
+    unsigned n;
     if (g_BsInit) return;
     g_BsInit = 1;
     BuildPaths();
     GtEnsureLog();
     g_BsCfg = GetPrivateProfileIntA(BS_SECTION, "BeaconInSP", 1, g_IniPath) ? 1 : 0;
-    q = AppendCStr(buf, q, "beaconsp: ", sizeof(buf));
-    q = AppendCStr(buf, q, g_BsCfg ? "ON (SP only)" : "OFF", sizeof(buf));
-    (void)q;
+    n = AppendCStr(buf, 0, "beaconsp: ", sizeof(buf));
+    AppendCStr(buf, n, g_BsCfg ? "ON (SP only)" : "OFF", sizeof(buf));
     LogLine(buf);
 }
 
@@ -164,14 +161,13 @@ static int BS_EnsureArt(void)
     if (!g_BsArtLogged)
     {
         char buf[64];
-        unsigned q = 0;
+        unsigned n;
         g_BsArtLogged = 1;
-        q = AppendCStr(buf, q, "beaconsp: no beacon art p=", sizeof(buf));
-        q = OU_AppendU(buf, q, art, sizeof(buf));
-        q = AppendCStr(buf, q, " r=", sizeof(buf));
-        q = OU_AppendU(buf, q, radar, sizeof(buf));
-        q = AppendCStr(buf, q, " - OFF", sizeof(buf));
-        (void)q;
+        n = AppendCStr(buf, 0, "beaconsp: no beacon art p=", sizeof(buf));
+        n = OU_AppendU(buf, n, art, sizeof(buf));
+        n = AppendCStr(buf, n, " r=", sizeof(buf));
+        n = OU_AppendU(buf, n, radar, sizeof(buf));
+        AppendCStr(buf, n, " - OFF", sizeof(buf));
         LogLine(buf);
     }
     return 0;

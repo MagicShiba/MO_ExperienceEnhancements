@@ -787,19 +787,32 @@ static int PiP_IsGameCode(const void* p)
     return v >= PIP_GAME_TEXT_LO && v < PIP_GAME_TEXT_HI;
 }
 
-/* 目标还活着吗 (跨帧持有 ObjectClass*, 每帧必须验一遍)。
- * 先查字节判据 (不碰 Fetch_ID 索引), 再按索引反查 —— 索引自检不过时 fail-open,
- * 只留字节判据, 与 OrderUtil 各处同一口径。 */
-static int PiP_FolUsable(void* o)
+/* 虚表形状: 虚表在 exe rdata 内, 且 WhatAmI(+0x2C) / GetCoords(+0x48) 是引擎代码。
+ * 跟随目标与点击重映射共用这一道 (比 IsPlausiblePtr 严, 堆里随便一个数过不了)。 */
+static int PiP_VtOK(const void* o)
 {
-    void** vt;
+    const void* const* vt;
     if (!o || !IsPlausiblePtr(o)) return 0;
-    vt = *(void***)o;
+    vt = *(const void* const* const*)o;
     if (!vt || (size_t)vt < PIP_GAME_RDATA_LO || (size_t)vt >= PIP_GAME_RDATA_HI)
         return 0;
-    if (!PiP_IsGameCode(vt[0x2C / 4]) || !PiP_IsGameCode(vt[0x48 / 4])) return 0;
-    if (!((unsigned char*)o)[OFF_ISALIVE]) return 0;   /* 已死 (尸体/正在移除) */
-    if (((unsigned char*)o)[OFF_INLIMBO]) return 0;    /* 进工厂/运输/已离场 */
+    return (PiP_IsGameCode(vt[0x2C / 4]) && PiP_IsGameCode(vt[0x48 / 4])) ? 1 : 0;
+}
+
+/* 还活着吗: 虚表形状 + IsAlive + 非 InLimbo。不进 Fetch_ID 索引。 */
+static int PiP_ObjUsable(const void* o)
+{
+    if (!PiP_VtOK(o)) return 0;
+    if (!((const unsigned char*)o)[OFF_ISALIVE]) return 0;   /* 已死 (尸体/正在移除) */
+    if (((const unsigned char*)o)[OFF_INLIMBO]) return 0;    /* 进工厂/运输/已离场 */
+    return 1;
+}
+
+/* 目标还活着吗 (跨帧持有 ObjectClass*, 每帧必须验一遍)。形状之外再按 Fetch_ID
+ * 索引反查一次; 索引自检不过时 fail-open, 只留字节判据 (同 OrderUtil)。 */
+static int PiP_FolUsable(void* o)
+{
+    if (!PiP_ObjUsable(o)) return 0;
     return OU_PtrAlive(o, g_FolId, g_FolIdxOk);
 }
 
@@ -819,13 +832,7 @@ static void PiP_FollowClear(const char* why)
 /* 把目标设为小窗跟随对象。返回 1 = 已开始跟随。 */
 static int PiP_FollowSet(void* o)
 {
-    void** vt;
-    if (!o || !IsPlausiblePtr(o)) return 0;
-    vt = *(void***)o;
-    if (!vt || (size_t)vt < PIP_GAME_RDATA_LO || (size_t)vt >= PIP_GAME_RDATA_HI)
-        return 0;
-    if (!PiP_IsGameCode(vt[0x2C / 4]) || !PiP_IsGameCode(vt[0x48 / 4])) return 0;
-    if (!((unsigned char*)o)[OFF_ISALIVE]) return 0;
+    if (!PiP_ObjUsable(o)) return 0;
 
     g_FolObj = o;
     g_FolId = OU_ObjId(o);
@@ -1071,17 +1078,11 @@ static int g_ClkSelCount = 0;
 
 static int PiP_SelEntryUsable(const unsigned char* e)
 {
-    void* obj;
+    void* obj = *(void**)e;
     void** vt;
-    obj = *(void**)e;
-    if (!obj || !IsPlausiblePtr(obj)) return 0;
+    if (!PiP_VtOK(obj)) return 0;
     vt = *(void***)obj;
-    if (!vt || (size_t)vt < PIP_GAME_RDATA_LO || (size_t)vt >= PIP_GAME_RDATA_HI)
-        return 0;
-    if (!PiP_IsGameCode(vt[0x2C / 4])) return 0;
-    if (!PiP_IsGameCode(vt[0x48 / 4])) return 0;
-    if (!PiP_IsGameCode(vt[0x88 / 4])) return 0;
-    return 1;
+    return PiP_IsGameCode(vt[0x88 / 4]) ? 1 : 0;   /* 点击链路要调的这一槽 */
 }
 
 /* 装上小窗的相机与可选物件表 (点击重映射和框选共用), 成功后必须成对还原。 */

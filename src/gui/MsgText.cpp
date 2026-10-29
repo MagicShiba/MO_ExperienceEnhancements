@@ -25,7 +25,6 @@
 
 /* ---------------- 地址 ---------------- */
 
-#define ADDR_COLORSCHEME_ARRAY   0x00B054D0u
 #define ADDR_SCHEME_TO_COLOR     0x00517440u
 
 /* 雷达事件 (RadarEventClass) 活对象表: 引擎 Create 成功才往里挂。
@@ -40,11 +39,7 @@
 #define RE_OFF_CELL              0x20u
 #define RE_MAX_SCAN              48          /* 一帧最多扫几个 (引擎容量 10 起, 会长) */
 
-/* 视口跳转: 见下面 MsgText_JumpToCell。ADDR_SET_TACTICAL_POS 在 EngineAddr.h。 */
-#define ADDR_MAP_INSTANCE        0x0087F7E8u  /* MapClass::Instance */
-#define ADDR_MAP_GET_CELL        0x005657A0u  /* CellClass* MapClass::GetCellAt(CellStruct*) */
-#define ADDR_CELL_GET_COORDS     0x00480A30u  /* CoordStruct* CellClass::GetCellCoords(CoordStruct*) */
-#define ADDR_Z_TO_SCREEN         0x006D20E0u  /* int TacticalClass::ZToScreen(int z) */
+/* 视口跳转: 见下面 MsgText_JumpToCell。用到的引擎地址都在 EngineAddr.h。 */
 
 /* 点击门落点: ProcessClickCoords (0x692300) 的"未处理"出口, 栈形对齐。 */
 
@@ -54,10 +49,6 @@
 #define STK_ARG_CS               0x10
 #define STK_ARG_TIMEOUT          0x18
 #define STK_ARG_SP               0x1C
-
-#define OFF_CSCHEME_ITEMS        0x04
-#define OFF_CSCHEME_COUNT        0x10
-#define OFF_CSCHEME_BASECOLOR    0x308
 
 /* ---------------- 雷达事件 ----------------
  * 事件名走配置节 [MsgRadar] 的 Name0..Name16 (下标 = RadarEventType),
@@ -434,7 +425,7 @@ static void SchemeColor(void* scheme, ColorStruct* out)
     if (!scheme || !IsPlausiblePtr(scheme)) { out->R = out->G = out->B = 255; return; }
     if (!fn) fn = (SchemeToColorFn)ADDR_SCHEME_TO_COLOR;
     buf[0] = buf[1] = buf[2] = buf[3] = 0;
-    r = fn((char*)scheme + OFF_CSCHEME_BASECOLOR, NULL, buf);
+    r = fn((char*)scheme + OFF_SCHEME_BASE, NULL, buf);
     if (!r || !IsPlausiblePtr(r)) { out->R = out->G = out->B = 255; return; }
     out->R = r[g_IdxR]; out->G = r[g_IdxG]; out->B = r[g_IdxB];
 }
@@ -444,30 +435,25 @@ static void* SchemePtr(int cs)
     void** items;
     int count;
     if (cs < 0) return NULL;
-    items = *(void***)(ADDR_COLORSCHEME_ARRAY + OFF_CSCHEME_ITEMS);
-    count = *(int*)(ADDR_COLORSCHEME_ARRAY + OFF_CSCHEME_COUNT);
+    items = *(void***)(size_t)ADDR_SCHEME_ITEMS;
+    count = *(int*)(size_t)ADDR_SCHEME_COUNT;
     if (!items || count <= 0 || count > 1000 || cs >= count) return NULL;
     return items[cs];
 }
 
-/* 本地玩家颜色方案: CurrentPlayer 房 +0x16054, 裸值即真方案号。
- * 三重实证: (1) 房内搜模板名命中 UIName @+0x1602A, +42 恰是此偏移
- * (YRpp 版式); (2) 青局读 7, 采样 (0,252,255) 正青, 与玩家色一致;
- * (3) 橙局游戏回声 cs=17, 采样 (255,120,0) 正橙。
- * LUT/0xA8B394 在单机皆不可靠, 已弃用。只读查询, 联机安全。 */
-#define ADDR_CURPLAYER_HOUSE 0x00A83D4Cu
-#define OFF_HOUSE_COLORIDX   0x16054u
+/* 本地玩家颜色方案: CurrentPlayer 房 +0x16054, 裸值即真方案号
+ * (房内 UIName 在 +0x1602A, +42 恰是此偏移, YRpp 版式)。只读查询, 联机安全。 */
 
 static int LocalPlayerScheme(int* outIdx)
 {
     void* house;
     int sc;
     if (outIdx) *outIdx = -99;
-    if (!IsPlausiblePtr((void*)ADDR_CURPLAYER_HOUSE)) return -1;
-    house = *(void**)ADDR_CURPLAYER_HOUSE;
+    if (!IsPlausiblePtr((void*)ADDR_CURPLAYER)) return -1;
+    house = *(void**)ADDR_CURPLAYER;
     if (!house || !IsPlausiblePtr(house)) return -1;
-    if (!IsPlausiblePtr((char*)house + OFF_HOUSE_COLORIDX + 4)) return -1;
-    sc = *(int*)((char*)house + OFF_HOUSE_COLORIDX);
+    if (!IsPlausiblePtr((char*)house + OFF_HOUSE_COLORSCHEME + 4)) return -1;
+    sc = *(int*)((char*)house + OFF_HOUSE_COLORSCHEME);
     if (outIdx) *outIdx = sc;
     if (!SchemePtr(sc)) return -1;
     return sc;
@@ -1449,17 +1435,17 @@ int MsgText_CellZ(short cx, short cy)
 
     cell[0] = cx;
     cell[1] = cy;
-    pCell = ((FnMapGetCell)(size_t)ADDR_MAP_GET_CELL)(map, cell);
+    pCell = ((FnMapGetCell)(size_t)FN_MAP_GET_CELL)(map, cell);
     if (!pCell || !IsPlausiblePtr(pCell) || pCell == (void*)0x00ABDC50u) return 0;
     c.X = c.Y = c.Z = 0;
-    ((FnCellGetCoords)(size_t)ADDR_CELL_GET_COORDS)(pCell, &c);
+    ((FnCellGetCoords)(size_t)FN_CELL_GET_COORDS)(pCell, &c);
     return c.Z;
 }
 
 int MsgText_ZToScreen(int z)
 {
     if (z <= 0) return 0;
-    return ((FnZToScreen)(size_t)ADDR_Z_TO_SCREEN)(z);
+    return ((FnZToScreen)(size_t)FN_Z_TO_SCREEN)(z);
 }
 
 static void MsgText_JumpToCell(short cx, short cy)
