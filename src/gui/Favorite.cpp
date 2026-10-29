@@ -68,6 +68,7 @@ static int s_CenterR = 36;      /* 最内圈半径 (像素) */
 static int s_CenterGap = 26;    /* 每个槽向外多一圈的增量 (像素) */
 static int s_ArrowLite = 15;    /* 一槽离屏箭头超过这么多个就整体半透明 */
 static int s_ArrowMax = 40;     /* 一槽最多画这么多个箭头, 多出的不画 */
+static int s_BeaconArrow = 1;   /* 为离屏的通信信标也画箭头 (用各自玩家的颜色) */
 static int s_GroupMax = FAV_GROUP_MAX;
 static int s_Rgb[FAV_SLOT_MAX] = { 0x40E060, 0xFFD040, 0xFF4838, 0x40D8F0 };
 
@@ -234,6 +235,7 @@ void Fav_EnsureInit(void)
     s_ArrowLite = Fav_Max(1, Fav_Min(FAV_GROUP_MAX, s_ArrowLite));
     s_ArrowMax = GetPrivateProfileIntA(FAV_SECTION, "ArrowMax", 40, g_IniPath);
     s_ArrowMax = Fav_Max(1, Fav_Min(FAV_GROUP_MAX, s_ArrowMax));
+    s_BeaconArrow = GetPrivateProfileIntA(FAV_SECTION, "BeaconArrow", 1, g_IniPath) ? 1 : 0;
     s_GroupMax = GetPrivateProfileIntA(FAV_SECTION, "GroupMax", FAV_GROUP_MAX, g_IniPath);
     s_GroupMax = Fav_Max(1, Fav_Min(FAV_GROUP_MAX, s_GroupMax));
     for (i = 0; i < FAV_SLOT_MAX; i++)
@@ -259,6 +261,8 @@ void Fav_EnsureInit(void)
     q += UtoA((unsigned)s_ArrowLite, buf + q);
     q = AppendCStr(buf, q, " max=", sizeof(buf));
     q += UtoA((unsigned)s_ArrowMax, buf + q);
+    q = AppendCStr(buf, q, " bc=", sizeof(buf));
+    q += UtoA((unsigned)s_BeaconArrow, buf + q);
     q = AppendCStr(buf, q, " grp=", sizeof(buf));
     q += UtoA((unsigned)s_GroupMax, buf + q);
     LogLine(buf);
@@ -571,17 +575,76 @@ static void Fav_DrawSlotStars(unsigned char* base, int pitch, int w, int h,
     }
 }
 
+/* center 模式的圈参数: 收藏四槽各占一圈 (0..3), 信标接在外面。
+ * 视图装不下四圈时压缩圈距; 回可用最大半径, 0 = 太小不画。 */
+static int Fav_RingPlan(const RectangleStruct* a, int* rIn, int* rStep)
+{
+    int maxR = Fav_Min(a->Width, a->Height) / 2 - s_ArrowInset;
+
+    *rIn = s_CenterR;
+    *rStep = s_CenterGap;
+    if (maxR < 12) return 0;
+    if (*rIn + *rStep * (FAV_SLOT_MAX - 1) > maxR)
+    {
+        int span;
+        if (*rIn > maxR / 2) *rIn = maxR / 2;
+        span = maxR - *rIn;
+        *rStep = span / (FAV_SLOT_MAX - 1);
+        if (*rStep < 4) *rStep = 4;
+    }
+    return maxR;
+}
+
+/* 箭尖落点: center = 以视图中心为圆心、半径 radius, 沿目标方向;
+ * edge = 射线与内缩 inset 像素的视图矩形求交。dx/dy 回目标方向 (未归一化)。 */
+static int Fav_ArrowAnchor(const RectangleStruct* a, int px, int py,
+                           int radius, int inset,
+                           int* ex, int* ey, int* dx, int* dy)
+{
+    int acx = a->X + a->Width / 2, acy = a->Y + a->Height / 2;
+    int rx = px - acx, ry = py - acy;
+
+    *dx = rx;
+    *dy = ry;
+    if (!rx && !ry) return 0;
+    if (s_ArrowCenter)
+    {
+        int len = Fav_ISqrt(rx * rx + ry * ry);
+        if (len <= 0 || radius <= 0) return 0;
+        *ex = acx + (int)((long long)rx * radius / len);
+        *ey = acy + (int)((long long)ry * radius / len);
+    }
+    else
+    {
+        int ax = (rx < 0) ? -rx : rx;
+        int ay = (ry < 0) ? -ry : ry;
+        int hw = a->Width / 2 - inset;
+        int hh = a->Height / 2 - inset;
+        if (hw < 8) hw = 8;
+        if (hh < 8) hh = 8;
+        if ((long long)ax * hh >= (long long)ay * hw)
+        {
+            *ex = acx + (rx > 0 ? hw : -hw);
+            *ey = acy + (int)((long long)ry * hw / (ax ? ax : 1));
+        }
+        else
+        {
+            *ey = acy + (ry > 0 ? hh : -hh);
+            *ex = acx + (int)((long long)rx * hh / (ay ? ay : 1));
+        }
+    }
+    return 1;
+}
+
 /* 一槽的箭头: 每个离屏成员一个, ArrowMax 之外的丢掉; 超过 ArrowLite 个整体半透明。
- * edge = 射线与内缩的视图矩形求交, 贴在屏幕边缘;
- * center = 以视图中心为圆心, 每个槽一个半径 (slot 越大圈越大), 同槽的箭头都
- *          在自己那圈上按各自方向滑动, 四槽仍构成同心圆。 */
+ * edge = 贴在屏幕边缘; center = 每个槽一个半径 (slot 越大圈越大), 同槽的箭头
+ * 都在自己那圈上按各自方向滑动, 四槽仍构成同心圆。 */
 static void Fav_DrawSlotArrows(unsigned char* base, int pitch, int w, int h,
                                const RectangleStruct* a, int slot)
 {
     FavSlot* f = &s_Slot[slot];
     unsigned r, g, b, alpha;
     int i, count = 0, drawn = 0;
-    int acx = a->X + a->Width / 2, acy = a->Y + a->Height / 2;
     int maxR = 0, rIn = 0, rStep = 0;
 
     /* 先数离屏成员: 决定半透明与上限 */
@@ -597,59 +660,167 @@ static void Fav_DrawSlotArrows(unsigned char* base, int pitch, int w, int h,
 
     if (s_ArrowCenter)
     {
-        maxR = Fav_Min(a->Width, a->Height) / 2 - s_ArrowInset;
-        if (maxR < 12) return;
-        rIn = s_CenterR;
-        rStep = s_CenterGap;
-        if (rIn + rStep * (FAV_SLOT_MAX - 1) > maxR)
-        {
-            int span;
-            if (rIn > maxR / 2) rIn = maxR / 2;
-            span = maxR - rIn;
-            rStep = span / (FAV_SLOT_MAX - 1);
-            if (rStep < 4) rStep = 4;
-        }
+        maxR = Fav_RingPlan(a, &rIn, &rStep);
+        if (!maxR) return;
     }
     Fav_Color(slot, &r, &g, &b);
     for (i = 0; i < f->n && drawn < s_ArrowMax; i++)
     {
-        int px, py, dx, dy, ex, ey;
+        int px, py, dx, dy, ex, ey, rr = 0;
         if (!Fav_MemberProject(slot, i, &px, &py)) continue;
         if (Fav_InView(a, px, py)) continue;
-        dx = px - acx;
-        dy = py - acy;
-        if (!dx && !dy) continue;
         if (s_ArrowCenter)
         {
-            int len = Fav_ISqrt(dx * dx + dy * dy);
-            int rr = rIn + slot * rStep;
-            if (len <= 0) continue;
+            rr = rIn + slot * rStep;
             if (rr > maxR) rr = maxR;
-            ex = acx + (int)((long long)dx * rr / len);
-            ey = acy + (int)((long long)dy * rr / len);
         }
-        else
-        {
-            int ax = (dx < 0) ? -dx : dx;
-            int ay = (dy < 0) ? -dy : dy;
-            int hw = a->Width / 2 - s_ArrowInset;
-            int hh = a->Height / 2 - s_ArrowInset;
-            if (hw < 8) hw = 8;
-            if (hh < 8) hh = 8;
-            if ((long long)ax * hh >= (long long)ay * hw)
-            {
-                ex = acx + (dx > 0 ? hw : -hw);
-                ey = acy + (int)((long long)dy * hw / (ax ? ax : 1));
-            }
-            else
-            {
-                ey = acy + (dy > 0 ? hh : -hh);
-                ex = acx + (int)((long long)dx * hh / (ay ? ay : 1));
-            }
-        }
+        if (!Fav_ArrowAnchor(a, px, py, rr, s_ArrowInset, &ex, &ey, &dx, &dy)) continue;
         Fav_ArrowAt(base, pitch, w, h, ex, ey, dx, dy, r, g, b, alpha);
         drawn++;
     }
+}
+
+/* ---------------- 通信信标 (B 键) 的箭头 ----------------
+ * 信标用各自玩家的颜色: HouseClass::ColorSchemeIndex → ColorScheme::Array[..]
+ * 的 Colors[MainShadeIndex], 与 ESC 玩家色色块、单位颜色是同一套。
+ * 只给本机看得见的信标画: 先问引擎 BeaconClass::VisibleToPlayer (0x4308B0,
+ * 只读: 已放置 + 与本家同盟 + 该房可见), 再叠本地黑幕判据 —— 不能靠箭头把
+ * 己方看不到的信标位置漏出来。 */
+#define BC_HOUSE_MAX    8
+#define BC_SLOT_MAX     3
+#define BC_MAX          (BC_HOUSE_MAX * BC_SLOT_MAX)
+#define BC_OFF_BITFIELD 0x0Cu      /* BeaconClass::Bitfield, bit0 = 已放置 */
+#define BC_OFF_HOUSEID  0x110u     /* BeaconClass::HouseID */
+#define BC_ADDR_VISIBLE 0x004308B0u
+#define OFF_HOUSE_SCHEME 0x16054u  /* HouseClass::ColorSchemeIndex */
+#define ADDR_SCHEME_ITEMS 0x00B054D4u
+#define ADDR_SCHEME_COUNT 0x00B054E0u
+#define OFF_SCHEME_COLORS 0x04u    /* ColorScheme::Colors[256] (每项 3 字节) */
+#define OFF_SCHEME_MAIN   0x330u   /* ColorScheme::MainShadeIndex */
+
+typedef unsigned char (__attribute__((thiscall)) *Fn_BcVisible)(void* self);
+
+typedef struct {
+    int px, py;         /* 屏幕投影 (离屏) */
+    unsigned r, g, b;   /* 该信标所属玩家的颜色 */
+} FavBcMark;
+
+/* 房号 → 玩家色 (RGB)。取不到回 0, 调用方跳过该信标。 */
+static int Fav_HouseColor(int houseId, unsigned* r, unsigned* g, unsigned* b)
+{
+    void** houses, **schemes;
+    void* house;
+    void* sc;
+    int hn, sn, idx, main;
+
+    houses = *(void***)(size_t)ADDR_HOUSES_ITEMS;
+    hn = *(int*)(size_t)ADDR_HOUSES_COUNT;
+    if (!houses || !IsPlausiblePtr(houses) || hn <= 0 || hn > 64) return 0;
+    if (houseId < 0 || houseId >= hn) return 0;
+    house = houses[houseId];
+    if (!house || !IsPlausiblePtr(house)) return 0;
+    idx = *(int*)((char*)house + OFF_HOUSE_SCHEME);
+    schemes = *(void***)(size_t)ADDR_SCHEME_ITEMS;
+    sn = *(int*)(size_t)ADDR_SCHEME_COUNT;
+    if (!schemes || !IsPlausiblePtr(schemes) || sn <= 0 || sn > 1000) return 0;
+    if (idx < 0 || idx >= sn) return 0;
+    sc = schemes[idx];
+    if (!sc || !IsPlausiblePtr(sc)) return 0;
+    main = *(int*)((char*)sc + OFF_SCHEME_MAIN);
+    if (main < 0 || main > 255) return 0;
+    *r = ((unsigned char*)sc)[OFF_SCHEME_COLORS + main * 3 + 0];
+    *g = ((unsigned char*)sc)[OFF_SCHEME_COLORS + main * 3 + 1];
+    *b = ((unsigned char*)sc)[OFF_SCHEME_COLORS + main * 3 + 2];
+    return 1;
+}
+
+static int Fav_BeaconVisible(void* b)
+{
+    static Fn_BcVisible fn = NULL;
+    /* 引擎函数直接解引用本家房指针, 开局前它可能是空。 */
+    if (!*(void**)(size_t)ADDR_CURPLAYER) return 0;
+    if (!fn) fn = (Fn_BcVisible)(void*)BC_ADDR_VISIBLE;
+    return fn(b) ? 1 : 0;
+}
+
+/* 每个离屏的、本机看得见的信标一个箭头, 用该玩家的颜色。
+ * center 模式下信标接在收藏四槽的圈外面; 同向挤在一起时往外多走一层错开。 */
+int Fav_DrawBeaconArrows(void* surf, int w, int h, int pitch)
+{
+    RectangleStruct a;
+    unsigned char* base;
+    FavBcMark mk[BC_MAX];
+    int mx[BC_MAX], my[BC_MAX];
+    int i, n = 0, placed = 0, rIn = 0, rStep = 0, maxR = 0, sep;
+
+    Fav_EnsureInit();
+    Fav_ScenCheck();
+    if (!s_Enable || !s_BeaconArrow) return 0;
+    if (!g_Calibrated) return 0;
+    if (!*(volatile unsigned char*)(size_t)ADDR_SCEN_STARTED) return 0;
+    if (!surf || !IsPlausiblePtr(surf)) return 0;
+    if (w <= 0 || h <= 0 || pitch < w * 2) return 0;
+    FM_GetViewRects(&a, NULL);
+    if (a.Width < 64 || a.Height < 64) return 0;
+
+    for (i = 0; i < BC_MAX; i++)
+    {
+        unsigned char* b = *(unsigned char**)((size_t)ADDR_BEACON_MGR + (size_t)i * 4u);
+        int px, py, hid;
+        unsigned r, g, bl;
+
+        if (!b || !IsPlausiblePtr(b)) continue;
+        if (!(b[BC_OFF_BITFIELD] & 1)) continue;        /* 只认已放置的槽 */
+        hid = *(int*)(b + BC_OFF_HOUSEID);
+        if (!Fav_HouseColor(hid, &r, &g, &bl)) continue;
+        if (!Fav_BeaconVisible(b)) continue;
+        if (Fav_CellHidden(*(int*)b, *(int*)(b + 4))) continue;
+        if (!OU_ProjWorld(*(int*)b, *(int*)(b + 4), *(int*)(b + 8), &px, &py)) continue;
+        if (Fav_InView(&a, px, py)) continue;          /* 在画面上就有信标本体 */
+        mk[n].px = px;
+        mk[n].py = py;
+        mk[n].r = r;
+        mk[n].g = g;
+        mk[n].b = bl;
+        n++;
+    }
+    if (n <= 0) return 0;
+
+    base = GtLock(surf);
+    if (!base) return 0;
+    sep = s_ArrowLen + 6;
+    if (s_ArrowCenter)
+    {
+        maxR = Fav_RingPlan(&a, &rIn, &rStep);
+        if (!maxR) { GtUnlock(surf); return 0; }
+    }
+    for (i = 0; i < n; i++)
+    {
+        int layer, ex = 0, ey = 0, dx = 0, dy = 0, ok = 0;
+
+        for (layer = 0; layer <= 8; layer++)
+        {
+            int rr, inset, k, hit = 0;
+            rr = rIn + (FAV_SLOT_MAX + layer) * rStep;
+            if (s_ArrowCenter && rr > maxR) rr = maxR;
+            inset = s_ArrowInset + layer * sep;
+            if (!Fav_ArrowAnchor(&a, mk[i].px, mk[i].py, rr, inset,
+                                 &ex, &ey, &dx, &dy)) break;
+            ok = 1;
+            for (k = 0; k < placed; k++)
+                if (ex >= mx[k] - sep && ex <= mx[k] + sep &&
+                    ey >= my[k] - sep && ey <= my[k] + sep) { hit = 1; break; }
+            if (!hit) break;
+            ok = 0;                                     /* 压在别人身上: 往外一层再试 */
+        }
+        if (!ok) continue;
+        Fav_ArrowAt(base, pitch, w, h, ex, ey, dx, dy, mk[i].r, mk[i].g, mk[i].b, 255);
+        mx[placed] = ex;
+        my[placed] = ey;
+        placed++;
+    }
+    GtUnlock(surf);
+    return 1;
 }
 
 static int Fav_CanDraw(void* surf, int w, int h, int pitch)

@@ -41,5 +41,9 @@ int Fav_DrawStars(void* surf, int w, int h, int pitch);
 /* 画进 Composite: 每个离屏成员一个指向箭头 (按槽限数)。放在最上层。 */
 int Fav_DrawArrows(void* surf, int w, int h, int pitch);
 
+/* 画进 Composite: 离屏通信信标的指向箭头 (用该信标所属玩家的颜色)。
+ * 放在最上层, 与收藏箭头同一套 ArrowMode 摆位。 */
+int Fav_DrawBeaconArrows(void* surf, int w, int h, int pitch);
+
 /* 清空全部槽并回到"只露一个按钮"。 */
 void Fav_Reset(void);

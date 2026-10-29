@@ -921,6 +921,70 @@ static void Up_SortByAmmo(UpEnt* a, int n)
     }
 }
 
+/* ---------------- NoManualUnload (Ares 的 TechnoType 键) ----------------
+ * 有些单位的"特殊功能"就是载员本体 (猎杀者的弹头、磁电束、鹦鹉螺的鱼雷、
+ * 清道夫的抓取), rules 里用 `NoManualUnload=yes` 关掉引擎的手动卸载。
+ * 这类载员不是可下车的乘客, 面板一律不列 —— 列出来就是个点了也没反应的格子,
+ * 还会让人以为能把功能部件卸下来。
+ *
+ * 读法: INI_Rules (ADDR_INI_RULES 里存 CCINIClass*) + ReadBool, 节名用类型
+ * 自己的 ID (持久指针, 绕开 INIClass 的节名指针缓存)。按 type 缓存; 换图/重开
+ * 会换 INI_Rules 指针, 那时整组作废重查。 */
+#define UP_NMU_CAP 64
+typedef struct { void* type; int val; } UpNmu;
+static UpNmu s_Nmu[UP_NMU_CAP];
+static int   s_NmuN = 0;
+static void* s_NmuIni = NULL;
+static int   s_NmuProbe = 0;      /* 本世代是否已记过一条诊断 */
+
+static int Up_NoManualUnload(void* type)
+{
+    typedef unsigned char (__attribute__((thiscall)) *Fn_ReadBool)(void* ini, const char* sec,
+                                                                 const char* key, int def);
+    void* ini = *(void**)ADDR_INI_RULES;
+    const char* id;
+    int i, v;
+
+    if (!type || !IsPlausiblePtr(type)) return 0;
+    if (ini != s_NmuIni) { s_NmuIni = ini; s_NmuN = 0; s_NmuProbe = 0; }
+    for (i = 0; i < s_NmuN; i++) if (s_Nmu[i].type == type) return s_Nmu[i].val;
+    if (!ini || !IsPlausiblePtr(ini)) return 0;
+
+    id = (const char*)((char*)type + OFF_TYPE_ID);
+    if (MemReadableBytes(id, 0x18) < 0x18 || !id[0]) return 0;
+    v = ((Fn_ReadBool)(void*)FN_INI_READBOOL)(ini, id, "NoManualUnload", 0) ? 1 : 0;
+
+    if (s_NmuN < UP_NMU_CAP)
+    {
+        s_Nmu[s_NmuN].type = type;
+        s_Nmu[s_NmuN].val = v;
+        s_NmuN++;
+    }
+    else
+    {
+        s_Nmu[0].type = type;
+        s_Nmu[0].val = v;
+    }
+
+    /* 诊断: 每个 rules 时代第一条 (不论真假) 记下来 —— ini 指针为 0 或读不出值
+     * 都能一眼看出来; 之后只有真值才记, 免得日志被普通单位刷满。 */
+    if (g_Log && (!s_NmuProbe || v))
+    {
+        char buf[112];
+        unsigned q = 0;
+        int k;
+        q = AppendCStr(buf, q, "up: nmu id=", sizeof(buf));
+        for (k = 0; k < 16 && id[k] && q + 1 < sizeof(buf); k++) buf[q++] = id[k];
+        q = AppendCStr(buf, q, " v=", sizeof(buf));
+        q += UtoA((unsigned)v, buf + q);
+        q = AppendCStr(buf, q, " ini=", sizeof(buf));
+        q += HtoA((unsigned)(size_t)ini, buf + q);
+        LogLine(buf);
+        s_NmuProbe = 1;
+    }
+    return v;
+}
+
 /* 驻军建筑: 载员在 BuildingClass::Occupants 向量里 (Items 0x688 / Count 0x694),
  * 与载具的 Passengers 链是两套存储。向量序就是面板序, 点击时按同一序反查
  * (SingleUnload.cpp)。 */
@@ -957,18 +1021,20 @@ static void Up_Rebuild(void)
     s_Trunc = 0;
     if (s_ListN == 1)
     {
-        /* 单选: 图标 + 信息 + 载员。载员超过 (9-2) 个就翻页, 前两格每页固定。 */
+        /* 单选: 图标 + 信息 + 载员。载员超过 (9-2) 个就翻页, 前两格每页固定。
+         * NoManualUnload 的单位载员是功能本体, 不算乘客, 一格都不列。 */
         void* o = s_List[0].obj;
         int cap = UP_CELLN - 2;
         int occ;
+        int showPax = Up_NoManualUnload(s_List[0].type) ? 0 : 1;
         all[0].obj = o; all[0].type = s_List[0].type; all[0].count = 1;
         all[1].obj = o; all[1].type = s_List[0].type; all[1].count = 0;   /* 0 => 信息格 */
         n = 2;
-        if (Up_WhatAmI(o) == WHATAMI_BUILDING)
+        if (showPax && Up_WhatAmI(o) == WHATAMI_BUILDING)
         {
             n = Up_AddOccupants(o, all, n);
         }
-        else
+        else if (showPax)
         {
             int pn = *(int*)((char*)o + OFF_TECH_PASSNUM);
             void* p = *(void**)((char*)o + OFF_TECH_PASSFIRST);
@@ -2213,8 +2279,11 @@ static void Up_ClickAt(int mx, int my)
         }
         /* 单选版式第 0/1 格 = 本车/本建筑自己: Z 按住时点它 = 给全部载员规划。
          * 不对容器本身下令 —— 建筑载员时它本来就不能动, 载具可以直接在地图上点。
-         * 按住 shift 且有多选名单时只给名单里的 (shift 选过就是明确指定)。 */
-        if (s_ListN == 1 && cell < 2 && e->obj && e->type)
+         * 按住 shift 且有多选名单时只给名单里的 (shift 选过就是明确指定)。
+         * NoManualUnload 的单位不给规划: 那些载员是功能本体, 卸下来单位就废了,
+         * 面板既然不列它们, 也不能留这条"给全部"的暗门。 */
+        if (s_ListN == 1 && cell < 2 && e->obj && e->type &&
+            !Up_NoManualUnload(e->type))
         {
             if (sh && Up_PickHostOK() && s_PickN > 0)
             {

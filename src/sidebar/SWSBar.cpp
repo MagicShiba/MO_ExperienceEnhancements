@@ -876,12 +876,10 @@ static int SwsArrayIndexOf(void* type, const char* id)
  * 图标优先 PCX (`SidebarPCX=`, 在 MIX 里, 磁盘上没有), 由引擎 (Ares) 的
  * `CameoPCX` 抓像素; 没写 `SidebarPCX=` 的走 SHP 兜底 (`SidebarImage`,
  * 用 `CC_Draw_Shape` 渲进自有 BSurface, 见 SwsRenderShp)。
- *   读键: CCINIClass::INI_Rules (0x887048) -> INIClass::ReadString (0x528A10)
+ *   读键: CCINIClass::INI_Rules (ADDR_INI_RULES) -> INIClass::ReadString (0x528A10)
  *   载图: PCX::Instance (0xAC4848) -> GetSurface / ForceLoadFile
  * 两条命门: GetSurface 未加载给的是占位图 (必须先 ForceLoadFile);
  * BSurface* 不可跨帧缓存 (切页签/重载美术会失效), 每次重建现取。 */
-
-#define ADDR_INI_RULES 0x887048u
 
 typedef void* (__thiscall *SwsPcxGetSurfFn)(void* pcx, const char* name, void* pal);
 #define FN_PCXGETSURF ((SwsPcxGetSurfFn)(void*)0x6BA140u)

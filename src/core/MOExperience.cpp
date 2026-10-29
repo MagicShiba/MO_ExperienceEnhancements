@@ -1371,6 +1371,7 @@ int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch,
     tOne = Perf_Now(); WeaponRange_Draw(surf, surfW, surfH, surfPitch);    Perf_Add(PF_D_WR, tOne);
     tOne = Perf_Now(); Aggressive_Draw(surf, surfW, surfH, surfPitch);     Perf_Add(PF_D_AG, tOne);
     tOne = Perf_Now(); Fav_DrawArrows(surf, surfW, surfH, surfPitch);      Perf_Add(PF_D_FAV, tOne);
+    tOne = Perf_Now(); Fav_DrawBeaconArrows(surf, surfW, surfH, surfPitch); Perf_Add(PF_D_FAV, tOne);
     tOne = Perf_Now(); if (FM_DrawRadarTo(surf)) drew = 1;                 Perf_Add(PF_D_RADAR, tOne);
     Perf_Add(PF_MSG_DRAWS, tSeg);
     }

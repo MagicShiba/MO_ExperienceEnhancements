@@ -152,6 +152,15 @@
 #define ADDR_INI_ART            0x00887180u
 #define FN_INI_READSTRING       0x00528A10u
 
+/* CCINIClass::INI_Rules: 0x887048 里存的是 CCINIClass* (规则 ini 本体),
+ * 换图/重开/读档会换指针 —— 按它派生的缓存必须比指针作废。
+ * ReadBool (0x5295F0, __thiscall: section, key, def) 返回值只有 AL 有效
+ * (尾部是 `mov al, [def]`), 必须按 1 字节接, 别声明成 int。
+ * 节名同样受上面那条指针缓存约束: 传类型对象里的 ID, 不要传栈上数组。
+ * 用途: Ares 的 TechnoType 键 `NoManualUnload=` (靠载员实现特殊功能的单位)。 */
+#define ADDR_INI_RULES          0x00887048u
+#define FN_INI_READBOOL         0x005295F0u
+
 /* TechnoTypeClass 成员 (图标 SHP 与弹药上限)。CameoFile 是 `Cameo=` 写的文件名
  * (0x19 字节, 紧挨在 Cameo 指针前); MO 的图标多为 .pcx, 此时 Cameo 指向的是
  * XXICON.SHP 占位图, 必须按 CameoFile 走 PCX 才拿得到真图。 */
