@@ -44,6 +44,7 @@
 #include "PauseView.h"
 #include "FrameCap.h"
 #include "Shot.h"
+#include "SaveShot.h"
 #include "PiP.h"
 #include "Weather.h"
 #include "EscMenu.h"
@@ -224,6 +225,7 @@ void MOE_EnsureInit(void)
     SidebarSkin_EnsureInit(); /* 阵营 UI 皮肤: 读 [Sidebar] SkinSide */
     EscMenu_EnsureInit(); /* ESC 菜单自定义页: 读 [EscMenu] */
     PvpNotice_EnsureInit(); /* 无 AI 对局自动聊天声明: 选文本 (硬编码, 无配置) */
+    SaveShot_EnsureInit();  /* 存档缩略图: 读 [SaveShot] */
 }
 
 /* ---------------- 渲染回退原因统计 ----------------
@@ -1402,6 +1404,8 @@ static DWORD MsgDrawBody(void* regs)
     /* 截图: 此刻各档原图都齐了且还没画任何 UI (侧栏/底栏/刻度条/战役框/
      * 画中画/tooltip 都在后面), 队列为空时是空操作。 */
     Shot_CapturePending();
+    /* 存档缩略图: 同一时刻按墙钟节流缓存一张无 UI 视口图 (存档对话框挡住战场时用)。 */
+    SaveShot_Tick();
 
     tick = GtTickNow();
 

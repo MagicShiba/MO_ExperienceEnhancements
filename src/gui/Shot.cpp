@@ -108,7 +108,7 @@ typedef struct {
 } ShotBmpHdr;               /* 66 字节, 与 Ares 的 bmpfile_full_header 同构 */
 #pragma pack(pop)
 
-static int Shot_Save(const char* path, const unsigned short* pix, int w, int h)
+int Shot_WriteBmp565(const char* path, const unsigned short* pix, int w, int h)
 {
     ShotBmpHdr hd;
     HANDLE f;
@@ -180,7 +180,7 @@ static int Shot_Capture(void)
     GtUnlock(surf);
 
     Shot_MakeName(path);
-    if (!Shot_Save(path, pix, vw, vh))
+    if (!Shot_WriteBmp565(path, pix, vw, vh))
     {
         VirtualFree(pix, 0, MEM_RELEASE);
         LogLine("shot: write failed");

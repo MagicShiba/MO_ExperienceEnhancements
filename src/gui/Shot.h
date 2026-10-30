@@ -25,3 +25,7 @@ void Shot_CapturePending(void);
 
 /* 相机按钮画进 Composite (须在刻度条与 PauseView 三键之后画)。 */
 int Shot_DrawToComposite(void);
+
+/* 16 位 BITFIELDS BMP 落盘 (掩码按 g_GBits 选 565/555, height 取负免倒序)。
+ * 给存档缩略图复用, 免得再写一份 BMP 头。成功返回 1。 */
+int Shot_WriteBmp565(const char* path, const unsigned short* pix, int w, int h);

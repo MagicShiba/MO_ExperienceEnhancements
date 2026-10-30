@@ -91,6 +91,8 @@ static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(
     SYHOOK(0x73D8CDu, 5u, "SU_PopOne"),
     SYHOOK(0x4580A9u, 6u, "SU_BldLoop"),
     SYHOOK(0x4581A4u, 5u, "SU_BldTail"),
+    SYHOOK(0x67CF42u, 6u, "SaveShot_SaveBegin"),
+    SYHOOK(0x67D2F1u, 5u, "SaveShot_SaveEnd"),
 };
 
 /* ---------------- Syringe 握手 ---------------- */

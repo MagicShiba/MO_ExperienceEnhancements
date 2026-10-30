@@ -26,6 +26,9 @@ const wchar_t* VecText_FontFace(void);
 int VecText_Bold(void);
 /* Resolved global vector font pixel size ([VecText] FontPx, 0 = auto). */
 int VecText_FontPx(void);
+/* 实际生效的字号: FontPx>0 就是它, FontPx=0 时是自动校准值。
+ * 要跟标题/按钮同号就用这个, 别自己按行高推。 */
+int VecText_ResolvedPx(void);
 
 /* ---------------- 超武列表整体接管 (Print 入口收集, 消息帧统一重绘) ----------------
  * VecText.cpp 只做高层级隐藏+收集 (不管内容细节, 不逐行绘制);

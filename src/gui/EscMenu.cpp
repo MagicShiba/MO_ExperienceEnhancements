@@ -20,6 +20,7 @@
 #include "LineEdit.h"
 #include "OrderUtil.h"
 #include "EscMenu.h"
+#include "SaveShot.h"
 #include "PlayerColor.h"
 #include "SidebarSkin.h"
 #include "FrameCap.h"
@@ -2925,6 +2926,9 @@ extern "C" __declspec(dllexport) DWORD __cdecl EscMenu_OnShow(void* regs)
 extern "C" __declspec(dllexport) DWORD __cdecl EscMenu_OnPaintSurface(void* regs)
 {
     unsigned esp, hwnd, surf;
+
+    /* 同一个钩点: 存/读档对话框的缩略图 (自己判 HWND, ESC 关掉也照画)。 */
+    SaveShot_PaintDialog(regs, (void*)(size_t)*(unsigned*)((char*)regs + ESC_REG_ESI));
 
     if (!s_Enable || !s_Host) return 0;
     if (!IsWindow(s_Host)) { s_Host = NULL; return 0; }

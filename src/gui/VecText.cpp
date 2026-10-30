@@ -2432,6 +2432,16 @@ int VecText_FontPx(void)
 {
 	return g_VT.FontPx;
 }
+
+/* 实际生效字号: 固定档就是 FontPx, 自动档是校准结果 (g_PxPx, 默认 19)。
+ * 其它模块要"和标题同号"时用这个, 别自己按行高/模板字号推。 */
+int VecText_ResolvedPx(void)
+{
+    int px = (g_VT.FontPx > 0) ? g_VT.FontPx : g_PxPx;
+    if (px < 8)  px = 8;
+    if (px > 40) px = 40;
+    return px;
+}
 int VecText_Bold(void)
 {
 	return g_VT.Bold;
