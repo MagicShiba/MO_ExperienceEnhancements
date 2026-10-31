@@ -989,6 +989,14 @@ void SB_RenderAfterMap(void)
     /* Render 照原版跑, 但 s_InRender 必须清 (Render 后半仍在栈上)。*/
     if (!s_RenderSwapped) { s_InRender = 0; return; }
     SB_RenderSwapOut();
+    SB_AfterMapPresent();
+}
+
+/* 还原之后的呈现段: 铺图外 + 降采样 (缩小档)。与 SwapOut 拆开, 让"画进本帧
+ * 原图"的层 (天气) 插在两者之间 —— 缩小档下原图是大面, 天气要赶在降采样之前
+ * 画进大面, 才会跟着地图一起进窗口面和无UI截图。 */
+void SB_AfterMapPresent(void)
+{
     SB_ShroudReport();
     /* 载入中不降采样 (三趟跑在 loader 自己的面上)。让出中由 Demagnify 内部跳过。*/
     if (SB_Out() && s_SurfActive && !SB_Loading())

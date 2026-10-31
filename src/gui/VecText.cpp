@@ -6,6 +6,7 @@
 #include <stdarg.h>             /* LogV 的变参 (编译器内建, 不依赖 CRT) */
 #include "GdiText.h"
 #include "VecText.h"
+#include "Patch.h"
 #include "OrderUtil.h"
 #include "Icon.h"
 #include "FullMap.h"
@@ -2316,93 +2317,6 @@ int __fastcall VecText_BlitHook(void* t, void* edxUnused, int wch, int x, int y,
 
 /* ---------------- 下钩 ---------------- */
 
-static int BytesSame(const unsigned char* a, const unsigned char* b, int n)
-{
-    int i;
-    for (i = 0; i < n; i++) if (a[i] != b[i]) return 0;
-    return 1;
-}
-
-static int BuildTramp(void)
-{
-    unsigned char* b;
-    int i;
-    b = (unsigned char*)VirtualAlloc(NULL, 32, MEM_COMMIT | MEM_RESERVE,
-                                     PAGE_EXECUTE_READWRITE);
-    if (!b) return 0;
-    for (i = 0; i < 7; i++) b[i] = ((unsigned char*)ADDR_BLIT)[i];
-    b[7] = 0xE9;   /* jmp 回 Blit+7 */
-    *(int*)(b + 8) = (int)(ADDR_BLIT_BACK - ((unsigned)(size_t)b + 12));
-    FlushInstructionCache(GetCurrentProcess(), b, 12);
-    g_OrigBlit = (BlitFn)b;
-    return 1;
-}
-
-static int PatchBlit(void)
-{
-    unsigned char* p = (unsigned char*)ADDR_BLIT;
-    DWORD old;
-    unsigned target = (unsigned)(size_t)VecText_BlitHook;
-    int rel = (int)(target - ((unsigned)(size_t)p + 5));
-    if (!VirtualProtect(p, 7, PAGE_EXECUTE_READWRITE, &old)) return 0;
-    p[0] = 0xE9;
-    *(int*)(p + 1) = rel;
-    p[5] = 0x90; p[6] = 0x90;
-    VirtualProtect(p, 7, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), p, 7);
-    return 1;
-}
-
-/* 通用跳板/补丁 (入口钩用)。
- * `n` 须落在完整指令末字节上 (落半截即从半个指令反汇编跑飞)。
- * `n` 范围禁 E8/E9 (rel32 基准变跳板自己 ⇒ 跳数据地址去，见 notes §23)，
- * 这里直接拒绝。用前先反汇编确认末字节。 */
-static void* BuildTrampAt(unsigned at, int n, unsigned back)
-{
-    unsigned char* b;
-    int i;
-    if (n < 1 || n > 16) return NULL;
-    for (i = 0; i < n; i++)
-    {
-        unsigned char c = ((unsigned char*)at)[i];
-        if (c == 0xE8 || c == 0xE9)
-        {
-            char m[80], n1[16];
-            unsigned q = 0;
-            q = AppendCStr(m, q, "tramp refused: PC-relative at ", sizeof(m));
-            UtoA(at, n1); q = AppendCStr(m, q, n1, sizeof(m));
-            q = AppendCh(m, q, ' ', sizeof(m));
-            UtoA((unsigned)c, n1); q = AppendCStr(m, q, n1, sizeof(m));
-            LogLine(m);
-            return NULL;
-        }
-    }
-    b = (unsigned char*)VirtualAlloc(NULL, 32, MEM_COMMIT | MEM_RESERVE,
-                                     PAGE_EXECUTE_READWRITE);
-    if (!b) return NULL;
-    for (i = 0; i < n; i++) b[i] = ((unsigned char*)at)[i];
-    b[n] = 0xE9;
-    *(int*)(b + n + 1) = (int)(back - ((unsigned)(size_t)b + n + 5));
-    FlushInstructionCache(GetCurrentProcess(), b, (SIZE_T)(n + 5));
-    return b;
-}
-
-static int PatchAt(unsigned at, void* target, int n)
-{
-    unsigned char* p = (unsigned char*)at;
-    DWORD old;
-    int rel = (int)((unsigned)(size_t)target - (at + 5));
-    int i;
-    if (n < 5) return 0;
-    if (!VirtualProtect(p, (SIZE_T)n, PAGE_EXECUTE_READWRITE, &old)) return 0;
-    p[0] = 0xE9;
-    *(int*)(p + 1) = rel;
-    for (i = 5; i < n; i++) p[i] = 0x90;
-    VirtualProtect(p, (SIZE_T)n, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), p, (SIZE_T)n);
-    return 1;
-}
-
 /* 打原版字节 (字节对不上时用: 现场只看日志就能判断是不是被别的模块改过)。 */
 static void LogBytes(const unsigned char* p)
 {
@@ -2573,18 +2487,18 @@ void VecText_LateInstall(void)
     if (!g_Log) return;
     /* 结算界面显示钩: 打开期间 g_ScoreScreen>0, 文本钩整条回落原版。
      * 与文本开关无关 (任务结算的退出按钮也靠它收尾)。 */
-    if (BytesSame((unsigned char*)0x5C9720u, kWantScoreShow, 8))
+    if (PatchSame((unsigned char*)0x5C9720u, kWantScoreShow, 8))
     {
-        g_OrigMPScoreShow = (ShowDlgFn)BuildTrampAt(0x5C9720u, 8, 0x5C9728u);
+        g_OrigMPScoreShow = (ShowDlgFn)PatchTrampAt(0x5C9720u, 8, 0x5C9728u);
         if (!g_OrigMPScoreShow ||
             !PatchAt(0x5C9720u, (void*)(size_t)VecMPScoreShowEntry, 8))
             g_OrigMPScoreShow = NULL;
         else LogLine("vtext: mpscore show hook ON (late)");
     }
     else LogLine("vtext: mpscore show site not pristine - OFF (foreign hook?)");
-    if (BytesSame((unsigned char*)0x6C8E80u, kWantScoreShow, 8))
+    if (PatchSame((unsigned char*)0x6C8E80u, kWantScoreShow, 8))
     {
-        g_OrigStandaloneShow = (ShowDlgFn)BuildTrampAt(0x6C8E80u, 8, 0x6C8E88u);
+        g_OrigStandaloneShow = (ShowDlgFn)PatchTrampAt(0x6C8E80u, 8, 0x6C8E88u);
         if (!g_OrigStandaloneShow ||
             !PatchAt(0x6C8E80u, (void*)(size_t)VecStandaloneShowEntry, 8))
             g_OrigStandaloneShow = NULL;
@@ -2595,10 +2509,10 @@ void VecText_LateInstall(void)
      * (按钮点了也走不到收尾)。 */
     if (g_OrigStandaloneShow)
     {
-        if (BytesSame((unsigned char*)0x6C8FF0u, kWantScoreProc, 8))
+        if (PatchSame((unsigned char*)0x6C8FF0u, kWantScoreProc, 8))
         {
             g_OrigScoreDlgProc =
-                (DlgProcFn)BuildTrampAt(0x6C8FF0u, 8, 0x6C8FF8u);
+                (DlgProcFn)PatchTrampAt(0x6C8FF0u, 8, 0x6C8FF8u);
             if (!g_OrigScoreDlgProc ||
                 !PatchAt(0x6C8FF0u, (void*)(size_t)VecScoreDlgEntry, 8))
                 g_OrigScoreDlgProc = NULL;
@@ -2607,9 +2521,9 @@ void VecText_LateInstall(void)
     /* FPS 钉住钩 (0x4F4589, GScreenClass::Render 尾): 只为本模块的文本服务,
      * 文本接管关了就不装。 */
     if (!g_VT.Enable) { g_LateHooksDone = 1; return; }
-    if (BytesSame((unsigned char*)0x4F4589u, kWantFpsPin, 5))
+    if (PatchSame((unsigned char*)0x4F4589u, kWantFpsPin, 5))
     {
-        g_FpsPinTramp = BuildTrampAt(0x4F4589u, 5, 0x4F458Eu);
+        g_FpsPinTramp = PatchTrampAt(0x4F4589u, 5, 0x4F458Eu);
         if (!g_FpsPinTramp || !PatchAt(0x4F4589u, (void*)(size_t)VecFpsPinEntry, 5))
             g_FpsPinTramp = NULL;
         else LogLine("vtext: fpspin hook ON (late)");
@@ -2673,13 +2587,13 @@ static void LogCat(const char* a, const char* b)
 static int VecHookAt(const VecHookEnt* h)
 {
     *h->tramp = NULL;
-    if (!BytesSame((const unsigned char*)h->at, h->want, (int)h->n))
+    if (!PatchSame((const unsigned char*)h->at, h->want, (int)h->n))
     {
         LogCat(h->name, " bytes mismatch");
         LogBytes((const unsigned char*)h->at);
         return 0;
     }
-    *h->tramp = BuildTrampAt(h->at, (int)h->n, h->at + (unsigned)h->n);
+    *h->tramp = PatchTrampAt(h->at, (int)h->n, h->at + (unsigned)h->n);
     if (*h->tramp && PatchAt(h->at, h->entry, (int)h->n))
     {
         LogCat(h->name, " hook ON");
@@ -2703,13 +2617,15 @@ void VecText_Install(void)
     /* Enable 只门控文本五钩; 以下共用钩无条件装 (缩放/底电等地基)。 */
     if (g_VT.Enable)
     {
-        if (!BytesSame((unsigned char*)ADDR_BLIT, kWantBlit, 7))
+        if (!PatchSame((unsigned char*)ADDR_BLIT, kWantBlit, 7))
         {
             LogLine("vtext: blit bytes mismatch, hook OFF");
             LogBytes((unsigned char*)ADDR_BLIT);
         }
-        else if (!BuildTramp()) LogLine("vtext: tramp fail, hook OFF");
-        else if (!PatchBlit()) LogLine("vtext: patch fail, hook OFF");
+        else if ((g_OrigBlit = (BlitFn)PatchTrampAt(ADDR_BLIT, 7, ADDR_BLIT_BACK)) == NULL)
+            LogLine("vtext: tramp fail, hook OFF");
+        else if (!PatchAt(ADDR_BLIT, (void*)VecText_BlitHook, 7))
+            LogLine("vtext: patch fail, hook OFF");
         else LogLine(g_VT.Render ? "vtext: blit hook ON (render)"
                                  : "vtext: blit hook ON (probe)");
         /* 文本四钩: DrawText/Print 只记上下文, Simple_ 收表并跳过, GetDim 接管宽度。 */
@@ -2820,7 +2736,7 @@ void VecText_Install(void)
     {
         static const unsigned char kWantClamp[5] =
             { 0xA1, 0xE4, 0xF8, 0x87, 0x00 };
-        if (BytesSame((unsigned char*)0x6D8640u, kWantClamp, 5))
+        if (PatchSame((unsigned char*)0x6D8640u, kWantClamp, 5))
         {
             if (PatchAt(0x6D8640u, (void*)MOExperience_ClampCenterEntry, 5))
                 LogLine("vtext: clampcenter hook ON");

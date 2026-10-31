@@ -47,6 +47,10 @@ void SB_RenderSwapIn(void);
 void SB_RenderSwapOut(void);
 /* 缩小档: 三趟地图画完立刻还原窗口面 + 降采样 (须早于引擎 UI)。 */
 void SB_RenderAfterMap(void);
+/* 还原 (SB_RenderSwapOut) 之后的呈现段: 铺图外 + 降采样 (缩小档)。
+ * 天气等"画进本帧原图"的层插在 SwapOut 与这一步之间, 缩小档下才会被
+ * 一起降采样进窗口面。 */
+void SB_AfterMapPresent(void);
 /* 边缘卷屏 (0x692B60) 入口修点: 缩放档把传入点换回物理鼠标 (屏幕空间死区)。 */
 void SB_EdgeScrollPointFix(Point2D* pt);
 /* 缩小档: 把大面的 R 区域降采样铺回 Composite 的 A。 */

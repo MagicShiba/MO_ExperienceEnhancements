@@ -29,13 +29,16 @@ void Weather_SetFire(int on);
 int  Weather_Cloud(void);
 void Weather_SetCloud(int on);
 
-/* 云影风格预设 (cumulus / big / small / sheet / overcast / patchy / streak)。
- * 每种是一套独立的噪声语汇 (各自的置换表 + y 轴压缩比), 不是同一张图调浓淡。
- * 菜单里选会落盘到 [Weather] CloudStyle。 */
-#define WEATHER_CLOUD_STYLE_N  7      /* 与 Weather.cpp 的 kCldStyle 行数一致 */
+/* 云影风格预设 (cumulus / big / small / sheet / overcast / patchy / streak /
+ * cirrus)。每种是一套独立的噪声语汇 (各自的置换表 + y 轴压缩比), 不是同一张图
+ * 调浓淡。菜单里选会落盘到 [Weather] CloudStyle。 */
+#define WEATHER_CLOUD_STYLE_N  8      /* 与 Weather.cpp 的 kCldStyle 行数一致 */
 int  Weather_CloudStyle(void);
 int  Weather_CloudStyleCount(void);
 void Weather_SetCloudStyle(int idx);
 
-/* 每帧绘制: 只画视图区 (不碰侧栏/底栏)。返回 1=画了。 */
-int Weather_Draw(void* surf, int surfW, int surfH, int surfPitch);
+/* 每帧绘制 (AfterMap 钩调, 三趟地图画完之后、UI 与缩放呈现之前):
+ * 画进本帧"未缩放视口原图面" (SB_RawView 同源) —— 天气是战场画面的一部分,
+ * 跟着原图走缩放呈现, 也因此无UI截图与存档缩略图天然包含天气。
+ * 返回 1=画了。 */
+int Weather_Draw(void);

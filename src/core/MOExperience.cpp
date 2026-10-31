@@ -620,8 +620,16 @@ void* g_AfterMapTramp = NULL;
 static void AfterMapC(void)
 {
     long long tPf = Perf_Now();
+    long long tWth;
     MOE_EnsureInit();
-    SB_RenderAfterMap();
+    /* 顺序必须是 还原 -> 天气 -> 呈现: 缩小档的本帧原图在刚换下来的大面上,
+     * 天气画进大面后降采样才会带着它进窗口面; 无UI截图与存档缩略图取的也是
+     * 这张原图, 天气因此一起被截到。1x/放大档原图在窗口 Composite, 同样成立。 */
+    SB_RenderSwapOut();
+    tWth = Perf_Now();
+    Weather_Draw();
+    Perf_Add(PF_D_WTH, tWth);
+    SB_AfterMapPresent();
     PiP_AfterMap();
     Perf_Add(PF_AFTERMAP, tPf);
 }
@@ -1443,14 +1451,6 @@ static DWORD MsgDrawBody(void* regs)
     /* 画中画小窗: 必须在这之后贴 (Composite 已是缩放呈现后的窗口面),
      * 否则被缩放模块一起放大/缩小。 */
     PiP_DrawOnComposite(surf);
-
-    /* 天气 (雨/雪): 在 UI 层之下、地图之上。直接画进 Composite 的视图区,
-     * 不覆盖侧栏; 每帧重画 (Composite 每帧被引擎重铺, 没法缓存)。 */
-    {
-        long long tWth = Perf_Now();
-        if (Weather_Draw(surf, surfW, surfH, surfPitch)) drew = 1;
-        Perf_Add(PF_D_WTH, tWth);
-    }
 
     /* 箱子类型图标: 压在木箱上、UI 之下。整片被黑幕盖住时自己跳过 (见 CrateIcon.cpp)。 */
     if (CrateIcon_Draw(surf, surfW, surfH, surfPitch)) drew = 1;

@@ -20,12 +20,19 @@
  *
  * 雨 / 雪 / 火雨 各自独立开关 (雨+雪 = 雨夹雪), 只存在于本次运行;
  * **云影开关与画法**是长期设置, 落盘 (见 Wth_LoadState)。
- * 纯渲染: 只读相机与调色板, 只写 Composite。联机安全。
+ * 纯渲染: 只读相机与调色板, 只写渲染面。联机安全。
+ *
+ * 画在哪: AfterMap 钩 (三趟地图画完、UI 之前) 调 Weather_Draw, 面与矩形取自
+ * SB_RawView —— 即"本帧未缩放视口原图" (与无UI截图同源)。缩小档下原图是大面,
+ * 天气画进大面后被一起降采样进窗口面; 放大档下画进低分辨率 R 块后随地图放大。
+ * 天气因此成为"战场原图的一部分": 屏幕上随缩放档一起缩放 (与原版引擎把
+ * RAIN/SNOW 画在地图层的行为一致), 无UI截图与存档缩略图也天然包含天气。
  */
 
 #include "Weather.h"
 #include "GdiText.h"
 #include "FullMap.h"
+#include "ScaleBar.h"
 #include <emmintrin.h>          /* 云影压暗的 SSE2 版 (见 Wth_CloudFillSse2) */
 
 /* ---------------- 引擎结构 (只读) ---------------- */
@@ -169,7 +176,9 @@ static const WthCldStyle kCldStyle[] = {
     /* 不均匀: 硬边 + 最强的疏密不均, 一半晴朗一半压在云底 */
     { "patchy",   0xB4C7E119u,   4, 3, 52,  16, 3, 55, 100, 55, 47, 42, 18, 1 },
     /* 条状: 大团 + 压到 30%, 一个圆团在屏幕上就是一条横带 (碎团压扁只会变成碎点) */
-    { "streak",   0xC3E5D7A2u,   5, 3, 50,  14, 3, 50,  60, 25, 30, 40, 34, 1 }
+    { "streak",   0xC3E5D7A2u,   5, 3, 50,  14, 3, 50,  60, 25, 30, 40, 34, 1 },
+    /* 卷云: 强域扭曲拉出丝缕 + 压到最扁, 高频细侵蚀收薄云边, 稀疏的一层高空薄纱 */
+    { "cirrus",   0xD4F19B37u,   8, 3, 45,  18, 3, 40, 130,  0, 22, 34, 32, 1 }
 };
 
 #define CLD_STYLE_N ((int)(sizeof(kCldStyle) / sizeof(kCldStyle[0])))
@@ -2210,11 +2219,13 @@ static void Wth_DrawLayer(WthLayer* l, void* surf, void* pal,
 
 /* ---------------- 每帧入口 ---------------- */
 
-int Weather_Draw(void* surf, int surfW, int surfH, int surfPitch)
+int Weather_Draw(void)
 {
-    RectangleStruct view, clip;
+    RectangleStruct clip;
+    void* surf;
     unsigned mask = 0;
     int cdx = 0, cdy = 0, d, dp, i, drew = 0;
+    int surfW, surfH, surfPitch;
     int needPx;
 
     Wth_Init();
@@ -2229,7 +2240,17 @@ int Weather_Draw(void* surf, int surfW, int surfH, int surfPitch)
 
     if (!g_On[WTH_K_RAIN] && !g_On[WTH_K_SNOW] && !g_On[WTH_K_FIRE] && !g_CloudOn)
         return 0;
-    if (!surf || !IsPlausiblePtr(surf) || surfW <= 0 || surfH <= 0) return 0;
+
+    /* 目标面 = 本帧"未缩放视口原图" (与无UI截图同源): 1x/放大档是窗口
+     * Composite (放大档取放大之前那块 R), 缩小档是大面。天气画进原图,
+     * 后面的缩放呈现与截图才都带着它。 */
+    if (!SB_RawView(&surf, &clip.X, &clip.Y, &clip.Width, &clip.Height))
+        return 0;
+    surfW = GtSurfGet(surf, GtVT_GET_WIDTH);
+    surfH = GtSurfGet(surf, GtVT_GET_HEIGHT);
+    surfPitch = GtSurfGet(surf, GtVT_GET_PITCH);
+    if (surfW <= 0 || surfH <= 0 || surfPitch <= 0) return 0;
+    if (clip.Width < 16 || clip.Height < 16) return 0;
 
     d = Wth_LogicDelta();
     g_Tick += d;
@@ -2243,16 +2264,6 @@ int Weather_Draw(void* surf, int surfW, int surfH, int surfPitch)
     }
     if (g_On[WTH_K_FIRE]) mask |= 1u << WTH_K_FIRE;
     needPx = mask != 0;
-
-    /* 视图区取 A (铺满的可见地图区): 1x 时就是视口, 缩放档也覆盖到该覆盖的地方,
-     * 且天然不含侧栏。视图区落在面外时 (渲染面比窗口小) 以面为界。 */
-    FM_GetViewRects(&view, NULL);
-    clip = view;
-    if (clip.X < 0) { clip.Width += clip.X; clip.X = 0; }
-    if (clip.Y < 0) { clip.Height += clip.Y; clip.Y = 0; }
-    if (clip.X + clip.Width > surfW) clip.Width = surfW - clip.X;
-    if (clip.Y + clip.Height > surfH) clip.Height = surfH - clip.Y;
-    if (clip.Width < 16 || clip.Height < 16) return 0;
 
     /* 云影: 盖在地面上、降水之下 (雨雪不该被云影再压暗一遍)。它是**独立开关**,
      * 不跟着雨/雪走 —— 想要"多云但没下雨"也能开。 */

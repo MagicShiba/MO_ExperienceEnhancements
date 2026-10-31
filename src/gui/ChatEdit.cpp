@@ -22,6 +22,7 @@
 #include "GdiText.h"
 #include "MsgText.h"
 #include "LineEdit.h"
+#include "Patch.h"
 #include "ChatEdit.h"
 
 #define CE_MSGLIST      0xA8BC60u
@@ -86,15 +87,11 @@ static int ce_Active = 0;
 static int ce_AtNative = 1;
 
 static wchar_t ce_Buf[CE_BUF_N];
-static int ce_Len = 0;
-static int ce_Cur = 0;
-static int ce_Anchor = -1;      /* -1=无选中, 否则选中 [min(Anchor,Cur), max) */
+static LiEdit  ce_Ed;           /* 光标/选区/滚动/闪烁 (buf = ce_Buf, CE_EnsureInit 接上) */
 /* 开框时认领的预填模板 (AddEdit 写入的"从Name："等): 原样未动则发送时剥离,
  * 用户只发自己打的字; 动过则尊重原文发送。 */
 static wchar_t ce_Pre[CE_BUF_N];
 static int ce_PreLen = 0;
-static int ce_ViewX = 0;        /* 横向滚动 (像素) */
-static unsigned ce_BlinkT = 0;
 
 static wchar_t ce_Comp[CE_BUF_N];
 static int ce_CompLen = 0;
@@ -148,6 +145,7 @@ static void CE_EnsureInit(void)
     ce_Init = 1;
     BuildPaths();
     GtEnsureLog();
+    LiEdInit(&ce_Ed, ce_Buf, CE_BUF_N);
     ce_Enable = GetPrivateProfileIntA(MSG_SECTION, "ChatEdit", 1, g_IniPath) ? 1 : 0;
     ce_ChatBoxSP = GetPrivateProfileIntA(MSG_SECTION, "ChatBoxSP", 1, g_IniPath) ? 1 : 0;
     ce_ChatNameSP = GetPrivateProfileIntA(MSG_SECTION, "ChatNameSP", 0, g_IniPath) ? 1 : 0;
@@ -188,27 +186,6 @@ static int CE_FieldW(void)
     return (w < 80) ? 640 : w;
 }
 
-static void CE_SelRange(int* lo, int* hi)
-{
-    if (ce_Anchor < 0 || ce_Anchor == ce_Cur) { *lo = *hi = -1; return; }
-    *lo = (ce_Anchor < ce_Cur) ? ce_Anchor : ce_Cur;
-    *hi = (ce_Anchor < ce_Cur) ? ce_Cur : ce_Anchor;
-}
-
-/* GDI 自然宽度 (ABC 全宽, 无 DigitTrack)。须先 GdiEnsure 成功。 */
-static int CE_TextWidth(const wchar_t* s, int n)
-{
-    int tot = 0, i;
-    if (!g_G || !g_G->dc || !s || n <= 0) return 0;
-    for (i = 0; i < n; i++)
-    {
-        int ga = GtCharAdv(s[i]);
-        if (ga < 0) return -1;
-        tot += ga;
-    }
-    return tot;
-}
-
 /* 文本镜像进原生缓冲 (提交/原生路径永远看到有效文本)。
  * 光标置尾, 起点置 0 (空=取消, 非空=发送, 与原生语义一致)。
  * 对话框层也会直接改这块 (Delete/方向键不走 Input 钩), 帧级覆盖回去。 */
@@ -217,19 +194,14 @@ static void CE_Mirror(void)
     wchar_t* nb = (wchar_t*)(CE_MSGLIST + CE_OFF_EDITBUF);
     int i;
     if (!IsPlausiblePtr(nb)) return;
-    if (ce_Len > CE_BUF_N - 1) ce_Len = CE_BUF_N - 1;
-    for (i = 0; i < ce_Len; i++) nb[i] = ce_Buf[i];
-    nb[ce_Len] = 0;
-    *(int*)(CE_MSGLIST + CE_OFF_CURPOS) = ce_Len;
+    if (ce_Ed.len > CE_BUF_N - 1) ce_Ed.len = CE_BUF_N - 1;
+    for (i = 0; i < ce_Ed.len; i++) nb[i] = ce_Buf[i];
+    nb[ce_Ed.len] = 0;
+    *(int*)(CE_MSGLIST + CE_OFF_CURPOS) = ce_Ed.len;
     *(int*)(CE_MSGLIST + CE_OFF_INITPOS) = 0;
 }
 
 /* ---------------- 编辑操作 (调用后须 CE_Mirror + 闪烁复位) ---------------- */
-
-static void CE_BlinkReset(void)
-{
-    ce_BlinkT = GetTickCount();
-}
 
 static int CE_LivePx(void)
 {
@@ -251,53 +223,44 @@ static int CE_EnsureFont(void)
     return GdiEnsure(CE_FontPx(), ce_Bold, CE_GDI_SLOT, ce_Face);
 }
 
+/* GDI 自然宽度 (ABC 全宽, 无 DigitTrack); 个别字宽拿不到按字高当全角,
+ * 与绘制同口径。须先 GdiEnsure 成功。 */
+static int CE_TextWidth(const wchar_t* s, int n)
+{
+    int xs[CE_BUF_N + 1];
+    if (!g_G || !g_G->dc || !s || n <= 0) return 0;
+    if (n > CE_BUF_N) n = CE_BUF_N;
+    LiCharXs(s, n, CE_FontPx(), xs);
+    return xs[n];
+}
+
 static int CE_BudgetOk(int newLen, int fieldW)
 {
     int w;
     if (newLen >= CE_BUF_N) return 0;
     if (!CE_EnsureFont()) return 1;   /* 字体就绪失败不卡 (只剩字数上限) */
     w = CE_TextWidth(ce_Buf, newLen);
-    if (w < 0) return 1;   /* 度量失败不卡 (只剩字数上限) */
     return (w <= fieldW - 10) ? 1 : 0;
 }
 
-static void CE_DeleteRange(int lo, int hi)
+/* LiEdInsert 的宿主过滤钩: 插完测整串宽, 超了回退 (与原生拒收同效果)。
+ * ctx = 原生输入域宽。 */
+static int CE_AcceptW(void* ctx, wchar_t ch, int newLen)
 {
-    ce_HistIdx = -1;   /* 改字即离翻历史 */
-    if (lo < 0 || hi <= lo) return;
-    LiDeleteRange(ce_Buf, &ce_Len, &ce_Cur, lo, hi);
-    ce_Anchor = -1;
+    (void)ch;
+    return CE_BudgetOk(newLen, (int)(size_t)ctx);
+}
+
+/* 改字即离翻历史。所有走 LiEd 会话的改动入口都先置这个。 */
+static void CE_Dirty(void)
+{
+    ce_HistIdx = -1;
 }
 
 static void CE_InsertOne(wchar_t c, int fieldW)
 {
-    int lo, hi;
-    ce_HistIdx = -1;   /* 改字即离翻历史 */
-    CE_SelRange(&lo, &hi);
-    if (lo >= 0) CE_DeleteRange(lo, hi);
-    if (!LiInsert(ce_Buf, CE_BUF_N, &ce_Len, &ce_Cur, c, 0)) return;
-    if (!CE_BudgetOk(ce_Len, fieldW))
-    {
-        /* 超宽回退 (与原生拒收同效果) */
-        LiDeleteRange(ce_Buf, &ce_Len, &ce_Cur, ce_Cur - 1, ce_Cur);
-    }
-    ce_Anchor = -1;
-}
-
-static void CE_DoBackspace(void)
-{
-    int lo, hi;
-    CE_SelRange(&lo, &hi);
-    if (lo >= 0) CE_DeleteRange(lo, hi);
-    else if (ce_Cur > 0) CE_DeleteRange(ce_Cur - 1, ce_Cur);
-}
-
-static void CE_DoDelete(void)
-{
-    int lo, hi;
-    CE_SelRange(&lo, &hi);
-    if (lo >= 0) CE_DeleteRange(lo, hi);
-    else if (ce_Cur < ce_Len) CE_DeleteRange(ce_Cur, ce_Cur + 1);
+    CE_Dirty();
+    LiEdInsert(&ce_Ed, &c, 1, 0, CE_AcceptW, (void*)(size_t)fieldW);
 }
 
 static int CE_IsWord(wchar_t c)
@@ -306,9 +269,11 @@ static int CE_IsWord(wchar_t c)
            (c >= L'0' && c <= L'9') || c == L'_';
 }
 
+/* Ctrl+←/→: 一次跳一段 (词/空格/标点各一段); 非 ASCII 一次一个字符。
+ * 只改 cur, anchor 维护与闪烁在 CE_NavMove。 */
 static void CE_MoveWord(int dir)
 {
-    int i = ce_Cur;
+    int i = ce_Ed.cur;
     if (dir < 0)
     {
         if (i <= 0) return;
@@ -327,17 +292,17 @@ static void CE_MoveWord(int dir)
                 }
             }
         }
-        ce_Cur = i;
+        ce_Ed.cur = i;
     }
     else
     {
-        if (i >= ce_Len) return;
+        if (i >= ce_Ed.len) return;
         if (ce_Buf[i] < 0x80)
         {
             int cls = (ce_Buf[i] == L' ') ? 0 : (CE_IsWord(ce_Buf[i]) ? 1 : 2);
             if (cls != 2)
             {
-                while (i < ce_Len)
+                while (i < ce_Ed.len)
                 {
                     int c2 = (ce_Buf[i] == L' ') ? 0
                         : (CE_IsWord(ce_Buf[i]) ? 1 : 2);
@@ -348,39 +313,25 @@ static void CE_MoveWord(int dir)
             else i++;
         }
         else i++;
-        ce_Cur = i;
+        ce_Ed.cur = i;
     }
+    LiEdTouch(&ce_Ed);
 }
 
-/* ---------------- 剪贴板 ----------------
- * 存取都在 LineEdit.h 的 LiClipGet/LiClipSet (与存档名框同一份): 宽字符、判 GlobalSize、所有权交出去。 */
+/* ---------------- 剪贴板 (LiEdCopy/LiEdPaste, 与存档名框同一份) ---------------- */
 
 static void CE_DoCopy(int cut)
 {
-    int lo, hi;
-    CE_SelRange(&lo, &hi);
-    if (lo < 0) return;
-    LiClipSet(ce_Buf + lo, hi - lo);
-    if (cut) { CE_DeleteRange(lo, hi); CE_Mirror(); CE_BlinkReset(); }
+    if (!LiEdCopy(&ce_Ed, cut)) return;
+    if (cut) { CE_Dirty(); CE_Mirror(); }
 }
 
 static void CE_DoPaste(int fieldW)
 {
-    wchar_t tmp[CE_BUF_N];
-    int n, i;
-    int lo, hi;
-    n = LiClipGet(tmp, CE_BUF_N);
-    if (n <= 0) return;
-    CE_SelRange(&lo, &hi);
-    if (lo >= 0) { CE_DeleteRange(lo, hi); }
-    for (i = 0; i < n; i++)
-    {
-        wchar_t c = tmp[i];
-        if (c < 0x20) c = L' ';   /* 单行: 控制符转空格 */
-        CE_InsertOne(c, fieldW);
-    }
+    CE_Dirty();
+    LiEdPaste(&ce_Ed, 0, CE_AcceptW, (void*)(size_t)fieldW);
+    /* 全被预算拒掉也算动过 (选区可能没了), 原生缓冲照刷 */
     CE_Mirror();
-    CE_BlinkReset();
 }
 
 /* ---------------- 输入历史 (上下键翻, 只挂输入框, 与联机无关) ----------------
@@ -391,12 +342,12 @@ static void CE_DoPaste(int fieldW)
 static void CE_HistPush(void)
 {
     int i, k;
-    if (ce_Len <= 0 || ce_Len >= CE_BUF_N) return;
-    if (ce_HistCount > 0 && ce_HistLen[0] == ce_Len)
+    if (ce_Ed.len <= 0 || ce_Ed.len >= CE_BUF_N) return;
+    if (ce_HistCount > 0 && ce_HistLen[0] == ce_Ed.len)
     {
-        for (k = 0; k < ce_Len; k++)
+        for (k = 0; k < ce_Ed.len; k++)
             if (ce_Hist[0][k] != ce_Buf[k]) break;
-        if (k >= ce_Len) return;   /* 相邻重复不记 (兼并回车+关框双记) */
+        if (k >= ce_Ed.len) return;   /* 相邻重复不记 (兼并回车+关框双记) */
     }
     if (ce_HistCount < CE_HIST_N) ce_HistCount++;
     for (i = ce_HistCount - 1; i > 0; i--)
@@ -405,20 +356,26 @@ static void CE_HistPush(void)
         ce_HistLen[i] = l;
         for (k = 0; k <= l; k++) ce_Hist[i][k] = ce_Hist[i - 1][k];
     }
-    ce_HistLen[0] = ce_Len;
-    for (k = 0; k <= ce_Len; k++) ce_Hist[0][k] = ce_Buf[k];
+    ce_HistLen[0] = ce_Ed.len;
+    for (k = 0; k <= ce_Ed.len; k++) ce_Hist[0][k] = ce_Buf[k];
+}
+
+/* 整行换内容 (历史翻行/恢复翻前行共用): 光标到尾, 镜像, 光标亮。 */
+static void CE_SetLine(const wchar_t* s, int len)
+{
+    int k;
+    for (k = 0; k <= len; k++) ce_Buf[k] = s[k];
+    ce_Ed.len = len;
+    ce_Ed.cur = len;
+    ce_Ed.anchor = -1;
+    ce_Ed.view = 0;   /* Render 按光标重滚 */
+    CE_Mirror();
+    LiEdTouch(&ce_Ed);
 }
 
 static void CE_HistApply(int idx)
 {
-    int k;
-    for (k = 0; k <= ce_HistLen[idx]; k++) ce_Buf[k] = ce_Hist[idx][k];
-    ce_Len = ce_HistLen[idx];
-    ce_Cur = ce_Len;
-    ce_Anchor = -1;
-    ce_ViewX = 0;   /* Render 按光标重滚 */
-    CE_Mirror();
-    CE_BlinkReset();
+    CE_SetLine(ce_Hist[idx], ce_HistLen[idx]);
 }
 
 static void CE_HistMove(int dir)
@@ -429,7 +386,7 @@ static void CE_HistMove(int dir)
         if (ce_HistCount <= 0) return;
         if (ce_HistIdx < 0)
         {
-            int n = (ce_Len < CE_BUF_N) ? ce_Len : CE_BUF_N - 1;
+            int n = (ce_Ed.len < CE_BUF_N) ? ce_Ed.len : CE_BUF_N - 1;
             for (k = 0; k < n; k++) ce_HistStash[k] = ce_Buf[k];
             ce_HistStash[n] = 0;
             ce_HistStashLen = n;
@@ -443,17 +400,7 @@ static void CE_HistMove(int dir)
     {
         if (ce_HistIdx < 0) return;
         if (ce_HistIdx > 0) { ce_HistIdx--; CE_HistApply(ce_HistIdx); }
-        else
-        {
-            for (k = 0; k <= ce_HistStashLen; k++) ce_Buf[k] = ce_HistStash[k];
-            ce_Len = ce_HistStashLen;
-            ce_Cur = ce_Len;
-            ce_Anchor = -1;
-            ce_ViewX = 0;
-            ce_HistIdx = -1;
-            CE_Mirror();
-            CE_BlinkReset();
-        }
+        else { ce_HistIdx = -1; CE_SetLine(ce_HistStash, ce_HistStashLen); }
     }
 }
 
@@ -477,7 +424,6 @@ static void CE_PollIME(void)
 {
     HWND fg;
     HIMC himc;
-    LONG r;
     ce_CompLen = 0;
     ce_CompCur = 0;
     CE_ReleaseFrameImc();
@@ -489,20 +435,7 @@ static void CE_PollIME(void)
         {
             ce_FrameImc = himc;
             ce_FrameImcWnd = fg;
-            r = ImmGetCompositionStringW(himc, GCS_COMPSTR, ce_Comp,
-                                        (DWORD)(CE_BUF_N - 1) * 2);
-            if (r > 0)
-            {
-                int n = (int)(r / 2);
-                LONG cur;
-                if (n > CE_BUF_N - 1) n = CE_BUF_N - 1;
-                ce_Comp[n] = 0;
-                ce_CompLen = n;
-                cur = ImmGetCompositionStringW(himc, GCS_CURSORPOS, NULL, 0);
-                if (cur < 0) cur = 0;
-                if (cur > n) cur = n;
-                ce_CompCur = (int)cur;
-            }
+            ce_CompLen = LiCompRead(himc, ce_Comp, CE_BUF_N, &ce_CompCur);
         }
     }
 }
@@ -538,11 +471,7 @@ static LRESULT WINAPI CE_WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
         (void)w; (void)l;
         return 0;
     }
-    if (IsWindowUnicode(h))
-        return orig ? CallWindowProcW(orig, h, m, w, l)
-                    : DefWindowProcW(h, m, w, l);
-    return orig ? CallWindowProcA(orig, h, m, w, l)
-                : DefWindowProcA(h, m, w, l);
+    return LiCallOld(h, orig, m, w, l);
 }
 
 static void CE_SubclassEnsure(HWND h)
@@ -683,15 +612,15 @@ static void CE_PositionIME(int imeX, int boxY, int bh,
 
 static void CE_NavMove(int vk, int shift, int ctrl)
 {
-    int old = ce_Cur;
-    if (!shift) ce_Anchor = -1;
-    else if (ce_Anchor < 0) ce_Anchor = old;
     if (ctrl && (vk == VK_LEFT || vk == VK_RIGHT))
+    {
+        if (!shift) ce_Ed.anchor = -1;
+        else if (ce_Ed.anchor < 0) ce_Ed.anchor = ce_Ed.cur;
         CE_MoveWord(vk == VK_LEFT ? -1 : 1);
+        if (shift && ce_Ed.anchor == ce_Ed.cur) ce_Ed.anchor = -1;
+    }
     else
-        LiMove(vk, &ce_Cur, ce_Len);
-    if (shift && ce_Anchor == ce_Cur) ce_Anchor = -1;
-    CE_BlinkReset();
+        LiEdMove(&ce_Ed, vk, shift);
 }
 
 /* 游戏主窗是否就是当前前台窗口。轮询与泵都只在这里为真时动手 ——
@@ -707,8 +636,12 @@ static void CE_ApplyNav(int vk)
 {
     int shift = LiKeyDown(VK_SHIFT);
     int ctrl = LiKeyDown(VK_CONTROL);
-    if (vk == VK_DELETE) { CE_DoDelete(); CE_Mirror(); }
-    else if (vk == VK_BACK) { CE_DoBackspace(); CE_Mirror(); }
+    if (vk == VK_DELETE || vk == VK_BACK)
+    {
+        CE_Dirty();
+        LiEdErase(&ce_Ed, vk == VK_DELETE);
+        CE_Mirror();
+    }
     else if (vk == VK_UP) CE_HistMove(-1);
     else if (vk == VK_DOWN) CE_HistMove(1);
     else CE_NavMove(vk, shift, ctrl);
@@ -735,7 +668,7 @@ static void CE_PollKeys(int fieldW)
                 if (i == 0) CE_DoCopy(0);
                 else if (i == 1) CE_DoCopy(1);
                 else if (i == 2) CE_DoPaste(fieldW);
-                else { ce_Anchor = 0; ce_Cur = ce_Len; CE_BlinkReset(); }
+                else LiEdSelAll(&ce_Ed);
                 ce_CmdTick = now;
             }
             ce_CtrlPrev[i] = down;
@@ -786,16 +719,16 @@ static void CE_Activate(void)
     if (IsPlausiblePtr(nb))
     {
         while (n < CE_BUF_N - 1 && nb[n]) { ce_Buf[n] = nb[n]; n++; }
-        ce_Len = n;
+        ce_Ed.len = n;
     }
-    ce_Buf[ce_Len] = 0;
-    ce_Cur = ce_Len;
-    ce_PreLen = (ce_Len < CE_BUF_N) ? ce_Len : CE_BUF_N - 1;
+    ce_Buf[ce_Ed.len] = 0;
+    ce_Ed.cur = ce_Ed.len;
+    ce_PreLen = (ce_Ed.len < CE_BUF_N) ? ce_Ed.len : CE_BUF_N - 1;
     {
         int k;
         for (k = 0; k <= ce_PreLen; k++) ce_Pre[k] = ce_Buf[k];
     }
-    ce_Len = 0; ce_Buf[0] = 0; ce_Cur = 0; ce_Anchor = -1; ce_ViewX = 0;
+    ce_Ed.len = 0; ce_Buf[0] = 0; ce_Ed.cur = 0; ce_Ed.anchor = -1; ce_Ed.view = 0;
     CE_Mirror();
     ce_FgWnd = GetForegroundWindow();
     if (!ce_FgWnd) ce_FgWnd = GetActiveWindow();
@@ -813,15 +746,15 @@ static void CE_Activate(void)
     CE_CharPostInstall();   /* 懒安装 (Ares 系钩子早下完, 此时下最稳) */
     CE_MeasureView();       /* 呈现模式/分辨率随时可能变, 每次开框重量 */
     ce_Active = 1;
-    CE_BlinkReset();
+    LiEdTouch(&ce_Ed);
 }
 
 static void CE_Deactivate(void)
 {
-    if (ce_Len > 0 && !ce_Esc) CE_HistPush();   /* 关框补记 (单机对话框提交不走 Input; 回车已记过, 相邻去重合并) */
+    if (ce_Ed.len > 0 && !ce_Esc) CE_HistPush();   /* 关框补记 (单机对话框提交不走 Input; 回车已记过, 相邻去重合并) */
     ce_Esc = 0;
     ce_Active = 0;
-    ce_Anchor = -1;
+    ce_Ed.anchor = -1;
     ce_CompLen = 0;
 }
 
@@ -859,8 +792,8 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     unsigned char* locked;
     int fieldW, lx, ly, lineH;
     int xs[CE_BUF_N + 1];
-    int i, tx, ty, bw, bh;
-    int startIdx, endIdx, visLen, dx, curX, lo, hi;
+    int tx, ty, bw, bh;
+    int startIdx, endIdx, visLen, dx, lo, hi;
     int compX, imeX, compWsum, compFit, th, boxY;
     void* label;
     if (!surf || !IsPlausiblePtr(surf)) return 0;
@@ -898,25 +831,15 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
         }
     }
     if (!GdiEnsure(lineH, ce_Bold, CE_GDI_SLOT, ce_Face)) return 0;
-    /* 逐字 x 偏移 (与 RenderLine 同口径)。 */
-    xs[0] = 0;
-    for (i = 0; i < ce_Len; i++)
-    {
-        int ga = GtCharAdv(ce_Buf[i]);
-        if (ga < 0) ga = lineH;
-        xs[i + 1] = xs[i] + ga;
-    }
+    /* 逐字 x 偏移 (与 RenderLine 同口径); 宽度拿不到按 lineH 当全角。 */
+    LiCharXs(ce_Buf, ce_Ed.len, lineH, xs);
     /* 滚动保证光标可见 */
-    curX = xs[ce_Cur];
-    if (curX - ce_ViewX > fieldW - 8) ce_ViewX = curX - fieldW + 24;
-    if (curX < ce_ViewX) ce_ViewX = curX;
-    if (ce_ViewX < 0) ce_ViewX = 0;
-    startIdx = 0;
-    while (startIdx < ce_Len && xs[startIdx + 1] <= ce_ViewX) startIdx++;
+    ce_Ed.view = LiScrollFit(xs[ce_Ed.cur], ce_Ed.view, fieldW);
+    startIdx = LiFirstVis(xs, ce_Ed.len, ce_Ed.view);
     /* 可见窗口三重截断: 像素(fieldW/1000 滚窗) + DIB 容量 (RenderLine 单次上限
      * DIB_W-8)。盒只包画出部分, 不留黑尾。 */
     endIdx = startIdx;
-    while (endIdx < ce_Len &&
+    while (endIdx < ce_Ed.len &&
            xs[endIdx + 1] - xs[startIdx] <= fieldW &&
            xs[endIdx + 1] - xs[startIdx] <= 1000) endIdx++;
     {
@@ -931,7 +854,6 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     {
         compFit = CharsFit(ce_Comp, ce_CompLen, DIB_W - 8);
         compWsum = CE_TextWidth(ce_Comp, compFit);
-        if (compWsum < 0) compWsum = 0;
     }
     /* 盒跟画出的走 (左右 6 内边距; 高按真实行步进, 上下 3) */
     th = (g_G && g_G->adv > 0) ? g_G->adv : lineH;
@@ -964,8 +886,8 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
         }
         ty = boxY + (bh - textCy) / 2;
     }
-    dx = tx - (xs[startIdx] - ce_ViewX);
-    CE_SelRange(&lo, &hi);
+    dx = tx - (xs[startIdx] - ce_Ed.view);
+    LiEdSel(&ce_Ed, &lo, &hi);
 
     vt = *(unsigned char**)surf;
     if (!vt || !IsPlausiblePtr(vt)) return 0;
@@ -997,7 +919,7 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     }
     /* 组字串 (黄色+下划线, 光标跟组字光标; 宽钳到盒内).
      * 候选框锚点另算 (imeX = 插入点, 见下), 不跟组字串走。 */
-    compX = dx + (xs[ce_Cur] - xs[startIdx]);
+    compX = dx + (xs[ce_Ed.cur] - xs[startIdx]);
     imeX = compX;
     if (ce_CompLen > 0 && compFit > 0)
     {
@@ -1029,7 +951,7 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
     if (compX > tx + bw - 2) compX = tx + bw - 2;
     if (imeX < tx) imeX = tx;
     if (imeX > tx + bw - 2) imeX = tx + bw - 2;
-    if (lo < 0 && ((GetTickCount() - ce_BlinkT) / 530u) % 2u == 0u)
+    if (lo < 0 && LiBlinkOn(&ce_Ed))
         CE_FillRect(surf, compX, ty, 2, th, 255, 255, 255, 100);
 
     unlockFn(surf, NULL);
@@ -1042,15 +964,15 @@ static int CE_Render(void* surf, int bitLineH, int surfW, int surfH,
  * 有改动: 前缀区被编辑过则尊重原文。调用后已镜像。 */
 static void CE_StripPrefix(void){
     int k, i;
-    if (ce_PreLen <= 0 || ce_Len < ce_PreLen) return;
+    if (ce_PreLen <= 0 || ce_Ed.len < ce_PreLen) return;
     for (k = 0; k < ce_PreLen; k++)
         if (ce_Buf[k] != ce_Pre[k]) return;
-    for (i = ce_PreLen; i <= ce_Len; i++) ce_Buf[i - ce_PreLen] = ce_Buf[i];
-    ce_Len -= ce_PreLen;
-    ce_Cur = (ce_Cur > ce_PreLen) ? ce_Cur - ce_PreLen : 0;
-    ce_Anchor = -1;
+    for (i = ce_PreLen; i <= ce_Ed.len; i++) ce_Buf[i - ce_PreLen] = ce_Buf[i];
+    ce_Ed.len -= ce_PreLen;
+    ce_Ed.cur = (ce_Ed.cur > ce_PreLen) ? ce_Ed.cur - ce_PreLen : 0;
+    ce_Ed.anchor = -1;
     CE_Mirror();
-    CE_BlinkReset();
+    LiEdTouch(&ce_Ed);
 }
 
 /* ---------------- 发送指纹 (单机跟色用) ----------------
@@ -1067,7 +989,7 @@ static void CE_NoteSent(void)
     CESent* e = &ce_Sent[ce_SentHead];
     int i;
     ce_SentHead = (ce_SentHead + 1) % CE_SENT_N;
-    e->len = (ce_Len < CE_BUF_N) ? ce_Len : CE_BUF_N - 1;
+    e->len = (ce_Ed.len < CE_BUF_N) ? ce_Ed.len : CE_BUF_N - 1;
     for (i = 0; i < e->len; i++) e->s[i] = ce_Buf[i];
     e->s[e->len] = 0;
     e->tick = GetTickCount();
@@ -1100,15 +1022,8 @@ int ChatEdit_MatchSent(const wchar_t* msg)
 /* 组字中? 钩子内现查。组字中 ASCII 已被 IME 收编, 钩子照打会留英文残渣。 */
 static int CE_CompActiveNow(void)
 {
-    HWND fg = GetForegroundWindow();
-    HIMC himc;
-    LONG r;
-    if (!fg || fg != ce_FgWnd) return 0;
-    himc = ImmGetContext(fg);
-    if (!himc) return 0;
-    r = ImmGetCompositionStringW(himc, GCS_COMPSTR, NULL, 0);
-    ImmReleaseContext(fg, himc);
-    return (r > 0) ? 1 : 0;
+    if (!ce_FgWnd || GetForegroundWindow() != ce_FgWnd) return 0;
+    return LiComposing(ce_FgWnd);
 }
 
 /* ---------------- WM_CHAR 摘除钩 (英文唯一入口) ----------------
@@ -1163,7 +1078,7 @@ extern "C" void CE_CharAdopt2(void* this_)
     fieldW = CE_FieldW();
     CE_InsertOne((wchar_t)w, fieldW);
     CE_Mirror();
-    CE_BlinkReset();
+    LiEdTouch(&ce_Ed);
     /* 摘除 (A)(B) 两格: 倒数第二格是本次 (A)(0x000A) 才退 2, 否则退 1。 */
     back = 1;
     if (used >= 2 && ring[(cur - 2) & (CE_RING_N - 1)] == CE_CHAR_FLAG)
@@ -1191,22 +1106,14 @@ __attribute__((naked)) void ChatEdit_CharPost(void)
 static void CE_CharPostInstall(void)
 {
     unsigned char* p = (unsigned char*)CE_CHARPOST_SITE;
-    unsigned target;
-    int want, rel;
-    DWORD old;
+    int want;
     if (ce_PostOn) return;
     ce_PostOn = 1;   /* 只试一次 */
     want = (int)(CE_CHARPOST_BACK - (CE_CHARPOST_SITE + 5));
     if (p[0] != 0xE9 || *(int*)(p + 1) != want)
     { LogLine("chatedit: charpost bytes mismatch, hook OFF"); return; }
-    target = (unsigned)(size_t)ChatEdit_CharPost;
-    rel = (int)(target - (CE_CHARPOST_SITE + 5));
-    if (!VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old))
-    { LogLine("chatedit: charpost protect fail, hook OFF"); return; }
-    p[0] = 0xE9;
-    *(int*)(p + 1) = rel;
-    VirtualProtect(p, 5, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), p, 5);
+    if (!PatchAt(CE_CHARPOST_SITE, (void*)ChatEdit_CharPost, 5))
+    { LogLine("chatedit: charpost patch fail, hook OFF"); return; }
     LogLine("chatedit: charpost hook ON");
 }
 
@@ -1237,42 +1144,30 @@ int __fastcall ChatEdit_InputHook(void* t, void* edxUnused,
     if (CE_CompActiveNow())
     {
         if (ukey > 0x20u && ukey < 0x80u)
-        { *keySlot = 0; CE_BlinkReset(); return 0; }   /* 组字键吞掉, 不照打 */
+        { *keySlot = 0; LiEdTouch(&ce_Ed); return 0; }   /* 组字键吞掉, 不照打 */
     }
     if (ukey == 0x0Du)
     {
         /* 回车: 先剥未动预填 (空=原生取消, 非空=原生提交, 发包同手打) */
         CE_StripPrefix();
         /* 发送指纹存档 (单机回声跟玩家色用, 见上) */
-        if (ce_Len > 0) CE_NoteSent();
+        if (ce_Ed.len > 0) CE_NoteSent();
         CE_HistPush();   /* 记历史 (空行不记, 见内判) */
         return ce_OrigInput(t, edxUnused, keySlot, key);
     }
     if (ukey == 0x1Bu)
     { ce_Esc = 1; return ce_OrigInput(t, edxUnused, keySlot, key); }   /* Esc 原生关闭, 不记历史 */
-    if (ukey == 0x08u)
+    if (ukey == 0x08u || ukey == 0x7Fu)
     {
-        /* 退格: 轮询优先, 这里只做后备 (150ms 握手防双删) */
+        /* 退格/Delete: 轮询优先, 这里只做后备 (150ms 握手防双删) */
         if ((int)(GetTickCount() - ce_NavTick) > 150)
         {
-            CE_DoBackspace();
+            CE_Dirty();
+            LiEdErase(&ce_Ed, ukey == 0x7Fu);
             CE_Mirror();
         }
         ce_NavTick = GetTickCount();
-        CE_BlinkReset();
-        *keySlot = 0;
-        return 0;
-    }
-    if (ukey == 0x7Fu)
-    {
-        /* Delete: 同上, 只做后备 */
-        if ((int)(GetTickCount() - ce_NavTick) > 150)
-        {
-            CE_DoDelete();
-            CE_Mirror();
-        }
-        ce_NavTick = GetTickCount();
-        CE_BlinkReset();
+        LiEdTouch(&ce_Ed);
         *keySlot = 0;
         return 0;
     }
@@ -1284,8 +1179,7 @@ int __fastcall ChatEdit_InputHook(void* t, void* edxUnused,
         if (c == L'C' || c == L'c' || ukey == 0x03u) CE_DoCopy(0);
         else if (c == L'X' || c == L'x' || ukey == 0x18u) CE_DoCopy(1);
         else if (c == L'V' || c == L'v' || ukey == 0x16u) CE_DoPaste(fieldW);
-        else if (c == L'A' || c == L'a' || ukey == 0x01u)
-        { ce_Anchor = 0; ce_Cur = ce_Len; CE_BlinkReset(); }
+        else if (c == L'A' || c == L'a' || ukey == 0x01u) LiEdSelAll(&ce_Ed);
         else if (ukey < 0x20u) { *keySlot = 0; return 0; }   /* 原生拒收 */
         else CE_InsertOne(c, fieldW);   /* 与原生一致: 照打 */
         if (c != L'V' && c != L'v' && ukey != 0x16u) CE_Mirror();
@@ -1298,7 +1192,7 @@ int __fastcall ChatEdit_InputHook(void* t, void* edxUnused,
         int fieldW = CE_FieldW();
         CE_InsertOne((wchar_t)ukey, fieldW);
         CE_Mirror();
-        CE_BlinkReset();
+        LiEdTouch(&ce_Ed);
         *keySlot = 0;
         return 0;
     }
@@ -1307,26 +1201,8 @@ int __fastcall ChatEdit_InputHook(void* t, void* edxUnused,
 
 static const unsigned char CE_WANT_INPUT[5] = { 0x53, 0x8B, 0x5C, 0x24, 0x0C };
 
-static void* CE_TrampAt(unsigned at, int n, unsigned back)
-{
-    unsigned char* b;
-    int i;
-    b = (unsigned char*)VirtualAlloc(NULL, 32, MEM_COMMIT | MEM_RESERVE,
-                                     PAGE_EXECUTE_READWRITE);
-    if (!b) return NULL;
-    for (i = 0; i < n; i++) b[i] = ((unsigned char*)at)[i];
-    b[n] = 0xE9;
-    *(int*)(b + n + 1) = (int)(back - ((unsigned)(size_t)b + n + 5));
-    FlushInstructionCache(GetCurrentProcess(), b, (SIZE_T)(n + 5));
-    return b;
-}
-
 void ChatEdit_Install(void)
 {
-    unsigned char* p = (unsigned char*)CE_INPUT;
-    unsigned target;
-    int rel, i;
-    DWORD old;
     CE_EnsureInit();
     if (ce_Installed) return;
     /* 非 gamemd 宿主由 DllMain 宿主守卫拦截 (见 MOExperience.cpp),
@@ -1338,18 +1214,11 @@ void ChatEdit_Install(void)
         LogLine("chatedit: OFF, input hook not installed");
         return;
     }
-    for (i = 0; i < 5; i++)
-        if (p[i] != CE_WANT_INPUT[i])
-        { LogLine("chatedit: input bytes mismatch, hook OFF"); return; }
-    ce_OrigInput = (CE_InputFn)CE_TrampAt(CE_INPUT, 5, CE_INPUT_BACK);
+    if (!PatchSame((const void*)CE_INPUT, CE_WANT_INPUT, 5))
+    { LogLine("chatedit: input bytes mismatch, hook OFF"); return; }
+    ce_OrigInput = (CE_InputFn)PatchTrampAt(CE_INPUT, 5, CE_INPUT_BACK);
     if (!ce_OrigInput) { LogLine("chatedit: tramp fail, hook OFF"); return; }
-    target = (unsigned)(size_t)ChatEdit_InputHook;
-    rel = (int)(target - (CE_INPUT + 5));
-    if (!VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old)) return;
-    p[0] = 0xE9;
-    *(int*)(p + 1) = rel;
-    VirtualProtect(p, 5, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), p, 5);
+    if (!PatchAt(CE_INPUT, (void*)ChatEdit_InputHook, 5)) return;
     LogLine("chatedit: input hook ON");
     ce_Installed = 1;
 }
@@ -1480,7 +1349,7 @@ int ChatEdit_Frame(void* surf, int bitLineH, int screenW,
         if (CE_GameForeground()) CE_PollKeys(fieldW);
     }
     /* 单机发送不走 Input 回车分支, 缓冲非空逐帧刷新指纹, 回声何时到都命中。 */
-    if (ce_Len > 0) CE_NoteSent();
+    if (ce_Ed.len > 0) CE_NoteSent();
     /* 我方缓冲为准权威回写: VK_DELETE 由对话框层直接改原生缓冲 (不走 Input 钩),
      * 不覆盖回去就是"显示没删、发送少字"。 */
     CE_Mirror();

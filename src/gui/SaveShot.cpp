@@ -13,6 +13,7 @@
 #include "EngineAddr.h"
 #include "GdiText.h"
 #include "LineEdit.h"
+#include "Patch.h"
 #include "ScaleBar.h"
 #include "Shot.h"
 #include "FrameCap.h"
@@ -58,6 +59,8 @@
 #define SS_REG_EDX   0x1Cu
 
 #define SS_NAME_MAX  64
+
+#define SS_DWLP_USER 8             /* 对话框状态机对象 (GetWindowLongPtr) */
 
 /* ---------------- 状态 ---------------- */
 
@@ -111,6 +114,13 @@ static INT_PTR __stdcall SS_SaveDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 
 /* ---------------- 小工具 ---------------- */
 
+/* 对话框的状态机对象 (DWLP_USER)。指针合法才返回, 否则 NULL。 */
+static void* SS_Ctx(HWND dlg)
+{
+    void* ctx = (dlg && IsWindow(dlg)) ? (void*)GetWindowLongPtrA(dlg, SS_DWLP_USER) : NULL;
+    return (ctx && IsPlausiblePtr(ctx)) ? ctx : NULL;
+}
+
 /* 拆目录与主名 (主名去掉扩展名)。dir/base 都可传 NULL。 */
 static void SS_SplitPath(const char* path, char* dir, char* base)
 {
@@ -129,6 +139,15 @@ static void SS_SplitPath(const char* path, char* dir, char* base)
             base[k++] = path[i++];
         base[k] = 0;
     }
+}
+
+/* dir (空则用存档目录) 下的 Thumbs\<base>.bmp。三处拼同一种路径, 一份实现。 */
+static void SS_ThumbPath(char* out, unsigned cap, const char* dir, const char* base)
+{
+    unsigned p = AppendCStr(out, 0, dir[0] ? dir : s_SaveDir, cap);
+    p = AppendCStr(out, p, "\\Thumbs\\", cap);
+    p = AppendCStr(out, p, base, cap);
+    AppendCStr(out, p, ".bmp", cap);
 }
 
 /* "saveshot: <a><b>" 这类短日志 (LogLine 只收一个串)。 */
@@ -253,7 +272,7 @@ static __inline unsigned short SS_Pack(unsigned r, unsigned g, unsigned b)
     return (unsigned short)((r << (SS_GBits() == 6 ? 11 : 10)) | (g << 5) | b);
 }
 
-/* 已 Lock 的 16 位面: 填一块 (自动裁到面内) / 混一块。 */
+/* 已 Lock 的 16 位面: 填一块 (自动裁到面内) / 混一块 / 画 t 像素矩形边框。 */
 static void SS_FillPx(unsigned char* base, int pitch, int W, int H,
                       int x, int y, int w, int h, unsigned short c)
 {
@@ -270,6 +289,15 @@ static void SS_FillPx(unsigned char* base, int pitch, int W, int H,
         int k = w;
         while (k--) *r++ = c;
     }
+}
+
+static void SS_Frame(unsigned char* base, int pitch, int W, int H,
+                     int x, int y, int w, int h, int t, unsigned short c)
+{
+    SS_FillPx(base, pitch, W, H, x, y, w, t, c);
+    SS_FillPx(base, pitch, W, H, x, y + h - t, w, t, c);
+    SS_FillPx(base, pitch, W, H, x, y, t, h, c);
+    SS_FillPx(base, pitch, W, H, x + w - t, y, t, h, c);
 }
 
 static void SS_BlendPx(unsigned char* base, int pitch, int W, int H,
@@ -415,56 +443,7 @@ static void SS_ThumbReset(void)
 }
 
 /* ---------------- 装钩小工具 ----------------
- * 站点前 n 字节搬进可执行内存 + 末尾 jmp 回 back。含 rel32 的站点拒绝 (原样抄
- * 过去会跳飞)。装钩前跑 tools/hookaudit.py 能提前发现这类站点。 */
-
-/* 无 CRT: memcmp 链接不到, 逐字节比。 */
-static int SS_Same(const void* a, const void* b, int n)
-{
-    const unsigned char* x = (const unsigned char*)a;
-    const unsigned char* y = (const unsigned char*)b;
-    int i;
-
-    for (i = 0; i < n; i++) if (x[i] != y[i]) return 0;
-    return 1;
-}
-
-static void* SS_Tramp(unsigned at, int n, unsigned back)
-{
-    unsigned char* b;
-    int i;
-
-    if (n < 1 || n > 16) return NULL;
-    for (i = 0; i < n; i++)
-    {
-        unsigned char c = ((const unsigned char*)(size_t)at)[i];
-        if (c == 0xE8 || c == 0xE9) return NULL;
-    }
-    b = (unsigned char*)VirtualAlloc(NULL, 32, MEM_COMMIT | MEM_RESERVE,
-                                     PAGE_EXECUTE_READWRITE);
-    if (!b) return NULL;
-    memcpy(b, (const void*)(size_t)at, (size_t)n);
-    b[n] = 0xE9;
-    *(int*)(b + n + 1) = (int)(back - ((unsigned)(size_t)b + n + 5));
-    FlushInstructionCache(GetCurrentProcess(), b, (SIZE_T)(n + 5));
-    return b;
-}
-
-static int SS_Patch(unsigned at, void* target, int n)
-{
-    unsigned char* p = (unsigned char*)(size_t)at;
-    DWORD old;
-    int i;
-
-    if (n < 5) return 0;
-    if (!VirtualProtect(p, (SIZE_T)n, PAGE_EXECUTE_READWRITE, &old)) return 0;
-    p[0] = 0xE9;
-    *(int*)(p + 1) = (int)((unsigned)(size_t)target - (at + 5));
-    for (i = 5; i < n; i++) p[i] = 0x90;
-    VirtualProtect(p, (SIZE_T)n, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), p, (SIZE_T)n);
-    return 1;
-}
+ * 跳板/补丁在 Patch.h; 装钩前跑 tools/hookaudit.py 能提前发现含 rel32 的站点。 */
 
 /* 原版字节比对 → 建跳板 → 打补丁, 任一步失败就等于没装 (返回 NULL)。
  * 返回跳板 = 调原函数的入口。tag 只出现在日志里。 */
@@ -472,13 +451,13 @@ static void* SS_Hook(unsigned at, const unsigned char* want, int n, void* fn, co
 {
     void* orig;
 
-    if (!SS_Same((const void*)(size_t)at, want, n))
+    if (!PatchSame((const void*)(size_t)at, want, n))
     {
         SS_Log("site not pristine, OFF: ", tag);
         return NULL;
     }
-    orig = SS_Tramp(at, n, at + n);
-    if (!orig || !SS_Patch(at, fn, n))
+    orig = PatchTrampAt(at, n, at + n);
+    if (!orig || !PatchAt(at, fn, n))
     {
         SS_Log("hook FAILED: ", tag);
         return NULL;
@@ -553,7 +532,7 @@ static void SS_InstallMenuTail(const unsigned char* want)
     int i = 0, jOrig, jWrite;
 
     if (s_TailOn) return;
-    if (!SS_Same((const void*)SS_ADDR_MENU_TAIL, want, 5))
+    if (!PatchSame((const void*)SS_ADDR_MENU_TAIL, want, 5))
     {
         SS_Log("menutail site not pristine, load tail OFF", NULL);
         return;
@@ -590,7 +569,7 @@ static void SS_InstallMenuTail(const unsigned char* want)
     p[i++] = 0xFF; p[i++] = 0xE0;
 
     FlushInstructionCache(GetCurrentProcess(), p, (SIZE_T)i);
-    if (!SS_Patch(SS_ADDR_MENU_TAIL, p, 5))
+    if (!PatchAt(SS_ADDR_MENU_TAIL, p, 5))
     {
         SS_Log("menutail patch FAILED", NULL);
         return;
@@ -761,15 +740,14 @@ void SaveShot_OnSaveBegin(void* regs)
     }
     SS_DefaultDir();
 
-    p = AppendCStr(buf, 0, wide ? "saveshot: pathW " : "saveshot: pathA ", sizeof(buf));
-    AppendCStr(buf, p, path, sizeof(buf));
-    LogLine(buf);
+    SS_Log(wide ? "pathW " : "pathA ", path);
 }
 
 void SaveShot_OnSaveEnd(void* regs)
 {
-    char dir[MAX_PATH_LEN], path[MAX_PATH_LEN], buf[MAX_PATH_LEN + 48];
+    char dir[MAX_PATH_LEN], path[MAX_PATH_LEN];
     unsigned p;
+    int ok;
 
     if (!regs) return;
     if (!s_Enable) return;
@@ -778,24 +756,13 @@ void SaveShot_OnSaveEnd(void* regs)
     if (!s_Pix || s_PixW <= 0 || s_PixH <= 0) { SS_Log("no frame cached, skip", NULL); return; }
 
     p = AppendCStr(dir, 0, s_SaveDir, MAX_PATH_LEN);
-    p = AppendCStr(dir, p, "\\Thumbs", MAX_PATH_LEN);
+    AppendCStr(dir, p, "\\Thumbs", MAX_PATH_LEN);
     CreateDirectoryA(dir, NULL);   /* 已存在返回 ERROR_ALREADY_EXISTS, 忽略 */
 
-    p = AppendCStr(path, 0, dir, MAX_PATH_LEN);
-    p = AppendCh(path, p, '\\', MAX_PATH_LEN);
-    p = AppendCStr(path, p, s_BaseName, MAX_PATH_LEN);
-    AppendCStr(path, p, ".bmp", MAX_PATH_LEN);
-
-    p = AppendCStr(buf, 0, "saveshot: ", sizeof(buf));
-    if (Shot_WriteBmp565(path, s_Pix, s_PixW, s_PixH))
-    {
-        p = AppendCStr(buf, p, "write ", sizeof(buf));
-        SS_ThumbReset();            /* 新写的这张要能被下次读档读到 */
-    }
-    else
-        p = AppendCStr(buf, p, "write FAILED ", sizeof(buf));
-    AppendCStr(buf, p, path, sizeof(buf));
-    LogLine(buf);
+    SS_ThumbPath(path, MAX_PATH_LEN, s_SaveDir, s_BaseName);
+    ok = Shot_WriteBmp565(path, s_Pix, s_PixW, s_PixH);
+    if (ok) SS_ThumbReset();       /* 新写的这张要能被下次读档读到 */
+    SS_Log(ok ? "write " : "write FAILED ", path);
 }
 
 /* ---------------- 找对话框 ---------------- */
@@ -809,7 +776,7 @@ static BOOL CALLBACK SS_EnumCb(HWND h, LPARAM lp)
     char cls[24];
 
     if (GetClassNameA(h, cls, sizeof(cls)) < 2) return TRUE;
-    if (cls[0] != '#' || cls[1] != '3' || lstrcmpA(cls, "#32770") != 0) return TRUE;
+    if (lstrcmpA(cls, "#32770") != 0) return TRUE;
     if (GetDlgItem(h, SS_ID_LIST_LOAD)) { f->hwnd = h; f->listId = SS_ID_LIST_LOAD; return FALSE; }
     if (GetDlgItem(h, SS_ID_LIST_SAVE)) { f->hwnd = h; f->listId = SS_ID_LIST_SAVE; return FALSE; }
     return TRUE;
@@ -872,11 +839,10 @@ static HWND SS_FindScroll(HWND hDlg, HWND list, const RECT* lr)
 /* 跟随列表加宽的子控件: 右缘不越过主按钮左缘 (bandR), 也不窄于原宽。 */
 static int SS_WideW(const RECT* r, int nl, int dw, int bandR, int pad)
 {
-    int nw = (int)(r->right - r->left) + dw;
+    int ow = (int)(r->right - r->left), nw = ow + dw;
 
     if (bandR > 0 && nl + nw > bandR - pad) nw = bandR - pad - nl;
-    if (nw < (int)(r->right - r->left)) nw = (int)(r->right - r->left);
-    return nw;
+    return (nw < ow) ? ow : nw;
 }
 
 static void SS_PlaceBtn(HWND h, const RECT* r)
@@ -1163,10 +1129,7 @@ static void SS_DrawBox(void* surf, const RECT* b, const SS_Pic* im, const wchar_
     base = GtLock(surf);
     if (!base) return;
     SS_FillPx(base, pitch, W, H, b->left, b->top, bw, bh, fill);
-    SS_FillPx(base, pitch, W, H, b->left, b->top, bw, 1, edge);
-    SS_FillPx(base, pitch, W, H, b->left, b->bottom - 1, bw, 1, edge);
-    SS_FillPx(base, pitch, W, H, b->left, b->top, 1, bh, edge);
-    SS_FillPx(base, pitch, W, H, b->right - 1, b->top, 1, bh, edge);
+    SS_Frame(base, pitch, W, H, b->left, b->top, bw, bh, 1, edge);
     GtUnlock(surf);
 
     if (im->px && im->w > 0 && im->h > 0)
@@ -1344,13 +1307,16 @@ static LRESULT CALLBACK SS_ListProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_ERASEBKGND) return 1;    /* 别让类背景刷把面板面涂掉 */
     if (msg == WM_NCDESTROY)
     {
+        /* 销毁通知必须送到刚恢复的那个原过程: s_OldListProc 这时已被清掉 */
         WNDPROC old = s_OldListProc;
         if (s_SubList == h) { s_SubList = NULL; s_OldListProc = NULL; }
-        if (old) SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)old);
-        if (old) return CallWindowProcA(old, h, msg, wp, lp);
+        if (old)
+        {
+            SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)old);
+            return CallWindowProcA(old, h, msg, wp, lp);
+        }
     }
-    if (s_OldListProc) return CallWindowProcA(s_OldListProc, h, msg, wp, lp);
-    return DefWindowProcA(h, msg, wp, lp);
+    return LiCallOld(h, s_OldListProc, msg, wp, lp);
 }
 
 /* 换一个列表窗口就重挂一次 (对话框每次打开都是新控件)。 */
@@ -1437,10 +1403,7 @@ static void SS_DrawRows(void* surf, HWND list)
     }
 
     /* 外框: 面板美术里那圈 2px 灰边 (与存档名输入框同色) */
-    SS_FillPx(base, pitch, W, H, x0, y0, w, 2, cEdge);
-    SS_FillPx(base, pitch, W, H, x0, y1 - 2, w, 2, cEdge);
-    SS_FillPx(base, pitch, W, H, x0, y0, 2, y1 - y0, cEdge);
-    SS_FillPx(base, pitch, W, H, x1 - 2, y0, 2, y1 - y0, cEdge);
+    SS_Frame(base, pitch, W, H, x0, y0, w, y1 - y0, 2, cEdge);
 
     for (i = top; i < cnt && inkH > 0; i++)
     {
@@ -1478,7 +1441,6 @@ static void SS_DrawRows(void* surf, HWND list)
 
 /* ---------------- 载入 / 删除 ---------------- */
 
-#define SS_DWLP_USER     8
 #define SS_BTN_PAGE_LOAD 1        /* 引擎状态机的页面号: 1=载入 2=储存 3=删除 */
 #define SS_MODE_LOAD     0x40F    /* 载入页按钮 id, 也是状态机认的"载入"动作码 */
 #define SS_DEL_ARM_MS    4000
@@ -1523,10 +1485,7 @@ static int SS_EntryFile(HWND list, char* sav, unsigned savN, char* bmp, unsigned
 
     SS_SplitPath(sav, dir, base);
     if (!base[0]) return 0;
-    p = AppendCStr(bmp, 0, dir[0] ? dir : s_SaveDir, bmpN);
-    p = AppendCStr(bmp, p, "\\Thumbs\\", bmpN);
-    p = AppendCStr(bmp, p, base, bmpN);
-    AppendCStr(bmp, p, ".bmp", bmpN);
+    SS_ThumbPath(bmp, bmpN, dir, base);
     return 1;
 }
 
@@ -1548,9 +1507,9 @@ static void SS_BumpSel(HWND list, int cur, int cnt)
  * 不用像走引擎删除页那样被弹走。 */
 static void SS_DoDelete(HWND dlg, HWND list)
 {
-    char sav[MAX_PATH_LEN], bmp[MAX_PATH_LEN], msg[MAX_PATH_LEN + 48];
+    char sav[MAX_PATH_LEN], bmp[MAX_PATH_LEN];
     int cur, n0, n1;
-    unsigned p, now;
+    unsigned now;
 
     if (!list) return;
     cur = (int)SendMessageA(list, LB_GETCURSEL, 0, 0);
@@ -1574,10 +1533,7 @@ static void SS_DoDelete(HWND dlg, HWND list)
     }
     s_DelArm = 0;
 
-    p = AppendCStr(msg, 0, DeleteFileA(sav) ? "saveshot: del ok " : "saveshot: del FAIL ",
-                   sizeof(msg));
-    AppendCStr(msg, p, sav, sizeof(msg));
-    LogLine(msg);
+    SS_Log(DeleteFileA(sav) ? "del ok " : "del FAIL ", sav);
     if (bmp[0]) DeleteFileA(bmp);
 
     n0 = (int)SendMessageA(list, LB_GETCOUNT, 0, 0);
@@ -1628,8 +1584,8 @@ static void SS_DoLoad(HWND dlg, HWND list)
         return;
     }
 
-    ctx = (void*)GetWindowLongPtrA(dlg, SS_DWLP_USER);
-    if (!ctx || !IsPlausiblePtr(ctx)) { SS_Log("load no ctx", NULL); return; }
+    ctx = SS_Ctx(dlg);
+    if (!ctx) { SS_Log("load no ctx", NULL); return; }
     if (*(int*)((char*)ctx + 4) != 2 || *(int*)((char*)ctx + 0x18) != -1)
     {
         char buf[80];
@@ -1819,9 +1775,8 @@ static INT_PTR __stdcall SS_SaveDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
          * 否则下一次存档或删除会被 0x4F14BF 的桩误当成载入收尾。 */
         if (s_TailLoad)
         {
-            void* ctx = (void*)GetWindowLongPtrA(h, SS_DWLP_USER);
-            if (!(ctx && IsPlausiblePtr(ctx) &&
-                  *(int*)((char*)ctx + 0x18) == SS_MODE_LOAD))
+            void* ctx = SS_Ctx(h);
+            if (!(ctx && *(int*)((char*)ctx + 0x18) == SS_MODE_LOAD))
             {
                 s_TailLoad = 0;
                 SS_Log("load tail dropped", NULL);
@@ -1845,7 +1800,6 @@ static INT_PTR __stdcall SS_SaveDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
 #define SS_ED_BUF     96
 #define SS_ED_PAD     5         /* 文字距框内沿 */
-#define SS_ED_BLINK   530       /* 光标闪烁周期 (ms) */
 #define SS_ED_EDGE_R  168       /* 自绘框边框: 紫, 与引擎原生的灰边区分 */
 #define SS_ED_EDGE_G  92
 #define SS_ED_EDGE_B  235
@@ -1854,10 +1808,10 @@ static INT_PTR __stdcall SS_SaveDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
 static HWND    s_Ed = NULL;
 static WNDPROC s_EdOld = NULL;
-static int     s_EdCur = 0;             /* 插入点 (在引擎文字里的下标) */
-static int     s_EdAnchor = -1;         /* -1 = 无选中, 否则选中 [min,max) */
-static int     s_EdView = 0;            /* 横向滚动 (像素) */
-static unsigned s_EdBlinkT = 0;
+/* 文字真相在引擎控件; 会话状态 (光标/选区/滚动/闪烁) 在 LiEdit, 每次编辑
+ * 前 SS_EdLoad 拉、改完 SS_EdFlush 写回。 */
+static wchar_t s_EdText[SS_ED_BUF];
+static LiEdit  s_EdSt;
 static wchar_t s_EdComp[SS_ED_BUF];     /* 输入法组字串 */
 static int     s_EdCompLen = 0, s_EdCompCur = 0;
 static unsigned s_EdImeResT = 0;        /* 收编 GCS_RESULTSTR 的时刻 (吃掉系统回声) */
@@ -1883,14 +1837,11 @@ static int SS_EdText(wchar_t* out)
  * 那会取消用户刚点的东西。 */
 static void SS_EdClearAct(void)
 {
-    HWND dlg;
     void* ctx;
 
     if (!s_Ed || !IsWindow(s_Ed)) return;
-    dlg = GetParent(s_Ed);
-    if (!dlg || !IsWindow(dlg)) return;
-    ctx = (void*)GetWindowLongPtrA(dlg, SS_DWLP_USER);
-    if (ctx && IsPlausiblePtr(ctx) && *(int*)((char*)ctx + 0x18) == 1)
+    ctx = SS_Ctx(GetParent(s_Ed));
+    if (ctx && *(int*)((char*)ctx + 0x18) == 1)
         *(int*)((char*)ctx + 0x18) = -1;
 }
 
@@ -1957,115 +1908,67 @@ static void SS_EdBeatStart(void)
     if (h) CloseHandle(h);                  /* 线程自跑, 句柄不留 */
 }
 
-/* ---- 编辑 (插入/删除/剪贴板/几何都在 LineEdit.h) ---- */
+/* ---- 编辑 (插入/删除/剪贴板/几何在 LineEdit.h 的会话层) ---- */
+
+/* 引擎那份文字拉进本地会话 (真相在引擎, 每次编辑前拉一遍)。 */
+static void SS_EdLoad(void)
+{
+    s_EdSt.len = SS_EdText(s_EdSt.buf);
+    if (s_EdSt.cur > s_EdSt.len) s_EdSt.cur = s_EdSt.len;
+}
+
+/* 改完的文字写回引擎, 组字串断掉, 请一次重画。 */
+static void SS_EdFlush(void)
+{
+    s_EdSt.buf[s_EdSt.len] = 0;
+    s_EdCompLen = 0;
+    SS_EdCommit(s_EdSt.buf);
+}
 
 /* 在插入点插入 k 个字符 (选区先删掉)。整段一次写回, 免得每个字都触发一次通知。 */
 static void SS_EdInsertStr(const wchar_t* src, int k)
 {
-    wchar_t t[SS_ED_BUF];
-    int n, lo, hi, i;
-
     if (!s_Ed || !IsWindow(s_Ed)) return;
-    n = SS_EdText(t);
-    if (s_EdCur > n) s_EdCur = n;
-    LiSelRange(s_EdCur, s_EdAnchor, &lo, &hi);
-    if (lo >= 0) { LiDeleteRange(t, &n, &s_EdCur, lo, hi); s_EdAnchor = -1; }
-    for (i = 0; i < k; i++)
-        if (!LiInsert(t, SS_ED_BUF, &n, &s_EdCur, src[i], SS_ED_BUF - 1)) break;
-    s_EdCompLen = 0;
-    s_EdBlinkT = GetTickCount();
-    SS_EdCommit(t);
+    SS_EdLoad();
+    LiEdInsert(&s_EdSt, src, k, SS_ED_BUF - 1, NULL, NULL);
+    SS_EdFlush();
 }
 
 /* 退格 / Delete: 有选中删选中, 否则删插入点前/后一个字符。 */
 static void SS_EdErase(int forward)
 {
-    wchar_t t[SS_ED_BUF];
-    int n, lo, hi;
-
     if (!s_Ed || !IsWindow(s_Ed)) return;
-    n = SS_EdText(t);
-    if (s_EdCur > n) s_EdCur = n;
-    LiSelRange(s_EdCur, s_EdAnchor, &lo, &hi);
-    if (lo >= 0) { LiDeleteRange(t, &n, &s_EdCur, lo, hi); s_EdAnchor = -1; }
-    else if (forward) LiDelete(t, &n, &s_EdCur);
-    else LiBackspace(t, &n, &s_EdCur);
-    s_EdCompLen = 0;
-    s_EdBlinkT = GetTickCount();
-    SS_EdCommit(t);
-}
-
-static int SS_EdIsWord(wchar_t c)
-{
-    return (c == L'_' || (c >= L'0' && c <= L'9') ||
-            (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') ||
-            c >= 0x80) ? 1 : 0;
-}
-
-/* Ctrl+←/→: 跳过一整段词 (标点与空格各算一段) */
-static void SS_EdMoveWord(const wchar_t* s, int n, int dir)
-{
-    int i = s_EdCur;
-
-    if (i > n) i = n;
-    if (dir < 0)
-    {
-        while (i > 0 && !SS_EdIsWord(s[i - 1])) i--;
-        while (i > 0 && SS_EdIsWord(s[i - 1])) i--;
-    }
-    else
-    {
-        while (i < n && !SS_EdIsWord(s[i])) i++;
-        while (i < n && SS_EdIsWord(s[i])) i++;
-    }
-    s_EdAnchor = -1;
-    s_EdCur = i;
-    s_EdBlinkT = GetTickCount();
+    SS_EdLoad();
+    LiEdErase(&s_EdSt, forward);
+    SS_EdFlush();
 }
 
 static void SS_EdCopy(int cut)
 {
-    wchar_t t[SS_ED_BUF];
-    int n, lo, hi;
-
     if (!s_Ed || !IsWindow(s_Ed)) return;
-    n = SS_EdText(t);
-    LiSelRange(s_EdCur, s_EdAnchor, &lo, &hi);
-    if (lo < 0) return;
-    if (hi > n) hi = n;
-    LiClipSet(t + lo, hi - lo);
-    if (!cut) return;
-    LiDeleteRange(t, &n, &s_EdCur, lo, hi);
-    s_EdAnchor = -1;
-    s_EdCompLen = 0;
-    s_EdBlinkT = GetTickCount();
-    SS_EdCommit(t);
+    SS_EdLoad();
+    if (LiEdCopy(&s_EdSt, cut) && cut) SS_EdFlush();
 }
 
 static void SS_EdPaste(void)
 {
-    wchar_t src[SS_ED_BUF];
-    int n;
-
     if (!s_Ed || !IsWindow(s_Ed)) return;
-    n = LiClipGet(src, SS_ED_BUF);
-    if (n > 0) SS_EdInsertStr(src, n);
+    SS_EdLoad();
+    if (LiEdPaste(&s_EdSt, SS_ED_BUF - 1, NULL, NULL)) SS_EdFlush();
 }
 
 /* ---- 版面: 逐字宽度 / 横向滚动 / 插入点像素 ----
  * 调用前必须已 GdiEnsure 到 [VecText] 那一槽。xs[] 至少 SS_ED_BUF+1。 */
-static int SS_EdLayout(const wchar_t* s, int n, int fieldW, int* xs, int* pStart)
+static int SS_EdLayout(int n, int fieldW, int* xs, int* pStart)
 {
-    int i, cur;
+    int cur;
 
-    if (s_EdCur > n) s_EdCur = n;
-    LiCharXs(s, n, VecText_ResolvedPx(), xs);
-    cur = xs[s_EdCur];
-    s_EdView = LiScrollFit(cur, s_EdView, fieldW);
-    if (s_EdView > xs[n]) s_EdView = xs[n];
-    i = 0;
-    while (i < n && xs[i + 1] <= s_EdView) i++;
-    *pStart = i;
+    if (s_EdSt.cur > n) s_EdSt.cur = n;
+    LiCharXs(s_EdSt.buf, n, VecText_ResolvedPx(), xs);
+    cur = xs[s_EdSt.cur];
+    s_EdSt.view = LiScrollFit(cur, s_EdSt.view, fieldW);
+    if (s_EdSt.view > xs[n]) s_EdSt.view = xs[n];
+    *pStart = LiFirstVis(xs, n, s_EdSt.view);
     return cur;
 }
 
@@ -2078,41 +1981,26 @@ static int SS_EdFieldW(void)
         ? (int)(r.right - r.left) - 2 * SS_ED_PAD : 16;
 }
 
-static int SS_EdCaretPx(const wchar_t* s, int n)
+static int SS_EdCaretPx(int n)
 {
-    int xs[SS_ED_BUF + 1], start = 0, x;
+    int xs[SS_ED_BUF + 1], start = 0;
 
     if (!GdiEnsure(VecText_ResolvedPx(), VecText_Bold(), SS_VEC_SLOT, SS_Face()))
         return SS_ED_PAD;
-    x = SS_ED_PAD + (SS_EdLayout(s, n, SS_EdFieldW(), xs, &start) - s_EdView);
-    return (x < 0) ? 0 : x;
-}
-
-/* 客户区 x → 字符下标 (单击/双击定位)。按字中点分界: 点在字的左半就落在字前。 */
-static int SS_EdHit(int mxLocal)
-{
-    wchar_t t[SS_ED_BUF];
-    int xs[SS_ED_BUF + 1], start = 0, n;
-
-    if (!s_Ed || !IsWindow(s_Ed)) return s_EdCur;
-    if (!GdiEnsure(VecText_ResolvedPx(), VecText_Bold(), SS_VEC_SLOT, SS_Face()))
-        return s_EdCur;
-    n = SS_EdText(t);
-    SS_EdLayout(t, n, SS_EdFieldW(), xs, &start);  /* 顺带把横向滚动夹回合法范围 */
-    return LiHitIndex(xs, n, mxLocal - SS_ED_PAD + s_EdView);
+    SS_EdLayout(n, SS_EdFieldW(), xs, &start);
+    return SS_ED_PAD + LiCaretX(xs, n, s_EdSt.cur, s_EdSt.view);
 }
 
 /* 插入符位置: 宽高用的都是引擎建的那个 (宽 1px), 这里只挪位置。 */
 static void SS_EdCaretSync(void)
 {
-    wchar_t t[SS_ED_BUF];
     RECT cr;
     int n, x, y;
 
     if (!SS_EdFocused()) return;
     if (!GetClientRect(s_Ed, &cr)) return;
-    n = SS_EdText(t);
-    x = SS_EdCaretPx(t, n);
+    n = SS_EdText(s_EdSt.buf);
+    x = SS_EdCaretPx(n);
     if (x > (int)(cr.right - cr.left) - 4) x = (int)(cr.right - cr.left) - 4;
     y = ((int)(cr.bottom - cr.top) - VecText_ResolvedPx()) / 2;
     SetCaretPos((x < 0) ? 0 : x, (y < 0) ? 0 : y);
@@ -2137,20 +2025,16 @@ static HWND SS_GameHwnd(void)
 
 /* 呈现区尺寸 (0 = 还没量到) 与上次推给输入法的位置。 */
 static int s_ImeVW = 0, s_ImeVH = 0;
-static unsigned s_ImeMeasT = 0;
 static int s_ImeX = -1, s_ImeY = -1, s_ImeYC = -1;
 static unsigned s_ImePushT = 0;
 
-/* 量呈现区: 算法在 LineEdit.h 的 LiPresent (与聊天框同一份), 这里只管"1 秒一次"的节流 ——
- * 开框/切分辨率都靠它自己纠正, 不必等某个事件。 */
+/* 量呈现区: 算法在 LineEdit.h 的 LiPresent (与聊天框同一份)。存档页无性能
+ * 压力, 每帧量; 尺寸没变直接返回, 变了作废上次推的 IME 位置。 */
 static void SS_MeasureView(void)
 {
-    unsigned now = GetTickCount();
     int vw, vh;
 
-    if (s_ImeVW >= 100 && s_ImeVH >= 100 && (unsigned)(now - s_ImeMeasT) < 1000) return;
     if (!LiPresent(SS_GameHwnd(), -1, &vw, &vh)) return;
-    s_ImeMeasT = now;
     if (vw == s_ImeVW && vh == s_ImeVH) return;
     s_ImeVW = vw;
     s_ImeVH = vh;
@@ -2183,7 +2067,6 @@ static HIMC SS_EdHimc(HWND* pw)
 /* 把候选窗钉在输入框**正下方**, 组合窗锚在框内同一行。 */
 static void SS_EdImePlace(void)
 {
-    wchar_t t[SS_ED_BUF];
     HWND dlg, w;
     HIMC imc;
     RECT r;
@@ -2206,8 +2089,8 @@ static void SS_EdImePlace(void)
     bh = pt[1].y - y0;
     if (bw < 8 || bh < 4) return;
 
-    n = SS_EdText(t);
-    lx = SS_EdCaretPx(t, n);                             /* 插入点在框内的 x */
+    n = SS_EdText(s_EdSt.buf);
+    lx = SS_EdCaretPx(n);                                /* 插入点在框内的 x */
     lineH = VecText_ResolvedPx() + 2;
     cx = (x0 + lx) * s_ImeVW / s_EdSurfW;
     cy = (y0 + bh + 2) * s_ImeVH / s_EdSurfH;            /* 框底外沿: 别盖住字 */
@@ -2249,22 +2132,17 @@ static int SS_EdComposing(void)
 {
     HWND w;
     HIMC imc;
-    LONG n;
 
     if (!s_Ed || !IsWindow(s_Ed)) return 0;
     imc = SS_EdHimc(&w);
-    if (!imc) return s_EdCompLen > 0;
-    n = ImmGetCompositionStringW(imc, GCS_COMPSTR, NULL, 0);
-    ImmReleaseContext(w, imc);
-    return (n > 0) ? 1 : 0;
+    if (!imc) return s_EdCompLen > 0;    /* 拿不到上下文: 退到本地缓存判断 */
+    return LiComposing(w);
 }
 
 static void SS_EdImePoll(void)
 {
     HWND w;
     HIMC imc;
-    LONG r, c;
-    int n;
 
     if (!SS_EdFocused())
     {
@@ -2275,25 +2153,13 @@ static void SS_EdImePoll(void)
     SS_EdImePlace();                     /* 每帧钉一次候选窗 */
     imc = SS_EdHimc(&w);
     if (!imc) { s_EdCompLen = s_EdCompCur = 0; return; }
-    r = ImmGetCompositionStringW(imc, GCS_COMPSTR, s_EdComp, (DWORD)(SS_ED_BUF - 1) * 2);
-    n = (r > 0) ? (int)(r / 2) : 0;
-    if (n > SS_ED_BUF - 1) n = SS_ED_BUF - 1;
-    s_EdComp[n] = 0;
-    s_EdCompLen = n;
-    s_EdCompCur = 0;
-    if (n > 0)
-    {
-        c = ImmGetCompositionStringW(imc, GCS_CURSORPOS, NULL, 0);
-        if (c > 0) s_EdCompCur = (int)c;
-        if (s_EdCompCur > n) s_EdCompCur = n;
-    }
+    s_EdCompLen = LiCompRead(imc, s_EdComp, SS_ED_BUF, &s_EdCompCur);
     ImmReleaseContext(w, imc);
 }
 
 /* ---- 绘制: 在 0x622396 那张整屏面上, 坐标是对话框客户区 ---- */
 static void SS_EdDraw(void* surf)
 {
-    wchar_t t[SS_ED_BUF];
     RECT r;
     POINT pt[2];
     HWND dlg;
@@ -2352,17 +2218,18 @@ static void SS_EdDraw(void* surf)
     }
     if (g_G->adv > 0) adv = g_G->adv;
 
-    n = SS_EdText(t);
-    cur = SS_EdLayout(t, n, fieldW, xs, &start);
+    n = SS_EdText(s_EdSt.buf);
+    s_EdSt.len = n;
+    cur = SS_EdLayout(n, fieldW, xs, &start);
     focus = SS_EdFocused();
-    LiSelRange(s_EdCur, s_EdAnchor, &lo, &hi);
+    LiEdSel(&s_EdSt, &lo, &hi);
     if (hi > n) hi = n;                 /* 引擎可能把文字截短了, 选中区跟着收 */
     ty = y0 + (bh - inkH) / 2 - inkTop;
 
     /* 选中底 */
     if (lo >= 0)
     {
-        int sx1 = textL + xs[lo] - s_EdView, sx2 = textL + xs[hi] - s_EdView;
+        int sx1 = textL + xs[lo] - s_EdSt.view, sx2 = textL + xs[hi] - s_EdSt.view;
         int sy = (ty < y0) ? y0 : ty, ey = ty + adv;
         if (sx1 < x0) sx1 = x0;
         if (sx2 > x0 + bw) sx2 = x0 + bw;
@@ -2371,16 +2238,16 @@ static void SS_EdDraw(void* surf)
     }
 
     /* 正文: 从 start 起, 右缘由 textR 截断 */
-    while (start < n && textL + xs[start] - s_EdView < x0) start++;
+    while (start < n && textL + xs[start] - s_EdSt.view < x0) start++;
     if (n > start)
     {
-        int dx = textL + xs[start] - s_EdView;
-        SS_TextRun(base, pitch, W, H, t + start, CharsFit(t + start, n - start, textR - dx),
+        int dx = textL + xs[start] - s_EdSt.view;
+        SS_TextRun(base, pitch, W, H, s_EdSt.buf + start, CharsFit(s_EdSt.buf + start, n - start, textR - dx),
                    dx, ty, textR - dx, 239, 235, 239);
     }
 
     /* 插入点 */
-    caret = textL + (cur - s_EdView);
+    caret = textL + (cur - s_EdSt.view);
     if (caret < x0) caret = x0;
     if (caret > x0 + bw - 1) caret = x0 + bw - 1;
 
@@ -2408,7 +2275,7 @@ static void SS_EdDraw(void* surf)
     }
 
     /* 自绘光标: 有焦点、没有选中时才画 (系统那个 1px 另有用途: 输入法锚点) */
-    if (focus && lo < 0 && !(((GetTickCount() - s_EdBlinkT) / SS_ED_BLINK) & 1u))
+    if (focus && lo < 0 && LiBlinkOn(&s_EdSt))
     {
         int sy = (ty < y0 + 2) ? y0 + 2 : ty;
         int ey = ty + adv, ex = caret + 2;
@@ -2445,7 +2312,7 @@ static LRESULT CALLBACK SS_EdProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_SETFOCUS:
     case WM_KILLFOCUS:
-        s_EdBlinkT = GetTickCount();
+        LiEdTouch(&s_EdSt);
         s_EdCompLen = s_EdCompCur = 0;
         SS_EdRepaint();
         break;                           /* 交原过程: 建/拆它自己的插入符 */
@@ -2456,15 +2323,16 @@ static LRESULT CALLBACK SS_EdProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK:
     {
-        int old = s_EdCur;
+        int xs[SS_ED_BUF + 1], start = 0, n;
 
-        s_EdCur = SS_EdHit((int)(short)LOWORD(lp));
-        if (GetKeyState(VK_SHIFT) < 0)
-        {
-            if (s_EdAnchor < 0) s_EdAnchor = old;   /* Shift+点击: 从原插入点选到我 */
-        }
-        else s_EdAnchor = -1;
-        s_EdBlinkT = GetTickCount();               /* 点完立刻亮着, 不要等下一次闪烁 */
+        if (!GdiEnsure(VecText_ResolvedPx(), VecText_Bold(), SS_VEC_SLOT, SS_Face()))
+            break;
+        n = SS_EdText(s_EdSt.buf);
+        s_EdSt.len = n;
+        SS_EdLayout(n, SS_EdFieldW(), xs, &start);  /* 顺带把横向滚动夹回合法范围 */
+        LiEdClick(&s_EdSt, xs, n,
+                  (int)(short)LOWORD(lp) - SS_ED_PAD + s_EdSt.view,
+                  (GetKeyState(VK_SHIFT) < 0));
         s_EdCompLen = s_EdCompCur = 0;             /* 点走 = 放弃组字 */
         SS_EdRepaint();
         break;                                     /* 原过程照走 (焦点/它自己的插入符) */
@@ -2481,35 +2349,26 @@ static LRESULT CALLBACK SS_EdProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_KEYDOWN:
     {
-        wchar_t t[SS_ED_BUF];
-        int done = 0, n = 0;
+        int done = 0;
 
         ctrl  = (GetKeyState(VK_CONTROL) < 0);
         shift = (GetKeyState(VK_SHIFT) < 0);
 
-        if (ctrl && wp == 'A') { s_EdAnchor = 0; s_EdCur = SS_EdText(t); done = 1; }
+        if (ctrl && wp == 'A') { SS_EdLoad(); LiEdSelAll(&s_EdSt); done = 1; }
         else if (ctrl && (wp == 'C' || wp == 'X')) { SS_EdCopy(wp == 'X'); done = 1; }
         else if (ctrl && wp == 'V') { SS_EdPaste(); done = 1; }
-        else if (ctrl && (wp == VK_LEFT || wp == VK_RIGHT))
-        {
-            n = SS_EdText(t);
-            SS_EdMoveWord(t, n, wp == VK_LEFT ? -1 : 1);
-            done = 1;
-        }
         else if (wp == VK_LEFT || wp == VK_RIGHT || wp == VK_HOME || wp == VK_END ||
                  wp == VK_UP || wp == VK_DOWN)
         {
-            if (!shift) s_EdAnchor = -1;
-            else if (s_EdAnchor < 0) s_EdAnchor = s_EdCur;
-            n = SS_EdText(t);
+            SS_EdLoad();
             if (wp == VK_UP) wp = VK_HOME;          /* 单行框: 上下 = 首尾 */
             else if (wp == VK_DOWN) wp = VK_END;
-            LiMove(wp, &s_EdCur, n);
+            LiEdMove(&s_EdSt, (int)wp, shift);
             done = 1;
         }
         else if (wp == VK_DELETE) { SS_EdErase(1); done = 1; }
 
-        if (done) { s_EdBlinkT = GetTickCount(); SS_EdRepaint(); return 0; }
+        if (done) { SS_EdRepaint(); return 0; }
         break;
     }
 
@@ -2524,11 +2383,11 @@ static LRESULT CALLBACK SS_EdProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     {
         HWND w;
         HIMC imc = SS_EdHimc(&w);
-        wchar_t res[SS_ED_BUF], comp[SS_ED_BUF];
-        LONG nr = 0, nc = 0, ncur = 0;
-        int kr, kc, i;
+        wchar_t res[SS_ED_BUF];
+        LONG nr = 0;
+        int kr;
 
-        res[0] = comp[0] = 0;
+        res[0] = 0;
         /* 上下文里只读不写: 读完立刻释放, 插入/通知不在 IMM 锁内做 */
         if (imc)
         {
@@ -2536,11 +2395,7 @@ static LRESULT CALLBACK SS_EdProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 nr = ImmGetCompositionStringW(imc, GCS_RESULTSTR, res,
                                               (DWORD)(SS_ED_BUF - 1) * 2);
             if (lp & (GCS_COMPSTR | GCS_CURSORPOS))
-            {
-                nc   = ImmGetCompositionStringW(imc, GCS_COMPSTR, comp,
-                                                (DWORD)(SS_ED_BUF - 1) * 2);
-                ncur = ImmGetCompositionStringW(imc, GCS_CURSORPOS, NULL, 0);
-            }
+                s_EdCompLen = LiCompRead(imc, s_EdComp, SS_ED_BUF, &s_EdCompCur);
             ImmReleaseContext(w, imc);
         }
 
@@ -2550,15 +2405,6 @@ static LRESULT CALLBACK SS_EdProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             if (kr > SS_ED_BUF - 1) kr = SS_ED_BUF - 1;
             SS_EdInsertStr(res, kr);
             s_EdImeResT = GetTickCount();      /* 收编时刻: 用来吃掉系统回声 */
-        }
-        if (lp & (GCS_COMPSTR | GCS_CURSORPOS))
-        {
-            kc = (nc > 0) ? (int)(nc / 2) : 0;
-            if (kc > SS_ED_BUF - 1) kc = SS_ED_BUF - 1;
-            for (i = 0; i < kc; i++) s_EdComp[i] = comp[i];
-            s_EdComp[kc] = 0;
-            s_EdCompLen = kc;
-            s_EdCompCur = (ncur > 0 && (int)ncur <= kc) ? (int)ncur : kc;
         }
         if (lp & (GCS_COMPSTR | GCS_CURSORPOS | GCS_RESULTSTR))
         {
@@ -2595,10 +2441,7 @@ static LRESULT CALLBACK SS_EdProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         break;
     }
 
-    if (IsWindowUnicode(h))
-        r = s_EdOld ? CallWindowProcW(s_EdOld, h, msg, wp, lp) : DefWindowProcW(h, msg, wp, lp);
-    else
-        r = s_EdOld ? CallWindowProcA(s_EdOld, h, msg, wp, lp) : DefWindowProcA(h, msg, wp, lp);
+    r = LiCallOld(h, s_EdOld, msg, wp, lp);
 
     /* 原过程在获得焦点/按键时会按它自己的排版摆插入符。位置统一改成我们这版算出来的
      * 插入点 —— 只挪位置, 不销毁: 那是输入法的锚点。 */
@@ -2615,9 +2458,7 @@ static void SS_EdDetach(void)
         SetWindowLongPtrA(s_Ed, GWLP_WNDPROC, (LONG_PTR)s_EdOld);
     s_Ed = NULL;
     s_EdOld = NULL;
-    s_EdCur = 0;
-    s_EdAnchor = -1;
-    s_EdView = 0;
+    LiEdInit(&s_EdSt, s_EdText, SS_ED_BUF);
     s_EdCompLen = s_EdCompCur = 0;
     s_EdImeResT = 0;
     s_EdSurfW = s_EdSurfH = 0;
@@ -2630,15 +2471,16 @@ static void SS_EdAttach(void)
 {
     HWND ed;
     WNDPROC old;
-    wchar_t t[SS_ED_BUF];
 
     if (!s_EdHook || !s_BoxHwnd || !IsWindow(s_BoxHwnd)) return;
     ed = s_BoxHwnd;
     if (s_Ed == ed) return;
     if (s_Ed) SS_EdDetach();
 
+    /* 先 init (清会话状态) 再拉文字进 buf, 顺序反了文字会被 LiEdInit 清掉 */
     s_Ed = ed;
-    if (SS_EdText(t) <= 0)          /* 拉不到文字 = 字不在这个窗口里, 硬画等于抹掉它 */
+    LiEdInit(&s_EdSt, s_EdText, SS_ED_BUF);
+    if (SS_EdText(s_EdSt.buf) <= 0) /* 拉不到文字 = 字不在这个窗口里, 硬画等于抹掉它 */
     {
         s_Ed = NULL;
         SS_Log("namebox empty, keep native", NULL);
@@ -2652,11 +2494,9 @@ static void SS_EdAttach(void)
         return;
     }
     s_EdOld = old;
-    s_EdCur = lstrlenW(t);
-    s_EdAnchor = -1;
-    s_EdView = 0;
-    s_EdCompLen = s_EdCompCur = 0;
-    s_EdBlinkT = GetTickCount();
+    s_EdSt.len = lstrlenW(s_EdSt.buf);
+    s_EdSt.cur = s_EdSt.len;
+    LiEdTouch(&s_EdSt);
 
     SS_EdBeatStart();       /* 光标闪 / 组字 / 候选窗要有节拍 (SetTimer 在这不响) */
     SS_EdRepaint();         /* 立刻把这一块交给我们画 */
@@ -2814,17 +2654,10 @@ void SaveShot_PaintDialog(void* regs, void* surf)
         lstrcpynA(s_ThumbName, name, SS_NAME_MAX);   /* 加载失败也记下, 免得每帧重读磁盘 */
         if (name[0])
         {
-            char path[MAX_PATH_LEN], msg[MAX_PATH_LEN + 32];
-            unsigned p = AppendCStr(path, 0, s_SaveDir, MAX_PATH_LEN);
-            p = AppendCStr(path, p, "\\Thumbs\\", MAX_PATH_LEN);
-            p = AppendCStr(path, p, name, MAX_PATH_LEN);
-            AppendCStr(path, p, ".bmp", MAX_PATH_LEN);
+            char path[MAX_PATH_LEN];
+            SS_ThumbPath(path, MAX_PATH_LEN, s_SaveDir, name);
             if (!SS_PicLoadBmp(&s_PicB, path, bw, bh))
-            {
-                p = AppendCStr(msg, 0, "saveshot: no thumb ", sizeof(msg));
-                AppendCStr(msg, p, path, sizeof(msg));
-                LogLine(msg);
-            }
+                SS_Log("no thumb ", path);
         }
     }
     else if (s_PicB.px && (s_PicB.w > bw + 2 || s_PicB.h > bh + 2))

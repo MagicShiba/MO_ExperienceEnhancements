@@ -1,12 +1,15 @@
 /* LineEdit.h - 单行输入框的全部公共零件 (存档名框 / 聊天框 / ESC 数值框共用)。
- * 五节: 按键轮询 / 缓冲编辑 / 剪贴板 / 逐字几何 / 呈现区与输入法。
- * 前三节只碰 windows.h, 逐字几何靠 GdiText 的字宽, 最后一节是宿主适配 (imm.h)。
+ * 六节: 按键轮询 / 缓冲编辑 / 剪贴板 / 逐字几何 / 呈现区与输入法 / 编辑会话。
+ * 前三节只碰 windows.h, 逐字几何靠 GdiText 的字宽, 后两节是宿主适配 (imm.h)。
  *
- * **编辑语义不在这里** —— 三个框的文字真相来源不一样:
- *   存档名框: 在引擎 NewEdit 里 (0x4B3 读 / 0x4B2 写回);
- *   聊天框:   本地缓冲 ce_Buf, 镜像给引擎;
+ * 编辑会话 (LiEdit) 是三框共用的编辑底子: 光标/选区/删除/复制剪切/粘贴/点击
+ * 定位/光标闪烁/组字串读取一份实现。**文字真相来源不在这里** ——
+ *   存档名框: 在引擎 NewEdit 里 (0x4B3 读 / 0x4B2 写回), 宿主每次操作前拉、
+ *             改完写回;
+ *   聊天框:   本地缓冲 ce_Buf, 改完镜像给引擎;
  *   ESC 数值框: 只有数字, 无选中/无输入法, 度量是超采样后除的 (ESC_TEXT_SS)。
- * 词移动同理没并: 聊天框对非 ASCII 一次一个字符, 存档框把整段 CJK 当一个词。
+ * 类型差异 (文本/数字/宽度预算) 走 LiAcceptFn 钩; 词移动不并: 聊天框对非
+ * ASCII 一次一个字符, 存档框没有词跳。
  *
  * 无 CRT: 只用 Win32 与 GdiText 已导出的东西。全 static inline, 各 TU 内联一份。
  */
@@ -74,16 +77,6 @@ static inline void LiDeleteRange(wchar_t* buf, int* len, int* cur,
     for (i = hi; i <= *len; i++) buf[i - (hi - lo)] = buf[i];
     *len -= hi - lo;
     *cur = lo;
-}
-
-static inline void LiBackspace(wchar_t* buf, int* len, int* cur)
-{
-    if (*cur > 0) LiDeleteRange(buf, len, cur, *cur - 1, *cur);
-}
-
-static inline void LiDelete(wchar_t* buf, int* len, int* cur)
-{
-    if (*cur < *len) LiDeleteRange(buf, len, cur, *cur, *cur + 1);
 }
 
 static inline void LiMove(int vk, int* cur, int len)
@@ -194,6 +187,14 @@ static inline int LiScrollFit(int curPx, int view, int fieldW)
     return (view < 0) ? 0 : view;
 }
 
+/* 滚动量 view 下第一个可见字符的下标 (xs 单调不减)。 */
+static inline int LiFirstVis(const int* xs, int n, int view)
+{
+    int i = 0;
+    while (i < n && xs[i + 1] <= view) i++;
+    return i;
+}
+
 /* 选中区 [lo,hi); anchor < 0 或空选返回 lo = hi = -1。 */
 static inline void LiSelRange(int cur, int anchor, int* lo, int* hi)
 {
@@ -278,4 +279,227 @@ static inline void LiImePin(HIMC imc, int cx, int cyc, int ccx, int ccy)
     cdc.rcArea.left = cdc.rcArea.top = 0;
     cdc.rcArea.right = cdc.rcArea.bottom = 0;
     ImmSetCandidateWindow(imc, &cdc);
+}
+
+/* ---------------- 编辑会话 (三框共用的编辑底子) ----------------
+ * 光标/选区/删除/复制剪切/粘贴/点击定位/闪烁一份实现; 文字真相来源与
+ * 绘制在宿主 (见文件头)。本节依赖上面的缓冲编辑/剪贴板/逐字几何/IMM。 */
+
+#define LI_BLINK_MS  530        /* 光标闪烁半周期 (亮/暗各一拍) */
+#define LI_PASTE_CAP 162        /* 粘贴读剪贴板的统一容量 */
+
+typedef struct {
+    wchar_t* buf;               /* 存储由宿主提供 */
+    int cap;
+    int len, cur, anchor;       /* anchor < 0 = 无选中, 选中 = [min,max) */
+    int view;                   /* 横向滚动 (像素), 宿主在绘制时调整 */
+    unsigned blinkT;
+} LiEdit;
+
+/* 宿主过滤钩: 在刚插入后调用, 返回 0 拒收该字符 (数字框收数字 /
+ * 聊天框宽度预算), 会立即回退。NULL = 全收。 */
+typedef int (*LiAcceptFn)(void* ctx, wchar_t ch, int newLen);
+
+static inline void LiEdInit(LiEdit* e, wchar_t* buf, int cap)
+{
+    e->buf = buf;
+    e->cap = cap;
+    e->len = 0;
+    e->cur = 0;
+    e->anchor = -1;
+    e->view = 0;
+    e->blinkT = 0;
+    buf[0] = 0;
+}
+
+/* 光标闪烁复位 (按键/点击后立刻亮着)。 */
+static inline void LiEdTouch(LiEdit* e)
+{
+    e->blinkT = GetTickCount();
+}
+
+/* 光标亮暗相位 (1 = 亮)。有选中时藏光标是宿主的事。 */
+static inline int LiBlinkOn(const LiEdit* e)
+{
+    return ((GetTickCount() - e->blinkT) / LI_BLINK_MS) % 2u == 0u;
+}
+
+/* 选中区 [lo,hi), 无选中 lo = hi = -1。 */
+static inline void LiEdSel(const LiEdit* e, int* lo, int* hi)
+{
+    LiSelRange(e->cur, e->anchor, lo, hi);
+}
+
+/* 插入一段: 先删选区, 再逐字过 (控制符转空格 → 容量/maxLen → 宿主过滤)。
+ * 返回实际插入的字符数。 */
+static inline int LiEdInsert(LiEdit* e, const wchar_t* s, int n, int maxLen,
+                             LiAcceptFn accept, void* ctx)
+{
+    int i, lo, hi, put = 0;
+
+    LiSelRange(e->cur, e->anchor, &lo, &hi);
+    if (lo >= 0)
+    { LiDeleteRange(e->buf, &e->len, &e->cur, lo, hi); e->anchor = -1; }
+    for (i = 0; i < n; i++)
+    {
+        wchar_t c = s[i];
+        if (c < 0x20 || c == 0x7F) c = L' ';   /* 单行: 控制符转空格 */
+        if (!LiInsert(e->buf, e->cap, &e->len, &e->cur, c, maxLen)) break;
+        if (accept && !accept(ctx, c, e->len))
+        {
+            LiDeleteRange(e->buf, &e->len, &e->cur, e->cur - 1, e->cur);
+            continue;
+        }
+        put++;
+    }
+    return put;
+}
+
+/* 退格/删除: 有选中删选中, 否则删插入点前/后一个。返回是否删了。 */
+static inline int LiEdErase(LiEdit* e, int forward)
+{
+    int lo, hi, did = 0;
+
+    LiSelRange(e->cur, e->anchor, &lo, &hi);
+    if (lo >= 0)
+    {
+        LiDeleteRange(e->buf, &e->len, &e->cur, lo, hi);
+        e->anchor = -1;
+        did = 1;
+    }
+    else if (forward)
+    {
+        if (e->cur < e->len)
+        { LiDeleteRange(e->buf, &e->len, &e->cur, e->cur, e->cur + 1); did = 1; }
+    }
+    else
+    {
+        if (e->cur > 0)
+        { LiDeleteRange(e->buf, &e->len, &e->cur, e->cur - 1, e->cur); did = 1; }
+    }
+    if (did) LiEdTouch(e);
+    return did;
+}
+
+/* 复制/剪切选区。返回是否复制了东西 (cut 时顺带删选区)。 */
+static inline int LiEdCopy(LiEdit* e, int cut)
+{
+    int lo, hi;
+
+    LiEdSel(e, &lo, &hi);
+    if (lo < 0) return 0;
+    if (hi > e->len) hi = e->len;
+    LiClipSet(e->buf + lo, hi - lo);
+    if (cut)
+    {
+        LiDeleteRange(e->buf, &e->len, &e->cur, lo, hi);
+        e->anchor = -1;
+        LiEdTouch(e);
+    }
+    return 1;
+}
+
+/* 粘贴: 剪贴板内容按 LiEdInsert 语义进框。返回是否插了。 */
+static inline int LiEdPaste(LiEdit* e, int maxLen, LiAcceptFn accept, void* ctx)
+{
+    wchar_t tmp[LI_PASTE_CAP];
+    int n = LiClipGet(tmp, LI_PASTE_CAP);
+
+    return (n > 0) ? LiEdInsert(e, tmp, n, maxLen, accept, ctx) : 0;
+}
+
+/* ←→/Home/End 移动 (含 Shift 选区)。VK_UP/DOWN (历史/微调) 归宿主。 */
+static inline void LiEdMove(LiEdit* e, int vk, int shift)
+{
+    if (!shift) e->anchor = -1;
+    else if (e->anchor < 0) e->anchor = e->cur;
+    LiMove(vk, &e->cur, e->len);
+    if (shift && e->anchor == e->cur) e->anchor = -1;
+    LiEdTouch(e);
+}
+
+/* 全选 (Ctrl+A)。 */
+static inline void LiEdSelAll(LiEdit* e)
+{
+    e->anchor = 0;
+    e->cur = e->len;
+    LiEdTouch(e);
+}
+
+/* 交回原窗口过程 (没挂上时走默认过程)。 */
+static inline LRESULT LiCallOld(HWND h, WNDPROC old, UINT msg,
+                                WPARAM wp, LPARAM lp)
+{
+    if (!old) return IsWindowUnicode(h) ? DefWindowProcW(h, msg, wp, lp)
+                                        : DefWindowProcA(h, msg, wp, lp);
+    return IsWindowUnicode(h) ? CallWindowProcW(old, h, msg, wp, lp)
+                              : CallWindowProcA(old, h, msg, wp, lp);
+}
+
+/* 点击定位: mx 为文本区起点起的像素 (已含滚动补偿), xs[0..n] 由 LiCharXs
+ * 算好。shift = 1 时从原插入点选到我。返回新插入点。 */
+static inline int LiEdClick(LiEdit* e, const int* xs, int n, int mx, int shift)
+{
+    int old = e->cur;
+
+    e->cur = LiHitIndex(xs, n, mx);
+    if (shift) { if (e->anchor < 0) e->anchor = old; }
+    else e->anchor = -1;
+    LiEdTouch(e);
+    return e->cur;
+}
+
+/* 插入点像素 (相对文本区起点, 已扣滚动, 不为负)。 */
+static inline int LiCaretX(const int* xs, int n, int cur, int view)
+{
+    int x;
+
+    if (cur > n) cur = n;
+    x = xs[cur] - view;
+    return (x < 0) ? 0 : x;
+}
+
+/* 读组字串 + 组字游标。返回串长 (0 = 无组字, comp 置空)。 */
+static inline int LiCompRead(HIMC imc, wchar_t* comp, int cap, int* cur)
+{
+    LONG r;
+    int n = 0;
+
+    if (cur) *cur = 0;
+    if (!imc || !comp || cap < 2) { if (comp) comp[0] = 0; return 0; }
+    r = ImmGetCompositionStringW(imc, GCS_COMPSTR, comp, (DWORD)(cap - 1) * 2);
+    if (r > 0)
+    {
+        LONG c;
+        n = (int)(r / 2);
+        if (n > cap - 1) n = cap - 1;
+        comp[n] = 0;
+        if (cur)
+        {
+            c = ImmGetCompositionStringW(imc, GCS_CURSORPOS, NULL, 0);
+            if (c < 0) c = 0;
+            if (c > (LONG)n) c = (LONG)n;
+            *cur = (int)c;
+        }
+    }
+    else comp[0] = 0;
+    return n;
+}
+
+/* 组字中? (按键钩子里现查, 与帧轮询独立)。 */
+static inline int LiComposing(HWND w)
+{
+    HIMC imc;
+    LONG r;
+    int on = 0;
+
+    if (!w) return 0;
+    imc = ImmGetContext(w);
+    if (imc)
+    {
+        r = ImmGetCompositionStringW(imc, GCS_COMPSTR, NULL, 0);
+        ImmReleaseContext(w, imc);
+        on = (r > 0) ? 1 : 0;
+    }
+    return on;
 }

@@ -138,3 +138,6 @@
 ; 存档缩略图: StgCreateDocfileW 调用点取宽字符路径, 尾部 (BL=1) 写 <存档目录>\Thumbs\<名>.bmp。见 src/gui/SaveShot.cpp
 0x67CF42 = SaveShot_SaveBegin, 6
 0x67D2F1 = SaveShot_SaveEnd, 5
+; 矿石受环境光照系数: 两处 push 0x3E8 之后改栈上的 Brightness 参数, 见 src/gui/OreLight.cpp
+0x47F939 = OreLight_Slope, 6
+0x47FA3D = OreLight_Flat, 5

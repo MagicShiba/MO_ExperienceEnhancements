@@ -8,7 +8,7 @@
 /* 参数个数与顺序: 环境光 / 红 / 绿 / 蓝。
  * 单位 = 地图 ini 的 ×100 (75 表示 0.75, 与引擎字段同单位)。 */
 #define LIGHT_PARAM_N       4
-#define LIGHT_PARAM_MAX     150
+#define LIGHT_PARAM_MAX     999
 
 /* 预设号: 0 = 用地图自带的光照, 1..5 = 内置预设, -1 = 手动调过。
  * LIGHT_PRESET_COUNT = 6 = 预设号上界+1 (原图 + 标准/早上/下午/黄昏/晚上)。 */
