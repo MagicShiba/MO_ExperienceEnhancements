@@ -1,29 +1,19 @@
-/* ChatEdit.cpp - 自绘聊天输入框 (见 ChatEdit.h)。
- * 原生 MessageListClass::Input 显示差、无光标移动/选中/粘贴, 且单机不建框。
- *
- * 做法 (自绘 + GDI, 只读查询 + 渲染面绘制, 联机安全):
+/* ChatEdit.cpp - 自绘聊天输入框 (见 ChatEdit.h)。原生 Input 没有光标移动/选中/粘贴,
+ * 单机还不建框。做法 (自绘 + GDI, 只读查询 + 渲染面绘制, 联机安全):
  *   聊天框: 对话框四处 session 检查各下一钩, 跳过单人判定 (Phobos
  *     AllowChatBoxInSinglePlayer 同原理, 见 notes/ChatBox参考.md)。
- *   输入: 运行时补丁 MessageListClass::Input (0x5D4510, 5B, 跳回 0x5D4515),
- *     同签名 __fastcall 替换; 字符/退格/回车/Esc/Ctrl 自己处理后消费
- *     (*keySlot=0, return 0), 其余走跳板跑原生。英文走 WM_CHAR, 由对话框层
- *     直接写行缓冲, 另有 ChatEdit_CharPost 摘除钩收编 (两钩互补才是全量)。
- *     导航键 (箭头/Home/End/Delete) 到不了 Input, 每帧 GetAsyncKeyState 轮询
- *     (边缘立刻一步, 按住 400ms 后 33ms 连发), 只在游戏主窗当前台时动手,
- *     组字中放行给 IME。不装全局键盘钩 (会卡住后台程序取键)。
- *   历史: 回车/提交时记行 (Esc 取消不记, 相邻重复不记, 32 行, 纯输入框本地);
- *     开框时上下键翻 (Up 更旧/Down 更新, 到底恢复翻前行), 改字即离翻。
- *   文本全程镜像进原生 EditBuffer, 提交/取消走原生 Input, 发包与手打一致,
- *     不碰模拟/网络函数 (单机+联机同路)。
- *   显示: 原生编辑行由 ChatEdit_HideNative 隐藏 (0x5D49B4, 3B, 永不返回 0,
- *     两向显式落点, 详见该函数注释); 自绘盒子画在 MessageDrawHook 尾部,
- *     压住战役框。底部模式贴战役框下沿, 顶部模式留原生行原位;
- *     底板只包画出内容, 字体跟战役框 (MsgText_CampStyle)。
- *   粘贴 CF_UNICODETEXT, 复制/剪切写剪贴板; 组字串自画黄色+下划线。
- *   输入法: 组合窗 (隐藏) 指盒底上一行做堆叠锚点 + 候选窗 CANDIDATEPOS 指盒底
- *     (surface→呈现区换算, 基准每次开框重量, 见 CE_MeasureView);
- *     系统组合窗由主窗子类化隐藏 (WM_IME_SETCONTEXT 清位
- *     + 吃掉 STARTCOMPOSITION), 候选条仍由系统画。
+ *   输入: 运行时补丁 MessageListClass::Input (0x5D4510, 5B, 跳回 0x5D4515), 同签名
+ *     __fastcall 替换; 字符/退格/回车/Esc/Ctrl 自己处理后消费 (*keySlot=0, return 0),
+ *     其余走跳板跑原生。英文走 WM_CHAR, 由对话框层直接写行缓冲, 另有 ChatEdit_CharPost
+ *     摘除钩收编 (两钩互补才是全量)。导航键到不了 Input, 每帧 GetAsyncKeyState 轮询
+ *     (边缘一步, 按住 400ms 后 33ms 连发), 只在主窗前台时动手, 组字中放行给 IME;
+ *     不装全局键盘钩 (会卡住后台程序取键)。
+ *   历史: 回车/提交时记行 (Esc 取消不记, 相邻重复不记, 32 行); 开框时上下翻。
+ *   文本全程镜像进原生 EditBuffer, 提交/取消走原生 Input, 发包与手打一致。
+ *   显示: 原生编辑行由 ChatEdit_HideNative 隐藏 (0x5D49B4, 3B, 两向显式落点);
+ *     自绘盒子画在 MessageDrawHook 尾部, 字体跟战役框 (MsgText_CampStyle)。
+ *   输入法: 组合窗 (隐藏) 指盒底上一行做堆叠锚点 + 候选窗指盒底 (surface→呈现区
+ *     换算见 CE_MeasureView); 系统组合窗由主窗子类化隐藏。
  *   代价: 打字时方向键镜头可能动一下 (不再吞键)。
  */
 
@@ -362,60 +352,15 @@ static void CE_MoveWord(int dir)
     }
 }
 
-/* ---------------- 剪贴板 (全本地 Win32) ---------------- */
-
-static int CE_ClipboardGet(wchar_t* dst, int cap)
-{
-    int n = 0;
-    HGLOBAL h;
-    const wchar_t* p;
-    SIZE_T bytes;
-    if (!OpenClipboard(NULL)) return 0;
-    h = GetClipboardData(CF_UNICODETEXT);
-    if (h)
-    {
-        p = (const wchar_t*)GlobalLock(h);
-        if (p && IsPlausiblePtr(p))
-        {
-            bytes = GlobalSize(h);
-            while (n < cap - 1 && (SIZE_T)(n + 1) * 2 < bytes && p[n]) n++;
-            {
-                int i;
-                for (i = 0; i < n; i++) dst[i] = p[i];
-            }
-        }
-        if (p) GlobalUnlock(h);
-    }
-    CloseClipboard();
-    return n;
-}
-
-static void CE_ClipboardSet(const wchar_t* s, int n)
-{
-    HGLOBAL h;
-    wchar_t* p;
-    int i;
-    if (n <= 0 || !s) return;
-    if (n > CE_BUF_N - 1) n = CE_BUF_N - 1;
-    h = GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)(n + 1) * 2);
-    if (!h) return;
-    p = (wchar_t*)GlobalLock(h);
-    if (!p) { GlobalFree(h); return; }
-    for (i = 0; i < n; i++) p[i] = s[i];
-    p[n] = 0;
-    GlobalUnlock(h);
-    if (!OpenClipboard(NULL)) { GlobalFree(h); return; }
-    EmptyClipboard();
-    SetClipboardData(CF_UNICODETEXT, h);   /* 所有权转交剪贴板, 不再释放 */
-    CloseClipboard();
-}
+/* ---------------- 剪贴板 ----------------
+ * 存取都在 LineEdit.h 的 LiClipGet/LiClipSet (与存档名框同一份): 宽字符、判 GlobalSize、所有权交出去。 */
 
 static void CE_DoCopy(int cut)
 {
     int lo, hi;
     CE_SelRange(&lo, &hi);
     if (lo < 0) return;
-    CE_ClipboardSet(ce_Buf + lo, hi - lo);
+    LiClipSet(ce_Buf + lo, hi - lo);
     if (cut) { CE_DeleteRange(lo, hi); CE_Mirror(); CE_BlinkReset(); }
 }
 
@@ -424,7 +369,7 @@ static void CE_DoPaste(int fieldW)
     wchar_t tmp[CE_BUF_N];
     int n, i;
     int lo, hi;
-    n = CE_ClipboardGet(tmp, CE_BUF_N);
+    n = LiClipGet(tmp, CE_BUF_N);
     if (n <= 0) return;
     CE_SelRange(&lo, &hi);
     if (lo >= 0) { CE_DeleteRange(lo, hi); }
@@ -654,84 +599,42 @@ static int CE_CompLineH(HIMC himc, int lineH, int ch, int surfH)
     return h;
 }
 
-/* ---------------- 呈现区测量 (surface → 呈现区换算基准, 详见 notes/ChatBox参考.md) ----------------
+/* ---------------- 呈现区测量 (surface → 呈现区换算基准) ----------------
  * IMM 坐标是主窗客户区坐标, 盒子画在渲染面上, 按呈现区/渲染面比例换算。
- * 全屏上采样时呈现区=显示器, 窗口化时=客户区; 模式问包装层 DDIsWindowed,
- * 查不到按窗口化, 仍偏则用 ImeFullscreen 手动指定。
+ * 全屏上采样时呈现区=显示器, 窗口化时=客户区 (判定在 LineEdit.h 的 LiPresent)。
  */
-
-typedef int (__cdecl *CE_DDIsWindowedFn)(void);
-static CE_DDIsWindowedFn ce_DDIsWin = NULL;
-static int ce_DDIsWinTried = 0;
-
-/* 包装层是不是窗口化呈现: 1=是, 0=全屏, -1=查不到 (不是 cnc-ddraw)。 */
-static int CE_DrawIsWindowed(void)
-{
-    HMODULE m;
-    if (!ce_DDIsWin && !ce_DDIsWinTried)
-    {
-        ce_DDIsWinTried = 1;
-        m = GetModuleHandleA("ddraw.dll");
-        if (m)
-            ce_DDIsWin = (CE_DDIsWindowedFn)(size_t)
-                         GetProcAddress(m, "DDIsWindowed");
-    }
-    if (ce_DDIsWin) return ce_DDIsWin() ? 1 : 0;
-    return -1;
-}
 
 static int ce_ViewW = 0, ce_ViewH = 0;   /* 呈现区尺寸 (0=还没量到) */
 /* IMM 上次推的位置; 基准变了要作废重推, 见 CE_MeasureView。 */
 static int ce_ImeX = -1, ce_ImeY = -1, ce_ImeYC = -1;
 
-/* 每次开框重量: 全屏按显示器呈现区 (要求客户区原点在屏幕 (0,0), 此时客户区
- * 坐标就是屏幕坐标), 窗口化按主窗客户区 (候选窗要落在窗口里)。量不到
- * (窗口刚建/正在切模式) 沿用上次。 */
+/* 每次开框重量一次, 只做三件本地事: 缓存、基准变了作废 IME 位置、记一行日志
+ * (候选窗歪了第一眼看的就是它)。ce_ImeFsMode 是 ini 的手动纠正: 0 客户区 / 1 显示器。 */
 static void CE_MeasureView(void)
 {
     HWND h = CE_GameHwnd();
+    int w, ht, cw, ch;
     RECT cr;
-    HMONITOR mon;
-    MONITORINFO mi;
-    POINT org;
-    int cw, ch, mw = 0, mh = 0, win, w, ht;
-    if (!h || !IsWindow(h)) return;
-    if (!GetClientRect(h, &cr)) return;
-    cw = cr.right - cr.left;
-    ch = cr.bottom - cr.top;
-    if (cw < 100 || ch < 100) return;
-    mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
-    mi.cbSize = sizeof(MONITORINFO);
-    if (mon && GetMonitorInfo(mon, &mi))
-    {
-        mw = mi.rcMonitor.right - mi.rcMonitor.left;
-        mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
-    }
-    org.x = 0; org.y = 0;
-    ClientToScreen(h, &org);
-    win = CE_DrawIsWindowed();
-    if (ce_ImeFsMode == 0) win = 1;         /* 强制按客户区 */
-    else if (ce_ImeFsMode == 1) win = 0;    /* 强制按显示器 */
-    else if (win < 0) win = 1;              /* 不是 cnc-ddraw: 退回窗口化 */
-    w = cw; ht = ch;
-    if (!win && org.x == 0 && org.y == 0 && mw > cw && mh > ch)
-    { w = mw; ht = mh; }
+
+    if (!LiPresent(h, ce_ImeFsMode, &w, &ht)) return;
     if (w == ce_ViewW && ht == ce_ViewH) return;
-    ce_ViewW = w; ce_ViewH = ht;
+    ce_ViewW = w;
+    ce_ViewH = ht;
     ce_ImeX = ce_ImeY = ce_ImeYC = -1;
+    cw = w; ch = ht;
+    if (GetClientRect(h, &cr)) { cw = (int)(cr.right - cr.left); ch = (int)(cr.bottom - cr.top); }
     {
-        char b[128], t1[16], t2[16], t3[16], t4[16];
+        char b[96];
         unsigned q = 0;
         q = AppendCStr(b, q, "chatedit: view=", sizeof(b));
-        UtoA((unsigned)w, t1); q = AppendCStr(b, q, t1, sizeof(b));
+        q = AppendInt(b, q, sizeof(b), w);
         q = AppendCh(b, q, 'x', sizeof(b));
-        UtoA((unsigned)ht, t2); q = AppendCStr(b, q, t2, sizeof(b));
+        q = AppendInt(b, q, sizeof(b), ht);
         q = AppendCStr(b, q, " client=", sizeof(b));
-        UtoA((unsigned)cw, t3); q = AppendCStr(b, q, t3, sizeof(b));
+        q = AppendInt(b, q, sizeof(b), cw);
         q = AppendCh(b, q, 'x', sizeof(b));
-        UtoA((unsigned)ch, t4); q = AppendCStr(b, q, t4, sizeof(b));
-        q = AppendCStr(b, q, " ", sizeof(b));
-        AppendCStr(b, q, (w == mw && ht == mh) ? "mon" : "win", sizeof(b));
+        q = AppendInt(b, q, sizeof(b), ch);
+        q = AppendCStr(b, q, (w == cw && ht == ch) ? " win" : " mon", sizeof(b));
         LogLine(b);
     }
 }
@@ -741,8 +644,6 @@ static void CE_PositionIME(int imeX, int boxY, int bh,
                            int lineH, int surfW, int surfH)
 {
     HWND h = CE_GameHwnd();
-    COMPOSITIONFORM cfc = { 0 };
-    CANDIDATEFORM cdc = { 0 };
     HIMC himc;
     int own;
     int cw, ch, cx, cy, cyc;
@@ -774,14 +675,7 @@ static void CE_PositionIME(int imeX, int boxY, int bh,
     }
     ce_ImeX = cx; ce_ImeY = cy; ce_ImeYC = cyc;
     CE_SubclassEnsure(h);
-    cfc.dwStyle = CFS_FORCE_POSITION;
-    cfc.ptCurrentPos.x = cx;
-    cfc.ptCurrentPos.y = cyc;
-    ImmSetCompositionWindow(himc, &cfc);
-    cdc.dwStyle = CFS_CANDIDATEPOS;
-    cdc.ptCurrentPos.x = cx;
-    cdc.ptCurrentPos.y = cy;
-    ImmSetCandidateWindow(himc, &cdc);
+    LiImePin(himc, cx, cyc, cx, cy);   /* 组合窗压到盒底上一行, 候选窗贴盒底 */
     if (own) ImmReleaseContext(h, himc);
 }
 

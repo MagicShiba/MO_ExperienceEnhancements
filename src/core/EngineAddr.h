@@ -464,6 +464,12 @@
 #define ADDR_BC_SENDBUILD_SKIP  0x00430E50u  /* 共享收尾 (pop edi/esi/ebp/ebx) */
 #define ADDR_BC_SENDBUILD_NEXT  0x00430D9Fu
 
+/* ==================== 主窗口句柄 ==================== */
+
+/* 引擎存的游戏主窗 HWND (ChatEdit/FullMap/GdiText 都用这一处)。输入法定位
+ * 要以它为基准: 主窗客户区原点通常在屏幕 (0,0), 那里客户区坐标就是屏幕坐标。 */
+#define ADDR_GAME_HWND          0x00B73550u
+
 /* ==================== GameOptions / 渲染计时 ==================== */
 
 /* GameOptionsClass @ 0xA8EB60 (首成员即 GameSpeed), UnitActionLines 在 +0x1E

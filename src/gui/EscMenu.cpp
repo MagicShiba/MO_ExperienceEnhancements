@@ -2888,6 +2888,10 @@ static void Esc_Subclass(HWND hDlg)
 
 static void Esc_OnShow(HWND hDlg)
 {
+    /* 存档界面的"当前画面"要的是按键那一刻: 这里 (0x4F1140) 对话框刚建好、还没
+     * ShowWindow, 视口里仍是刚渲染完的战场。晚一步抓到的就是菜单/对话框。 */
+    SaveShot_CaptureNow();
+
     EscMenu_EnsureInit();
     if (!s_Enable) return;
 

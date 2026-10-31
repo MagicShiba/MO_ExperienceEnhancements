@@ -10,8 +10,12 @@
 /* 读 [SaveShot] (幂等)。 */
 void SaveShot_EnsureInit(void);
 
-/* 消息帧钩里紧接 Shot_CapturePending 之后调: 按墙钟节流缓存一张视口缩略图。 */
+/* 消息帧钩里紧接 Shot_CapturePending 之后调: 只在本局还没抓过图时补一张兜底图。 */
 void SaveShot_Tick(void);
+
+/* 按 ESC 那一刻抓图: 由 EscMenu 在引擎建好对话框、还没 ShowWindow 时调
+ * (0x4F1140)。此时视口里还是刚渲染完的战场, 菜单一个像素都没画上去。 */
+void SaveShot_CaptureNow(void);
 
 /* 0x67CF42 (StgCreateDocfileW 调用点, EDX = 宽字符完整路径): 记路径。 */
 void SaveShot_OnSaveBegin(void* regs);
