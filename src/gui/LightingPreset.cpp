@@ -9,13 +9,16 @@
  * 脚本写的正是地图 ini 的 [Lighting] 段, 四个预设之间只有 Ambient 与
  * Red/Green/Blue 不同, 所以这里只改这四个值, 不动 Level/Ground/Ion*。
  *
- * 全是临时设置: 不写 ini, 不广播。取消菜单回滚到打开菜单时的值, 换局后回到
- * 新地图自带的值。
+ * 全是临时设置: 不写 ini, 不广播。取消菜单回滚到打开菜单时的值; 换到另一张
+ * 地图时回到新地图自带的值; 读同一个场景的存档时保留用户改过的值 (引擎读档
+ * 会把光照重置回地图自带值, 见 Lighting_Poll 的"用哪组值")。
  */
 
 #include <windows.h>
 #include "LightingPreset.h"
 #include "EngineAddr.h"
+#include "GdiText.h"
+#include "LightConvFix.h"
 
 /* 参数顺序: 环境光 / 红 / 绿 / 蓝。单位 = 引擎字段单位 (ini 值 ×100)。 */
 enum { P_AMBIENT = 0, P_RED = 1, P_GREEN = 2, P_BLUE = 3 };
@@ -42,10 +45,8 @@ static int s_SavedPreset = LIGHT_PRESET_ORIGINAL;
 static int s_Preset = LIGHT_PRESET_ORIGINAL;
 static int s_HaveOrig = 0;          /* s_Orig 是否已快照 */
 static int s_WroteOk = 0;           /* s_Wrote 是否有效 */
-static int s_LastFrame = -1;        /* 上次看到的逻辑帧号 (倒退 = 场景重开) */
-static int s_Pending = 0;           /* 场景重开了, 等一下再恢复光照 */
-static int s_Wait = 0;              /* 场景重开后等几帧 (让引擎把场景摆好) */
-static int s_UserSet = 0;           /* 用户改过光照, 还没被恢复掉 */
+static int s_Pending = 0;           /* 场景重开了, 等一下再刷新光照 */
+static int s_PendWait = 0;          /* pending 已经等了多少帧 */
 
 typedef void (__attribute__((fastcall)) *FnRecalcLighting)(int r, int g, int b,
                                                           int tint);
@@ -142,66 +143,120 @@ static int Light_Same(const int* a, const int* b)
     return 1;
 }
 
-/* 场景重开 (新开/读档) 后把光照恢复回地图原值。
+/* 引擎当前值 == 地图自带值 (s_Orig) 而我们手上还留着用户改过的那组
+ * = 引擎把光照重置成了地图自带值, 该盖回用户那组 (运行期改的光照不跟着
+ * 存档走)。要求调用方已确认这是"引擎主动改字段"而非我们自己的写入。 */
+static int Light_UseOurs(const int* v)
+{
+    return s_HaveOrig && Light_Same(v, s_Orig) && !Light_Same(s_Wrote, s_Orig);
+}
+
+/* 场景重开 (新开/读档/换图) 后按"引擎此刻给的值"重算一遍光照。
  *
- * 判据是"引擎接管了光照字段": 引擎重建场景时会用地图 ini (或存档里的值)
- * 重写那几处, 与我们最后写的不同。这个判据不依赖时序 —— 引擎读 ini 与
- * 进局谁先谁后都无所谓。
+ * 要解决的问题: 读档后地形/格子是按"重建那一刻的光照"建起来的, 而 LoadGame
+ * (0x67E440) 不调 RecalcLighting —— 于是字段是对的, 画面却停在重建时的亮度。
+ * 这里照抄手动改参数那条路: 用现有值走 写字段 + RecalcLighting + 全格 convert
+ * 重建。
  *
- * 恢复成什么:
- *   - 引擎给的值 == 我们最后写的那组 → 场景重开了但没改光照 (存档里存的是
- *     我们改过的), 回到地图原值 (s_Orig);
- *   - 否则 → 引擎给的就是这份存档/这张地图该有的值, 以它为准。
+ * 触发: 两个场景就绪钩子, 即引擎把"对局中" (0xA8ED5C) 置 1 的全部两条指令
+ * (新开局 0x683E75 / 读档 0x67E6C4, 两条路径互不经过) 置 pending。
  *
- * 恢复 = 写全部六个字段 + RecalcLighting, 格子光照与调色板一起回来;
- * 只改字段不重算的话画面还是旧的 (看着像"恢复不彻底")。
- * 场景重开本身用逻辑帧号倒退来认 (引擎复用 Scenario 对象, 指针不变)。 */
+ * 等什么: 过了载入闸、格子数组回来了才动手; 但**最多等 240 帧** —— 任何一个
+ * 闸门卡住都会让 Poll 从此不干活, 到点就无视闸门硬刷一次。多刷一次只是白干
+ * 一次活, 不刷就是永久错。
+ *
+ * 用哪组值: 引擎把光照重置成了地图自带值 (s_Orig) 而我们手上还留着用户改过的
+ * 那组 → 盖回用户那组 (运行期改的光照不跟着存档走); 其它情况以引擎为准。 */
 void Lighting_Poll(void)
 {
     int started = Light_InGame();
-    int frame = *(volatile int*)(size_t)ADDR_FRAME;
     int v[LIGHT_PARAM_N];
-    int taken;
+    int taken, use_ours, waited;
+    int wasAmb;
+    char msg[192];
+    unsigned p;
 
-    if (s_LastFrame >= 0 && frame < s_LastFrame)
-        s_Pending = 1;                    /* 帧号倒退 = 场景重开 */
-    s_LastFrame = frame;
+    if (s_Pending)
+    {
+        s_PendWait++;
+        if (s_PendWait < 2) return;       /* 让引擎把这一帧的收尾走完再动手 */
+        if ((!started || *(volatile int*)(size_t)ADDR_LOAD_PHASE ||
+             !LightConv_WorldReady()) && s_PendWait < 240)
+            return;                       /* 载入中/世界没搭好: 继续等 */
+        waited = s_PendWait;
+        s_Pending = 0;
+        s_PendWait = 0;
+        /* 场景对象/格子数组都还没有: 没东西可刷, 等下一次场景就绪 (主菜单就是
+         * 这个状态)。超时只可能出现在"世界始终没准备好"这种情形。 */
+        if (!Light_Scen() || !LightConv_WorldReady()) return;
+
+        Light_ReadAll(v);
+        taken = (s_WroteOk && !Light_Same(v, s_Wrote));
+        use_ours = (taken && Light_UseOurs(v));
+
+        wasAmb = s_WroteOk ? s_Wrote[P_AMBIENT] : -1;
+        Light_Apply(use_ours ? s_Wrote : v);
+        LightConv_RefreshNow();           /* 读档期间可能已按瞬态值建过 convert */
+
+        if (!use_ours && taken)
+        {
+            s_HaveOrig = 0;               /* 引擎给了第三组值 → 旧快照作废 */
+            s_Preset = LIGHT_PRESET_ORIGINAL;
+        }
+
+        p = 0;
+        p = AppendCStr(msg, p, "lighting: scene reopen amb=", sizeof(msg));
+        p = AppendInt(msg, p, sizeof(msg), v[P_AMBIENT]);
+        p = AppendCStr(msg, p, " tint=", sizeof(msg));
+        p = AppendInt(msg, p, sizeof(msg), v[P_RED]);
+        p = AppendCh(msg, p, sizeof(msg), ',');
+        p = AppendInt(msg, p, sizeof(msg), v[P_GREEN]);
+        p = AppendCh(msg, p, sizeof(msg), ',');
+        p = AppendInt(msg, p, sizeof(msg), v[P_BLUE]);
+        p = AppendCStr(msg, p, " last=", sizeof(msg));
+        p = AppendInt(msg, p, sizeof(msg), wasAmb);
+        p = AppendCStr(msg, p, use_ours ? " -> ours" : " -> engine", sizeof(msg));
+        p = AppendCStr(msg, p, " n=", sizeof(msg));
+        p = AppendInt(msg, p, sizeof(msg), waited);
+        LogLine(msg);
+        return;
+    }
+
     if (!started) return;                 /* 不在对局里不动手 */
     if (*(volatile int*)(size_t)ADDR_LOAD_PHASE) return;   /* 还在载入 */
 
     Light_ReadAll(v);
     taken = (s_WroteOk && !Light_Same(v, s_Wrote));
-
-    if (s_Pending)
-    {
-        if (++s_Wait < 3) return;         /* 等引擎把场景摆好 */
-        s_Pending = 0;
-        s_Wait = 0;
-        /* 只有用户改过光照才需要按"场景重开"恢复: 帧号倒退偶尔不只发生在
-         * 读档 (换图/进任务简报也会), 无条件恢复会把用户的预设刷掉。 */
-        if (!s_UserSet) return;
-        s_UserSet = 0;
-        Light_ReadAll(v);
-        if (!s_HaveOrig)
-        {
-            Light_ReadAll(s_Orig);        /* 没有地图原值快照 → 以引擎为准 */
-            s_HaveOrig = 1;
-        }
-        else if (!s_WroteOk || !Light_Same(v, s_Wrote))
-        {
-            Light_ReadAll(s_Orig);        /* 引擎给了自己的值 → 以它为准 */
-        }
-        Light_Apply(s_Orig);
-        s_Preset = LIGHT_PRESET_ORIGINAL;
-        return;
-    }
     if (!taken) return;
 
-    /* 引擎改了光照 (读档/换图/地图动作) → 把当前值写回并重算, 画面跟上。
-     * 地图原值快照不动 (它仍然是"原图")。 */
-    Light_Apply(v);
-    s_UserSet = 0;
+    /* 引擎改了光照 → 用它的值重算, 画面跟上。
+     * 例外: 引擎把光照重置回地图自带值是"读档/重开", 不是地图动作, 盖回用户
+     * 那组。读档的 ini 应用可能晚于场景就绪钩子, 落在这里, 所以这一条不能只在
+     * 重开分支写。 */
+    use_ours = Light_UseOurs(v);
+    Light_Apply(use_ours ? s_Wrote : v);
     s_Preset = LIGHT_PRESET_ORIGINAL;
+}
+
+/* 场景就绪钩子 (0x683E75: mov byte ptr [0xa8ed5c], 1 —— 新开局路径把"对局中"
+ * 置 1 的指令)。只置标志, 真正的刷新留给 Lighting_Poll。 */
+extern "C" __declspec(dllexport) DWORD __cdecl Lighting_ScenStartHook(void* regs)
+{
+    (void)regs;
+    s_Pending = 1;
+    s_PendWait = 0;
+    return 0;                             /* 回放 mov byte ptr [0xa8ed5c], 1 */
+}
+
+/* 读档就绪钩子 (0x67E6C4: LoadGame (0x67E440) 体内 mov [0xa8ed5c], bl —— 读档
+ * 路径把"对局中"置 1 的指令, bl 在 0x67E694 处置 1 后不被破坏, 恒为 1)。读档
+ * 不经过新开局的 0x683E75, 漏了这条读档就完全没触发。 */
+extern "C" __declspec(dllexport) DWORD __cdecl Lighting_LoadReadyHook(void* regs)
+{
+    (void)regs;
+    s_Pending = 1;
+    s_PendWait = 0;
+    return 0;                             /* 回放 mov [0xa8ed5c], bl */
 }
 
 int Lighting_Preset(void)
@@ -217,7 +272,6 @@ void Lighting_ApplyPreset(int preset)
         Light_EnsureOrig();
         Light_Apply(s_Orig);
         s_Preset = LIGHT_PRESET_ORIGINAL;
-        s_UserSet = 0;
         return;
     }
     if (preset < 1 || preset >= LIGHT_PRESET_COUNT) return;
@@ -225,7 +279,6 @@ void Lighting_ApplyPreset(int preset)
     Light_EnsureOrig();
     Light_Apply(s_PresetTable[preset - 1]);
     s_Preset = preset;
-    s_UserSet = 1;
 }
 
 int Lighting_GetParam(int idx)
@@ -247,7 +300,6 @@ void Lighting_SetParam(int idx, int value)
     v[idx] = value;
     Light_Apply(v);
     s_Preset = LIGHT_PRESET_CUSTOM;
-    s_UserSet = 1;
 }
 
 void Lighting_SaveState(void)

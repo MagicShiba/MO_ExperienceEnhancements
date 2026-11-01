@@ -141,3 +141,12 @@
 ; 矿石受环境光照系数: 两处 push 0x3E8 之后改栈上的 Brightness 参数, 见 src/gui/OreLight.cpp
 0x47F939 = OreLight_Slope, 6
 0x47FA3D = OreLight_Flat, 5
+; 光照变更源头: 两处 call UpdateCellLighting 调用点, 调用后按签名刷新每格
+; LightConvert, 修长期锯齿残留, 见 src/misc/LightConvFix.cpp
+0x53ADDB = LightConv_Recalc, 5
+0x55B4C6 = LightConv_Step, 5
+; 场景/读档就绪: 引擎把"对局中"字节 0xA8ED5C 置 1 的两条指令, 新开局与读档各走
+; 一条互不经过 (0x67E6C4 在 LoadGame 体内)。只置标志让 Lighting_Poll 等世界就绪
+; 后刷新光照, 见 src/gui/LightingPreset.cpp
+0x67E6C4 = Lighting_LoadReadyHook, 6
+0x683E75 = Lighting_ScenStartHook, 7

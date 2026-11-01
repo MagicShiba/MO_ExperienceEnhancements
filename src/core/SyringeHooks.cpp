@@ -35,7 +35,7 @@ struct SyHookDecl
 
 #define SYHOOK(a, s, n) { (a), (s), (n), 0u }
 
-/* 与 dist/MOExperience.dll.inj 逐行对应 (55 项, 顺序一致)。 */
+/* 与 dist/MOExperience.dll.inj 逐行对应 (61 项, 顺序一致)。 */
 static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(16))) =
 {
     SYHOOK(0x5D3BA0u, 6u, "MsgText_AddMessageHook"),
@@ -95,6 +95,13 @@ static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(
     SYHOOK(0x67D2F1u, 5u, "SaveShot_SaveEnd"),
     SYHOOK(0x47F939u, 6u, "OreLight_Slope"),
     SYHOOK(0x47FA3Du, 5u, "OreLight_Flat"),
+    /* 光照变更源头: 两处 call UpdateCellLighting 调用点, 见 LightConvFix.cpp */
+    SYHOOK(0x53ADDBu, 5u, "LightConv_Recalc"),
+    SYHOOK(0x55B4C6u, 5u, "LightConv_Step"),
+    /* 场景/读档就绪: 引擎把 0xA8ED5C 置 1 的两条指令 (新开局/读档各一条),
+     * 只置标志, 见 LightingPreset.cpp */
+    SYHOOK(0x67E6C4u, 6u, "Lighting_LoadReadyHook"),
+    SYHOOK(0x683E75u, 7u, "Lighting_ScenStartHook"),
 };
 
 /* ---------------- Syringe 握手 ---------------- */
