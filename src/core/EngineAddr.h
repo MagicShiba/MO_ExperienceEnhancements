@@ -379,13 +379,17 @@
 /* ScenarioClass 里的光照字段偏移。地图 ini 的 [Lighting] 段读进来就放这儿
  * (gamemd 0x68A7xx 那段读入代码): Ambient 与 tint = ini 值 ×100,
  * Ground / Level = ini 值 ×1000 (常量 0x7E2AC0=100.0, 0x7E4658=1000.0)。
- * 本项目只动 Ambient 与 R/G/B, Ground/Level 不碰。 */
+ * 菜单会改 Ambient / R/G/B / Ground / Level 六项 (Ion / Dominator 那几组不碰)。 */
 #define OFF_SCEN_AMBIENT_ORIG  0x3528u   /* AmbientOriginal (ini 的 Ambient) */
 #define OFF_SCEN_AMBIENT_CUR   0x352Cu   /* AmbientCurrent */
 #define OFF_SCEN_AMBIENT_TGT   0x3530u   /* AmbientTarget */
 #define OFF_SCEN_TINT_R        0x3534u   /* NormalLighting.Tint.R (ini 的 Red) */
 #define OFF_SCEN_TINT_G        0x3538u   /* NormalLighting.Tint.G (Green) */
 #define OFF_SCEN_TINT_B        0x353Cu   /* NormalLighting.Tint.B (Blue) */
+/* 地形层级亮度修正: 每层 +Level、0 平面 -Ground, 只在建 convert 时用
+ * (CellClass::CalculateLightSourceLighting 0x484180 尾部), 详见 notes/光照预设.md 2.1。 */
+#define OFF_SCEN_GROUND        0x3540u   /* NormalLighting.Ground (ini 的 Ground) */
+#define OFF_SCEN_LEVEL         0x3544u   /* NormalLighting.Level  (ini 的 Level) */
 
 /* ScenarioClass::Name (wchar_t[0x2D], 地图 [Basic] Name, 如 "Tournament Desert")。
  * 0x686DD0 实证: 以场景文件路径 (FileName, +0x125C) 构造 CCINIClass, 再用

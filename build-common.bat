@@ -48,7 +48,10 @@ if "%PWSH%"=="powershell.exe" if exist "%ProgramFiles%\PowerShell\7\pwsh.exe" se
 rem Header lookup for the bare-name includes; keep in sync with src\ subdirs.
 set "SRCINC=-Isrc -Isrc\core -Isrc\gui -Isrc\order -Isrc\sidebar -Isrc\preview -Isrc\perf -Isrc\misc"
 
-set "CXXFLAGS=-O2 -Wall -fno-exceptions -fno-rtti -fno-builtin-memset -fno-builtin-memcpy -fno-builtin-memmove -fno-builtin-strlen -fno-builtin-strcmp -fno-builtin-sin -fno-builtin-cos %SRCINC% -c"
+rem -fno-unwind-tables / -fno-asynchronous-unwind-tables: nothing here throws or
+rem unwinds (no _Unwind_*, no catch), but 32-bit mingw emits .eh_frame for every
+rem function by default -- 64 KB in the DLL for tables nobody reads.
+set "CXXFLAGS=-O2 -Wall -fno-exceptions -fno-rtti -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-builtin-memset -fno-builtin-memcpy -fno-builtin-memmove -fno-builtin-strlen -fno-builtin-strcmp -fno-builtin-sin -fno-builtin-cos %SRCINC% -c"
 
 if not exist obj mkdir obj
 

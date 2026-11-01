@@ -70,7 +70,7 @@
 #define ESC_TEXT_SS          2
 #define ESC_LABEL_CAP        96
 #define ESC_LEFT_ROWS        2
-#define ESC_GUI_DISPLAY      31
+#define ESC_GUI_DISPLAY      33
 #define ESC_SEP_H            14
 #define ESC_SKIN_N           5
 #define ESC_SCATTER_N        3
@@ -140,11 +140,17 @@ enum {
     GUI_ITEM_GAMESPEED_ON,
     GUI_ITEM_GAMESPEED,
     GUI_ITEM_FPS,
-    /* 光照: 预设行 + 参数行。参数行的四个格子各有自己的 item,
-     * 因为数值编辑框按 item 记状态 (格子顺序 = 环境光/红/绿/蓝)。 */
+    /* 光照: 预设行 + 调色方式行 + 参数两行。
+     * 参数分两行: 第一行 环境/等级/地面, 第二行 红/绿/蓝。每个格子各有自己的
+     * item (数值编辑框按 item 记状态), 行 item (LIGHT_PARM / LIGHT_TINT) 只当
+     * 行标题的文案槽。 */
     GUI_ITEM_LIGHT_PRESET,
+    GUI_ITEM_LIGHT_MODE,
     GUI_ITEM_LIGHT_PARM,
     GUI_ITEM_LIGHT_AMBIENT,
+    GUI_ITEM_LIGHT_LEVEL,
+    GUI_ITEM_LIGHT_GROUND,
+    GUI_ITEM_LIGHT_TINT,
     GUI_ITEM_LIGHT_RED,
     GUI_ITEM_LIGHT_GREEN,
     GUI_ITEM_LIGHT_BLUE,
@@ -210,6 +216,8 @@ static wchar_t s_GuiWthMode[WEATHER_DRAW_N][32];
 static wchar_t s_GuiWthStyle[WEATHER_CLOUD_STYLE_N][32];
 /* 光照预设分段: 原图 + 标准/早上/下午/黄昏/晚上 + 自定义 (自定义只是状态)。 */
 static wchar_t s_GuiLight[LIGHT_PRESET_COUNT + 1][32];
+/* 调色方式分段: 逐格重建 / 全池统一。 */
+static wchar_t s_GuiLightMode[LIGHT_MODE_COUNT][32];
 
 static wchar_t s_TextTitle[ESC_LABEL_CAP];
 static wchar_t s_TextLabel[TX_COUNT][ESC_LABEL_CAP];
@@ -331,13 +339,18 @@ static const char* const kLabelKey[GUI_ITEM_COUNT] = {
     "GuiRows", "GuiSkin", "GuiColor", "GuiBuildQueue", "GuiScatter",
     "GuiSideScroll", "GuiSideHide", "GuiSwsSide", "GuiGameSpeedOn",
     "GuiGameSpeed", "GuiFps",
-    "GuiLightPreset", "GuiLightParm", "GuiLightAmbient", "GuiLightRed",
+    "GuiLightPreset", "GuiLightMode", "GuiLightParm", "GuiLightAmbient",
+    "GuiLightLevel", "GuiLightGround", "GuiLightTint", "GuiLightRed",
     "GuiLightGreen", "GuiLightBlue", "GuiWthMode", "GuiWthTrio", "GuiWthRain",
     "GuiWthSnow", "GuiWthFire", "GuiWthCloud", "GuiWthStyle", "GuiCrate"
 };
 static const char* const kLightKey[LIGHT_PRESET_COUNT + 1] = {
     "GuiLightOrig", "GuiLightStandard", "GuiLightMorning", "GuiLightAfternoon",
     "GuiLightDusk", "GuiLightNight", "GuiLightCustom"
+};
+/* 调色方式名 (顺序与 LIGHT_MODE_* 一致) */
+static const char* const kLightModeKey[LIGHT_MODE_COUNT] = {
+    "GuiLightModePerCell", "GuiLightModeUniform"
 };
 static const char* const kSkinKey[ESC_SKIN_N] = {
     "GuiSkinDefault", "GuiSkin1", "GuiSkin2", "GuiSkin3", "GuiSkin4"
@@ -424,6 +437,7 @@ static void Esc_LoadAllText(void)
     ESC_LOAD_FAM(kWeatherKey, s_GuiWthMode, 0);
     ESC_LOAD_FAM(kCldStyleKey, s_GuiWthStyle, 0);
     ESC_LOAD_FAM(kLightKey, s_GuiLight, 0);
+    ESC_LOAD_FAM(kLightModeKey, s_GuiLightMode, 0);
 
     Esc_TextText("TextTitle", s_TextTitle, ESC_LABEL_CAP);
     ESC_LOAD_FAM(kTextKey, s_TextLabel, 1);
@@ -644,7 +658,9 @@ static const EscGuiRowInfo s_GuiLayout[ESC_GUI_DISPLAY] = {
     { EG_SLIDE,  GUI_ITEM_GAMESPEED },
     { EG_GROUP,  GUI_GROUP_LIGHT },
     { EG_CHOICE, GUI_ITEM_LIGHT_PRESET },
+    { EG_CHOICE, GUI_ITEM_LIGHT_MODE },
     { EG_LIGHTPARM, GUI_ITEM_LIGHT_PARM },
+    { EG_LIGHTPARM, GUI_ITEM_LIGHT_TINT },
     { EG_CHOICE, GUI_ITEM_WTH_MODE },
     { EG_TRIO,   GUI_ITEM_WTH_TRIO },
     { EG_SWITCH, GUI_ITEM_WTH_CLOUD },
@@ -1210,12 +1226,20 @@ static void EscChoiceLightApply(int pick)
     Lighting_ApplyPreset(pick);
 }
 
+/* 调色方式: 逐格 / 统一。只影响"改动怎么上色", 与光照一样只在本次运行有效。 */
+static void EscChoiceLightModeApply(int pick)
+{
+    Lighting_SetMode(pick);
+}
+
 static const EscChoice s_Choice[] = {
     { GUI_ITEM_SCATTER,   s_GuiScatter, ESC_SCATTER_N,  0, PS_Mode,       EscChoiceScatter },
     { GUI_ITEM_SIDE_HIDE, s_GuiHide,    ESC_HIDE_N,     0, FM_HideState,  EscChoiceHide },
     { GUI_ITEM_SWS_SIDE,  s_GuiSwsSide, ESC_SWS_SIDE_N, 1, SWS_SideRight, EscChoiceSwsSide },
     { GUI_ITEM_LIGHT_PRESET, s_GuiLight, LIGHT_PRESET_COUNT + 1, 0,
       EscChoiceLightGet, EscChoiceLightApply },
+    { GUI_ITEM_LIGHT_MODE, s_GuiLightMode, LIGHT_MODE_COUNT, 0,
+      Lighting_Mode, EscChoiceLightModeApply },
     { GUI_ITEM_WTH_MODE,  s_GuiWthMode, WEATHER_DRAW_N, 0, Weather_DrawMode,
       EscChoiceWthMode },
     { GUI_ITEM_WTH_STYLE, s_GuiWthStyle, WEATHER_CLOUD_STYLE_N, 0,
@@ -1412,27 +1436,44 @@ static int Esc_SlideXFor(int value, int trkX, int trkW)
 }
 
 /* ---------------- 光照参数行 ----------------
- * 一行四个小格: [标题][数值框]。没有 +/- 按钮 (点数值框直接输数字),
- * 数值框按三位数定宽。四个小格按各自标题的实际文字宽度排 (英文
- * "Ambient" 不会被截断), 格与格之间是固定间距, 整组贴行右端。 */
+ * 两行各三个小格: [标题][数值框]。第一行 环境/等级/地面, 第二行 红/绿/蓝。
+ * 没有 +/- 按钮 (点数值框直接输数字), 数值框按三位数定宽。每行内的小格按各自
+ * 标题的实际文字宽度排, 整组贴行右端 —— 与其它选项行 (标签在左、控件在右) 同版式。 */
 #define LIGHT_CAP_GAP    4       /* 小标题与数值框之间的缝 */
 #define LIGHT_BOX_MIN    32      /* 数值框最小宽 (三位数 + 留白) */
 #define LIGHT_BOX_PAD    12      /* 数值框左右留白 */
 #define LIGHT_CELL_GAP   14      /* 两格之间的缝 */
+#define LIGHT_ROW_CELLS  3       /* 每行三格 */
+
+/* 参数号 -> 菜单 item (顺序 = 显示顺序, 与 LIGHT_P_* 一致) */
+static const int s_LightItem[LIGHT_PARAM_N] = {
+    GUI_ITEM_LIGHT_AMBIENT, GUI_ITEM_LIGHT_LEVEL, GUI_ITEM_LIGHT_GROUND,
+    GUI_ITEM_LIGHT_RED, GUI_ITEM_LIGHT_GREEN, GUI_ITEM_LIGHT_BLUE
+};
 
 static int Esc_LightItemIdx(int item)
 {
-    if (item < GUI_ITEM_LIGHT_AMBIENT || item > GUI_ITEM_LIGHT_BLUE) return -1;
-    return item - GUI_ITEM_LIGHT_AMBIENT;
+    int i;
+
+    for (i = 0; i < LIGHT_PARAM_N; i++)
+        if (s_LightItem[i] == item) return i;
+    return -1;
 }
 
-/* 四个格子的几何。每格 = [小标题][数值框], 组内紧凑, 整组贴行右端 ——
- * 与其它选项行 (标签在左、控件在右) 的版式一致。 */
+/* 行 item (标题所在行) -> 这一行第一个参数号; -1 = 不是参数行。 */
+static int Esc_LightRowFirst(int item)
+{
+    if (item == GUI_ITEM_LIGHT_PARM) return 0;
+    if (item == GUI_ITEM_LIGHT_TINT) return LIGHT_ROW_CELLS;
+    return -1;
+}
+
+/* 一行三格的几何。每格 = [小标题][数值框], 组内紧凑, 整组贴行右端。 */
 typedef struct {
-    int capX[LIGHT_PARAM_N];   /* 小标题 x */
-    int capW[LIGHT_PARAM_N];   /* 小标题宽 (按实测文字宽度) */
-    int boxX[LIGHT_PARAM_N];   /* 数值框 x */
-    int boxW;                  /* 数值框宽 (四格相同) */
+    int capX[LIGHT_ROW_CELLS];         /* 小标题 x */
+    int capW[LIGHT_ROW_CELLS];         /* 小标题宽 (按实测文字宽度) */
+    int boxX[LIGHT_ROW_CELLS];         /* 数值框 x */
+    int boxW;                          /* 数值框宽 (三格相同) */
 } LightGeom;
 
 /* 数值框宽度: 恰好放三位数字 (上限 999), 不留空位。 */
@@ -1445,25 +1486,25 @@ static int Esc_LightBoxW(void)
     return (w > LIGHT_BOX_MIN) ? w : LIGHT_BOX_MIN;
 }
 
-static void Esc_LightGeom(int rowL, int rowW, LightGeom* g)
+static void Esc_LightGeom(int first, int rowL, int rowW, LightGeom* g)
 {
     int right = rowL + rowW - ESC_CTL_RIGHT;
     int total = 0, x, i;
 
     g->boxW = Esc_LightBoxW();
-    for (i = 0; i < LIGHT_PARAM_N; i++)
+    for (i = 0; i < LIGHT_ROW_CELLS; i++)
     {
-        /* 宽度按实测来, 不能用固定值 —— 固定值会把 "Ambient" 截成 "Amt"。 */
-        g->capW[i] = Esc_TextWidth(s_GuiLabel[GUI_ITEM_LIGHT_AMBIENT + i],
+        /* 宽度按实测: 固定值会把 "Ambient" 截成 "Amt"。 */
+        g->capW[i] = Esc_TextWidth(s_GuiLabel[s_LightItem[first + i]],
                                    ESC_BODY_PX, ESC_BODY_SLOT);
         if (g->capW[i] <= 0) g->capW[i] = 16;
         total += g->capW[i] + LIGHT_CAP_GAP + g->boxW;
     }
-    total += LIGHT_CELL_GAP * (LIGHT_PARAM_N - 1);
+    total += LIGHT_CELL_GAP * (LIGHT_ROW_CELLS - 1);
 
     x = right - total;
     if (x < rowL + 4) x = rowL + 4;
-    for (i = 0; i < LIGHT_PARAM_N; i++)
+    for (i = 0; i < LIGHT_ROW_CELLS; i++)
     {
         g->capX[i] = x;
         g->boxX[i] = x + g->capW[i] + LIGHT_CAP_GAP;
@@ -1479,10 +1520,11 @@ static void Esc_NumBoxFor(int item, const RECT* right, int* x, int* w)
     if (idx >= 0)
     {
         LightGeom g;
+        int rowL = right->left + ESC_PAD;
+        int rowW = (right->right - right->left) - ESC_PAD * 2;
 
-        Esc_LightGeom(right->left + ESC_PAD,
-                      (right->right - right->left) - ESC_PAD * 2, &g);
-        *x = g.boxX[idx];
+        Esc_LightGeom((idx / LIGHT_ROW_CELLS) * LIGHT_ROW_CELLS, rowL, rowW, &g);
+        *x = g.boxX[idx % LIGHT_ROW_CELLS];
         *w = g.boxW;
         return;
     }
@@ -1864,27 +1906,31 @@ static void Esc_DrawEditBox(void* surf, int x, int y, int w, int textY,
     Esc_DrawNumText(surf, x, y, w, textY, value, editing, text);
 }
 
-/* 光照参数行: 环境 / 红 / 绿 / 蓝 四个格子, 数值单位 = 地图 ini 的 ×100。
- * 没有 +/- 按钮 —— 点数值框直接输数字 (三位数)。 */
+/* 光照参数行: 一行三格, 数值单位见 LightingPreset.h (环境与 R/G/B = ini ×100,
+ * 等级/地面 = ini ×1000)。item = 该行的行标题 item。 */
 static void Esc_DrawLightParamRow(void* surf, int rowL, int rowY, int rowW,
-                                  int bodyH, const wchar_t* label)
+                                  int bodyH, const wchar_t* label, int item)
 {
     LightGeom g;
+    int first = Esc_LightRowFirst(item);
     int i, boxY;
 
-    Esc_LightGeom(rowL, rowW, &g);
+    if (first < 0) return;
+    Esc_LightGeom(first, rowL, rowW, &g);
     Esc_RowLabel(surf, rowL, rowY, g.capX[0], bodyH, label);
 
     boxY = rowY + (ESC_ROW_H - ESC_STEP_BTN_H) / 2;
-    for (i = 0; i < LIGHT_PARAM_N; i++)
+    for (i = 0; i < LIGHT_ROW_CELLS; i++)
     {
-        Esc_Text(surf, s_GuiLabel[GUI_ITEM_LIGHT_AMBIENT + i], g.capX[i],
+        int p = first + i;
+
+        Esc_Text(surf, s_GuiLabel[s_LightItem[p]], g.capX[i],
                  rowY + (ESC_ROW_H - bodyH) / 2, g.capW[i],
                  ESC_BODY_PX, ESC_BODY_SLOT, 230, 230, 230);
         Esc_DrawEditBox(surf, g.boxX[i], boxY, g.boxW,
                         rowY + (ESC_ROW_H - bodyH) / 2,
-                        Lighting_GetParam(i),
-                        Esc_EditIs(EDIT_PAGE_GUI, GUI_ITEM_LIGHT_AMBIENT + i),
+                        Lighting_GetParam(p),
+                        Esc_EditIs(EDIT_PAGE_GUI, s_LightItem[p]),
                         NULL);
     }
 }
@@ -2016,7 +2062,8 @@ static void Esc_DrawGuiRow(void* surf, int rowL, int rowY, int rowW, int rh,
                          cur > ESC_SPEED_MAX ? L"MAX" : NULL);
     }
     else if (kind == EG_LIGHTPARM)
-        Esc_DrawLightParamRow(surf, rowL, rowY, rowW, bodyH, s_GuiLabel[item]);
+        Esc_DrawLightParamRow(surf, rowL, rowY, rowW, bodyH, s_GuiLabel[item],
+                              item);
     else if (kind == EG_TRIO)
         Esc_DrawTrioRow(surf, rowL, rowY, rowW, rh, bodyH);
     else if (kind == EG_COLOR)
@@ -2695,19 +2742,24 @@ static void Esc_ApplyGui(HWND hDlg, const RECT* right, int index, int mx,
         if (!PlayerColor_Set(pick)) return;
         break;
     case GUI_ITEM_LIGHT_PARM:
+    case GUI_ITEM_LIGHT_TINT:
     {
         LightGeom g;
+        int first = Esc_LightRowFirst(index);
         int i;
 
-        Esc_LightGeom(right->left + ESC_PAD,
+        if (first < 0) return;
+        Esc_LightGeom(first, right->left + ESC_PAD,
                       (right->right - right->left) - ESC_PAD * 2, &g);
-        for (i = 0; i < LIGHT_PARAM_N; i++)
+        for (i = 0; i < LIGHT_ROW_CELLS; i++)
         {
             if (mx >= g.boxX[i] && mx < g.boxX[i] + g.boxW)
             {
+                int p = first + i;
+
                 Esc_EditBegin(hDlg, right, mx, EDIT_PAGE_GUI,
-                              GUI_ITEM_LIGHT_AMBIENT + i,
-                              Lighting_GetParam(i), 0, LIGHT_PARAM_MAX);
+                              s_LightItem[p], Lighting_GetParam(p),
+                              0, LIGHT_PARAM_MAX);
                 return;
             }
         }
@@ -2920,20 +2972,21 @@ static int Esc_WheelValue(HWND h, const RECT* b, int mx, int my, int delta)
             maxv = ESC_SPEED_TOP;
             step = ESC_SPEED_STEP;
         }
-        else if (index == GUI_ITEM_LIGHT_PARM)
+        else if (Esc_LightRowFirst(index) >= 0)
         {
             /* 光照参数行: 光标落在哪一格调哪个参数 */
             LightGeom g;
             int rowL = b->left + ESC_PAD;
             int rowW = (b->right - b->left) - ESC_PAD * 2;
+            int first = Esc_LightRowFirst(index);
             int i;
 
-            Esc_LightGeom(rowL, rowW, &g);
-            for (i = 0; i < LIGHT_PARAM_N; i++)
+            Esc_LightGeom(first, rowL, rowW, &g);
+            for (i = 0; i < LIGHT_ROW_CELLS; i++)
                 if (mx >= g.boxX[i] && mx < g.boxX[i] + g.boxW) break;
-            if (i >= LIGHT_PARAM_N) return 0;
-            index = GUI_ITEM_LIGHT_AMBIENT + i;
-            v = Lighting_GetParam(i);
+            if (i >= LIGHT_ROW_CELLS) return 0;
+            index = s_LightItem[first + i];
+            v = Lighting_GetParam(first + i);
             minv = 0;
             maxv = LIGHT_PARAM_MAX;
             step = 1;

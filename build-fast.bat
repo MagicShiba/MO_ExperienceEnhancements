@@ -49,9 +49,11 @@ if "%LINK%"=="0" (
   exit /b 0
 )
 
+rem -s strips the COFF symbol table (~180 KB) and the DWARF sections libgcc
+rem ships; crash addresses are resolved through obj\MOExperience.map instead.
 echo [ld] linking
 g++ -shared -o dist\MOExperience.dll %OBJS% obj\icons.res.o ^
-  -nostdlib -lkernel32 -luser32 -lgdi32 -limm32 -lgcc ^
+  -nostdlib -lkernel32 -luser32 -lgdi32 -limm32 -lole32 -lgcc -s ^
   -Wl,--enable-stdcall-fixup -Wl,--no-insert-timestamp -Wl,--entry,_DllMain@12 -Wl,-Map=obj\MOExperience.map
 if errorlevel 1 exit /b 1
 
