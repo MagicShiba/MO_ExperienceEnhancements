@@ -150,6 +150,15 @@
 #define OFF_BLD_OCC_ITEMS       0x688u
 #define OFF_BLD_OCC_COUNT       0x694u
 
+/* HouseClass::IsAlliedWith(HouseClass const*) 0x4F9A50, __thiscall 只读,
+ * 返回值只在 AL (函数指针须声明为 unsigned char)。同盟含自己。 */
+#define FN_HOUSE_ISALLIED       0x004F9A50u
+
+/* MissionClass::ForceMission(Mission) 0x5B2FD0, __thiscall 单参:
+ * 立刻把 CurrentMission 换掉并清 QueuedMission/状态计时 (不改任何"任务结果")。
+ * 任务处理器想中途结束自己时用它, 例: 吸收型建筑卸载完一个人要回到 Guard。 */
+#define FN_MISSION_FORCE        0x005B2FD0u
+
 /* 类型的名字字段: AbstractTypeClass::ID (0x24, char[0x18]) 与
  * ObjectTypeClass::ImageFile (0x1F8, char[0x19])。art ini 的节名用 ImageFile,
  * 空时落 ID (与引擎查 art 的顺序一致)。 */

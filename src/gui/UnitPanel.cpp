@@ -15,6 +15,7 @@
 #include "GdiText.h"
 #include "IconSnap.h"
 #include "OrderUtil.h"
+#include "Observer.h"
 #include "PauseView.h"
 #include "PcxImage.h"
 #include "SingleUnload.h"
@@ -1245,9 +1246,52 @@ static int Up_NoManualUnload(void* type)
     return v;
 }
 
-/* 驻军建筑: 载员在 BuildingClass::Occupants 向量里 (Items 0x688 / Count 0x694),
- * 与载具的 Passengers 链是两套存储。向量序就是面板序, 点击时按同一序反查
- * (SingleUnload.cpp)。 */
+/* 载员可见性: 只看容器 (车/楼) 的归属, 每次重建判一次。敌人的整份舱单不列,
+ * 本家与盟友照列; 观战不参与对局, 全部可见。
+ * 载员本身不看: 心控来的敌车 Owner 已改成我方 (原主存在 CaptureManager 节点里),
+ * 车里的敌方载员照列也照放 —— 与引擎"能放出敌方单位"一致。 */
+typedef unsigned char __attribute__((thiscall)) (*Fn_Up_IsAllied)(void* self, void* other);
+
+static int Up_PaxVisible(void* o)
+{
+    void* me;
+    void* own;
+
+    if (Observer_LocalIsSpectator()) return 1;
+    me = *(void**)ADDR_CURPLAYER;
+    if (!me) return 1;
+    own = *(void**)((char*)o + OFF_OWNER);
+    if (own == me) return 1;
+    return ((Fn_Up_IsAllied)FN_HOUSE_ISALLIED)(me, own) ? 1 : 0;
+}
+
+/* 载员链 (TechnoClass::Passengers: 数 0x114 / 头 0x118)。载具走这里, 吸收型建筑
+ * (InfantryAbsorb/UnitAbsorb, 例如生物反应炉 YAPOWR) 也走这里 —— 引擎只把驻军放进
+ * Occupants, 吸收进来的人挂在这条链上。链序由模拟决定, 点击时按同一序反查。 */
+static int Up_AddChain(void* o, UpEnt* all, int n)
+{
+    int cnt = *(int*)((char*)o + OFF_TECH_PASSNUM);
+    void* p;
+    int guard = 0;
+
+    if (cnt <= 0) return n;               /* 计数是权威: 0 就不去碰链头 */
+    p = *(void**)((char*)o + OFF_TECH_PASSFIRST);
+    while (p && IsPlausiblePtr(p) && guard < 64 && n < UP_ENT_MAX)
+    {
+        void* t = Up_TypeOf(p, Up_WhatAmI(p));
+        if (t)
+        {
+            all[n].obj = p; all[n].type = t; all[n].count = 1;
+            n++;
+        }
+        p = *(void**)((char*)p + OFF_NEXT_OBJ);
+        guard++;
+    }
+    return n;
+}
+
+/* 驻军建筑: 载员在 BuildingClass::Occupants 向量里 (Items 0x688 / Count 0x694)。
+ * 向量序就是面板序, 点击时按同一序反查 (SingleUnload.cpp)。 */
 static int Up_AddOccupants(void* o, UpEnt* all, int n)
 {
     void** items = *(void***)((char*)o + OFF_BLD_OCC_ITEMS);
@@ -1270,6 +1314,15 @@ static int Up_AddOccupants(void* o, UpEnt* all, int n)
     return n;
 }
 
+/* 面板上这个建筑的载员是不是取自载员链 (Occupants 为空 = 吸收型建筑)。
+ * 这类载员能单卸 (SingleUnload 按链序放), 但 Z 规划只认 Occupants 向量,
+ * 所以 shift 多选时不进名单 —— 名单就是喂给规划用的。 */
+static int Up_PaxFromChain(void* o)
+{
+    if (!o || Up_WhatAmI(o) != ABS_BUILDING) return 0;
+    return *(int*)((char*)o + OFF_BLD_OCC_COUNT) <= 0 ? 1 : 0;
+}
+
 /* 重建整张表 + 当前页的 9 格 */
 static void Up_FitGrid(int n);
 static void Up_Rebuild(void)
@@ -1290,29 +1343,14 @@ static void Up_Rebuild(void)
         all[0].obj = o; all[0].type = s_List[0].type; all[0].count = 1;
         all[1].obj = o; all[1].type = s_List[0].type; all[1].count = 0;   /* 0 => 信息格 */
         n = 2;
-        if (showPax && Up_WhatAmI(o) == ABS_BUILDING)
+        /* 载员: 归属只判容器一次, 过了才铺。 */
+        if (showPax && Up_PaxVisible(o))
         {
-            n = Up_AddOccupants(o, all, n);
-        }
-        else if (showPax)
-        {
-            int pn = *(int*)((char*)o + OFF_TECH_PASSNUM);
-            void* p = *(void**)((char*)o + OFF_TECH_PASSFIRST);
-            if (pn > 0 && p && IsPlausiblePtr(p))
-            {
-                int guard = 0;
-                while (p && IsPlausiblePtr(p) && guard < 64 && n < UP_ENT_MAX)
-                {
-                    void* t = Up_TypeOf(p, Up_WhatAmI(p));
-                    if (t)
-                    {
-                        all[n].obj = p; all[n].type = t; all[n].count = 1;
-                        n++;
-                    }
-                    p = *(void**)((char*)p + OFF_NEXT_OBJ);
-                    guard++;
-                }
-            }
+            /* 两种存储互斥: 驻军在 Occupants 向量, 吸收型建筑 (Occupants 恒空)
+             * 在载员链。 */
+            n = (Up_WhatAmI(o) == ABS_BUILDING && !Up_PaxFromChain(o))
+                ? Up_AddOccupants(o, all, n)
+                : Up_AddChain(o, all, n);
         }
         occ = n - 2;
         if (occ <= cap)
@@ -2393,6 +2431,9 @@ static void Up_ClickAt(int mx, int my)
             if (!e->obj || !e->type || e->count <= 0) return;
             if (sh)
             {
+                /* 载员链上的载员 (吸收型建筑) 不进名单: 名单只喂给 SingleUnload
+                 * 的规划, 那条路认 Occupants 序号, 框起来是个死键。 */
+                if (Up_PaxFromChain(s_List[0].obj)) return;
                 Up_PickToggle(s_List[0].obj, e->obj);
                 /* 已经在给这辆车规划时, 名单变化要立刻反映到参与集合上 */
                 SU_PlanResync(s_List[0].obj, s_Pick, s_PickN);

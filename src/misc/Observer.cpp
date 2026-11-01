@@ -68,19 +68,24 @@ static int OB_NodeClaimsHouse(void* house)
     return 0;
 }
 
-/* 本房无出生点（ArrayIndex 不在 Scenario::HouseIndices 内）。 */
+/* 本房无出生点（ArrayIndex 不在 Scenario::HouseIndices 内）。
+ * 整表全 -1 = 未初始化（这张表是选房阶段的数据，读档不恢复），不能当"无出生点"的证据：
+ * 否则读档进图后本机被判成观战者，所有"观战全可见 / 观战不参与对局"的分支一起误判。 */
 static int OB_HouseHasNoSpawn(void* house)
 {
     const int* idx;
-    int arrayIndex, i;
+    int arrayIndex, i, valid = 0;
 
     idx = (const int*)(*(const char**)ADDR_SCENARIO + OFF_HOUSEINDICES);
     if (!IsPlausiblePtr(idx)) return 0;
     arrayIndex = *(int*)((const char*)house + OFF_HOUSE_INDEX);
     if (arrayIndex < 0 || arrayIndex > 1024) return 0;
     for (i = 0; i < 16; i++)
+    {
+        if (idx[i] >= 0 && idx[i] <= 1024) valid++;
         if (idx[i] == arrayIndex) return 0;
-    return 1;
+    }
+    return valid > 0 ? 1 : 0;
 }
 
 /* 是否任一观战槽（不只是全局真观战房）。 */

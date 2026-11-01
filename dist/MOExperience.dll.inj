@@ -135,6 +135,9 @@
 ; 0x4581A4 是循环收尾 (只移走放走的那个, 不清空向量)。见 src/misc/SingleUnload.cpp
 0x4580A9 = SU_BldLoop, 6
 0x4581A4 = SU_BldTail, 5
+; 吸收型建筑 (生物反应炉) 同理: 0x44D8D3 是 Mi_Unload 摘链头那句 (call rel32,
+; 桩内不重定位, 钩子自己跑原 call), 摘完把任务排回 Guard。见 src/misc/SingleUnload.cpp
+0x44D8D3 = SU_AbsorbPop, 5
 ; 存档缩略图: StgCreateDocfileW 调用点取宽字符路径, 尾部 (BL=1) 写 <存档目录>\Thumbs\<名>.bmp。见 src/gui/SaveShot.cpp
 0x67CF42 = SaveShot_SaveBegin, 6
 0x67D2F1 = SaveShot_SaveEnd, 5

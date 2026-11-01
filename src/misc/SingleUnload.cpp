@@ -39,6 +39,8 @@
 #define SU_ADDR_POP_DONE   0x0073D8D2u   /* call RemoveFirstPassenger 的下一句 */
 #define SU_ADDR_BLD_SKIP   0x0045819Du   /* 驻军循环: dec ebp; jns 循环头 */
 #define SU_ADDR_BLD_TAIL   0x004581C9u   /* 驻军循环: 清向量之后的动画刷新 */
+#define SU_ADDR_ABS_POP_DONE 0x0044D8D8u /* 吸收型建筑: 摘链头那句 call 的下一句 (cmp esi,edi) */
+#define SU_MISSION_GUARD     5
 
 /* 0x457DE0 在放人循环前 +1、循环后 -1 的"卸载进行中"计数 (其它代码据此跳过
  * 重入路径, 例如 0x4D9736)。单卸保留向量, 但这个计数必须照原样平衡。 */
@@ -53,10 +55,13 @@
 #define SU_CLICK_MS      350u            /* 同一 (车,载员) 双击去重 */
 
 typedef void __attribute__((thiscall)) (*Fn_SU_RemovePax)(void* self, void* pax);
-/* 原生"弹链头" 0x4DE710: 只有 ECX=this, 无栈参, 返回被卸者。
- * 站点 0x73D8CD 那句 call 被 Syringe 抄进桩里时 rel32 不会修正, 所以
- * "跑原指令" 在这里等于跳到别的代码池 (见 notes/崩溃定位.md)。 */
+/* 弹链头, 两种站点同一个约定 (ecx = 参数, 无栈参, 返回被卸者):
+ *   0x4DE710 = 原生"弹链头" (ecx = 车)
+ *   0x473430 = PassengerClass::RemoveFirstPassenger (ecx = 单位 + 0x114)
+ * 站点那句 call 被 Syringe 抄进桩里时 rel32 不会修正, 所以"跑原指令"在这里
+ * 等于跳到别的代码池 (见 notes/崩溃定位.md), 一律自己调。 */
 typedef void* __attribute__((thiscall)) (*Fn_SU_PopHead)(void* self);
+typedef unsigned char __attribute__((thiscall)) (*Fn_SU_ForceMission)(void* self, int mission);
 
 typedef struct
 {
@@ -492,6 +497,89 @@ extern "C" __declspec(dllexport) unsigned __cdecl SU_BldTail(void* regs)
     s_BldFired = 0;
     s_BldPax = 0;
     return SU_ADDR_BLD_TAIL;
+}
+
+/* ---------------- 吸收型建筑 (InfantryAbsorb/UnitAbsorb, 生物反应炉 YAPOWR) ---- */
+
+/* 把链上某个载员挪到链头 (NumPassengers 不变)。引擎只摘链头, 想放指定那个
+ * 必须先挪到最前; 挪完再摘, 其余载员的相对顺序与原来一致。
+ * 链是模拟状态, 但改动与"引擎自己摘"的结果等价: 摘掉的正是被点名那个。 */
+static void SU_ChainToHead(void* host, void* pax)
+{
+    void* prev = 0;
+    void* p = *(void**)((char*)host + OFF_TECH_PASSFIRST);
+    int guard = 0;
+
+    while (p && p != pax && IsPlausiblePtr(p) && guard < 64)
+    {
+        prev = p;
+        p = *(void**)((char*)p + OFF_NEXT_OBJ);
+        guard++;
+    }
+    if (p != pax || !prev) return;        /* 已在链头 / 不在链上: 不用动 */
+    *(void**)((char*)prev + OFF_NEXT_OBJ) = *(void**)((char*)pax + OFF_NEXT_OBJ);
+    *(void**)((char*)pax + OFF_NEXT_OBJ) = *(void**)((char*)host + OFF_TECH_PASSFIRST);
+    *(void**)((char*)host + OFF_TECH_PASSFIRST) = pax;
+}
+
+/* 跑原站点那句摘链头 (0x473430, ecx = &PassengerClass) 并把返回值写进 EAX ——
+ * 下一句 (0x44D8D8) 读的就是它。桩里那句 call 不会重定位, 所以必须自己跑。 */
+static void SU_PopChainHead(void* regs, void* b)
+{
+    void* pax = ((Fn_SU_PopHead)(void*)0x00473430u)((char*)b + OFF_TECH_PASSNUM);
+    *(unsigned*)((char*)regs + REG_OFF_EAX) = (unsigned)(size_t)pax;
+}
+
+/* 吸收型建筑的卸载 (BuildingClass::Mi_Unload 0x44D880): 引擎每 tick 只摘一个
+ * 链头再 unlimbo, 没有"放哪一个"的入口, 所以与驻军不同 —— 它不会一次放完。
+ * 有记录就把目标挪到链头再摘; 摘完必须把任务排回 Guard, 否则下一个 tick 会
+ * 继续把剩下的全吐出来。
+ * 寄存器: Mi_Unload 里 ebp = 建筑 (0x44D8BF 读 [ebp+0x114])。 */
+extern "C" __declspec(dllexport) unsigned __cdecl SU_AbsorbPop(void* regs)
+{
+    void* b = (void*)(size_t)SU_Reg(regs, REG_OFF_EBP);
+    void* pax;
+    int i;
+
+    if (!b || !IsPlausiblePtr(b))
+    {
+        /* 认不出容器: 摘不了也别跳回去 (桩里那句 call 不会重定位), 当没摘到。 */
+        *(unsigned*)((char*)regs + REG_OFF_EAX) = 0;
+        return SU_ADDR_ABS_POP_DONE;
+    }
+    i = SU_Find(b);
+    if (i >= 0 && s_Rec[i].expire && SU_Frame() > s_Rec[i].expire)
+    {
+        SU_Drop(i);
+        i = -1;
+    }
+    if (i >= 0 && s_Rec[i].fired)
+    {
+        /* 已经放过一个: 任务本该被换掉, 万一引擎又进来也不再摘人
+         * (EAX=0 = 没摘到, 处理器直接返回等待)。 */
+        *(unsigned*)((char*)regs + REG_OFF_EAX) = 0;
+        return SU_ADDR_ABS_POP_DONE;
+    }
+    pax = (i >= 0) ? SU_PaxAt(b, s_Rec[i].idx) : 0;
+    if (!pax)
+    {
+        if (i >= 0)
+        {
+            SU_LogIdx("su: abs gone idx=", s_Rec[i].idx);
+            SU_Drop(i);
+        }
+        SU_PopChainHead(regs, b);         /* 不是单卸: 原生行为 */
+        return SU_ADDR_ABS_POP_DONE;
+    }
+    SU_ChainToHead(b, pax);
+    SU_PopChainHead(regs, b);
+    s_Rec[i].fired = 1;
+    s_Rec[i].expire = SU_Frame() + SU_BLD_TTL;
+    SU_LogIdx("su: abs pop idx=", s_Rec[i].idx);
+    /* 任务回到 Guard: 卸载任务自身不会结束 (只要链上还有人, 它每 tick 都来摘一个),
+     * 不换掉就会把剩下的全吐出来。 */
+    ((Fn_SU_ForceMission)(void*)FN_MISSION_FORCE)(b, SU_MISSION_GUARD);
+    return SU_ADDR_ABS_POP_DONE;
 }
 
 /* ---------------- 载员路径点 (Z + 点载员格 / 点本车格=全部载员) ---------------- */
@@ -1084,13 +1172,23 @@ int SU_ClickPassenger(void* unit, void* pax)
     if (am == ABS_BUILDING)
     {
         idx = SU_BldIndexOf(unit, pax);
-        if (idx < 0)
+        if (idx >= 0)
         {
-            SU_LogClick("skip bld index", unit, pax, 0);
-            return 0;
+            /* 下标能查到即证明 pax 在驻军向量里 (面板格子就是按这个向量铺的)。 */
+            SU_LogBld(unit, pax, idx);
         }
-        /* 下标能查到即证明 pax 在驻军向量里 (面板格子就是按这个向量铺的)。 */
-        SU_LogBld(unit, pax, idx);
+        else
+        {
+            /* 吸收型建筑 (生物反应炉) 的载员挂在 TechnoClass 链上 (0x114/0x118),
+             * 面板按链序铺格子, 这里按同一序反查。 */
+            idx = SU_IndexOf(unit, pax);
+            if (idx < 0)
+            {
+                SU_LogClick("skip bld index", unit, pax, 0);
+                return 0;
+            }
+            SU_LogPax(unit, pax, idx);
+        }
     }
     else if (am == ABS_UNIT)
     {
