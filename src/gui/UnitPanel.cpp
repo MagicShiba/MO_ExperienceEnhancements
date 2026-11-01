@@ -1588,8 +1588,6 @@ static unsigned short* Up_Cameo(void* type)
     unsigned short* px;
     char name[64];
     char sec[32];
-    int fromPcx = 0;
-    int pcxW = 0, pcxH = 0;   /* 源面尺寸, 只给日志看 (cameo 该是 60x48) */
     void* shp;
 
     if (!type || !IsPlausiblePtr(type)) return NULL;
@@ -1599,37 +1597,12 @@ static unsigned short* Up_Cameo(void* type)
     name[0] = 0;
     sec[0] = 0;
     if (Up_CameoPcxName(type, name, (int)sizeof(name), sec, (int)sizeof(sec)))
-    {
-        px = IconSnap_Pcx(name, UP_ICON_W, UP_ICON_H, &pcxW, &pcxH);
-        fromPcx = (px != NULL);
-    }
+        px = IconSnap_Pcx(name, UP_ICON_W, UP_ICON_H, NULL, NULL);
     if (!px)
     {
         shp = *(void**)((char*)type + OFF_TT_CAMEO);
         if (shp && IsPlausiblePtr(shp)) px = IconSnap_Shp(shp, UP_ICON_W, UP_ICON_H);
         if (!px) return NULL;
-    }
-
-    if (s_CapN < 12 && g_Log)
-    {
-        /* 对应关系排查: 类型 ID / 查的 art 节 / 实际贴的 pcx */
-        char buf[192];
-        unsigned q = 0;
-        const char* id = (const char*)((char*)type + OFF_TYPE_ID);
-        q = AppendCStr(buf, q, "up: icon id=", sizeof(buf));
-        q = Up_AppendId(buf, sizeof(buf), q, id, 16, '?');
-        q = AppendCStr(buf, q, " sec=", sizeof(buf));
-        q = AppendCStr(buf, q, sec[0] ? sec : "?", sizeof(buf));
-        q = AppendCStr(buf, q, fromPcx ? " pcx=" : " shp=", sizeof(buf));
-        q = AppendCStr(buf, q, name[0] ? name : "none", sizeof(buf));
-        if (fromPcx && q + 8 < sizeof(buf))
-        {
-            q = AppendCh(buf, q, ' ', sizeof(buf));
-            q += UtoA((unsigned)pcxW, buf + q);
-            q = AppendCh(buf, q, 'x', sizeof(buf));
-            q += UtoA((unsigned)pcxH, buf + q);
-        }
-        LogLine(buf);
     }
 
     if (s_CapN < UP_CAP_N)

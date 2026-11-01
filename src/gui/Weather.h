@@ -5,7 +5,7 @@
  * 不同)。火雨只有粒子形态, 与画法无关。云影是独立的一层 (云图压暗), 与降水无关。
  *
  * 雨、雪各自独立开关 (同时开就是雨夹雪), 只在本次运行有效;
- * **云影开关**与**画法**是长期设置, 落盘到 [Weather] 的 CloudEnable / DrawMode。
+ * **云影开关**与**画法**是长期设置, 落盘到 [Environment] 的 CloudEnable / DrawMode。
  */
 #pragma once
 
@@ -31,7 +31,7 @@ void Weather_SetCloud(int on);
 
 /* 云影风格预设 (cumulus / big / small / sheet / overcast / patchy / streak /
  * cirrus)。每种是一套独立的噪声语汇 (各自的置换表 + y 轴压缩比), 不是同一张图
- * 调浓淡。菜单里选会落盘到 [Weather] CloudStyle。 */
+ * 调浓淡。菜单里选会落盘到 [Environment] CloudStyle。 */
 #define WEATHER_CLOUD_STYLE_N  8      /* 与 Weather.cpp 的 kCldStyle 行数一致 */
 int  Weather_CloudStyle(void);
 int  Weather_CloudStyleCount(void);

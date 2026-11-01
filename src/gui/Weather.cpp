@@ -33,6 +33,7 @@
 #include "GdiText.h"
 #include "FullMap.h"
 #include "ScaleBar.h"
+#include "EnvIni.h"
 #include <emmintrin.h>          /* 云影压暗的 SSE2 版 (见 Wth_CloudFillSse2) */
 
 /* ---------------- 引擎结构 (只读) ---------------- */
@@ -79,11 +80,12 @@ typedef struct {
 
 static WthLayer g_Layer[2] = { { "RAIN" }, { "SNOW" } };
 
-/* ---------------- 参数 (ini 的 [Weather] 段) ----------------
+/* ---------------- 参数 (ini 的 [Environment] 段) ----------------
  * 这里只有表现参数。落盘的开关只有"云影"和"画法"两项 (见 Wth_LoadState), 降水
  * 开关只在本次运行内有效 —— 配置里不该留下"每次进游戏都下火雨"。
- * 速度统一按"60 帧基准下的像素/秒"给, 内部再换算成 1/16 像素/逻辑帧。 */
-#define WTH_SECTION "Weather"
+ * 速度统一按"60 帧基准下的像素/秒"给, 内部再换算成 1/16 像素/逻辑帧。
+ * 节名与跨模块键名见 core/EnvIni.h (环境显示组的配置全在一节里)。 */
+#define WTH_SECTION ENV_SECTION
 
 enum { WTH_K_RAIN = 0, WTH_K_SNOW = 1, WTH_K_FIRE = 2, WTH_K_N = 3 };
 
@@ -566,7 +568,7 @@ static int g_CamX, g_CamY, g_CamHave = 0;
 static int Wth_StrCaseCmp(const char* a, const char* b);
 
 /* 长期设置: 云影开关与画法。其余开关只在本次运行内有效, 所以不读。
- * 由 ESC 菜单写入 (section "Weather" / key "CloudEnable" / "DrawMode")。 */
+ * 由 ESC 菜单写入 (section "Environment" / key "CloudEnable" / "DrawMode")。 */
 static void Wth_LoadState(void)
 {
     char buf[16];

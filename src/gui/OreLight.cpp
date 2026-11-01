@@ -31,8 +31,10 @@
 #include <windows.h>
 #include "EngineAddr.h"
 #include "GdiText.h"
+#include "OreLight.h"
+#include "EnvIni.h"
 
-#define OL_SECTION "OreLight"
+#define OL_SECTION ENV_SECTION
 
 /* Syringe REGISTERS 偏移 (EngineAddr.h 没有的两个, 同一套布局) */
 #define OL_REG_ESP  0x14u
@@ -50,19 +52,12 @@ static int s_Init, s_On = 1, s_Factor = 50;
 
 static void OL_EnsureInit(void)
 {
-    char msg[64];
-    unsigned p;
-
     if (s_Init) return;
     s_Init = 1;
-    s_On = GetPrivateProfileIntA(OL_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    s_Factor = GetPrivateProfileIntA(OL_SECTION, "Factor", 50, g_IniPath);
+    s_On = GetPrivateProfileIntA(OL_SECTION, ENV_KEY_OREENABLE, 1, g_IniPath) ? 1 : 0;
+    s_Factor = GetPrivateProfileIntA(OL_SECTION, ENV_KEY_OREFACTOR, 50, g_IniPath);
     if (s_Factor < 0) s_Factor = 0;
-    if (s_Factor > 100) s_Factor = 100;
-    if (!s_On) return;
-    p = AppendCStr(msg, 0, "orelight: Factor=", sizeof(msg));
-    p = AppendInt(msg, p, sizeof(msg), s_Factor);
-    LogLine(msg);
+    if (s_Factor > ORELIGHT_FACTOR_MAX) s_Factor = ORELIGHT_FACTOR_MAX;
 }
 
 /* 新 Brightness: 在 1000 与格子 Intensity_Normal 之间按 Factor/100 插值 */
@@ -73,7 +68,6 @@ static int OL_Brightness(void* regs)
 
     if (!cell) return 1000;
     intensity = (int)*(unsigned short*)(cell + OL_CELL_INTENSITY_NORMAL);
-    if (intensity < 0) intensity = 0;
     if (intensity > 2000) intensity = 2000;
     bright = 1000 + (intensity - 1000) * s_Factor / 100;
     if (bright < 0) bright = 0;
@@ -114,4 +108,19 @@ extern "C" __declspec(dllexport) DWORD __cdecl OreLight_Flat(void* regs)
     esp = *(unsigned*)((char*)regs + OL_REG_ESP);
     if (esp) *(unsigned*)(size_t)esp = (unsigned)OL_Brightness(regs);
     return 0;
+}
+
+/* 菜单读写。SetFactor 先走 EnsureInit (读 ini), 显式设置的值再盖过去。 */
+int OreLight_Factor(void)
+{
+    OL_EnsureInit();
+    return s_Factor;
+}
+
+void OreLight_SetFactor(int factor)
+{
+    OL_EnsureInit();
+    if (factor < 0) factor = 0;
+    if (factor > ORELIGHT_FACTOR_MAX) factor = ORELIGHT_FACTOR_MAX;
+    s_Factor = factor;
 }

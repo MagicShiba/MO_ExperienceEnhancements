@@ -8,7 +8,7 @@
 /* 参数顺序: 环境 / 等级 / 地面 / 红 / 绿 / 蓝 (与菜单两行参数格同序)。
  * 单位 = 引擎字段单位: 环境与 R/G/B 是 ini 值 ×100 (75 表示 0.75),
  * 等级/地面是 ini 值 ×1000 (32 表示 0.032) —— 这两项只有百分之几的量级,
- * 按 ×100 会丢到个位数。 */
+ * 按 ×100 会丢到个位数。等级可以是负数。 */
 #define LIGHT_PARAM_N       6
 #define LIGHT_PARAM_MAX     999
 
@@ -27,13 +27,12 @@ enum {
 #define LIGHT_PRESET_CUSTOM   (-1)
 #define LIGHT_PRESET_COUNT     6
 
-/* 调色方式 (只决定"改完之后怎么上色", 不改任何字段值):
- *   PERCEL  = 逐格重建 convert, 每格自己算色 —— 与地图自带光照逐像素一致 (默认);
- *   UNIFORM = 全池统一改色, 与引擎触发器 SetTintRed 同一套 —— 整片一个颜色, 偏亮。
- * 详见 notes/光照预设.md 3.1 / 3.2。 */
-#define LIGHT_MODE_PERCEL      0
-#define LIGHT_MODE_UNIFORM     1
-#define LIGHT_MODE_COUNT       2
+/* 调色比例 (不改任何光照字段, 只决定"单位/建筑/玩家色跟不跟着当前色调走"):
+ *   0   = 地形按每格自己的光源色重建, 单位/建筑保持原色 (与地图自带光照一致);
+ *   100 = 在此之上把玩家色与单位/建筑也染成当前色调 (引擎触发器的范围);
+ *   中间值在 Color1 上线性插值。
+ * 详见 notes/光照预设.md 3.2。 */
+#define LIGHT_MIX_MAX          100
 
 /* 每循环调用: 认出场景重开 (新开/读档) 后把光照恢复成地图原值。 */
 void Lighting_Poll(void);
@@ -47,9 +46,10 @@ void Lighting_ApplyPreset(int preset);
 int  Lighting_GetParam(int idx);
 void Lighting_SetParam(int idx, int value);
 
-/* 调色方式读写 (LIGHT_MODE_*); 改方式会立刻按当前字段重算一遍。 */
-int  Lighting_Mode(void);
-void Lighting_SetMode(int mode);
+/* 调色比例读写 (0..LIGHT_MIX_MAX); 改比例会立刻按当前字段重算一遍。
+ * 长期设置: 落盘 [Environment] LightMix (默认 0 = 不染色), 越局保留。 */
+int  Lighting_Mix(void);
+void Lighting_SetMix(int mix);
 
 /* ESC 菜单"取消"用: 记住 / 还原打开菜单时的光照。 */
 void Lighting_SaveState(void);
