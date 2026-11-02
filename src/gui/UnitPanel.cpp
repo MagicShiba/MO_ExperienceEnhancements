@@ -491,61 +491,17 @@ static void Up_KmReset(void)
     s_ActionKickFrame = -1;
 }
 
-/* 当前地图名 (ScenarioClass::Name)。FileName 读档后是存档名, 比不出图;
- * Name 没写的地图退到 UIName。空名/读不到/脏数据都回 0, 调用方放弃比对。 */
-static int Up_KmMapName(wchar_t* out)
-{
-    char* sc = *(char**)ADDR_SCENARIO;
-    int i;
-
-    out[0] = 0;
-    if (!sc || !IsPlausiblePtr(sc)) return 0;
-    if (MemReadableBytes(sc + OFF_SCEN_NAME, 0x2D * 2) >= 0x2D * 2)
-    {
-        for (i = 0; i < 0x2C; i++)
-        {
-            wchar_t c = *(wchar_t*)(sc + OFF_SCEN_NAME + i * 2);
-            if (!c) break;
-            if (c < 0x20 || c == 0xFFFF) { i = 0; break; }   /* 脏数据 */
-            out[i] = c;
-        }
-        out[i] = 0;
-        if (i > 0) return 1;
-    }
-    if (MemReadableBytes(sc + OFF_SCEN_UINAME, 0x20) >= 0x20)
-    {
-        for (i = 0; i < 0x1F; i++)
-        {
-            char c = sc[OFF_SCEN_UINAME + i];
-            if (!c) break;
-            if ((unsigned char)c < 0x20) return 0;
-            out[i] = (wchar_t)(unsigned char)c;
-        }
-        out[i] = 0;
-        return i > 0;
-    }
-    return 0;
-}
-
-static int Up_KmWStrEq(const wchar_t* a, const wchar_t* b)
-{
-    int i;
-    for (i = 0; a[i] || b[i]; i++)
-        if (a[i] != b[i]) return 0;
-    return 1;
-}
-
 /* 刚进一局: 记下地图名, 与上一局同名就恢复 WASD 开关 (读档接着用, 换图保持
  * 关闭)。锚点不恢复 —— 它们按单位指针+id 索引, 读档后旧对象已经没了。 */
 static void Up_KmMatchEnter(void)
 {
-    wchar_t buf[0x2D];
+    wchar_t buf[OU_SCEN_NAME_MAX];
     int i;
 
-    if (Up_KmMapName(buf))
+    if (OU_ScenarioName(buf))
     {
         /* 折叠态没有模式指示, 恢复等于"键被吞却看不到提示", 所以不恢复 */
-        if (s_KmWant && !s_Collapsed && s_KmMap[0] && Up_KmWStrEq(buf, s_KmMap))
+        if (s_KmWant && !s_Collapsed && s_KmMap[0] && !lstrcmpW(buf, s_KmMap))
         {
             s_KeyMove = 1;
             Up_KmReset();

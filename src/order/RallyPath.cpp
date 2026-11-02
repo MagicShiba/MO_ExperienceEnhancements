@@ -143,14 +143,14 @@ static void RP_LoadTypes(void)
     int i = 0;
     g_RpTypesCount = 0;
     raw[0] = 0;
-    GetPrivateProfileStringA(RP_SECTION, "Types", "", raw, (DWORD)sizeof(raw), g_IniPath);
+    OU_ReadString(RP_SECTION, "Types", "", raw, sizeof(raw));
     while (raw[i] && g_RpTypesCount < RP_TYPES_MAX)
     {
         int k = 0;
-        while (raw[i] == ',' || raw[i] == ';' || raw[i] == ' ' || raw[i] == '\t') i++;
+        while (raw[i] == ',' || raw[i] == ' ' || raw[i] == '\t') i++;
         if (!raw[i]) break;
-        while (raw[i] && raw[i] != ',' && raw[i] != ';' && raw[i] != ' ' &&
-               raw[i] != '\t' && k < 23)
+        while (raw[i] && raw[i] != ',' && raw[i] != ' ' && raw[i] != '\t' &&
+               k < 23)
             g_RpTypes[g_RpTypesCount][k++] = raw[i++];
         g_RpTypes[g_RpTypesCount][k] = 0;
         if (k > 0 && RP_IdOk(g_RpTypes[g_RpTypesCount])) g_RpTypesCount++;

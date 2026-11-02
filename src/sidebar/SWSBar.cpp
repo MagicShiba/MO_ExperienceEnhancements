@@ -716,7 +716,8 @@ static const char* const kGlobalKey[] = {
 
 static void SwsLoadIniList(void)
 {
-    /* 列出节内全部键: 全局键跳过, 其余按超武 ID 收表。 */
+    /* 列出节内全部键: 全局键跳过, 其余按超武 ID 收表。
+     * 整节枚举不是读单值, 走不了 OU_ReadString。 */
     static char keys[8192];
     DWORD n;
     unsigned pos = 0;
@@ -812,9 +813,9 @@ static void SwsEnsureInit(void)
      * 还有**列序** (盟军永远靠屏幕外缘) 与按钮/滚动条/命中框的镜像。 */
     {
         char sideKey[16];
+
         sideKey[0] = 0;
-        GetPrivateProfileStringA(SWS_SECTION, "Side", "right", sideKey,
-                                 (unsigned)sizeof(sideKey), g_IniPath);
+        OU_ReadString(SWS_SECTION, "Side", "right", sideKey, sizeof(sideKey));
         s_SideRight = !(sideKey[0] == 'l' || sideKey[0] == 'L');
         kColOrder = s_SideRight ? kColOrderRight : kColOrderLeft;
     }

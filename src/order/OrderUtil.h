@@ -347,3 +347,11 @@ int OU_ReadHotkey(const char* section, const char* key, OU_Hotkey* io);
  * None 类=禁用)。先按 def 解析出默认值, 再读键覆盖。回 1=启用, 0=禁用。 */
 int OU_ReadHotkeySingle(const char* section, const char* key,
                         const char* def, OU_Hotkey* io);
+
+/* ---------------- 场景 (只读) ---------------- */
+
+#define OU_SCEN_NAME_MAX 0x2D   /* ScenarioClass::Name 的 wchar 上限 (含结尾 0) */
+
+/* 当前地图名 (ScenarioClass::Name; 没写 Name 的地图退到 UIName)。FileName 读档后
+ * 是存档名, 比不出图。空名/读不到/脏数据回 0, 调用方放弃比对。 */
+int OU_ScenarioName(wchar_t* out);

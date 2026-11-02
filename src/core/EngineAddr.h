@@ -494,6 +494,27 @@
  * 渲染计时, 让行动线从头开始画, 不改模拟。 */
 #define FN_START_ACTIONLINES    0x0070D150u
 
+/* ==================== 音效 (sound.ini 的 VocClass 条目) ==================== */
+
+/* VocClass::FindIndex (0x7514D0): fastcall(ecx = 名字) -> 下标, 找不到 -1。
+ * 大小写不敏感; 音效表未装载时同样返回 -1。 */
+#define FN_VOC_FINDINDEX        0x007514D0u
+
+/* VocClass::PlayGlobal (0x750920): fastcall(ecx = 下标, edx = pan 0..0x4000),
+ * 栈 = 音量 float + AudioController*, ret 8。音量是 sound.ini Volume 之上的
+ * 倍率 (传 1.0 = 原音量); 传了 controller 才会在末尾 SetEvent 绑定, 循环音必须
+ * 走这条才能停。 */
+#define FN_VOC_PLAYGLOBAL       0x00750920u
+
+/* AudioController.AudioIndex 必须指向这个实例: End/Stop 拿它当"这个控制器属于
+ * 音频系统"的凭据, 不设就整只函数空转。 */
+#define ADDR_AUDIO_IDX_INST     0x0087E294u
+
+/* AudioController::End (0x405FD0): thiscall, 淡出并释放事件。入口按 (Stamp,
+ * EventType) 核对事件是否还活着, 已被引擎销毁时什么都不做, 所以跨读档/退局补
+ * 一次 End 是安全的。 */
+#define FN_AUDIO_CTRL_END       0x00405FD0u
+
 /* ==================== 事件 (EventClass) ==================== */
 
 #define EVT_SIZE                111u      /* EventClass 结构的字节数 */

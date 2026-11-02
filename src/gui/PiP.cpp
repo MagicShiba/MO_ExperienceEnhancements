@@ -232,7 +232,7 @@ static int PiP_ParseInts(const char* s, int* out, int cap)
     while (s[i] && n < cap)
     {
         int sign = 1, v = 0;
-        while (s[i] == ',' || s[i] == ';' || s[i] == ' ' || s[i] == '\t') i++;
+        while (s[i] == ',' || s[i] == ' ' || s[i] == '\t') i++;
         if (!s[i]) break;
         if (s[i] == '-') { sign = -1; i++; }
         if (s[i] < '0' || s[i] > '9') { i++; continue; }
@@ -283,8 +283,8 @@ void PiP_EnsureInit(void)
     g_AutoJump = PiP_IniBool("AutoJump", 0);
     g_Operate  = PiP_IniBool("Operate", 0);
     g_FollowCfg = PiP_IniBool("Follow", 1);
-    GetPrivateProfileStringA(PIP_SECTION, "ButtonPos",
-                             "8,155,25,158,0,160,0,168", raw, sizeof(raw), g_IniPath);
+    OU_ReadString(PIP_SECTION, "ButtonPos", "8,155,25,158,0,160,0,168",
+                  raw, sizeof(raw));
     if (PiP_ParseInts(raw, pos, 8) == 8)
         for (v = 0; v < 4; v++)
         {

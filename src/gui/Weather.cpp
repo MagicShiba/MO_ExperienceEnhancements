@@ -34,6 +34,9 @@
 #include "FullMap.h"
 #include "ScaleBar.h"
 #include "EnvIni.h"
+#include "OrderUtil.h"
+#include "SoundFx.h"
+#include "LightingPreset.h"
 #include <emmintrin.h>          /* 云影压暗的 SSE2 版 (见 Wth_CloudFillSse2) */
 
 /* ---------------- 引擎结构 (只读) ---------------- */
@@ -61,10 +64,14 @@ typedef void (__fastcall *WthDrawShpFn)(void* surf, void* pal, void* shp,
 
 typedef struct { int X, Y; } WthPt;
 
+/* 三种降水 (雨/雪/火雨) 的编号, 也是 g_On 的下标。 */
+enum { WTH_K_RAIN = 0, WTH_K_SNOW = 1, WTH_K_FIRE = 2, WTH_K_N = 3 };
+
 /* ---------------- 图像档: 单个图层 (雨 / 雪) ---------------- */
 
 typedef struct {
     const char* id;         /* art.ini 的动画 ID */
+    int kind;               /* 对应的 WTH_K_* (开关用) */
     void* type;             /* AnimTypeClass* */
     void* shp;              /* SHPStruct* */
     int frames, w, h;
@@ -74,11 +81,12 @@ typedef struct {
     int frame;
     int fail;               /* 加载失败过就不再每帧重试 */
     int scrollX, scrollY;   /* 相机滚动累计 (像素) */
-    unsigned draws, adv;    /* 诊断: 画了几帧 / 推进了几个动画帧 (打一次日志用) */
-    int diagDone;
 } WthLayer;
 
-static WthLayer g_Layer[2] = { { "RAIN" }, { "SNOW" } };
+static WthLayer g_Layer[2] = {
+    { "RAIN", WTH_K_RAIN },
+    { "SNOW", WTH_K_SNOW }
+};
 
 /* ---------------- 参数 (ini 的 [Environment] 段) ----------------
  * 这里只有表现参数。落盘的开关只有"云影"和"画法"两项 (见 Wth_LoadState), 降水
@@ -87,8 +95,6 @@ static WthLayer g_Layer[2] = { { "RAIN" }, { "SNOW" } };
  * 节名与跨模块键名见 core/EnvIni.h (环境显示组的配置全在一节里)。 */
 #define WTH_SECTION ENV_SECTION
 
-enum { WTH_K_RAIN = 0, WTH_K_SNOW = 1, WTH_K_FIRE = 2, WTH_K_N = 3 };
-
 /* ---------------- 状态 ----------------
  * 三个降水开关 + 云影 + 画法, 互不影响: 雨 + 雪 = 雨夹雪, 云影可以单独开。
  * 只有"云影"和"画法"两项落盘 (长期设置, 见 Wth_LoadState); 降水开关每次进游戏
@@ -96,17 +102,25 @@ enum { WTH_K_RAIN = 0, WTH_K_SNOW = 1, WTH_K_FIRE = 2, WTH_K_N = 3 };
 static int g_Mode = WEATHER_DRAW_IMAGE;
 static int g_On[WTH_K_N];       /* 按 WTH_K_* 索引 */
 static int g_CloudOn = 0;
+static int g_Thunder = 0;       /* 雷电开关 (只在本次运行有效) */
 static int g_Init = 0;
+
+/* 雷声候选池: 每次打闪随机挑一条, 比一道反复响自然。名字是 sound.ini 的条目,
+ * 写在 [Environment] 的 ThunderSound 里, 逗号分隔。 */
+#define WTH_TH_SND_N  3
 
 /* ---------------- 粒子档容量 ----------------
  * 坐标与速度都是 1/16 像素定点 (整数, 不走浮点)。三种天气共用**一个**池子,
  * 布点时按 kind 顺序依次分配 (见 Wth_PxInit), 总和不会超过 WTH_PX_MAX。 */
 #define WTH_FX        4            /* 定点小数位 */
-#define WTH_PX_MAX    1536
+#define WTH_PX_MAX    4096
 #define WTH_SMOKE_MAX 192
-#define WTH_DROP_MAX  320
+#define WTH_DROP_MAX  1024          /* SplashRate 上限 ~1000/s 时水花并发约 1000, 320 会饱和闪烁 */
+#define WTH_RIP_MAX   256           /* 1000/s x 寿命15帧 = 并发 250, 96 同理会饱和 */
 #define WTH_SM_RMAX   8            /* 烟团最大半径 (像素) */
+#define WTH_RIP_RMAX  12           /* 涟漪最大半径 (像素; 水纹铺开才看得见, 比烟团大) */
 #define WTH_DROP_GRAV 7            /* 溅射重力: 每逻辑帧 1/16 像素/帧 的增量 */
+#define WTH_FLAKE_N   4            /* 雪花造型数 */
 
 /* 头部画法: 拖尾是共用的一段代码, 只有头不一样。 */
 enum {
@@ -115,20 +129,27 @@ enum {
     WTH_HEAD_GLOW           /* 加法光斑 + 尾迹之上的烟柱: 火球 */
 };
 
+/* 加法混合 (自发光) 与光照着色都跟着 head 走: GLOW 就是"会发光的那一类",
+ * 加新天气时不用再去落笔里补 kind == WTH_K_FIRE 的判断。 */
+#define WTH_ADD(k)  ((k)->head == WTH_HEAD_GLOW)
+
 /* 一种天气 = 一行参数。雨 / 雪 / 火雨 的差别全在这里, 推进与落笔是同一份代码。 */
 typedef struct {
-    int count, countMin, countMax;  /* 数量 = 视图面积/count, 再夹到 [min,max] */
+    int density;                    /* 每 N 平方像素 1 个粒子 (与分辨率无关的密度) */
     int vLo, vHi;                   /* 速度 px/s */
     int aLo, aHi;                   /* alpha 0~255 */
     int lenLo, lenHi;               /* 拖尾长度 (像素, 0 = 没有拖尾) */
-    int size;                       /* 线宽 / 雪臂长 / 火头半径 */
-    int wind;                       /* 水平速度 = 下落速度*wind/100, 0 = 用 spread */
+    int sizeLo, sizeHi;             /* 线宽 / 雪臂长 / 火头半径 (每个粒子自己抽一个) */
+    int windLo, windHi;             /* 水平速度 = 下落速度*wind/100, 区间内随机;
+                                       负 = 向左; 两值全 0 = 用 spread 抖动 */
     int spread;                     /* 水平速度随机抖动 (%) */
     int sway;                       /* 左右摇摆 (×1/5 像素每帧), 0 = 不摇 */
-    int bigRate;                    /* 1/n 概率变大, 0 = 恒定 */
-    int splash;                     /* 落地溅起几颗 (0 = 不溅) */
+    int bigRate;                    /* 大片比例 (%), 0 = 全小片 */
+    int splashLo, splashHi;         /* 落地溅起几颗 (区间内随机), 0 = 不溅 */
     int splashRate;                 /* 每秒落点次数, 0 = 按数量推算 */
     int head;                       /* WTH_HEAD_* */
+    int lit;                        /* 1 = 颜色跟环境光照走 (雨/雪); 0 = 自发光 (火雨) */
+    int alwaysParticle;             /* 1 = 图像档下也走粒子 (火雨没有 SHP 形态) */
     int fade;                       /* 尾端 alpha 占头部的百分比, 0 = 淡到无 */
     int tailSmoke;                  /* 尾迹后段并入烟色的程度 (0~255) */
     int plume;                      /* 尾迹之上的烟柱长度 (像素, 0 = 不画) */
@@ -197,10 +218,28 @@ typedef struct {
     int smokeALo, smokeAHi;
     int smokeR;                     /* 烟团最大半径 (像素, <= WTH_SM_RMAX) */
     int smokeGrowLo, smokeGrowHi;   /* 每逻辑帧半径增量 (1/16 像素) */
+    int rippleLo, rippleHi;         /* 落地水纹的最大半径范围 (像素, 2~WTH_RIP_RMAX) */
+    int powderLifeLo, powderLifeHi; /* 雪粉寿命范围 (逻辑帧, 60=1秒); 首颗在区间上半段抽 */
+    int lightMix;                   /* 雨雪受环境光着色的百分比 (0=原色, 100=完全跟光照) */
 
     int cloudOpacity;               /* 云心最大压暗 alpha (0~255), 0 = 关 */
     int cloudScale;                 /* 云块尺度 (像素) */
     int cloudStyle;                 /* 云影风格, 索引 kCldStyle */
+
+    /* 雷电与声音。音效名字是 sound.ini 的条目名 (不是 wav 文件名), 走
+     * SoundFx 的 FindIndex 解析; 写成不存在的名字 = 静默不发声 (不报错)。 */
+    int thFlash;                    /* 闪电全屏提亮的峰值 (0~255), 0 = 只画电弧 */
+    int thBolt;                     /* 1 = 画电弧 */
+    int thVol;                      /* 打雷音量倍率 (%), 100 = sound.ini 原音量 */
+    int thLo, thHi;                 /* 两道闪电的间隔范围 (逻辑帧) */
+    int rainVol;                    /* 雨声音量倍率 (%) */
+    int rainSnd;                    /* 1 = 下雨时播 RainLoop */
+    int snowVol;                    /* 风声音量倍率 (%) */
+    int snowSnd;                    /* 1 = 下雪时播 SnowSound 风声 */
+    int thCol[3];                   /* 闪电的加法色 (全屏提亮与电弧都用它调) */
+    char thSnd[WTH_TH_SND_N][24];   /* 雷声候选池, 每次打闪随机挑一条 */
+    char rainName[24];              /* 雨声循环 (sound.ini 里 Control 含 loop) */
+    char snowName[24];              /* 风声循环 (sound.ini 里 Control 含 loop) */
 
     int smokeLight[3], smokeDark[3];
 } WthCfg;
@@ -211,6 +250,28 @@ static WthKind g_Kind[WTH_K_N];
 static void Wth_Col(int* d, int r, int g, int b)
 {
     d[0] = r; d[1] = g; d[2] = b;
+}
+
+/* 一行里逗号分隔的若干名字 -> out[0..n-1], 顺带裁掉每段的空白。少给的槽位清空,
+ * 这样 Sfx_Index 拿到空串会返回 -1, 挑雷声时自然跳过。输入已由 OU_ReadString
+ * 去过注释, 这里只管切分。 */
+static void Wth_CfgList(char out[WTH_TH_SND_N][24], const char* src)
+{
+    int i, n;
+
+    for (n = 0; n < WTH_TH_SND_N; n++) out[n][0] = 0;
+    if (!src) return;
+    for (n = 0, i = 0; n < WTH_TH_SND_N; n++)
+    {
+        int j = 0;
+
+        while (src[i] == ' ' || src[i] == '\t') i++;
+        while (src[i] && src[i] != ',' && j < 23) out[n][j++] = src[i++];
+        while (j > 0 && (out[n][j - 1] == ' ' || out[n][j - 1] == '\t')) j--;
+        out[n][j] = 0;
+        if (src[i] != ',') break;
+        i++;
+    }
 }
 
 static void Wth_Defaults(void)
@@ -224,51 +285,76 @@ static void Wth_Defaults(void)
     g_Cfg.smokeALo = 90;     g_Cfg.smokeAHi = 140;
     g_Cfg.smokeR = WTH_SM_RMAX;
     g_Cfg.smokeGrowLo = 3;   g_Cfg.smokeGrowHi = 6;
+    g_Cfg.rippleLo = 5;      g_Cfg.rippleHi = 9;
 
     g_Cfg.cloudOpacity = 64;        /* 云心压暗 25%: 再重就像"天黑了"而不是"过云" */
     g_Cfg.cloudScale = 400;         /* 一团云约 400px, 一屏七八团 */
     g_Cfg.cloudStyle = 0;           /* cumulus */
+
+    /* 雷电: 打闪 + 打雷。间隔按**逻辑帧**给 (游戏里时间与帧号绑定), 60 帧下
+     * 5~15 秒; 换成 30 帧玩就是 10~30 秒, 与游戏自己的时间一致。 */
+    g_Cfg.thFlash = 110;
+    g_Cfg.thBolt = 1;
+    g_Cfg.thVol = 100;
+    g_Cfg.thLo = 300;
+    g_Cfg.thHi = 900;
+    g_Cfg.rainVol = 100;
+    g_Cfg.rainSnd = 1;
+    g_Cfg.snowVol = 100;
+    g_Cfg.snowSnd = 1;
+    g_Cfg.powderLifeLo = 30;
+    g_Cfg.powderLifeHi = 60;
+    g_Cfg.lightMix = 70;
+    Wth_Col(g_Cfg.thCol, 176, 194, 228);
 
     Wth_Col(g_Cfg.smokeLight, 178, 176, 172);
     Wth_Col(g_Cfg.smokeDark, 70, 66, 62);
 
     /* 雨: 细长线, 带风, 落地溅水花 */
     k = &g_Kind[WTH_K_RAIN];
-    k->count = 1100; k->countMin = 90; k->countMax = 640;
+    k->density = 1100;
     k->vLo = 600;   k->vHi = 1020;
     k->aLo = 150;   k->aHi = 220;
     k->lenLo = 12;  k->lenHi = 24;
-    k->size = 2;
-    k->wind = -22;
-    k->splash = 2;
+    k->sizeLo = 1;  k->sizeHi = 2;
+    k->windLo = -22; k->windHi = -22;
+    k->splashLo = 9; k->splashHi = 9;
+    k->splashRate = 55;
     k->head = WTH_HEAD_LINE;
+    k->lit = 1;
     k->fade = 0;
     Wth_Col(k->colA, 206, 227, 252);
     Wth_Col(k->colB, 206, 227, 252);
 
-    /* 雪: 慢、十字片、左右摇摆, 不溅 */
+    /* 雪: 慢、造型随机的片、左右摇摆, 落地只有一点点雪粉 (不是水花) */
     k = &g_Kind[WTH_K_SNOW];
-    k->count = 1200; k->countMin = 80; k->countMax = 640;
+    k->density = 1100;
     k->vLo = 22;    k->vHi = 67;
     k->aLo = 185;   k->aHi = 255;
-    k->size = 1;
+    k->sizeLo = 1;  k->sizeHi = 1;
     k->spread = 45;
     k->sway = 1;
-    k->bigRate = 4;
+    k->bigRate = 25;
+    k->windLo = 0;  k->windHi = 0;
+    k->splashLo = 2; k->splashHi = 2;
+    k->splashRate = 9;
     k->head = WTH_HEAD_FLAKE;
+    k->lit = 1;
     Wth_Col(k->colA, 246, 250, 255);
     Wth_Col(k->colB, 246, 250, 255);
 
     /* 火雨: 快、亮、带烟 */
     k = &g_Kind[WTH_K_FIRE];
-    k->count = 7500; k->countMin = 24; k->countMax = 96;
+    k->density = 7500;
     k->vLo = 840;   k->vHi = 1560;
     k->aLo = 190;   k->aHi = 240;
     k->lenLo = 20;  k->lenHi = 38;
-    k->size = 2;
+    k->sizeLo = 2;  k->sizeHi = 2;
     k->spread = 15;
-    k->splash = 3;
+    k->splashLo = 8; k->splashHi = 8;
+    k->splashRate = 12;
     k->head = WTH_HEAD_GLOW;
+    k->alwaysParticle = 1;
     k->fade = 25;                   /* 尾端留 1/4 alpha, 与烟柱起点接得上 */
     k->tailSmoke = 150;
     k->plume = 22;
@@ -285,6 +371,18 @@ static int Wth_Hex(int c){
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
 }
+
+/* 单值夹取: 表达式与语句两种用法 (Wth_ReadCfg 的 clamp 段全走 WTH_CLAMP)。 */
+static __inline int Wth_ClampI(int v, int lo, int hi)
+{
+    return (v < lo) ? lo : ((v > hi) ? hi : v);
+}
+#define WTH_CLAMP(v, lo, hi)  ((v) = Wth_ClampI((v), (lo), (hi)))
+
+/* 日志拼接: 每个字段一行, 消掉手工 Append 链的样板。m 必须是数组名 (取 sizeof)。 */
+#define WTH_L_S(m, q, s)  ((q) = AppendCStr((m), (q), (s), sizeof(m)))
+#define WTH_L_C(m, q, c)  ((q) = AppendCh((m), (q), (c), sizeof(m)))
+#define WTH_L_I(m, q, v)  ((q) = AppendInt((m), (q), sizeof(m), (v)))
 
 static void Wth_ParseColor(const char* s, int* out)
 {
@@ -328,13 +426,11 @@ static void Wth_ParseColor(const char* s, int* out)
             v[1] = (int)((val >> 8) & 0xFF);
             v[2] = (int)(val & 0xFF);
         }
-        out[0] = v[0] > 255 ? 255 : v[0];
-        out[1] = v[1] > 255 ? 255 : v[1];
-        out[2] = v[2] > 255 ? 255 : v[2];
+        for (n = 0; n < 3; n++) out[n] = Wth_ClampI(v[n], 0, 255);
         return;
     }
     for (n = 0; n < 3; n++)
-        out[n] = (v[n] < 0) ? 0 : (v[n] > 255 ? 255 : v[n]);
+        out[n] = Wth_ClampI(v[n], 0, 255);
 }
 
 /* CloudStyle 允许写序号或名字 (cumulus / big / small / sheet / overcast, 不分大小写)。
@@ -351,38 +447,50 @@ static int Wth_StyleParse(const char* s)
         return (v < CLD_STYLE_N) ? v : -1;
     }
     for (i = 0; i < CLD_STYLE_N; i++)
-    {
-        const char* a = s;
-        const char* b = kCldStyle[i].name;
-
-        while (*a && *b)
-        {
-            int ca = (*a >= 'A' && *a <= 'Z') ? *a + 32 : *a;
-            int cb = (*b >= 'A' && *b <= 'Z') ? *b + 32 : *b;
-
-            if (ca != cb) break;
-            a++; b++;
-        }
-        if (!*a && !*b) return i;
-    }
+        if (!lstrcmpiA(s, kCldStyle[i].name)) return i;
     return -1;
 }
 
 /* 三种天气的键名只差前缀, 用宏展开成三份 —— 加一种天气 = 加一行 WTH_KCFG。
- * 键名沿用老配置 (RainCount / SnowCount / FireCount ...), 老 ini 不用改。 */
+ * 单值键在 WTH_KCFG, 成对的在 WTH_KPAIR: 配置里写成 "600,1020" 一行,
+ * 只写一个数就是上下限相同。 */
 #define WTH_KCFG(pfx, i)                                                     \
-    { pfx "Count",      &g_Kind[i].count },                                  \
-    { pfx "CountMin",   &g_Kind[i].countMin },                               \
-    { pfx "CountMax",   &g_Kind[i].countMax },                               \
-    { pfx "SpeedMin",   &g_Kind[i].vLo },                                    \
-    { pfx "SpeedMax",   &g_Kind[i].vHi },                                    \
-    { pfx "AlphaMin",   &g_Kind[i].aLo },                                    \
-    { pfx "AlphaMax",   &g_Kind[i].aHi },                                    \
-    { pfx "LenMin",     &g_Kind[i].lenLo },                                  \
-    { pfx "LenMax",     &g_Kind[i].lenHi },                                  \
-    { pfx "Size",       &g_Kind[i].size },                                   \
-    { pfx "Splash",     &g_Kind[i].splash },                                 \
+    { pfx "Density",    &g_Kind[i].density },                                \
     { pfx "SplashRate", &g_Kind[i].splashRate }
+
+#define WTH_KPAIR(pfx, i)                                               \
+    { pfx "Size",   &g_Kind[i].sizeLo,   &g_Kind[i].sizeHi },           \
+    { pfx "Speed",  &g_Kind[i].vLo,      &g_Kind[i].vHi },              \
+    { pfx "Alpha",  &g_Kind[i].aLo,      &g_Kind[i].aHi },              \
+    { pfx "Len",    &g_Kind[i].lenLo,    &g_Kind[i].lenHi },            \
+    { pfx "Splash", &g_Kind[i].splashLo, &g_Kind[i].splashHi }
+
+/* "lo,hi" 一行两个数, 支持负数 (Wind 用)。只写一个数 = 上下限相同;
+ * 读不到或写坏了一律保持默认。 */
+static void Wth_CfgPair(const char* key, int* lo, int* hi)
+{
+    char buf[48];
+    const char* p;
+    int v[2], n = 0;
+
+    OU_ReadString(WTH_SECTION, key, "", buf, sizeof(buf));
+    if (!buf[0]) return;
+    for (p = buf; n < 2; )
+    {
+        int val = 0, got = 0, neg = 0;
+
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '-') { neg = 1; p++; }
+        while (*p >= '0' && *p <= '9') { val = val * 10 + (*p - '0'); p++; got = 1; }
+        if (got) v[n++] = neg ? -val : val;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != ',') break;
+        p++;
+    }
+    if (n <= 0) return;
+    *lo = v[0];
+    *hi = (n > 1) ? v[1] : v[0];
+}
 
 static void Wth_ReadCfg(void)
 {
@@ -393,52 +501,66 @@ static void Wth_ReadCfg(void)
         WTH_KCFG("Rain", WTH_K_RAIN),
         WTH_KCFG("Snow", WTH_K_SNOW),
         WTH_KCFG("Fire", WTH_K_FIRE),
-        { "RainWind",  &g_Kind[WTH_K_RAIN].wind },
         { "SnowBigRate", &g_Kind[WTH_K_SNOW].bigRate },
         { "FireTailSmoke", &g_Kind[WTH_K_FIRE].tailSmoke },
         { "FirePlume",     &g_Kind[WTH_K_FIRE].plume },
-        { "FireSmokeMin",  &g_Kind[WTH_K_FIRE].smokeLo },
-        { "FireSmokeMax",  &g_Kind[WTH_K_FIRE].smokeHi },
-        { "SmokeLifeMin",  &g_Cfg.smokeLifeLo },  { "SmokeLifeMax", &g_Cfg.smokeLifeHi },
-        { "SmokeAlphaMin", &g_Cfg.smokeALo },     { "SmokeAlphaMax", &g_Cfg.smokeAHi },
-        { "SmokeRadius",   &g_Cfg.smokeR },       { "SmokeGrowMin", &g_Cfg.smokeGrowLo },
-        { "SmokeGrowMax",  &g_Cfg.smokeGrowHi },
+        { "SmokeRadius",   &g_Cfg.smokeR },
         { "CloudOpacity",  &g_Cfg.cloudOpacity }, { "CloudScale", &g_Cfg.cloudScale },
-        { "CloudStyle",    &g_Cfg.cloudStyle }
+        { "ThunderFlash",  &g_Cfg.thFlash },      { "ThunderBolt", &g_Cfg.thBolt },
+        { "ThunderVolume", &g_Cfg.thVol },
+        { "RainVolume",    &g_Cfg.rainVol },      { "RainSoundEnable", &g_Cfg.rainSnd },
+        { "SnowVolume",    &g_Cfg.snowVol },      { "SnowSoundEnable", &g_Cfg.snowSnd },
+        { "WeatherLightMix", &g_Cfg.lightMix }
+    };
+    static const struct { const char* k; int* lo; int* hi; } t2[] = {
+        WTH_KPAIR("Rain", WTH_K_RAIN),
+        WTH_KPAIR("Snow", WTH_K_SNOW),
+        WTH_KPAIR("Fire", WTH_K_FIRE),
+        { "FireSmoke",  &g_Kind[WTH_K_FIRE].smokeLo, &g_Kind[WTH_K_FIRE].smokeHi },
+        { "SnowPowderLife", &g_Cfg.powderLifeLo, &g_Cfg.powderLifeHi },
+        { "RainWind",   &g_Kind[WTH_K_RAIN].windLo, &g_Kind[WTH_K_RAIN].windHi },
+        { "SnowWind",   &g_Kind[WTH_K_SNOW].windLo, &g_Kind[WTH_K_SNOW].windHi },
+        { "RippleSize", &g_Cfg.rippleLo,   &g_Cfg.rippleHi },
+        { "SmokeLife",  &g_Cfg.smokeLifeLo, &g_Cfg.smokeLifeHi },
+        { "SmokeAlpha", &g_Cfg.smokeALo,    &g_Cfg.smokeAHi },
+        { "SmokeGrow",  &g_Cfg.smokeGrowLo, &g_Cfg.smokeGrowHi },
+        { "ThunderFrames", &g_Cfg.thLo,     &g_Cfg.thHi }
+    };
+    static const struct { const char* k; int* rgb; } c[] = {
+        { "RainColor",       g_Kind[WTH_K_RAIN].colA },
+        { "SnowColor",       g_Kind[WTH_K_SNOW].colA },
+        { "FireHeadColor",   g_Kind[WTH_K_FIRE].colC },
+        { "FireMidColor",    g_Kind[WTH_K_FIRE].colA },
+        { "FireEndColor",    g_Kind[WTH_K_FIRE].colB },
+        { "SmokeLightColor", g_Cfg.smokeLight },
+        { "SmokeDarkColor",  g_Cfg.smokeDark },
+        { "ThunderColor",    g_Cfg.thCol }
     };
 
     for (i = 0; i < (int)(sizeof(t) / sizeof(t[0])); i++)
         *t[i].p = GetPrivateProfileIntA(WTH_SECTION, t[i].k, *t[i].p, g_IniPath);
+    for (i = 0; i < (int)(sizeof(t2) / sizeof(t2[0])); i++)
+        Wth_CfgPair(t2[i].k, t2[i].lo, t2[i].hi);
 
-    if (GetPrivateProfileStringA(WTH_SECTION, "RainColor", "", buf,
-                                 sizeof(buf), g_IniPath) > 0)
-        Wth_ParseColor(buf, g_Kind[WTH_K_RAIN].colA);
-    if (GetPrivateProfileStringA(WTH_SECTION, "SnowColor", "", buf,
-                                 sizeof(buf), g_IniPath) > 0)
-        Wth_ParseColor(buf, g_Kind[WTH_K_SNOW].colA);
-    if (GetPrivateProfileStringA(WTH_SECTION, "FireHeadColor", "", buf,
-                                 sizeof(buf), g_IniPath) > 0)
-        Wth_ParseColor(buf, g_Kind[WTH_K_FIRE].colC);
-    if (GetPrivateProfileStringA(WTH_SECTION, "FireMidColor", "", buf,
-                                 sizeof(buf), g_IniPath) > 0)
-        Wth_ParseColor(buf, g_Kind[WTH_K_FIRE].colA);
-    if (GetPrivateProfileStringA(WTH_SECTION, "FireEndColor", "", buf,
-                                 sizeof(buf), g_IniPath) > 0)
-        Wth_ParseColor(buf, g_Kind[WTH_K_FIRE].colB);
-    if (GetPrivateProfileStringA(WTH_SECTION, "SmokeLightColor", "", buf,
-                                 sizeof(buf), g_IniPath) > 0)
-        Wth_ParseColor(buf, g_Cfg.smokeLight);
-    if (GetPrivateProfileStringA(WTH_SECTION, "SmokeDarkColor", "", buf,
-                                 sizeof(buf), g_IniPath) > 0)
-        Wth_ParseColor(buf, g_Cfg.smokeDark);
-    /* CloudStyle 写字或写序号都行; 上面按整数读过了, 这里再按名字试一次 */
-    if (GetPrivateProfileStringA(WTH_SECTION, "CloudStyle", "", buf,
-                                 sizeof(buf), g_IniPath) > 0)
+    for (i = 0; i < (int)(sizeof(c) / sizeof(c[0])); i++)
     {
-        int si = Wth_StyleParse(buf);
-
-        if (si >= 0) g_Cfg.cloudStyle = si;
+        OU_ReadString(WTH_SECTION, c[i].k, "", buf, sizeof(buf));
+        Wth_ParseColor(buf, c[i].rgb);          /* 空串 / 坏串保持默认 */
     }
+
+    /* 音效条目名 = sound.ini 的段名。写错只是不出声, 启动日志里有解析结果。
+     * 一条键里逗号分隔若干条雷声, 每次打闪随机挑一条。 */
+    OU_ReadString(WTH_SECTION, "ThunderSound",
+                  "WeatherIntro,WeatherStart,WeatherStrike", buf, sizeof(buf));
+    Wth_CfgList(g_Cfg.thSnd, buf);
+    OU_ReadString(WTH_SECTION, "RainSound", "RainLoop",
+                  g_Cfg.rainName, sizeof(g_Cfg.rainName));
+    OU_ReadString(WTH_SECTION, "SnowSound", "_Amb_WindCold",
+                  g_Cfg.snowName, sizeof(g_Cfg.snowName));
+    /* CloudStyle 写字或写序号都行, Wth_StyleParse 两种都认 */
+    OU_ReadString(WTH_SECTION, "CloudStyle", "", buf, sizeof(buf));
+    i = Wth_StyleParse(buf);
+    if (i >= 0) g_Cfg.cloudStyle = i;
 
     /* 单调色的天气 (雨/雪) 尾端色必须跟根部一致, 否则就变成"渐变色雨"了 */
     for (i = 0; i < 3; i++)
@@ -447,65 +569,53 @@ static void Wth_ReadCfg(void)
         g_Kind[WTH_K_SNOW].colB[i] = g_Kind[WTH_K_SNOW].colA[i];
     }
 
-    /* 夹一遍, 免得手改配置时把数组/循环写飞 */
-    if (g_Cfg.speedScale < 5) g_Cfg.speedScale = 5;
-    if (g_Cfg.speedScale > 1000) g_Cfg.speedScale = 1000;
-    if (g_Cfg.imageSpeed < 5) g_Cfg.imageSpeed = 5;
-    if (g_Cfg.imageSpeed > 1000) g_Cfg.imageSpeed = 1000;
-    if (g_Cfg.smokeR > WTH_SM_RMAX) g_Cfg.smokeR = WTH_SM_RMAX;
-    if (g_Cfg.smokeR < 1) g_Cfg.smokeR = 1;
-    if (g_Cfg.smokeLifeHi > 250) g_Cfg.smokeLifeHi = 250;
-    if (g_Cfg.cloudOpacity < 0) g_Cfg.cloudOpacity = 0;
-    if (g_Cfg.cloudOpacity > 255) g_Cfg.cloudOpacity = 255;
-    if (g_Cfg.cloudScale < 32) g_Cfg.cloudScale = 32;
-    if (g_Cfg.cloudScale > 4096) g_Cfg.cloudScale = 4096;
-    if (g_Cfg.cloudStyle < 0 || g_Cfg.cloudStyle >= CLD_STYLE_N) g_Cfg.cloudStyle = 0;
+    /* 夹一遍, 免得手改配置时把数组/循环写飞。
+     * 成对参数 (lo,hi) 必须 lo<=hi: Wth_Range 里 hi-lo+1 变成 0 或负数会除零;
+     * size 当遍历上限、density 当除数, 越界会画到面外或布出天量粒子。 */
+#define WTH_PAIRCLAMP(lo, hi, minv, maxv)                                     \
+    do { WTH_CLAMP(lo, minv, maxv); WTH_CLAMP(hi, minv, maxv);                \
+         if ((hi) < (lo)) (hi) = (lo); } while (0)
+    WTH_CLAMP(g_Cfg.speedScale, 5, 1000);
+    WTH_CLAMP(g_Cfg.imageSpeed, 5, 1000);
+    WTH_CLAMP(g_Cfg.smokeR, 1, WTH_SM_RMAX);
+    WTH_CLAMP(g_Cfg.cloudOpacity, 0, 255);
+    WTH_CLAMP(g_Cfg.cloudScale, 32, 4096);
+    WTH_CLAMP(g_Cfg.thFlash, 0, 255);
+    WTH_CLAMP(g_Cfg.thVol, 0, 200);
+    WTH_PAIRCLAMP(g_Cfg.thLo, g_Cfg.thHi, 30, 3600);
+    WTH_CLAMP(g_Cfg.rainVol, 0, 200);
+    WTH_CLAMP(g_Cfg.lightMix, 0, 100);
+    WTH_CLAMP(g_Cfg.snowVol, 0, 200);
+    g_Cfg.thBolt = g_Cfg.thBolt ? 1 : 0;
+    g_Cfg.rainSnd = g_Cfg.rainSnd ? 1 : 0;
+    g_Cfg.snowSnd = g_Cfg.snowSnd ? 1 : 0;
 
-    /* 每对 lo/hi 都必须 lo<=hi, 否则 Wth_Range 里 hi-lo+1 会变成 0 或负数;
-     * size/wind/spread 在落笔里当循环上限与除数用, 越界会画到面外或除零。 */
-#define WTH_FIX(lo, hi, minv) \
-    do { if ((lo) < (minv)) (lo) = (minv); if ((hi) < (lo)) (hi) = (lo); } while (0)
     for (i = 0; i < WTH_K_N; i++)
     {
         WthKind* k = &g_Kind[i];
 
-        if (k->count < 200) k->count = 200;         /* 除数 */
-        if (k->countMin < 1) k->countMin = 1;
-        if (k->countMax > WTH_PX_MAX) k->countMax = WTH_PX_MAX;
-        WTH_FIX(k->countMin, k->countMax, 1);
-        WTH_FIX(k->vLo, k->vHi, 1);
-        WTH_FIX(k->aLo, k->aHi, 1);
-        WTH_FIX(k->lenLo, k->lenHi, 0);
-        if (k->lenHi > 200) k->lenHi = 200;
-        if (k->size < 1) k->size = 1;
-        if (k->size > 4) k->size = 4;               /* 宽度也是遍历上限 */
-        if (k->wind < -300) k->wind = -300;
-        if (k->wind > 300) k->wind = 300;
-        if (k->spread < 0) k->spread = 0;
-        if (k->spread > 200) k->spread = 200;
-        if (k->sway < 0) k->sway = 0;
-        if (k->sway > 4) k->sway = 4;
-        if (k->bigRate < 0) k->bigRate = 0;
-        if (k->splash < 0) k->splash = 0;
-        if (k->splash > 8) k->splash = 8;
-        if (k->splashRate < 0) k->splashRate = 0;
-        if (k->splashRate > 2000) k->splashRate = 2000;
-        if (k->fade < 0) k->fade = 0;
-        if (k->fade > 90) k->fade = 90;
-        if (k->tailSmoke < 0) k->tailSmoke = 0;
-        if (k->tailSmoke > 255) k->tailSmoke = 255;
-        if (k->plume < 0) k->plume = 0;
-        if (k->plume > 64) k->plume = 64;
-        if (k->smokeHi > 0)
-        {
-            WTH_FIX(k->smokeLo, k->smokeHi, 1);
-            if (k->smokeHi > 250) k->smokeHi = 250;
-        }
+        if (k->density < 100) k->density = 100;     /* 除数: 太小会布出天量粒子 */
+        WTH_PAIRCLAMP(k->vLo, k->vHi, 1, 8000);
+        WTH_PAIRCLAMP(k->aLo, k->aHi, 1, 255);
+        WTH_PAIRCLAMP(k->lenLo, k->lenHi, 0, 200);
+        WTH_PAIRCLAMP(k->sizeLo, k->sizeHi, 1, 4);
+        WTH_PAIRCLAMP(k->windLo, k->windHi, -300, 300);
+        WTH_PAIRCLAMP(k->splashLo, k->splashHi, 0, 8);
+        WTH_CLAMP(k->spread, 0, 200);
+        WTH_CLAMP(k->sway, 0, 4);
+        WTH_CLAMP(k->bigRate, 0, 100);
+        WTH_CLAMP(k->splashRate, 0, 2000);
+        WTH_CLAMP(k->fade, 0, 90);
+        WTH_CLAMP(k->tailSmoke, 0, 255);
+        WTH_CLAMP(k->plume, 0, 64);
+        if (k->smokeHi > 0) WTH_PAIRCLAMP(k->smokeLo, k->smokeHi, 1, 250);
     }
-    WTH_FIX(g_Cfg.smokeLifeLo, g_Cfg.smokeLifeHi, 2);
-    WTH_FIX(g_Cfg.smokeALo, g_Cfg.smokeAHi, 1);
-    WTH_FIX(g_Cfg.smokeGrowLo, g_Cfg.smokeGrowHi, 0);
-#undef WTH_FIX
+    WTH_PAIRCLAMP(g_Cfg.smokeLifeLo, g_Cfg.smokeLifeHi, 2, 250);
+    WTH_PAIRCLAMP(g_Cfg.smokeALo, g_Cfg.smokeAHi, 1, 255);
+    WTH_PAIRCLAMP(g_Cfg.smokeGrowLo, g_Cfg.smokeGrowHi, 0, 64);
+    WTH_PAIRCLAMP(g_Cfg.rippleLo, g_Cfg.rippleHi, 2, WTH_RIP_RMAX);
+    WTH_PAIRCLAMP(g_Cfg.powderLifeLo, g_Cfg.powderLifeHi, 1, 200);
+#undef WTH_PAIRCLAMP
 }
 
 /* ---------------- 粒子档 ----------------
@@ -523,6 +633,8 @@ typedef struct {
     unsigned char len;      /* 拖尾长度 (像素) */
     unsigned char a0;       /* 头部 alpha */
     unsigned char sz;       /* 雪花: 大片 (臂长再 +1) */
+    unsigned char wide;     /* 线宽 / 臂长 / 火头半径, 出生时按 Size 范围抽定 */
+    unsigned char shape;    /* 雪花造型 (0..WTH_FLAKE_N-1) */
     unsigned char st;       /* 冒烟倒计时 (逻辑帧) */
     unsigned char kind;     /* WTH_K_* */
 } WthPx;
@@ -537,21 +649,32 @@ typedef struct {
     unsigned char a0;
 } WthSmoke;
 
-/* 溅射水滴/火星: 落地时崩出来的小颗粒, 走抛物线, 有自己的寿命与颜色来源 (kind)。 */
+/* 溅射水滴/火星: 落地时崩出来的小颗粒, 有自己的重力/阻尼/寿命, 颜色取 kind 的 colA。
+ * px/py 是上一帧的位置, 绘制时连成一小段线 —— 单像素点在地面上等于看不见。
+ * drag 是每帧速度衰减 (/256): 雪粉零重力 + 高阻尼, 滑几像素就停住原地淡掉。 */
 typedef struct {
     int x, y;
+    int px, py;
     int vx, vy;
-    unsigned char age, life, a0, kind;
+    unsigned char age, life, a0, grav, drag, kind;
 } WthDrop;
+
+/* 落地的一个扩散环。雨/火是水面/地面的水纹 (扁椭圆), 雪不画。
+ * 半径从 r0 均匀长到 rmax (都是 1/16 像素定点), 长多大由 RippleSize 决定。 */
+typedef struct {
+    int x, y;
+    unsigned char age, life, r0, rmax, a0, kind;
+} WthRip;
 
 static WthPx g_Px[WTH_PX_MAX];     /* 三种天气共用; 按 kind 顺序排 (见 Wth_PxInit) */
 static int g_PxN;                   /* 有效粒子总数 */
 static int g_PxCnt[WTH_K_N];        /* 各 kind 的粒子数 */
 static WthSmoke g_Smoke[WTH_SMOKE_MAX];
 static WthDrop g_Drop[WTH_DROP_MAX];
-static unsigned g_SmokePut, g_DropPut;
+static WthRip g_Rip[WTH_RIP_MAX];
+static unsigned g_SmokePut, g_DropPut, g_RipPut;
 /* 半径 r 的圆形每行半宽: g_SmHalf[r][|dy|], 建一次 (整数, 不引 libm)。 */
-static unsigned char g_SmHalf[WTH_SM_RMAX + 1][WTH_SM_RMAX + 1];
+static unsigned char g_SmHalf[WTH_RIP_RMAX + 1][WTH_RIP_RMAX + 1];
 static int g_SmKernel;
 static int g_PxW, g_PxH;        /* 上次布点用的视图尺寸 */
 static int g_PxOk = 0;          /* 0 = 下一帧重新布点 */
@@ -561,25 +684,69 @@ static int g_Tick;              /* 逻辑帧累计 (摇摆相位 / 云影漂移)
 /* 相机 / 逻辑帧 */
 static unsigned g_LastNo = 0;
 static int g_HaveNo = 0;
+static int g_Rewound;           /* 这一帧帧号倒退过 (读档/新局), 见 Wth_SceneCheck */
 static int g_CamX, g_CamY, g_CamHave = 0;
 
 /* ---------------- 初始化 ---------------- */
-
-static int Wth_StrCaseCmp(const char* a, const char* b);
 
 /* 长期设置: 云影开关与画法。其余开关只在本次运行内有效, 所以不读。
  * 由 ESC 菜单写入 (section "Environment" / key "CloudEnable" / "DrawMode")。 */
 static void Wth_LoadState(void)
 {
-    char buf[16];
+    char val[24];
 
     g_CloudOn = GetPrivateProfileIntA(WTH_SECTION, "CloudEnable", 0, g_IniPath)
                 ? 1 : 0;
-    if (GetPrivateProfileStringA(WTH_SECTION, "DrawMode", "", buf,
-                                 sizeof(buf), g_IniPath) > 0)
-        g_Mode = (Wth_StrCaseCmp(buf, "particle") == 0)
-                 ? WEATHER_DRAW_PARTICLE : WEATHER_DRAW_IMAGE;
+    OU_ReadString(WTH_SECTION, "DrawMode", "image", val, sizeof(val));
+    g_Mode = (!lstrcmpiA(val, "particle"))
+             ? WEATHER_DRAW_PARTICLE : WEATHER_DRAW_IMAGE;
 }
+
+/* 参数自检: 装载后打一行实际生效的值, 手改 ini 没生效 (键名写错/没重进游戏)
+ * 时对着这行就能看出来。 */
+static void Wth_LogCfg(void)
+{
+    /* 数值项全在一张表里: name=lo 或 name=lo,hi (hi 为空就只打一个)。 */
+    static const struct { const char* k; int* lo; int* hi; } f[] = {
+        { "speed",      &g_Cfg.speedScale, NULL },
+        { "rainWind",   &g_Kind[WTH_K_RAIN].windLo, &g_Kind[WTH_K_RAIN].windHi },
+        { "rainSplash", &g_Kind[WTH_K_RAIN].splashLo, &g_Kind[WTH_K_RAIN].splashHi },
+        { "rainRate",   &g_Kind[WTH_K_RAIN].splashRate, NULL },
+        { "snowWind",   &g_Kind[WTH_K_SNOW].windLo, &g_Kind[WTH_K_SNOW].windHi },
+        { "snowSplash", &g_Kind[WTH_K_SNOW].splashLo, &g_Kind[WTH_K_SNOW].splashHi },
+        { "snowRate",   &g_Kind[WTH_K_SNOW].splashRate, NULL },
+        { "snowBig",    &g_Kind[WTH_K_SNOW].bigRate, NULL },
+        { "powder",     &g_Cfg.powderLifeLo, &g_Cfg.powderLifeHi },
+        { "lightMix",   &g_Cfg.lightMix, NULL }
+    };
+    char msg[256];
+    unsigned q = 0;
+    int i;
+
+    q = WTH_L_S(msg, q, "weather: cfg");
+    for (i = 0; i < (int)(sizeof(f) / sizeof(f[0])); i++)
+    {
+        q = WTH_L_C(msg, q, ' ');
+        q = WTH_L_S(msg, q, f[i].k);
+        q = WTH_L_C(msg, q, '=');
+        q = WTH_L_I(msg, q, *f[i].lo);
+        if (f[i].hi)
+        {
+            q = WTH_L_C(msg, q, ',');
+            q = WTH_L_I(msg, q, *f[i].hi);
+        }
+    }
+    q = WTH_L_S(msg, q, " snowSnd=");
+    q = WTH_L_S(msg, q, g_Cfg.snowName);
+    q = WTH_L_S(msg, q, " vol=");
+    q = WTH_L_I(msg, q, g_Cfg.snowVol);
+    q = WTH_L_S(msg, q, " en=");
+    q = WTH_L_I(msg, q, g_Cfg.snowSnd);
+    LogLine(msg);
+}
+
+static void Wth_SndReset(void);
+static void Wth_SndSetup(void);
 
 static void Wth_Init(void)
 {
@@ -590,6 +757,8 @@ static void Wth_Init(void)
     Wth_Defaults();
     Wth_ReadCfg();      /* 参数只在装载时读一次: 改 ini 需重进游戏 */
     Wth_LoadState();
+    Wth_SndSetup();     /* 循环音的通道/条目/音量装载时定死 (音量只从 ini 读一次) */
+    Wth_LogCfg();
 }
 
 int Weather_DrawMode(void)
@@ -613,6 +782,7 @@ int Weather_Rain(void)  { Wth_Init(); return g_On[WTH_K_RAIN]; }
 int Weather_Snow(void)  { Wth_Init(); return g_On[WTH_K_SNOW]; }
 int Weather_Fire(void)  { Wth_Init(); return g_On[WTH_K_FIRE]; }
 int Weather_Cloud(void) { Wth_Init(); return g_CloudOn; }
+int Weather_Thunder(void) { Wth_Init(); return g_Thunder; }
 
 static void Wth_SetKind(int kind, int on)
 {
@@ -620,11 +790,22 @@ static void Wth_SetKind(int kind, int on)
     if (on == g_On[kind]) return;
     g_On[kind] = on;
     g_PxOk = 0;
+    /* 雨一停立刻收声: 菜单里关雨时主循环是停的, 等下一帧就成了"关掉了还在响"。 */
+    if (kind == WTH_K_RAIN && !on) Wth_SndReset();
 }
 
 void Weather_SetRain(int on) { Wth_SetKind(WTH_K_RAIN, on); }
 void Weather_SetSnow(int on) { Wth_SetKind(WTH_K_SNOW, on); }
 void Weather_SetFire(int on) { Wth_SetKind(WTH_K_FIRE, on); }
+
+void Weather_SetThunder(int on)
+{
+    Wth_Init();
+    on = on ? 1 : 0;
+    if (on == g_Thunder) return;
+    g_Thunder = on;
+    if (!on) Wth_SndReset();
+}
 
 void Weather_SetCloud(int on)
 {
@@ -650,22 +831,6 @@ void Weather_SetCloudStyle(int idx)
 
 /* ---------------- 资源获取 ---------------- */
 
-/* 不引 CRT: 本 DLL 以 -nostdlib 链接, _stricmp 不可用。 */
-static int Wth_StrCaseCmp(const char* a, const char* b)
-{
-    while (*a && *b)
-    {
-        int ca = (unsigned char)*a;
-        int cb = (unsigned char)*b;
-        if (ca >= 'A' && ca <= 'Z') ca += 32;
-        if (cb >= 'A' && cb <= 'Z') cb += 32;
-        if (ca != cb) return ca - cb;
-        a++;
-        b++;
-    }
-    return (unsigned char)*a - (unsigned char)*b;
-}
-
 /* 在 AnimTypeClass 表里按 ID 找类型。表是 DynamicVectorClass<AnimTypeClass*>,
  * 数据指针在 +0x04, 个数在 +0x10 (与 ADDR_ANIMTYPE_COUNT 同址, 各写一遍防呆)。 */
 static void* Wth_FindAnimType(const char* id)
@@ -682,7 +847,7 @@ static void* Wth_FindAnimType(const char* id)
     {
         void* t = items[i];
         if (!t || !IsPlausiblePtr(t)) continue;
-        if (Wth_StrCaseCmp((const char*)((char*)t + OFF_ANIMTYPE_ID), id) == 0)
+        if (!lstrcmpiA((const char*)((char*)t + OFF_ANIMTYPE_ID), id))
             return t;
     }
     return NULL;
@@ -720,20 +885,20 @@ static void Wth_LogLayer(WthLayer* l, int step)
     char msg[160];
     unsigned p = 0;
 
-    p = AppendCStr(msg, p, "weather: ", sizeof(msg));
-    p = AppendCStr(msg, p, l->id, sizeof(msg));
-    p = AppendCStr(msg, p, " frames=", sizeof(msg));
-    p = AppendInt(msg, p, sizeof(msg), l->frames);
-    p = AppendCStr(msg, p, " loop=", sizeof(msg));
-    p = AppendInt(msg, p, sizeof(msg), l->loopStart);
-    p = AppendCh(msg, p, '-', sizeof(msg));
-    p = AppendInt(msg, p, sizeof(msg), l->loopEnd - 1);
-    p = AppendCStr(msg, p, " size=", sizeof(msg));
-    p = AppendInt(msg, p, sizeof(msg), l->w);
-    p = AppendCh(msg, p, 'x', sizeof(msg));
-    p = AppendInt(msg, p, sizeof(msg), l->h);
-    p = AppendCStr(msg, p, " step=", sizeof(msg));
-    p = AppendInt(msg, p, sizeof(msg), step);
+    p = WTH_L_S(msg, p, "weather: ");
+    p = WTH_L_S(msg, p, l->id);
+    p = WTH_L_S(msg, p, " frames=");
+    p = WTH_L_I(msg, p, l->frames);
+    p = WTH_L_S(msg, p, " loop=");
+    p = WTH_L_I(msg, p, l->loopStart);
+    p = WTH_L_C(msg, p, '-');
+    p = WTH_L_I(msg, p, l->loopEnd - 1);
+    p = WTH_L_S(msg, p, " size=");
+    p = WTH_L_I(msg, p, l->w);
+    p = WTH_L_C(msg, p, 'x');
+    p = WTH_L_I(msg, p, l->h);
+    p = WTH_L_S(msg, p, " step=");
+    p = WTH_L_I(msg, p, step);
     LogLine(msg);
 }
 
@@ -778,16 +943,18 @@ static int Wth_Ensure(WthLayer* l)
 
 /* ---------------- 每帧状态 ---------------- */
 
-/* 这帧渲染跨过了几个逻辑帧 (渲染与逻辑不一定 1:1)。跳号 (读档/重开) 不补帧。 */
+/* 这帧渲染跨过了几个逻辑帧 (渲染与逻辑不一定 1:1)。跳号 (读档/重开) 不补帧,
+ * 只置 g_Rewound 让换局判定认得这一拍。 */
 static int Wth_LogicDelta(void)
 {
     unsigned now = *(unsigned*)(size_t)ADDR_FRAME;
     int d;
 
+    g_Rewound = 0;
     if (!g_HaveNo) { g_HaveNo = 1; g_LastNo = now; return 0; }
     d = (int)(now - g_LastNo);
     g_LastNo = now;
-    if (d < 0 || d > 240) return 0;
+    if (d < 0 || d > 240) { g_Rewound = 1; return 0; }
     return d;
 }
 
@@ -830,7 +997,6 @@ static void Wth_Advance(WthLayer* l, int dFrames)
     if (span <= 0) { l->frame = l->loopStart; return; }
     if (l->frame >= l->loopEnd)
         l->frame = l->loopStart + (l->frame - l->loopStart) % span;
-    l->adv += (unsigned)n;
 }
 
 /* ---------------- 粒子: 布点与推进 ---------------- */
@@ -870,11 +1036,7 @@ static void Wth_SmokeAt(int x, int y)
  * px/s ÷ 60 × 16 = px/s × 4/15。SpeedScale 是统一的百分比倍率。 */
 static int Wth_V(int pxPerSec)
 {
-    int v = pxPerSec * 4 * g_Cfg.speedScale / 1500;
-
-    if (v < 1) v = 1;
-    if (v > 8000) v = 8000;
-    return v;
+    return Wth_ClampI(pxPerSec * 4 * g_Cfg.speedScale / 1500, 1, 8000);
 }
 
 /* 一条粒子的初始参数, 全部来自 g_Kind[kind] (单位见 Wth_V)。 */
@@ -884,15 +1046,18 @@ static void Wth_Spawn(WthPx* p, int kind, int w, int h)
 
     p->kind = (unsigned char)kind;
     p->sz = 0;
+    p->shape = (unsigned char)(Wth_Rand() % WTH_FLAKE_N);
     p->st = 0;
     p->vy = Wth_Range(Wth_V(k->vLo), Wth_V(k->vHi));
-    /* 风向优先: 有 wind 就按下落速度的百分比给水平速度 (拖尾方向由 sx 自动跟上),
-     * 没有就按 spread 随机抖一点。 */
-    p->vx = k->wind ? p->vy * k->wind / 100
-                    : p->vy * Wth_Range(-k->spread, k->spread) / 100;
+    /* 风向优先: wind 区间不全为 0 就按下落速度的百分比给水平速度 (拖尾方向由
+     * sx 自动跟上), 没有就按 spread 随机抖一点。 */
+    p->vx = (k->windLo || k->windHi)
+            ? p->vy * Wth_Range(k->windLo, k->windHi) / 100
+            : p->vy * Wth_Range(-k->spread, k->spread) / 100;
     p->len = (unsigned char)(k->lenHi > 0 ? Wth_Range(k->lenLo, k->lenHi) : 0);
     p->a0 = (unsigned char)Wth_Range(k->aLo, k->aHi);
-    if (k->bigRate > 1 && (int)(Wth_Rand() % (unsigned)k->bigRate) == 0)
+    p->wide = (unsigned char)Wth_Range(k->sizeLo, k->sizeHi);
+    if (k->bigRate > 0 && (int)(Wth_Rand() % 100) < k->bigRate)
         p->sz = 1;
     if (k->smokeHi > 0)
         p->st = (unsigned char)Wth_Range(1, k->smokeHi);
@@ -908,8 +1073,8 @@ static void Wth_BuildKernel(void)
 
     if (g_SmKernel) return;
     g_SmKernel = 1;
-    for (r = 0; r <= WTH_SM_RMAX; r++)
-        for (dy = 0; dy <= WTH_SM_RMAX; dy++)
+    for (r = 0; r <= WTH_RIP_RMAX; r++)
+        for (dy = 0; dy <= WTH_RIP_RMAX; dy++)
         {
             hw = 0;
             if (dy <= r)
@@ -918,11 +1083,19 @@ static void Wth_BuildKernel(void)
         }
 }
 
+/* 这一种天气这一帧是否走粒子落笔: 图像档下只有 SHP 没有的形态 (火雨) 才画粒子,
+ * 免得和 RAIN/SNOW.SHP 自带的雨丝叠成两层。布点与落笔共用这一条规则。 */
+static __inline int Wth_KindOn(int i)
+{
+    return g_On[i] && (g_Kind[i].alwaysParticle || g_Mode == WEATHER_DRAW_PARTICLE);
+}
+
 /* 数量按视图面积给, 视图尺寸变了或换过开关就重新布点。
  * 三种天气共用一个池子, 按 kind 顺序依次分配, 累计不超过 WTH_PX_MAX。 */
 static void Wth_PxInit(int w, int h)
 {
-    int area, i, kind, at = 0;
+    int area, i, j, at = 0, total = 0;
+    int need[WTH_K_N];
 
     if (g_PxOk && w == g_PxW && h == g_PxH) return;
     g_PxW = w;
@@ -931,80 +1104,143 @@ static void Wth_PxInit(int w, int h)
     Wth_BuildKernel();
     area = w * h;
 
-    for (kind = 0; kind < WTH_K_N; kind++)
+    /* 数量 = 视图面积 / 密度, 与分辨率无关: 同一个密度在 800x600 与 1920x1080 下
+     * 看起来一样疏密。只给这一帧真要画的 kind 布点 —— 图像档的雨/雪交给 SHP,
+     * 不占池子。 */
+    for (i = 0; i < WTH_K_N; i++)
     {
-        const WthKind* k = &g_Kind[kind];
-        int n = area / k->count;
+        int on = Wth_KindOn(i);
 
-        if (n < k->countMin) n = k->countMin;
-        if (n > k->countMax) n = k->countMax;
-        if (n > WTH_PX_MAX - at) n = WTH_PX_MAX - at;   /* 池子满了就少给 */
-        if (n < 0) n = 0;
-        g_PxCnt[kind] = n;
-        for (i = 0; i < n; i++) Wth_Spawn(&g_Px[at + i], kind, w, h);
+        need[i] = 0;
+        if (on)
+        {
+            need[i] = area / g_Kind[i].density;
+            if (need[i] < 4) need[i] = 4;
+            total += need[i];
+        }
+    }
+    /* 池子装不下就按比例缩 (雨夹雪再叠火雨): 一起变稀, 而不是谁先布谁占满 */
+    for (i = 0; i < WTH_K_N; i++)
+    {
+        int n = need[i];
+
+        if (total > WTH_PX_MAX) n = n * WTH_PX_MAX / total;
+        g_PxCnt[i] = n;
+        for (j = 0; j < n; j++) Wth_Spawn(&g_Px[at + j], i, w, h);
         at += n;
     }
     g_PxN = at;
 
     for (i = 0; i < WTH_SMOKE_MAX; i++) g_Smoke[i].life = 0;
     for (i = 0; i < WTH_DROP_MAX; i++) g_Drop[i].life = 0;
+    for (i = 0; i < WTH_RIP_MAX; i++) g_Rip[i].life = 0;
     g_SmokePut = 0;
     g_DropPut = 0;
+    g_RipPut = 0;
 
     /* 布点只在开关/尺寸变化时发生, 顺手留一行现场 (调密度用)。 */
     {
         char msg[128];
         unsigned p = 0;
 
-        p = AppendCStr(msg, p, "weather: particles view=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), w);
-        p = AppendCh(msg, p, 'x', sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), h);
-        p = AppendCStr(msg, p, " rain=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), g_PxCnt[WTH_K_RAIN]);
-        p = AppendCStr(msg, p, " snow=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), g_PxCnt[WTH_K_SNOW]);
-        p = AppendCStr(msg, p, " fire=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), g_PxCnt[WTH_K_FIRE]);
+        p = WTH_L_S(msg, p, "weather: particles view=");
+        p = WTH_L_I(msg, p, w);
+        p = WTH_L_C(msg, p, 'x');
+        p = WTH_L_I(msg, p, h);
+        p = WTH_L_S(msg, p, " rain=");
+        p = WTH_L_I(msg, p, g_PxCnt[WTH_K_RAIN]);
+        p = WTH_L_S(msg, p, " snow=");
+        p = WTH_L_I(msg, p, g_PxCnt[WTH_K_SNOW]);
+        p = WTH_L_S(msg, p, " fire=");
+        p = WTH_L_I(msg, p, g_PxCnt[WTH_K_FIRE]);
         LogLine(msg);
     }
 }
 
-/* 落地溅射: 在指定点崩出几颗小颗粒。雨/雪是水花 (近水平飞), 火是火星 (向上崩)
- * 并留一团烟。颗粒有自己的重力与寿命, 与降水粒子的回绕无关。
+/* 落地溅射: 一个扩散环 + 一根溅起的水柱 + 几颗甩出去的水花。雨是水花 (近水平飞),
+ * 火是火星 (向上崩) 并留一团烟, 雪只有轻轻扬起的雪粉 —— 地上不会出一圈涟漪。
+ * 颗粒有自己的重力与寿命, 与降水粒子的回绕无关。
  * 落点是**画面内随机一点**, 不查地形高度 —— 取地块 Z 要穿 TacticalClass 的世界
  * 坐标换算, 代价和风险都不值当; 溅射本来只是氛围。 */
 static void Wth_Splash(int x, int y, int kind)
 {
     const WthKind* k = &g_Kind[kind];
     int fire = (kind == WTH_K_FIRE);
-    int n = k->splash;
+    int n = Wth_Range(k->splashLo, k->splashHi);
     int i;
+
+    /* 环是落地最显眼的那一笔: 单靠几颗小点在贴图密集的地面上看不出来。
+     * 半径从 2px 均匀长大, 长多大按 RippleSize 范围逐个抽, 环线只有一圈, 中间留空。 */
+    if (kind != WTH_K_SNOW)
+    {
+        WthRip* r = &g_Rip[g_RipPut % WTH_RIP_MAX];
+
+        g_RipPut++;
+        r->x = x;
+        r->y = y;
+        r->age = 0;
+        r->life = (unsigned char)Wth_Range(12, 18);
+        r->r0 = 2 << WTH_FX;
+        r->rmax = (unsigned char)(Wth_Range(g_Cfg.rippleLo, g_Cfg.rippleHi) << WTH_FX);
+        r->a0 = (unsigned char)(fire ? Wth_Range(170, 230) : Wth_Range(165, 225));
+        r->kind = (unsigned char)kind;
+    }
 
     for (i = 0; i < n; i++)
     {
         WthDrop* d = &g_Drop[g_DropPut % WTH_DROP_MAX];
-        int life;
+        int life, side, up, spread = (kind == WTH_K_SNOW) ? 3 : 8;
 
         g_DropPut++;
-        d->x = x + Wth_Range(-6, 6);
+        d->x = x + (i ? Wth_Range(-spread, spread) : 0);
         d->y = y;
-        if (i & 1)      /* 一半是横向甩出去的水花, 一半是向上崩的 */
+        d->px = d->x;
+        d->py = d->y;
+        d->age = 0;
+        d->kind = (unsigned char)kind;
+        d->grav = (unsigned char)WTH_DROP_GRAV;
+        d->drag = 0;
+
+        if (kind == WTH_K_SNOW)
         {
-            d->vx = Wth_Range(14, 52) * ((i & 2) ? 1 : -1);
-            d->vy = -Wth_Range(10, 40);
+            /* 雪粉不是水: 一半原地淡掉, 一半滑动几像素后停稳 (零重力, 高阻尼)。
+             * 寿命在 SnowPowderLife 里配, 首颗在区间上半段抽 (多亮一会儿)。 */
+            int move = (int)(Wth_Rand() & 1);
+
+            side = move ? Wth_Range(8, 28) : 0;
+            up = move ? Wth_Range(4, 16) : 0;
+            life = (i == 0)
+                   ? Wth_Range((g_Cfg.powderLifeLo + g_Cfg.powderLifeHi) / 2,
+                               g_Cfg.powderLifeHi)
+                   : Wth_Range(g_Cfg.powderLifeLo, g_Cfg.powderLifeHi);
+            d->a0 = (unsigned char)((i == 0) ? 190 : Wth_Range(110, 180));
+            d->grav = 0;
+            d->drag = 60;
+        }
+        else if (i == 0)
+        {
+            /* 砸出来的水柱/火星: 几乎竖直往上冲, 头几帧一条竖线 */
+            side = Wth_Range(2, 12);
+            up = fire ? Wth_Range(140, 210) : Wth_Range(96, 156);
+            life = fire ? Wth_Range(6, 10) : Wth_Range(3, 4);
+            d->a0 = 255;
         }
         else
         {
-            d->vx = Wth_Range(-18, 18) * (fire ? 3 : 2) / 3;
-            d->vy = -Wth_Range(40, fire ? 130 : 80);
+            int lateral = (i & 1) != 0;
+
+            side = lateral ? Wth_Range(22, 74) : Wth_Range(4, fire ? 24 : 16);
+            up = lateral ? Wth_Range(12, 48) : Wth_Range(48, fire ? 150 : 96);
+            life = fire ? Wth_Range(8, 16) : Wth_Range(7, 13);
+            d->a0 = (unsigned char)(fire ? Wth_Range(190, 255)
+                                         : (lateral ? Wth_Range(170, 240)
+                                                    : Wth_Range(150, 230)));
         }
-        life = fire ? Wth_Range(8, 15) : Wth_Range(6, 12);
+        /* 方向随机取号, 与颗粒序号无关 (Splash=2 时按序号会恒朝一边) */
+        d->vx = (Wth_Rand() & 1) ? -side : side;
+        d->vy = -up;
         if (life < 3) life = 3;
-        d->age = 0;
         d->life = (unsigned char)life;
-        d->a0 = (unsigned char)(fire ? Wth_Range(170, 240) : Wth_Range(90, 170));
-        d->kind = (unsigned char)kind;
     }
     if (fire)
         Wth_SmokeAt(x, y - (2 << WTH_FX));      /* 火球砸地那一下也带一团烟 */
@@ -1022,13 +1258,14 @@ static int g_LandAcc[WTH_K_N];   /* 1/256 次 */
 static void Wth_LandTick(int kind, int d, int w, int h)
 {
     const WthKind* k = &g_Kind[kind];
-    int rate = k->splashRate > 0 ? k->splashRate : g_PxCnt[kind] / 5;
+    int rate = k->splashRate > 0 ? k->splashRate : g_PxCnt[kind] / 24;
     int x, y;
 
     if (rate <= 0 || d <= 0 || w < 32 || h < 32) return;
     g_LandAcc[kind] += rate * 256 * d / 60;
-    /* 卡一下之后别一次炸一串 */
-    if (g_LandAcc[kind] > 256 * 8) g_LandAcc[kind] = 256 * 8;
+    /* 卡一下之后别一次炸一串: 16 次/帧 = 60 逻辑帧下 ~1000 次/秒的天花板,
+     * 再大的 SplashRate 也等效于这个值 */
+    if (g_LandAcc[kind] > 256 * 16) g_LandAcc[kind] = 256 * 16;
     while (g_LandAcc[kind] >= 256)
     {
         g_LandAcc[kind] -= 256;
@@ -1100,8 +1337,9 @@ static void Wth_SmokeStep(int d, int sdx, int sdy)
     }
 }
 
-/* 溅射颗粒推进: 抛物线, 落到视图底边以下就回收。 */
-static void Wth_DropStep(int d, int sdx, int sdy, int h)
+/* 落地池推进 (溅射颗粒 + 涟漪): 两池都在落点节拍之前走, 顺序固定。
+ * 溅射是抛物线, 落到视图底边以下就回收; 涟漪只跟着相机走, 半径绘制时按 age 算。 */
+static void Wth_LandStep(int d, int sdx, int sdy, int h)
 {
     int i, gy;
 
@@ -1118,9 +1356,30 @@ static void Wth_DropStep(int d, int sdx, int sdy, int h)
             p->life = 0;
             continue;
         }
-        p->vy += WTH_DROP_GRAV * d;
+        p->vy += p->grav * d;
+        if (p->drag)
+        {
+            /* 每帧速度乘 (256-drag)/256; 先乘后除, 小速度才不会被整数截断卡住 */
+            int f = 256 - p->drag * d;
+
+            if (f < 0) f = 0;
+            p->vx = p->vx * f / 256;
+            p->vy = p->vy * f / 256;
+        }
+        p->px = p->x;
+        p->py = p->y;
         p->x += p->vx * d - (sdx << WTH_FX);
         p->y += p->vy * d - (sdy << WTH_FX);
+    }
+    for (i = 0; i < WTH_RIP_MAX; i++)
+    {
+        WthRip* p = &g_Rip[i];
+
+        if (!p->life) continue;
+        p->age = (unsigned char)(p->age + d);
+        if (p->age >= p->life) { p->life = 0; continue; }
+        p->x -= sdx << WTH_FX;
+        p->y -= sdy << WTH_FX;
     }
 }
 
@@ -1130,31 +1389,24 @@ static void Wth_DropStep(int d, int sdx, int sdy, int h)
 static unsigned short Wth_Add(unsigned short dst, unsigned r, unsigned g,
                               unsigned b, unsigned a)
 {
+    int rsh;
+    unsigned gm;
     unsigned dr, dg, db;
 
     if (a == 0) return dst;
     if (!g_ExpReady) GtBuildExpand();
-    if (g_GBits == 6)
-    {
-        dr = g_ExpR[(dst >> 11) & 0x1Fu];
-        dg = g_ExpG[(dst >> 5) & 0x3Fu];
-        db = g_ExpB[dst & 0x1Fu];
-    }
-    else
-    {
-        dr = g_ExpR[(dst >> 10) & 0x1Fu];
-        dg = g_ExpG[(dst >> 5) & 0x1Fu];
-        db = g_ExpB[dst & 0x1Fu];
-    }
-    dr += r * a / 255u; if (dr > 255u) dr = 255u;
-    dg += g * a / 255u; if (dg > 255u) dg = 255u;
-    db += b * a / 255u; if (db > 255u) db = 255u;
-    if (g_GBits == 6)
-        return (unsigned short)((((dr * 31u + 127u) / 255u) << 11) |
-                                (((dg * 63u + 127u) / 255u) << 5) |
-                                 ((db * 31u + 127u) / 255u));
-    return (unsigned short)((((dr * 31u + 127u) / 255u) << 10) |
-                            (((dg * 31u + 127u) / 255u) << 5) |
+    /* 565 与 555 只差 R 的起始位和 G 的位宽, 其余流程一样, 用变量带过。
+     * 565: R5@11 G6@5 B5 | 555: R5@10 G5@5 B5 */
+    rsh = (g_GBits == 6) ? 11 : 10;
+    gm  = (g_GBits == 6) ? 63u : 31u;
+    dr = g_ExpR[(dst >> rsh) & 0x1Fu] + r * a / 255u;
+    dg = g_ExpG[(dst >> 5) & gm] + g * a / 255u;
+    db = g_ExpB[dst & 0x1Fu] + b * a / 255u;
+    if (dr > 255u) dr = 255u;
+    if (dg > 255u) dg = 255u;
+    if (db > 255u) db = 255u;
+    return (unsigned short)((((dr * 31u + 127u) / 255u) << rsh) |
+                            (((dg * gm  + 127u) / 255u) << 5) |
                              ((db * 31u + 127u) / 255u));
 }
 
@@ -1164,27 +1416,32 @@ static __inline unsigned short* Wth_At(unsigned char* base, int pitch,
     return (unsigned short*)(base + (size_t)(oy + py) * (size_t)pitch) + ox + px;
 }
 
-/* 带裁剪的混合/加法落笔 (单像素)。裁剪放在这里, 各个画法就不用自己判边界。 */
-static __inline void Wth_BlendAt(unsigned char* base, int pitch, int ox, int oy,
-                                 int w, int h, int px, int py,
-                                 unsigned r, unsigned g, unsigned b, unsigned a)
+/* 带裁剪的落笔 (单像素): add != 0 走加法混合, 否则普通混合。裁剪放在这里,
+ * 各个画法就不用自己判边界。 */
+static __inline void Wth_Put(unsigned char* base, int pitch, int ox, int oy,
+                             int w, int h, int px, int py,
+                             unsigned r, unsigned g, unsigned b, unsigned a,
+                             int add)
 {
     unsigned short* d;
 
     if (a == 0 || px < 0 || px >= w || py < 0 || py >= h) return;
     d = Wth_At(base, pitch, ox, oy, px, py);
-    *d = Blend16(*d, r, g, b, a);
+    *d = add ? Wth_Add(*d, r, g, b, a) : Blend16(*d, r, g, b, a);
+}
+
+static __inline void Wth_BlendAt(unsigned char* base, int pitch, int ox, int oy,
+                                 int w, int h, int px, int py,
+                                 unsigned r, unsigned g, unsigned b, unsigned a)
+{
+    Wth_Put(base, pitch, ox, oy, w, h, px, py, r, g, b, a, 0);
 }
 
 static __inline void Wth_AddAt(unsigned char* base, int pitch, int ox, int oy,
                                int w, int h, int px, int py,
                                unsigned r, unsigned g, unsigned b, unsigned a)
 {
-    unsigned short* d;
-
-    if (a == 0 || px < 0 || px >= w || py < 0 || py >= h) return;
-    d = Wth_At(base, pitch, ox, oy, px, py);
-    *d = Wth_Add(*d, r, g, b, a);
+    Wth_Put(base, pitch, ox, oy, w, h, px, py, r, g, b, a, 1);
 }
 
 /* 取目标像素的绿色通道当亮度 (烟要按底下的明暗选深浅)。 */
@@ -1219,6 +1476,50 @@ static __inline int Wth_Lerp(int a, int b, int t)     /* t: 0..256 */
     return a + ((b - a) * t >> 8);
 }
 
+/* 粒子头离屏判定 (光斑/雪花, 半径最大 ~5, 统一留 8 像素余量)。 */
+static __inline int Wth_PxOff(int hx, int hy, int w, int h)
+{
+    return hx < -8 || hx >= w + 8 || hy < -8 || hy >= h + 8;
+}
+
+/* 雨/雪的整体着色: 每通道乘 (环境光 + 色调x等级), 与引擎地形同一光照模型
+ * (等级是千分量级, 贡献 = tint*lv/1000 个百分点, 系数不能放大)。结果与原色按
+ * WeatherLightMix 插值; 火雨自发光不参与。每帧重算一遍。 */
+static int g_LitA[WTH_K_N][3];
+
+/* 这一种天气的落笔色: 受光照的取 g_LitA, 自发光 (火雨) 取配置原色。 */
+static __inline const int* Wth_ColOf(int kind)
+{
+    return g_Kind[kind].lit ? g_LitA[kind] : g_Kind[kind].colA;
+}
+
+static void Wth_LightTick(void)
+{
+    int amb = Lighting_GetParam(LIGHT_P_AMBIENT);
+    int lv  = Lighting_GetParam(LIGHT_P_LEVEL);
+    int rgb[3], kd, c;
+
+    rgb[0] = Lighting_GetParam(LIGHT_P_RED);
+    rgb[1] = Lighting_GetParam(LIGHT_P_GREEN);
+    rgb[2] = Lighting_GetParam(LIGHT_P_BLUE);
+    for (kd = 0; kd < WTH_K_N; kd++)
+    {
+        const WthKind* k = &g_Kind[kd];
+
+        if (!k->lit) continue;
+        for (c = 0; c < 3; c++)
+        {
+            int m = amb + rgb[c] * lv / 1000;      /* tint/100 x lv/1000 -> 百分比 */
+            int vA;
+
+            if (m < 0) m = 0;
+            if (m > 200) m = 200;
+            vA = k->colA[c] * m / 100;
+            g_LitA[kd][c] = (k->colA[c] * (100 - g_Cfg.lightMix) + vA * g_Cfg.lightMix) / 100;
+        }
+    }
+}
+
 /* 拖尾: 从头部往斜上方一条线, 越远越淡, 颜色由 colA 渐变到 colB。
  *
  * 三件事一定要守住:
@@ -1232,10 +1533,12 @@ static void Wth_PxTrail(unsigned char* base, int pitch, int ox, int oy,
     int hx = p->x >> WTH_FX;
     int hy = p->y >> WTH_FX;
     int len = p->len ? p->len : 1;
-    int wide = k->size;
+    int wide = p->wide;
     int lead = (wide - 1) >> 1;         /* 让线条以头部为轴 (宽 3 时左移 1) */
     unsigned a0 = p->a0;
     const int* sc = NULL;
+    const int* ca = Wth_ColOf(p->kind);
+    const int* tb = k->lit ? ca : k->colB;      /* 雨/雪 colB==colA, 单色 */
     int xoff = 0, prevX = hx, c, i;
 
     if (hy < 0 || hy - len >= h) return;
@@ -1260,9 +1563,9 @@ static void Wth_PxTrail(unsigned char* base, int pitch, int ox, int oy,
 
         xoff -= p->sx;
         if (a == 0) break;
-        cr = Wth_Lerp(k->colA[0], k->colB[0], t);
-        cg = Wth_Lerp(k->colA[1], k->colB[1], t);
-        cb = Wth_Lerp(k->colA[2], k->colB[2], t);
+        cr = Wth_Lerp(ca[0], tb[0], t);
+        cg = Wth_Lerp(ca[1], tb[1], t);
+        cb = Wth_Lerp(ca[2], tb[2], t);
         if (sc && t > 168)
         {
             int s2 = (t - 168) * 256 / 88 * k->tailSmoke / 256;
@@ -1318,11 +1621,11 @@ static void Wth_PxGlow(unsigned char* base, int pitch, int ox, int oy,
 {
     int hx = p->x >> WTH_FX;
     int hy = p->y >> WTH_FX;
-    int sz = k->size;
+    int sz = p->wide;
     unsigned a0 = p->a0;
     int dx, dy;
 
-    if (hx < -8 || hx >= w + 8 || hy < -8 || hy >= h + 8) return;
+    if (Wth_PxOff(hx, hy, w, h)) return;
     for (dy = -sz; dy <= sz; dy++)
         for (dx = -sz; dx <= sz; dx++)
         {
@@ -1342,39 +1645,95 @@ static void Wth_PxGlow(unsigned char* base, int pitch, int ox, int oy,
         }
 }
 
-/* 雪花: 十字亮点 + 下方一像素冷灰影。纯亮色在雪原/浅色地形上会糊成一片,
- * 补一像素深色边 —— 亮底上看得见暗边, 暗底上看得见亮点。
+/* 雪花: 中心亮点 + 按造型长臂。造型与大小各自随机 —— 一屏里混着飘才不像
+ * "一堆大小不同的十字"。几种造型都只占 3~5px, 再大就不像雪, 像贴图上的图标。
+ * 臂用淡一档的同色系; 朝下那几笔压暗, 亮底上才看得见 (纯白在雪原上会糊掉)。
  * 臂长由 size 给, 大片 (sz) 再 +1。 */
 static void Wth_PxFlake(unsigned char* base, int pitch, int ox, int oy,
                         int w, int h, const WthPx* p, const WthKind* k)
 {
-    const int cr = k->colA[0], cg = k->colA[1], cb = k->colA[2];
-    /* 四邻用比底色淡一点的同色系, 对角再淡; 下方那像素刻意压暗当影 */
+    const int* lc = g_LitA[p->kind];
+    const int cr = lc[0], cg = lc[1], cb = lc[2];
     const int nr = (cr * 3 + 200) / 4, ng = (cg * 3 + 200) / 4, nb = (cb * 3 + 200) / 4;
     int hx = p->x >> WTH_FX;
     int hy = p->y >> WTH_FX;
     unsigned a = p->a0;
-    int arm = k->size + (p->sz ? 1 : 0);
+    int arm = p->wide + (p->sz ? 1 : 0);
     int d;
 
-    if (hx < -4 || hx >= w + 4 || hy < -4 || hy >= h + 4) return;
-    Wth_BlendAt(base, pitch, ox, oy, w, h, hx, hy, cr, cg, cb, a);
-    for (d = 1; d <= arm; d++)
-    {
-        unsigned da = a * 4u / (unsigned)(4 + d * 4);
+    if (Wth_PxOff(hx, hy, w, h)) return;
 
-        Wth_BlendAt(base, pitch, ox, oy, w, h, hx - d, hy, nr, ng, nb, da);
-        Wth_BlendAt(base, pitch, ox, oy, w, h, hx + d, hy, nr, ng, nb, da);
-        Wth_BlendAt(base, pitch, ox, oy, w, h, hx, hy - d, nr, ng, nb, da);
-        Wth_BlendAt(base, pitch, ox, oy, w, h, hx, hy + d, nr / 2, ng / 2, nb / 2, da);
-        if (d < arm)
+#define FL(dx, dy, r, g, bl, av) \
+    Wth_BlendAt(base, pitch, ox, oy, w, h, hx + (dx), hy + (dy), r, g, bl, av)
+
+    FL(0, 0, cr, cg, cb, a);
+    switch (p->shape)
+    {
+    case 0:     /* 六角星: 横臂 + 上臂, 斜臂只朝上斜 (雪花主枝的方向) */
+        for (d = 1; d <= arm; d++)
         {
-            Wth_BlendAt(base, pitch, ox, oy, w, h, hx - d, hy - d, nr, ng, nb, a / 8u);
-            Wth_BlendAt(base, pitch, ox, oy, w, h, hx + d, hy - d, nr, ng, nb, a / 8u);
-            Wth_BlendAt(base, pitch, ox, oy, w, h, hx - d, hy + d, nr, ng, nb, a / 8u);
-            Wth_BlendAt(base, pitch, ox, oy, w, h, hx + d, hy + d, nr, ng, nb, a / 8u);
+            unsigned da = a * 4u / (unsigned)(4 + d * 4);
+
+            FL(-d, 0, nr, ng, nb, da);
+            FL(d, 0, nr, ng, nb, da);
+            FL(0, -d, nr, ng, nb, da);
+            FL(-d, -d, nr, ng, nb, da / 3u);
+            FL(d, -d, nr, ng, nb, da / 3u);
         }
+        FL(0, 1, nr / 2, ng / 2, nb / 2, a / 2u);
+        break;
+
+    case 1:     /* 十字: 四向等长, 对角一圈很淡的影子 */
+        for (d = 1; d <= arm; d++)
+        {
+            unsigned da = a * 4u / (unsigned)(4 + d * 4);
+
+            FL(-d, 0, nr, ng, nb, da);
+            FL(d, 0, nr, ng, nb, da);
+            FL(0, -d, nr, ng, nb, da);
+            FL(0, d, nr / 2, ng / 2, nb / 2, da);
+            if (d < arm)
+            {
+                FL(-d, -d, nr, ng, nb, a / 8u);
+                FL(d, -d, nr, ng, nb, a / 8u);
+                FL(-d, d, nr, ng, nb, a / 8u);
+                FL(d, d, nr, ng, nb, a / 8u);
+            }
+        }
+        break;
+
+    case 2:     /* 绒球: 实心 3x3, 大片再往外一圈 —— 近处糊成一团的那种雪 */
+        FL(-1, 0, nr, ng, nb, a * 3u / 4u);
+        FL(1, 0, nr, ng, nb, a * 3u / 4u);
+        FL(0, -1, nr, ng, nb, a * 3u / 4u);
+        FL(0, 1, nr, ng, nb, a / 3u);
+        FL(-1, -1, nr, ng, nb, a / 2u);
+        FL(1, -1, nr, ng, nb, a / 2u);
+        FL(-1, 1, nr, ng, nb, a / 4u);
+        FL(1, 1, nr, ng, nb, a / 4u);
+        if (arm > 1)
+        {
+            FL(-2, 0, nr, ng, nb, a / 5u);
+            FL(2, 0, nr, ng, nb, a / 5u);
+            FL(0, -2, nr, ng, nb, a / 5u);
+            FL(-2, -1, nr, ng, nb, a / 8u);
+            FL(2, -1, nr, ng, nb, a / 8u);
+        }
+        break;
+
+    default:    /* 斜叉: 两条对角, 飘着看像在转 */
+        for (d = 1; d <= arm; d++)
+        {
+            unsigned da = a * 4u / (unsigned)(4 + d * 4);
+
+            FL(-d, -d, nr, ng, nb, da);
+            FL(d, -d, nr, ng, nb, da);
+            FL(-d, d, nr, ng, nb, da / 2u);
+            FL(d, d, nr, ng, nb, da / 2u);
+        }
+        break;
     }
+#undef FL
 }
 
 /* 一个落笔循环管三种天气: 拖尾共用, 头按 WTH_HEAD_* 分。
@@ -1454,6 +1813,50 @@ static void Wth_PxSmoke(unsigned char* base, int pitch, int ox, int oy,
     }
 }
 
+/* 线段步进步数 = max(|dx|,|dy|) (Wth_DropSeg/Wth_BltSeg 共用)。 */
+static __inline int Wth_SegLen(int dx, int dy)
+{
+    int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
+
+    return adx > ady ? adx : ady;
+}
+
+/* 溅射颗粒的一小段轨迹: 从上一帧位置连到这一帧, 尾淡头亮。单像素点在贴图密集的
+ * 地面上等于看不见; 溅起的水柱就是这么一条竖线。卡帧造成的大跳只留末端 8px,
+ * 免得拉出一道横贯屏幕的白线。 */
+static void Wth_DropSeg(unsigned char* base, int pitch, int ox, int oy,
+                        int w, int h, int x0, int y0, int x1, int y1,
+                        int r, int g, int b, unsigned a, int add)
+{
+    int dx = x1 - x0, dy = y1 - y0;
+    int n = Wth_SegLen(dx, dy), i;
+
+    if (n <= 0)
+    {
+        Wth_Put(base, pitch, ox, oy, w, h, x1, y1,
+                (unsigned)r, (unsigned)g, (unsigned)b, a, add);
+        return;
+    }
+    if (n > 8)
+    {
+        x0 = x1 - dx * 8 / n;
+        y0 = y1 - dy * 8 / n;
+        dx = x1 - x0;
+        dy = y1 - y0;
+        n = 8;
+    }
+    for (i = 0; i <= n; i++)
+    {
+        int px = x0 + dx * i / n;
+        int py = y0 + dy * i / n;
+        unsigned ai = a * (unsigned)(i + 1) / (unsigned)(n + 1);
+
+        if (ai == 0) continue;
+        Wth_Put(base, pitch, ox, oy, w, h, px, py,
+                (unsigned)r, (unsigned)g, (unsigned)b, ai, add);
+    }
+}
+
 /* 溅射颗粒: 雨/雪是水花 (普通混合), 火是火星 (加法, 才有烧起来的亮度)。
  * 颜色直接取对应天气的 colA, 不用为它单开一组参数。 */
 static void Wth_PxDrop(unsigned char* base, int pitch, int ox, int oy,
@@ -1465,7 +1868,8 @@ static void Wth_PxDrop(unsigned char* base, int pitch, int ox, int oy,
     {
         const WthDrop* p = &g_Drop[i];
         const WthKind* k = &g_Kind[p->kind];
-        int px, py;
+        const int* lc = Wth_ColOf(p->kind);
+        int px, py, add;
         unsigned a;
 
         if (!p->life) continue;
@@ -1473,22 +1877,64 @@ static void Wth_PxDrop(unsigned char* base, int pitch, int ox, int oy,
         py = p->y >> WTH_FX;
         a = (unsigned)p->a0 * (unsigned)(p->life - p->age) / (unsigned)p->life;
         if (a == 0) continue;
-        if (p->kind == WTH_K_FIRE)
+        add = WTH_ADD(k);
+        Wth_DropSeg(base, pitch, ox, oy, w, h, p->px >> WTH_FX, p->py >> WTH_FX,
+                    px, py, lc[0], lc[1], lc[2], a, add);
+        if (add)
         {
-            Wth_AddAt(base, pitch, ox, oy, w, h, px, py,
-                      k->colA[0], k->colA[1], k->colA[2], a);
-            if (a > 90)
-                Wth_AddAt(base, pitch, ox, oy, w, h, px, py + 1,
-                          k->colB[0], k->colB[1], k->colB[2], a / 3u);
+            Wth_AddAt(base, pitch, ox, oy, w, h, px, py + 1,
+                      k->colB[0], k->colB[1], k->colB[2], a * 45u / 100u);
+            if (a > 120)
+                Wth_AddAt(base, pitch, ox, oy, w, h, px, py - 1,
+                          k->colC[0], k->colC[1], k->colC[2], a / 4u);
         }
         else
+            Wth_BlendAt(base, pitch, ox, oy, w, h, px + 1, py,
+                        lc[0], lc[1], lc[2], a * 2u / 3u);
+    }
+}
+
+/* 落地涟漪: 扁椭圆的环 (2:1 等距视图里水面上的圆本来就是扁的)。环线画两个像素
+ * 厚 (外圈实、内圈半透), 单像素线在贴图密集的地面上基本看不见; 中间留空 ——
+ * 实心圆会像"地上多了个球"。 */
+static void Wth_PxRip(unsigned char* base, int pitch, int ox, int oy,
+                      int w, int h)
+{
+    int i;
+
+    for (i = 0; i < WTH_RIP_MAX; i++)
+    {
+        const WthRip* p = &g_Rip[i];
+        const int* lc = Wth_ColOf(p->kind);
+        int r, cx, cy, dy, a, add;
+
+        if (!p->life) continue;
+        r = (p->r0 + (int)(p->rmax - p->r0) * (int)p->age / (int)p->life) >> WTH_FX;
+        if (r < 1) r = 1;
+        if (r > WTH_RIP_RMAX) r = WTH_RIP_RMAX;
+        cx = p->x >> WTH_FX;
+        cy = p->y >> WTH_FX;
+        a = (int)p->a0 * (int)(p->life - p->age) / (int)p->life;
+        if (a <= 0) continue;
+        add = WTH_ADD(&g_Kind[p->kind]);
+
+#define RIP(px2, py2, av)                                                     \
+    Wth_Put(base, pitch, ox, oy, w, h, px2, py2,                              \
+            (unsigned)lc[0], (unsigned)lc[1], (unsigned)lc[2], av, add)
+
+        for (dy = -(r / 2); dy <= r / 2; dy++)
         {
-            Wth_BlendAt(base, pitch, ox, oy, w, h, px, py,
-                        k->colA[0], k->colA[1], k->colA[2], a);
-            Wth_BlendAt(base, pitch, ox, oy, w, h, px, py + 1,
-                        k->colA[0], k->colA[1], k->colA[2], a / 3u);
+            int ad = (dy < 0) ? -dy : dy;
+            int hw = g_SmHalf[r][ad * 2];
+            int in = (hw > 1) ? hw - 1 : hw;
+
+            RIP(cx - hw, cy + dy, (unsigned)a);
+            RIP(cx + hw, cy + dy, (unsigned)a);
+            RIP(cx - in, cy + dy, (unsigned)(a / 2));
+            RIP(cx + in, cy + dy, (unsigned)(a / 2));
         }
     }
+#undef RIP
 }
 
 /* ---------------- 云影 (低频定形 + 高频侵蚀) ----------------
@@ -1792,20 +2238,19 @@ static void Wth_CloudBake(void)
         char msg[160];
         unsigned p = 0;
 
-        p = AppendCStr(msg, p, "weather: cloud style=", sizeof(msg));
-        p = AppendCStr(msg, p, st->name, sizeof(msg));
-        p = AppendCStr(msg, p, " seed=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), (int)(st->perm & 0xFFFFu));
-        p = AppendCStr(msg, p, " sq=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), st->squash);
-        p = AppendCStr(msg, p, " cover=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), hits * 100 / n);
-        p = AppendCStr(msg, p, "% thr=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), thr);
-        p = AppendCStr(msg, p, " bake=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg),
-                      (int)((q1.QuadPart - q0.QuadPart) * 1000 / fq.QuadPart));
-        p = AppendCStr(msg, p, "ms", sizeof(msg));
+        p = WTH_L_S(msg, p, "weather: cloud style=");
+        p = WTH_L_S(msg, p, st->name);
+        p = WTH_L_S(msg, p, " seed=");
+        p = WTH_L_I(msg, p, (int)(st->perm & 0xFFFFu));
+        p = WTH_L_S(msg, p, " sq=");
+        p = WTH_L_I(msg, p, st->squash);
+        p = WTH_L_S(msg, p, " cover=");
+        p = WTH_L_I(msg, p, hits * 100 / n);
+        p = WTH_L_S(msg, p, "% thr=");
+        p = WTH_L_I(msg, p, thr);
+        p = WTH_L_S(msg, p, " bake=");
+        p = WTH_L_I(msg, p, (int)((q1.QuadPart - q0.QuadPart) * 1000 / fq.QuadPart));
+        p = WTH_L_S(msg, p, "ms");
         LogLine(msg);
     }
 }
@@ -1939,91 +2384,37 @@ static __inline unsigned short Wth_DarkPx(unsigned short v, unsigned m8,
  * 就是一张 8x8 的马赛克网。 */
 static const unsigned char kCldW[8] = { 3, 24, 59, 104, 152, 197, 232, 253 };
 
-/* 标量版: 逐像素。右边缘的残块也走它 (n < 8)。 */
-static void Wth_CloudFillScalar(unsigned char* base, int pitch, int ox, int oy,
-                                int cols, int rows, int w, int h,
-                                unsigned rsh, unsigned gm)
+/* 一行最多 8 像素的逐像素压暗: 块内 alpha 栅坡 + Bayer 抖动。标量版整行与
+ * SSE2 版右缘残块共用。差值先 >>1 再乘权重, 是为了让 16 位乘法不溢出
+ * (|差|<=255 x 253); 代价是负的奇数差会多算一档 (最多 2 级 alpha), 所以夹回。
+ * phase = 屏幕行号 & 3 (抖动相位)。 */
+static __inline void Wth_CldRow(unsigned short* dp, int n, int at, int ab,
+                                int phase, unsigned rsh, unsigned gm)
 {
-    int by, bx;
+    const unsigned char* dr = kBayer + phase * 4;
+    int i;
 
-    for (by = 0; by < rows; by++)
+    for (i = 0; i < n; i++)
     {
-        const unsigned char* a0 = g_CldF + by * g_CldStride;
-        const unsigned char* a1 = a0 + g_CldStride;
-        int y0 = by * WTH_CLOUD_BLK;
-        int y1 = y0 + WTH_CLOUD_BLK;
+        int a = at + ((((ab - at) >> 1) * kCldW[i]) >> 7);
 
-        if (y1 > h) y1 = h;
-        for (bx = 0; bx < cols; bx++)
-        {
-            int v00 = a0[bx], v10 = a0[bx + 1];
-            int v01 = a1[bx], v11 = a1[bx + 1];
-            int x0 = bx * WTH_CLOUD_BLK;
-            int x1 = x0 + WTH_CLOUD_BLK;
-            int n, y, i;
-
-            if ((v00 | v10 | v01 | v11) < 2) continue;
-            if (x1 > w) x1 = w;
-            n = x1 - x0;
-            for (y = y0; y < y1; y++)
-            {
-                const unsigned char* dr = kBayer + (y & 3) * 4;
-                int fy = kCldW[y - y0];
-                int at = v00 + ((((v01 - v00) >> 1) * fy) >> 7);
-                int ab = v10 + ((((v11 - v10) >> 1) * fy) >> 7);
-                unsigned short* dp = (unsigned short*)
-                    (base + (size_t)(oy + y) * (size_t)pitch) + ox + x0;
-
-                if (at < 0) at = 0; else if (at > 255) at = 255;
-                if (ab < 0) ab = 0; else if (ab > 255) ab = 255;
-                if ((at | ab) < 2) continue;
-                for (i = 0; i < n && i < WTH_CLOUD_BLK; i++)
-                {
-                    int a = at + ((((ab - at) >> 1) * kCldW[i]) >> 7);
-
-                    if (a < 0) a = 0; else if (a > 255) a = 255;
-                    if (a)
-                        dp[i] = Wth_DarkPx(dp[i], 256u - (unsigned)a, rsh, gm,
-                                           (unsigned)dr[i & 3] * 16u + 8u);
-                }
-            }
-        }
+        if (a < 0) a = 0; else if (a > 255) a = 255;
+        if (a)
+            dp[i] = Wth_DarkPx(dp[i], 256u - (unsigned)a, rsh, gm,
+                               (unsigned)dr[i & 3] * 16u + 8u);
     }
 }
 
-#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
-#define WTH_HAVE_SSE2 1
-/* PF_XMMI64_INSTRUCTIONS_AVAILABLE = 10 (SSE2)。老 CPU 自动退回标量。 */
-static int s_WthSse2 = -1;
-static int WthSse2Ok(void)
-{
-    if (s_WthSse2 < 0) s_WthSse2 = IsProcessorFeaturePresent(10) ? 1 : 0;
-    return s_WthSse2;
-}
+/* 块循环 + 块内插值: 标量与 SSE2 共用, 两条路的 alpha 场因此逐位一致。
+ * 每行算出左右两列的 alpha (at/ab) 与行首指针, 交给 rowFill 落笔。 */
+typedef void (*WthCldRowFn)(unsigned short* dp, int n, int at, int ab,
+                            int phase, unsigned rsh, unsigned gm);
 
-__attribute__((target("sse2")))
-static void Wth_CloudFillSse2(unsigned char* base, int pitch, int ox, int oy,
+static void Wth_CloudFillRows(unsigned char* base, int pitch, int ox, int oy,
                               int cols, int rows, int w, int h,
-                              unsigned rsh, unsigned gm)
+                              unsigned rsh, unsigned gm, WthCldRowFn rowFill)
 {
-    const __m128i m5 = _mm_set1_epi16(0x1F);
-    const __m128i mg = _mm_set1_epi16((short)gm);
-    const __m128i k256 = _mm_set1_epi16(256);
-    const __m128i zero = _mm_setzero_si128();
-    const __m128i kw = _mm_setr_epi16(kCldW[0], kCldW[1], kCldW[2], kCldW[3],
-                                      kCldW[4], kCldW[5], kCldW[6], kCldW[7]);
-    const __m128i c5 = _mm_cvtsi32_si128(5);
-    const __m128i crs = _mm_cvtsi32_si128((int)rsh);
-    /* 抖动的 4 个行相位 (块恒 8 像素宽, 所以列相位就是 i&3) */
-    __m128i kd[4];
-    int by, bx, k;
-
-    for (k = 0; k < 4; k++)
-        kd[k] = _mm_setr_epi16(
-            (short)(kBayer[k * 4 + 0] * 16 + 8), (short)(kBayer[k * 4 + 1] * 16 + 8),
-            (short)(kBayer[k * 4 + 2] * 16 + 8), (short)(kBayer[k * 4 + 3] * 16 + 8),
-            (short)(kBayer[k * 4 + 0] * 16 + 8), (short)(kBayer[k * 4 + 1] * 16 + 8),
-            (short)(kBayer[k * 4 + 2] * 16 + 8), (short)(kBayer[k * 4 + 3] * 16 + 8));
+    int by, bx;
 
     for (by = 0; by < rows; by++)
     {
@@ -2051,116 +2442,86 @@ static void Wth_CloudFillSse2(unsigned char* base, int pitch, int ox, int oy,
                 int ab = v10 + ((((v11 - v10) >> 1) * fy) >> 7);
                 unsigned short* dp = (unsigned short*)
                     (base + (size_t)(oy + y) * (size_t)pitch) + ox + x0;
-                __m128i km;
-                __m128i dv;
-                int i;
 
-                /* 差值先 >>1 再乘权重, 是为了让 16 位乘法不溢出 (|差|≤255 × 253)。
-                 * 代价是负的奇数差会多算一档 (最多 2 级 alpha), 所以夹回 0..255。 */
                 if (at < 0) at = 0; else if (at > 255) at = 255;
                 if (ab < 0) ab = 0; else if (ab > 255) ab = 255;
                 if ((at | ab) < 2) continue;
-                if (n < WTH_CLOUD_BLK)                   /* 右边缘的残块走标量 */
-                {
-                    const unsigned char* dr = kBayer + (y & 3) * 4;
-
-                    for (i = 0; i < n; i++)
-                    {
-                        int a = at + ((((ab - at) >> 1) * kCldW[i]) >> 7);
-
-                        if (a < 0) a = 0; else if (a > 255) a = 255;
-                        if (a)
-                            dp[i] = Wth_DarkPx(dp[i], 256u - (unsigned)a, rsh, gm,
-                                               (unsigned)dr[i & 3] * 16u + 8u);
-                    }
-                    continue;
-                }
-                /* 块内 alpha: a_i = at + ((ab-at)/2 * w_i >> 7), 一次算 8 个 */
-                km = _mm_sub_epi16(k256,
-                        _mm_min_epi16(_mm_set1_epi16(255), _mm_max_epi16(zero,
-                            _mm_add_epi16(
-                                _mm_set1_epi16((short)at),
-                                _mm_srai_epi16(
-                                    _mm_mullo_epi16(
-                                        _mm_srai_epi16(_mm_set1_epi16((short)(ab - at)), 1),
-                                        kw), 7)))));
-                dv = kd[y & 3];
-                {
-                    __m128i v = _mm_loadu_si128((const __m128i*)dp);
-                    __m128i r = _mm_and_si128(_mm_srl_epi16(v, crs), m5);
-                    __m128i g = _mm_and_si128(_mm_srl_epi16(v, c5), mg);
-                    __m128i b = _mm_and_si128(v, m5);
-
-                    r = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(r, km), dv), 8);
-                    g = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(g, km), dv), 8);
-                    b = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(b, km), dv), 8);
-                    _mm_storeu_si128((__m128i*)dp,
-                        _mm_or_si128(_mm_sll_epi16(r, crs),
-                            _mm_or_si128(_mm_slli_epi16(g, 5), b)));
-                }
+                rowFill(dp, n, at, ab, y & 3, rsh, gm);
             }
         }
     }
 }
 
-/* 一次性自检: 同一块缓冲上把 SSE2 与标量各跑一遍, 逐字节比对。
- * 只在第一帧跑一次 (小窗口), 不一致才写日志 —— 两条路必须逐位一致, 否则
- * "换台机器 / 关掉 SSE2" 就会看到不一样的云影。 */
-static void Wth_CloudVerify(int w, int h)
+#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
+#define WTH_HAVE_SSE2 1
+/* PF_XMMI64_INSTRUCTIONS_AVAILABLE = 10 (SSE2)。老 CPU 自动退回标量。 */
+static int s_WthSse2 = -1;
+static int WthSse2Ok(void)
 {
-    static int done = 0;
-    unsigned char* a;
-    unsigned char* b;
-    size_t pitch, n;
-    int i, bad, cols, rows;
-    unsigned rsh = (g_GBits == 6) ? 11u : 10u;
-    unsigned gm = (g_GBits == 6) ? 63u : 31u;
+    if (s_WthSse2 < 0) s_WthSse2 = IsProcessorFeaturePresent(10) ? 1 : 0;
+    return s_WthSse2;
+}
 
-    if (done || !WthSse2Ok() || g_CldCols <= 0 || g_CldRows <= 0) return;
-    done = 1;
-    if (w > 128) w = 128;
-    if (h > 40) h = 40;
-    cols = (w + WTH_CLOUD_BLK - 1) / WTH_CLOUD_BLK;
-    rows = (h + WTH_CLOUD_BLK - 1) / WTH_CLOUD_BLK;
-    if (cols >= g_CldCols || rows >= g_CldRows) return;   /* 场没铺满就跳, 不越界 */
-    pitch = (size_t)w * 2;
-    n = pitch * (size_t)h;
-    a = (unsigned char*)LocalAlloc(LMEM_FIXED, n);
-    b = (unsigned char*)LocalAlloc(LMEM_FIXED, n);
-    if (!a || !b)
+/* SSE2 常量缓存: 行填充每帧被调上千次, 常量不能每行重建。rsh/gm 一帧内不变,
+ * 换 565/555 时重建一次。 */
+static unsigned s_CldRsh = 0xFFFFFFFFu, s_CldGm;
+static __m128i s_CldM5, s_CldMg, s_CldK256, s_CldZero, s_CldKw, s_CldC5, s_CldCrs;
+static __m128i s_CldKd[4];
+
+__attribute__((target("sse2")))
+static void Wth_CldRowSse2(unsigned short* dp, int n, int at, int ab,
+                           int phase, unsigned rsh, unsigned gm)
+{
+    __m128i km, dv, v, r, g, b;
+
+    if (n < WTH_CLOUD_BLK)                   /* 右边缘的残块走标量 */
     {
-        if (a) LocalFree(a);
-        if (b) LocalFree(b);
+        Wth_CldRow(dp, n, at, ab, phase, rsh, gm);
         return;
     }
-    /* 底图取一条遍历全 16 位值的序列: 0 和全 1 的极端像素都要过一遍 */
-    for (i = 0; i < (int)(n / 2); i++)
+    if (rsh != s_CldRsh || gm != s_CldGm)
     {
-        unsigned v = (unsigned)i * 2654435761u;
+        int k;
 
-        ((unsigned short*)a)[i] = (unsigned short)(v >> 16);
+        s_CldRsh = rsh;
+        s_CldGm = gm;
+        s_CldM5 = _mm_set1_epi16(0x1F);
+        s_CldMg = _mm_set1_epi16((short)gm);
+        s_CldK256 = _mm_set1_epi16(256);
+        s_CldZero = _mm_setzero_si128();
+        s_CldKw = _mm_setr_epi16(kCldW[0], kCldW[1], kCldW[2], kCldW[3],
+                                 kCldW[4], kCldW[5], kCldW[6], kCldW[7]);
+        s_CldC5 = _mm_cvtsi32_si128(5);
+        s_CldCrs = _mm_cvtsi32_si128((int)rsh);
+        for (k = 0; k < 4; k++)              /* 抖动的 4 个行相位 (块恒 8 像素宽) */
+            s_CldKd[k] = _mm_setr_epi16(
+                (short)(kBayer[k * 4 + 0] * 16 + 8), (short)(kBayer[k * 4 + 1] * 16 + 8),
+                (short)(kBayer[k * 4 + 2] * 16 + 8), (short)(kBayer[k * 4 + 3] * 16 + 8),
+                (short)(kBayer[k * 4 + 0] * 16 + 8), (short)(kBayer[k * 4 + 1] * 16 + 8),
+                (short)(kBayer[k * 4 + 2] * 16 + 8), (short)(kBayer[k * 4 + 3] * 16 + 8));
     }
-    memcpy(b, a, n);
-    Wth_CloudFillSse2(a, (int)pitch, 0, 0, cols, rows, w, h, rsh, gm);
-    Wth_CloudFillScalar(b, (int)pitch, 0, 0, cols, rows, w, h, rsh, gm);
-    bad = 0;
-    for (i = 0; i < (int)n; i++) if (a[i] != b[i]) bad++;
-    if (bad)
-    {
-        char msg[80];
-        unsigned p = 0;
 
-        p = AppendCStr(msg, p, "weather: cloud sse2 mismatch=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), bad);
-        LogLine(msg);
-    }
-    LocalFree(a);
-    LocalFree(b);
-}
-#else
-static void Wth_CloudVerify(int w, int h)
-{
-    (void)w; (void)h;
+    /* 块内 alpha: a_i = at + ((ab-at)/2 * w_i >> 7), 一次算 8 个 */
+    km = _mm_sub_epi16(s_CldK256,
+            _mm_min_epi16(_mm_set1_epi16(255), _mm_max_epi16(s_CldZero,
+                _mm_add_epi16(
+                    _mm_set1_epi16((short)at),
+                    _mm_srai_epi16(
+                        _mm_mullo_epi16(
+                            _mm_srai_epi16(_mm_set1_epi16((short)(ab - at)), 1),
+                            s_CldKw), 7)))));
+    dv = s_CldKd[phase];
+    v = _mm_loadu_si128((const __m128i*)dp);
+    r = _mm_and_si128(_mm_srl_epi16(v, s_CldCrs), s_CldM5);
+    g = _mm_and_si128(_mm_srl_epi16(v, s_CldC5), s_CldMg);
+    b = _mm_and_si128(v, s_CldM5);
+
+    r = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(r, km), dv), 8);
+    g = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(g, km), dv), 8);
+    b = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(b, km), dv), 8);
+    _mm_storeu_si128((__m128i*)dp,
+        _mm_or_si128(_mm_sll_epi16(r, s_CldCrs),
+            _mm_or_si128(_mm_slli_epi16(g, 5), b)));
 }
 #endif
 
@@ -2173,11 +2534,12 @@ static void Wth_CloudFill(unsigned char* base, int pitch, int ox, int oy,
 #ifdef WTH_HAVE_SSE2
     if (WthSse2Ok())
     {
-        Wth_CloudFillSse2(base, pitch, ox, oy, cols, rows, w, h, rsh, gm);
+        Wth_CloudFillRows(base, pitch, ox, oy, cols, rows, w, h, rsh, gm,
+                          Wth_CldRowSse2);
         return;
     }
 #endif
-    Wth_CloudFillScalar(base, pitch, ox, oy, cols, rows, w, h, rsh, gm);
+    Wth_CloudFillRows(base, pitch, ox, oy, cols, rows, w, h, rsh, gm, Wth_CldRow);
 }
 
 /* ---------------- 图像档绘制 ---------------- */
@@ -2219,6 +2581,499 @@ static void Wth_DrawLayer(WthLayer* l, void* surf, void* pal,
     }
 }
 
+/* ---------------- 雷电 (闪电 / 打雷) 与雨声 ----------------
+ *
+ * 声音走 sound.ini 的条目 (见 SoundFx), 名字在 [Environment] 可换:
+ *   ThunderSound  逗号分隔的几条雷声, 默认 WeatherIntro, WeatherStart, WeatherStrike
+ *   RainSound     雨声循环, 默认 RainLoop
+ *   SnowSound     雪天的风声循环, 默认 _Amb_WindCold
+ *
+ * 时间线按**逻辑帧**: 这游戏的速度与帧号绑定, 按墙钟走会出现"游戏变慢雷照打"。
+ * 雷电是独立开关 (不必下雨) → 2 秒后第一道 → 之后每 Min~Max 帧一道, 每道先见光、
+ * 后闻声 (延迟按帧算), 离得远的声音轻而钝。
+ *
+ * 落点在归一化空间里可以越出视图 (±半屏): 天边的雷看不见电弧, 只剩提亮和声音,
+ * 声像跟着落点走。
+ *
+ * 画面 = 电弧 (自绘折线 + 三层光晕, 加法混合) + 整屏提亮, 共用一条寿命曲线。曲线
+ * 第 4 帧的第二个峰是回击: 真实闪电都闪两下, 单峰像闪光灯。只画在视图区原图面上
+ * (与雨/雪同源), 缩放、无UI截图、存档缩略图都一致。
+ */
+
+#define WTH_BLT_NODE   9      /* 主折线节点数 (含首尾) */
+#define WTH_BLT_BR     3      /* 分叉数 */
+#define WTH_BLT_BRN    4      /* 每个分叉的节点数 */
+#define WTH_BLT_LIFE   10     /* 一道闪电的寿命 (逻辑帧) */
+#define WTH_BLT_OFF    512    /* 落点最多越出视图多远 (归一化半屏) */
+#define WTH_TH_FIRST   120    /* 开雷电之后多久打第一道 (逻辑帧) */
+#define WTH_TH_DLY     6      /* 见光到闻声的最短延迟 (逻辑帧) */
+
+static const unsigned char kFlashA[WTH_BLT_LIFE] =
+    { 255, 170, 92, 40, 128, 58, 18, 0, 0, 0 };
+static const unsigned char kBoltA[WTH_BLT_LIFE] =
+    { 255, 236, 196, 132, 224, 146, 64, 0, 0, 0 };
+
+/* 电弧坐标归一化到 0..1023 (可以越界), 绘制时按视图尺寸展开 —— 换分辨率不用重生成。 */
+typedef struct {
+    int on;
+    int age;                        /* 已过几个逻辑帧 */
+    int prox;                       /* 落点离视图多近 (255 = 视图内), 压暗屏外那道闪的提亮 */
+    unsigned char n, bn;
+    unsigned char bFrom[WTH_BLT_BR];
+    short mx[WTH_BLT_NODE], my[WTH_BLT_NODE];
+    short bx[WTH_BLT_BR][WTH_BLT_BRN], by[WTH_BLT_BR][WTH_BLT_BRN];
+} WthBolt;
+
+/* 一条循环音 (雨声 / 风声): 通道、条目、音量在装载时定死。 */
+typedef struct {
+    int started;                    /* 循环在响 */
+    unsigned retry;                 /* 下次尝试起的时刻 (ms) */
+    int sfx;                        /* SFX_LOOP_* 通道 */
+    const char* name;               /* sound.ini 条目名 (g_Cfg 里的数组) */
+    int vol;
+} WthLoop;
+
+typedef struct {
+    int on;                         /* 雷电在跑 */
+    WthLoop rain, wind;             /* 雨声 / 风声循环, 各跟各的开关 */
+    unsigned next;                  /* 下一道闪电的帧号 */
+    unsigned sndAt;                 /* 待播的那声雷的帧号, 0 = 无 */
+    int sndPan, sndVol, sndIdx;
+} WthStorm;
+
+static WthBolt  g_Bolt;
+static WthStorm g_Storm;
+
+static void Wth_ThunderStop(void)
+{
+    g_Storm.on = 0;
+    g_Storm.sndAt = 0;
+    g_Bolt.on = 0;
+    g_Bolt.age = 0;
+}
+
+/* Wth_Init 调: 循环音的通道/条目/音量装载时定死。 */
+static void Wth_SndSetup(void)
+{
+    g_Storm.rain.sfx = SFX_LOOP_RAIN;
+    g_Storm.rain.name = g_Cfg.rainName;
+    g_Storm.rain.vol = g_Cfg.rainVol;
+    g_Storm.wind.sfx = SFX_LOOP_WIND;
+    g_Storm.wind.name = g_Cfg.snowName;
+    g_Storm.wind.vol = g_Cfg.snowVol;
+}
+
+static void Wth_LoopStop(WthLoop* l)
+{
+    if (l->started)
+    {
+        Sfx_LoopStop(l->sfx);
+        l->started = 0;
+    }
+}
+
+/* 循环音的状态机: 开着就拉起, 起不来 2 秒退避再试 (名字解析失败 = 音效表还没
+ * 装载, 不然每帧扫一遍几千条的表); 开关关了就停。 */
+static void Wth_LoopTick(WthLoop* l, int on, unsigned now)
+{
+    if (!on)
+    {
+        Wth_LoopStop(l);
+        return;
+    }
+    if (!l->started && (int)(now - l->retry) >= 0)
+    {
+        l->started = Sfx_LoopStart(l->sfx, l->name, 0x2000, l->vol);
+        if (!l->started) l->retry = now + 2000;
+    }
+}
+
+/* 雨停 / 雪停 / 雷电关: 循环音与待播的雷一起收掉 (菜单里点完立刻生效)。 */
+static void Wth_SndReset(void)
+{
+    Wth_ThunderStop();
+    Wth_LoopStop(&g_Storm.rain);
+    Wth_LoopStop(&g_Storm.wind);
+    g_Storm.rain.retry = 0;
+    g_Storm.wind.retry = 0;
+}
+
+/* 生成一道电弧: 主折线从视图上方 (或更高的云外) 扎到视图 55%~110% 处, 每段左右甩;
+ * 再从主干中段各分出一条叉 (真实闪电的叉都从中段斜着甩出去)。
+ * 横向不夹到视图内: 多数落点贴着视图, 偶尔整个甩到屏外 —— 那一次只剩提亮和一声
+ * 从那个方向传来的雷。 */
+static void Wth_BoltGen(void)
+{
+    int i, b, j, x, y0, yEnd;
+
+    g_Bolt.n = WTH_BLT_NODE;
+    g_Bolt.bn = WTH_BLT_BR;
+    if (Wth_Range(0, 2) == 0)
+        x = Wth_Range(-WTH_BLT_OFF, 1023 + WTH_BLT_OFF);
+    else
+        x = Wth_Range(-100, 1123);
+    y0 = -Wth_Range(0, 80);
+    yEnd = Wth_Range(520, 1120);
+    for (i = 0; i < WTH_BLT_NODE; i++)
+    {
+        int yy = y0 + (yEnd - y0) * i / (WTH_BLT_NODE - 1);
+
+        if (i)
+        {
+            x += Wth_Range(-54, 54);
+            yy += Wth_Range(-16, 16);
+        }
+        g_Bolt.mx[i] = (short)x;
+        g_Bolt.my[i] = (short)yy;
+    }
+    for (b = 0; b < WTH_BLT_BR; b++)
+    {
+        int from = 2 + b * 2;
+        int cx = g_Bolt.mx[from], cy = g_Bolt.my[from];
+        int dir = (b & 1) ? 1 : -1;
+
+        g_Bolt.bFrom[b] = (unsigned char)from;
+        for (j = 0; j < WTH_BLT_BRN; j++)
+        {
+            cx += dir * Wth_Range(18, 46);
+            cy += Wth_Range(24, 56);
+            g_Bolt.bx[b][j] = (short)cx;
+            g_Bolt.by[b][j] = (short)cy;
+        }
+    }
+}
+
+/* 电弧上的一个点: 白芯 + 三层蓝光晕, 加法混合。光晕按半径迅速衰减, 衰减慢了边缘
+ * 会有一圈硬边, 看着像加粗的线而不是光。 */
+static void Wth_BltDot(unsigned char* base, int pitch, int ox, int oy,
+                       int w, int h, int px, int py, int a)
+{
+    Wth_AddAt(base, pitch, ox, oy, w, h, px, py, 236, 244, 255, (unsigned)a);
+    Wth_AddAt(base, pitch, ox, oy, w, h, px - 1, py, 190, 214, 255, (unsigned)(a * 62 / 100));
+    Wth_AddAt(base, pitch, ox, oy, w, h, px + 1, py, 190, 214, 255, (unsigned)(a * 62 / 100));
+    Wth_AddAt(base, pitch, ox, oy, w, h, px, py - 1, 190, 214, 255, (unsigned)(a * 45 / 100));
+    Wth_AddAt(base, pitch, ox, oy, w, h, px, py + 1, 190, 214, 255, (unsigned)(a * 45 / 100));
+    Wth_AddAt(base, pitch, ox, oy, w, h, px - 1, py - 1, 150, 178, 240, (unsigned)(a * 28 / 100));
+    Wth_AddAt(base, pitch, ox, oy, w, h, px + 1, py - 1, 150, 178, 240, (unsigned)(a * 28 / 100));
+    Wth_AddAt(base, pitch, ox, oy, w, h, px - 1, py + 1, 150, 178, 240, (unsigned)(a * 28 / 100));
+    Wth_AddAt(base, pitch, ox, oy, w, h, px + 1, py + 1, 150, 178, 240, (unsigned)(a * 28 / 100));
+    if (a < 32) return;
+    Wth_AddAt(base, pitch, ox, oy, w, h, px - 2, py, 92, 128, 200, (unsigned)(a * 14 / 100));
+    Wth_AddAt(base, pitch, ox, oy, w, h, px + 2, py, 92, 128, 200, (unsigned)(a * 14 / 100));
+    Wth_AddAt(base, pitch, ox, oy, w, h, px, py - 2, 92, 128, 200, (unsigned)(a * 14 / 100));
+    Wth_AddAt(base, pitch, ox, oy, w, h, px, py + 2, 92, 128, 200, (unsigned)(a * 14 / 100));
+}
+
+/* 一条电弧线段: 沿线逐像素铺点。线段自身给的是"发光方向", 粗细由 Wth_BltDot 给。 */
+static void Wth_BltSeg(unsigned char* base, int pitch, int ox, int oy,
+                       int w, int h, int ax, int ay, int bx, int by, int a)
+{
+    int n = Wth_SegLen(bx - ax, by - ay);
+    int i;
+
+    if (n <= 0)
+    {
+        Wth_BltDot(base, pitch, ox, oy, w, h, ax, ay, a);
+        return;
+    }
+    for (i = 0; i <= n; i++)
+        Wth_BltDot(base, pitch, ox, oy, w, h, ax + (bx - ax) * i / n,
+                   ay + (by - ay) * i / n, a);
+}
+
+static void Wth_BoltDraw(unsigned char* base, int pitch, int ox, int oy,
+                         int w, int h)
+{
+    int a, i, b, j;
+
+    if (!g_Bolt.on) return;
+    a = kBoltA[g_Bolt.age];
+    if (a <= 0) return;
+
+    for (i = 0; i + 1 < g_Bolt.n; i++)
+        Wth_BltSeg(base, pitch, ox, oy, w, h,
+                   g_Bolt.mx[i] * w / 1024, g_Bolt.my[i] * h / 1024,
+                   g_Bolt.mx[i + 1] * w / 1024, g_Bolt.my[i + 1] * h / 1024, a);
+
+    for (b = 0; b < g_Bolt.bn; b++)
+    {
+        int from = g_Bolt.bFrom[b];
+        int ax = g_Bolt.mx[from] * w / 1024;
+        int ay = g_Bolt.my[from] * h / 1024;
+
+        for (j = 0; j < WTH_BLT_BRN; j++)
+        {
+            int bx = g_Bolt.bx[b][j] * w / 1024;
+            int by = g_Bolt.by[b][j] * h / 1024;
+
+            Wth_BltSeg(base, pitch, ox, oy, w, h, ax, ay, bx, by, a * 3 / 4);
+            ax = bx;
+            ay = by;
+        }
+    }
+}
+
+/* 整屏提亮 (一次闪电的一"闪")。
+ *
+ * 加法混合逐像素算太贵: 一屏近两百万像素, 每帧要多花十几毫秒, 而闪电正好落
+ * 在最需要帧率的时候。565 用 SSE2 一次 8 像素 (拆通道 -> 加 -> 夹 -> 拼回),
+ * 555 与老 CPU 走标量 (逐像素同一套算法, 结果一致)。
+ * 行间从 aTop 渐变到 aBot: 雷电的亮是"从天上来"的, 上下一样亮像有人开灯。 */
+#ifdef WTH_HAVE_SSE2
+__attribute__((target("sse2")))
+static void Wth_FlashRowSse2(unsigned short* row, int n, int ar, int ag, int ab)
+{
+    const __m128i m5 = _mm_set1_epi16(0x1F);
+    const __m128i m6 = _mm_set1_epi16(0x3F);
+    const __m128i vr = _mm_set1_epi16((short)ar);
+    const __m128i vg = _mm_set1_epi16((short)ag);
+    const __m128i vb = _mm_set1_epi16((short)ab);
+    int x;
+
+    for (x = 0; x + 8 <= n; x += 8)
+    {
+        __m128i v = _mm_loadu_si128((const __m128i*)(row + x));
+        __m128i r = _mm_and_si128(_mm_srli_epi16(v, 11), m5);
+        __m128i g = _mm_and_si128(_mm_srli_epi16(v, 5), m6);
+        __m128i b = _mm_and_si128(v, m5);
+
+        r = _mm_min_epi16(_mm_add_epi16(r, vr), m5);
+        g = _mm_min_epi16(_mm_add_epi16(g, vg), m6);
+        b = _mm_min_epi16(_mm_add_epi16(b, vb), m5);
+        v = _mm_or_si128(_mm_or_si128(_mm_slli_epi16(r, 11),
+                                      _mm_slli_epi16(g, 5)), b);
+        _mm_storeu_si128((__m128i*)(row + x), v);
+    }
+}
+#endif
+
+static void Wth_FlashFill(unsigned char* base, int pitch, int ox, int oy,
+                          int w, int h, int aTop, int aBot)
+{
+    int y;
+
+    if (!base || w <= 0 || h <= 0) return;
+    for (y = 0; y < h; y++)
+    {
+        int a = (h > 1) ? aTop + (aBot - aTop) * y / (h - 1) : aTop;
+        int ar, ag, ab, gmax = (g_GBits == 6) ? 0x3F : 0x1F;
+        unsigned short* row;
+        int x = 0;
+
+        if (a <= 0) continue;
+        ar = g_Cfg.thCol[0] * a / 255;
+        ag = g_Cfg.thCol[1] * a / 255;
+        ab = g_Cfg.thCol[2] * a / 255;
+        ar = ar * 31 / 255;
+        ag = ag * gmax / 255;
+        ab = ab * 31 / 255;
+        if (!ar && !ag && !ab) continue;
+
+        row = (unsigned short*)(base + (size_t)(oy + y) * (size_t)pitch) + ox;
+
+#ifdef WTH_HAVE_SSE2
+        if (g_GBits == 6 && WthSse2Ok())
+        {
+            Wth_FlashRowSse2(row, w, ar, ag, ab);
+            x = w & ~7;
+        }
+#endif
+        for (; x < w; x++)
+        {
+            unsigned v = row[x];
+            unsigned r, g, b;
+
+            if (g_GBits == 6)
+            {
+                r = (v >> 11) & 0x1Fu;
+                g = (v >> 5) & 0x3Fu;
+                b = v & 0x1Fu;
+            }
+            else
+            {
+                r = (v >> 10) & 0x1Fu;
+                g = (v >> 5) & 0x1Fu;
+                b = v & 0x1Fu;
+            }
+            r += (unsigned)ar; if (r > 0x1Fu) r = 0x1Fu;
+            g += (unsigned)ag; if (g > (unsigned)gmax) g = (unsigned)gmax;
+            b += (unsigned)ab; if (b > 0x1Fu) b = 0x1Fu;
+            row[x] = (unsigned short)((r << (g_GBits == 6 ? 11 : 10)) |
+                                      (g << 5) | b);
+        }
+    }
+}
+
+/* 一次性自检: 把音效名解析到的下标打一行 —— 名字写错 (或行内注释没截掉) 时
+ * 这里直接是 -1, 不用听声音猜。 */
+static int s_SndLogged = 0;
+
+static void Wth_LogSnd(void)
+{
+    char msg[192];
+    unsigned q = 0;
+    int i;
+
+    if (s_SndLogged) return;
+    s_SndLogged = 1;
+    q = WTH_L_S(msg, q, "weather: sound ");
+    q = WTH_L_S(msg, q, g_Cfg.rainName);
+    q = WTH_L_C(msg, q, '=');
+    q = WTH_L_I(msg, q, Sfx_Index(g_Cfg.rainName));
+    q = WTH_L_C(msg, q, ' ');
+    q = WTH_L_S(msg, q, g_Cfg.snowName);
+    q = WTH_L_C(msg, q, '=');
+    q = WTH_L_I(msg, q, Sfx_Index(g_Cfg.snowName));
+    for (i = 0; i < WTH_TH_SND_N; i++)
+    {
+        q = WTH_L_C(msg, q, ' ');
+        q = WTH_L_S(msg, q, g_Cfg.thSnd[i]);
+        q = WTH_L_C(msg, q, '=');
+        q = WTH_L_I(msg, q, Sfx_Index(g_Cfg.thSnd[i]));
+    }
+    LogLine(msg);
+}
+
+/* 打一道闪电: 生成电弧 + 排一声雷。落点可以在视图外 —— 声像跟着落点走 (看见
+ * 哪边闪就是哪边响), "距离"只影响延迟与音量, 屏外那道还有额外的衰减。 */
+static void Wth_Strike(void)
+{
+    int dist = Wth_Range(0, 255);
+    int x, off, start, k;
+
+    Wth_BoltGen();
+    g_Bolt.on = 1;
+    g_Bolt.age = 0;
+    x = g_Bolt.mx[WTH_BLT_NODE - 1];
+    off = (x < 0) ? -x : (x > 1023 ? x - 1023 : 0);
+    if (off > WTH_BLT_OFF) off = WTH_BLT_OFF;
+    /* 落点越出视图后, 提亮逐渐压到三成: 天边的雷只剩一声闷响与一层微光。 */
+    g_Bolt.prox = 255 - off * 180 / WTH_BLT_OFF;
+
+    g_Storm.sndPan = 0x2000 + (x - 512) * 0x4000 / 1023;
+    if (g_Storm.sndPan < 0) g_Storm.sndPan = 0;
+    if (g_Storm.sndPan > 0x4000) g_Storm.sndPan = 0x4000;
+    g_Storm.sndVol = g_Cfg.thVol * (100 - dist * 35 / 255) / 100;
+    g_Storm.sndVol = g_Storm.sndVol * (255 - off * 90 / WTH_BLT_OFF) / 255;
+
+    /* 从随机起点找一个装得下的: ini 里漏写一条也不至于整场哑掉。 */
+    g_Storm.sndIdx = -1;
+    start = Wth_Range(0, WTH_TH_SND_N - 1);
+    for (k = 0; k < WTH_TH_SND_N; k++)
+    {
+        int c = (start + k) % WTH_TH_SND_N;
+
+        if (Sfx_Index(g_Cfg.thSnd[c]) >= 0) { g_Storm.sndIdx = c; break; }
+    }
+
+    g_Storm.sndAt = (unsigned)g_Tick + WTH_TH_DLY
+                    + (unsigned)(dist * 18 / 255 + off * 12 / WTH_BLT_OFF);
+}
+
+/* ---------------- 换局 / 读档 ----------------
+ * 规则: 进对局时按**地图**判 —— 与上一局同一张图就整套保留 (开关、雷电、雨声),
+ * 换了地图全部复位。场景指针每次开局都会换 (读同一张图也换), 比不出"是不是同
+ * 一张图", 所以比 OU_ScenarioName (Name, 没写则 UIName; 读档后 FileName 是存档
+ * 名, 更不能比)。 */
+
+/* 进对局那一拍: ScenarioStarted 的 0->1 边沿, 或者帧号倒退 (每局开始把帧号写 0)。
+ * 读档时主循环停着, 0->1 那一拍轮不到这里, 只能靠帧号倒退认 (见 Wth_LogicDelta)。 */
+static void Wth_SceneCheck(void)
+{
+    static wchar_t s_Last[OU_SCEN_NAME_MAX];
+    static int s_Seen = 0, s_WasOn = 0;
+    int started = *(volatile unsigned char*)(size_t)ADDR_SCEN_STARTED;
+    int enter = (started && !s_WasOn) || g_Rewound;
+    wchar_t name[OU_SCEN_NAME_MAX];
+    int i;
+
+    s_WasOn = started;
+    if (!enter || !OU_ScenarioName(name)) return;
+
+    if (s_Seen && lstrcmpW(name, s_Last))
+    {
+        /* 换了地图: 天气全部收掉, 与新一局"默认无天气"一致。 */
+        Wth_SndReset();
+        for (i = 0; i < WTH_K_N; i++) g_On[i] = 0;
+        g_Thunder = 0;
+        g_PxOk = 0;
+        LogLine("weather: reset (new map)");
+    }
+    else
+    {
+        /* 同一张图: 开关与状态都保留, 只把雷电重新计时; 引擎读档时销毁了全部
+         * 音频事件, 循环音的标记要清掉才会重新起 (不然就是"天气在, 声音没了")。
+         * 不能走 Wth_LoopStop —— 通道句柄已随引擎销毁, 只清标记。 */
+        Wth_ThunderStop();
+        g_Storm.rain.started = 0;
+        g_Storm.rain.retry = 0;
+        g_Storm.wind.started = 0;
+        g_Storm.wind.retry = 0;
+    }
+    lstrcpynW(s_Last, name, OU_SCEN_NAME_MAX);
+    s_Seen = 1;
+}
+
+/* 每帧的声音与雷电状态机。d = 这一帧过了几个逻辑帧 (0 = 暂停/卡住)。
+ *
+ * 开头那段与"开关"无关地跑, 因为它要负责把雨声收掉 —— 早退之后再判断就永远
+ * 收不了 (全部关掉时 Weather_Draw 直接 return)。 */
+static void Wth_SndTick(int d)
+{
+    unsigned now;
+
+    Wth_SceneCheck();
+
+    if (g_Bolt.on)
+    {
+        g_Bolt.age += d;
+        if (g_Bolt.age >= WTH_BLT_LIFE)
+        {
+            g_Bolt.on = 0;
+            g_Bolt.age = 0;
+        }
+    }
+
+    /* GtTickNow 一个 tick = 16ms (timeGetTime() >> 4), 这里统一换成毫秒。
+     * 只有循环音的重试退避用它, 雷雨时间线走 g_Tick (逻辑帧)。 */
+    now = GtTickNow() * 16u;
+
+    /* 循环音各跟各的开关 ("安静的雪" 用 ini 关)。条目自带 5~10 秒 Delay,
+     * 开雪后过几秒才有第一声是正常的。 */
+    Wth_LoopTick(&g_Storm.rain,
+                 g_On[WTH_K_RAIN] && g_Cfg.rainSnd && g_Cfg.rainVol > 0, now);
+    Wth_LoopTick(&g_Storm.wind,
+                 g_On[WTH_K_SNOW] && g_Cfg.snowSnd && g_Cfg.snowVol > 0, now);
+
+    /* 雷电是独立开关: 不下雨也能打雷 (光开雷电就是"干雷暴")。 */
+    if (!g_Thunder)
+    {
+        Wth_ThunderStop();
+        return;
+    }
+    /* 暂停 (逻辑帧不动) 时不推进: 时间线是帧号, 不拦会"暂停时还在打雷"。 */
+    if (d <= 0) return;
+
+    if (!g_Storm.on)
+    {
+        g_Storm.on = 1;
+        g_Storm.next = (unsigned)g_Tick + WTH_TH_FIRST;
+        Wth_LogSnd();
+        return;
+    }
+    if (g_Storm.sndAt && (int)((unsigned)g_Tick - g_Storm.sndAt) >= 0)
+    {
+        g_Storm.sndAt = 0;
+        if (g_Storm.sndIdx >= 0)
+            Sfx_Play(g_Cfg.thSnd[g_Storm.sndIdx], g_Storm.sndPan, g_Storm.sndVol);
+    }
+    if ((int)((unsigned)g_Tick - g_Storm.next) >= 0)
+    {
+        Wth_Strike();
+        g_Storm.next = (unsigned)g_Tick + (unsigned)Wth_Range(g_Cfg.thLo, g_Cfg.thHi);
+    }
+}
+
 /* ---------------- 每帧入口 ---------------- */
 
 int Weather_Draw(void)
@@ -2240,7 +3095,17 @@ int Weather_Draw(void)
         g_Layer[i].scrollY += cdy;
     }
 
-    if (!g_On[WTH_K_RAIN] && !g_On[WTH_K_SNOW] && !g_On[WTH_K_FIRE] && !g_CloudOn)
+    d = Wth_LogicDelta();
+    g_Tick += d;
+    dp = (d > 4) ? 4 : d;   /* 渲染远慢于逻辑时别让粒子一步跨过整屏 */
+
+    /* 声音/雷电状态机要在"全关早退"之前跑: 雨停了要负责把雨声收掉。 */
+    Wth_SndTick(d);
+    Wth_LightTick();            /* 雨/雪颜色跟环境光照走, 每帧重算一遍 */
+
+    /* 雷电可以单独开 (不必下雨), 所以它也算"这一帧有事要做"。 */
+    if (!g_On[WTH_K_RAIN] && !g_On[WTH_K_SNOW] && !g_On[WTH_K_FIRE] &&
+        !g_CloudOn && !(g_Thunder && g_Bolt.on))
         return 0;
 
     /* 目标面 = 本帧"未缩放视口原图" (与无UI截图同源): 1x/放大档是窗口
@@ -2254,21 +3119,17 @@ int Weather_Draw(void)
     if (surfW <= 0 || surfH <= 0 || surfPitch <= 0) return 0;
     if (clip.Width < 16 || clip.Height < 16) return 0;
 
-    d = Wth_LogicDelta();
-    g_Tick += d;
-    dp = (d > 4) ? 4 : d;   /* 渲染远慢于逻辑时别让粒子一步跨过整屏 */
+    /* d / g_Tick / dp 只算一次: Wth_LogicDelta 会推进帧号基准, 再调一次必返回 0,
+     * 雨雪就不动了。 */
 
-    /* 这一帧哪些 kind 走粒子落笔: 火雨恒为粒子, 雨/雪看画法。 */
-    if (g_Mode == WEATHER_DRAW_PARTICLE)
-    {
-        if (g_On[WTH_K_RAIN]) mask |= 1u << WTH_K_RAIN;
-        if (g_On[WTH_K_SNOW]) mask |= 1u << WTH_K_SNOW;
-    }
-    if (g_On[WTH_K_FIRE]) mask |= 1u << WTH_K_FIRE;
+    /* 这一帧哪些 kind 走粒子落笔 (规则见 Wth_KindOn)。落地溅射、涟漪都挂在
+     * 同一份 mask 上 —— 图像档的 RAIN/SNOW.SHP 自带落地水花, 再叠一层我们的
+     * 粒子只会显重复。 */
+    for (i = 0; i < WTH_K_N; i++)
+        if (Wth_KindOn(i)) mask |= 1u << i;
     needPx = mask != 0;
 
-    /* 云影: 盖在地面上、降水之下 (雨雪不该被云影再压暗一遍)。它是**独立开关**,
-     * 不跟着雨/雪走 —— 想要"多云但没下雨"也能开。 */
+    /* 云影画在降水之下, 免得雨雪被压暗两遍; 它是独立开关, 不跟着雨/雪走。 */
     if (g_CloudOn && g_Cfg.cloudOpacity > 0 && surfPitch >= surfW * 2)
     {
         long long tCld = Perf_Now();
@@ -2281,7 +3142,6 @@ int Weather_Draw(void)
              * 否则两边一旦不一致就会读到场外 */
             if (g_CldCols > 0 && g_CldRows > 0)
             {
-                Wth_CloudVerify(clip.Width, clip.Height);
                 Wth_CloudFill(cbase, surfPitch, clip.X, clip.Y,
                               g_CldCols, g_CldRows, clip.Width, clip.Height);
                 drew = 1;
@@ -2303,26 +3163,10 @@ int Weather_Draw(void)
             {
                 WthLayer* l = &g_Layer[i];
 
-                if (!g_On[i ? WTH_K_SNOW : WTH_K_RAIN]) continue;
+                if (!g_On[l->kind]) continue;
                 if (!Wth_Ensure(l)) continue;
                 Wth_Advance(l, d);
                 Wth_DrawLayer(l, surf, pal, &clip);
-                l->draws++;
-                /* 一次性自检: 画满 120 帧时报"推进了几个动画帧", 一眼看出是不是
-                 * 动态。60 帧游戏下 step=2 应该约等于 60 个动画帧。 */
-                if (!l->diagDone && l->draws >= 120)
-                {
-                    char msg[128];
-                    unsigned q = 0;
-
-                    l->diagDone = 1;
-                    q = AppendCStr(msg, q, "weather: ", sizeof(msg));
-                    q = AppendCStr(msg, q, l->id, sizeof(msg));
-                    q = AppendCStr(msg, q, " 120 draws -> ", sizeof(msg));
-                    q = AppendInt(msg, q, sizeof(msg), (int)l->adv);
-                    q = AppendCStr(msg, q, " anim frames", sizeof(msg));
-                    LogLine(msg);
-                }
                 drew = 1;
             }
         }
@@ -2337,17 +3181,40 @@ int Weather_Draw(void)
         if (base)
         {
             Wth_PxInit(clip.Width, clip.Height);
-            Wth_DropStep(dp, cdx, cdy, clip.Height);
-            /* 落点节拍: 与粒子数量同比例 (雨越密落得越勤), ini 给了定值就用定值 */
+            Wth_LandStep(dp, cdx, cdy, clip.Height);
+            /* 落点节拍: 铺满整个视图, 按 mask 里的 kind 走 (与粒子同一份集合)。 */
             for (i = 0; i < WTH_K_N; i++)
-                if ((mask & (1u << i)) && g_Kind[i].splash > 0)
+                if ((mask & (1u << i)) && g_Kind[i].splashHi > 0)
                     Wth_LandTick(i, dp, clip.Width, clip.Height);
             Wth_PxStep(dp, clip.Width, clip.Height, cdx, cdy, mask);
             Wth_SmokeStep(dp, cdx, cdy);
             /* 烟先画: 火球压在烟上面才有"烧穿"的层次。 */
             Wth_PxSmoke(base, surfPitch, clip.X, clip.Y, clip.Width, clip.Height);
             Wth_PxDraw(base, surfPitch, clip.X, clip.Y, clip.Width, clip.Height, mask);
+            Wth_PxRip(base, surfPitch, clip.X, clip.Y, clip.Width, clip.Height);
             Wth_PxDrop(base, surfPitch, clip.X, clip.Y, clip.Width, clip.Height);
+            GtUnlock(surf);
+            drew = 1;
+        }
+    }
+
+    /* 雷电画在最后: 闪电是整屏的一次曝光, 压在雨丝之上 (写在下面像在雨幕后面
+     * 打手电)。提亮从视图顶到底衰减 —— 光是从天上来的。 */
+    if (g_Bolt.on && surfPitch >= surfW * 2)
+    {
+        unsigned char* b2 = GtLock(surf);
+
+        if (b2)
+        {
+            int fa = kFlashA[g_Bolt.age] * g_Cfg.thFlash / 255;
+
+            fa = fa * g_Bolt.prox / 255;    /* 屏外那道只留一层微光 */
+            if (fa > 0)
+                Wth_FlashFill(b2, surfPitch, clip.X, clip.Y, clip.Width,
+                              clip.Height, fa, fa * 45 / 100);
+            if (g_Cfg.thBolt)
+                Wth_BoltDraw(b2, surfPitch, clip.X, clip.Y, clip.Width,
+                             clip.Height);
             GtUnlock(surf);
             drew = 1;
         }

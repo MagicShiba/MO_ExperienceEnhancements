@@ -4,8 +4,8 @@
  * 粒子档: 自绘雨丝/雪花/火星, 逐帧推进, 连续平滑 (三种天气共用一套粒子, 只是参数
  * 不同)。火雨只有粒子形态, 与画法无关。云影是独立的一层 (云图压暗), 与降水无关。
  *
- * 雨、雪各自独立开关 (同时开就是雨夹雪), 只在本次运行有效;
- * **云影开关**与**画法**是长期设置, 落盘到 [Environment] 的 CloudEnable / DrawMode。
+ * 雨、雪各自独立开关 (同时开就是雨夹雪), 只在本次运行有效; 云影开关与画法是
+ * 长期设置, 落盘到 [Environment] 的 CloudEnable / DrawMode。
  */
 #pragma once
 
@@ -24,6 +24,12 @@ int  Weather_Snow(void);
 void Weather_SetSnow(int on);
 int  Weather_Fire(void);
 void Weather_SetFire(int on);
+
+/* 雷电 (闪电 + 打雷): 独立开关, 不下雨也能打; 与画法无关, 只在本次运行有效
+ * (不落盘)。落点可以在视图外, 声像跟着落点走。雨声 (RainLoop) 跟着"下雨"
+ * 本身走, 不受这个开关影响。 */
+int  Weather_Thunder(void);
+void Weather_SetThunder(int on);
 
 /* 云影 (云图压暗)。独立于雨/雪, 可单独开; 长期生效 (菜单里改会落盘)。 */
 int  Weather_Cloud(void);

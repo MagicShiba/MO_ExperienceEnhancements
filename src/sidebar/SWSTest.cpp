@@ -15,7 +15,8 @@
 #include "EngineAddr.h"
 #include "SWSBar.h"
 #include "SWSTest.h"
-#include "GUI/GdiText.h"
+#include "GUI/GdiText.h"        /* Point2D 等在 OrderUtil.h 之前 */
+#include "OrderUtil.h"
 
 #define T_N 10
 /* 与 SWS_TestAction 的动作号同序; 0/1 由本文件直接调 SWS_SetEnabled。 */
@@ -54,11 +55,11 @@ static void LogTest(const char* name, int ms)
 void SWSTest_Init(void)
 {
     char buf[512];
-    unsigned pos = 0, n;
+    unsigned pos = 0;
+
     s_N = 0;
-    n = GetPrivateProfileStringA("Log", "TestSws", "", buf,
-                                 (unsigned)sizeof(buf), g_IniPath);
-    if (n == 0 || n >= sizeof(buf)) return;
+    OU_ReadString("Log", "TestSws", "", buf, sizeof(buf));
+    if (!buf[0]) return;
     while (buf[pos] && s_N < T_N)
     {
         const char* t = buf + pos;

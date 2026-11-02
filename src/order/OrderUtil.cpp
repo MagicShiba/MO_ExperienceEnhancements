@@ -1256,3 +1256,40 @@ int OU_ReadHotkeySingle(const char* section, const char* key,
     *io = tmp;
     return tmp.disabled ? 0 : 1;
 }
+
+int OU_ScenarioName(wchar_t* out)
+{
+    char* sc = *(char**)ADDR_SCENARIO;
+    int i;
+
+    out[0] = 0;
+    if (!sc || !IsPlausiblePtr(sc)) return 0;
+    if (MemReadableBytes(sc + OFF_SCEN_NAME, OU_SCEN_NAME_MAX * 2) >= OU_SCEN_NAME_MAX * 2)
+    {
+        for (i = 0; i + 1 < OU_SCEN_NAME_MAX; i++)
+        {
+            wchar_t c = *(wchar_t*)(sc + OFF_SCEN_NAME + i * 2);
+
+            if (!c) break;
+            if (c < 0x20 || c == (wchar_t)0xFFFF) { i = 0; break; }   /* 脏数据 */
+            out[i] = c;
+        }
+        out[i] = 0;
+        if (i > 0) return 1;
+    }
+    /* Name 没写的地图只有 UIName (单字节 ASCII), 退到它 */
+    if (MemReadableBytes(sc + OFF_SCEN_UINAME, 0x20) >= 0x20)
+    {
+        for (i = 0; i < 0x1F; i++)
+        {
+            char c = sc[OFF_SCEN_UINAME + i];
+
+            if (!c) break;
+            if ((unsigned char)c < 0x20) return 0;
+            out[i] = (wchar_t)(unsigned char)c;
+        }
+        out[i] = 0;
+        return i > 0;
+    }
+    return 0;
+}
