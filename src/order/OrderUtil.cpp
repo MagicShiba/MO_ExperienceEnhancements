@@ -39,6 +39,48 @@ int OU_IsMP(void)
     return (gm == 3 || gm == 4) ? 1 : 0;   /* 3=LAN, 4=Internet */
 }
 
+/* 建筑实例 → 类型 (BuildingTypeClass); 非建筑/读不到回 NULL。 */
+static void* OU_BldType(void* bld)
+{
+    void* tp;
+    if (OU_WhatAmI(bld) != ABS_BUILDING) return NULL;
+    tp = *(void**)((char*)bld + OFF_BLD_TYPE);
+    if (!tp || !IsPlausiblePtr(tp)) return NULL;
+    return tp;
+}
+
+/* 类型标记 (Bunker/UnitAbsorb/InfantryAbsorb), 偏移见 .h。 */
+int OU_BldFlag(void* bld, unsigned off)
+{
+    void* tp = OU_BldType(bld);
+    if (!tp) return 0;
+    return (*(unsigned char*)((char*)tp + off)) ? 1 : 0;
+}
+
+/* 已占槽数 = 引擎 0x473460(ecx = 建筑+0x114), 它自己累加乘客 Size。 */
+typedef int (__attribute__((thiscall)) *Fn_PaxSize)(void* pax);
+#define FN_PAX_SIZE ((Fn_PaxSize)(void*)0x473460u)
+
+int OU_BldCapacity(void* bld)
+{
+    void* tp = OU_BldType(bld);
+    int cap;
+    if (!tp) return 0;
+    cap = *(int*)((char*)tp + OFF_TT_PASSENGERS);
+    return (cap < 0 || cap > 64) ? 0 : cap;   /* 越界当读不到 */
+}
+
+int OU_BldUsedSize(void* bld)
+{
+    int n, used;
+    if (OU_WhatAmI(bld) != ABS_BUILDING) return 0;
+    /* 个数只用来确认 +0x114 真是 PassengersClass; 不像就绝不把它交给引擎去走。 */
+    n = *(int*)((char*)bld + OFF_BLD_PAX);
+    if (n <= 0 || n > 64) return 0;
+    used = FN_PAX_SIZE((char*)bld + OFF_BLD_PAX);
+    return (used > 0) ? used : 0;
+}
+
 /* ---------------- 跨模块共享小函数 (OT/WP/ML 共用, 免各文件手写一份) ---------------- */
 
 void OU_LogTag(const char* tag, const char* msg)

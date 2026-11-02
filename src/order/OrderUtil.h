@@ -70,7 +70,7 @@ void OU_CopyEvt(char* dst, const char* src);
 #define OFF_PLANFLAG  0x1Du   /* MegaMission.IsPlanningEvent (Z 按住=路径点时置 1) */
 #define MISSION_MOVE  2       /* Mission::Move (YRpp GeneralDefinitions.h) */
 #define MISSION_ATTACK 1      /* Mission::Attack (注意不是 Action::Attack=5) */
-#define MISSION_ENTER 7       /* Mission::Enter (载具/运输, Destination=目标对象) */
+#define MISSION_ENTER 7       /* Mission::Enter (进楼/进运输, Destination=目标对象) */
 #define MISSION_CAPTURE 8     /* Mission::Capture (工程师占领/步兵进驻, Destination=建筑) */
 #define MISSION_SABOTAGE 17   /* Mission::Sabotage (备用进驻, Destination=建筑) */
 #define MISSION_UNLOAD 16     /* Mission::Unload (载具放载员, 见 SingleUnload.cpp) */
@@ -79,7 +79,10 @@ void OU_CopyEvt(char* dst, const char* src);
  * 注意与 Mission 编号不同: 如 Action::Attack=5 对应 Mission::Attack=1。 */
 #define ACTION_MOVE 1
 #define ACTION_ENTER 3
+/* Action::SelfDeploy: Ares 给自家 Bunker=yes 建筑 (坦克碉堡) 的部署光标。 */
+#define ACTION_SELFDEPLOY 4
 #define ACTION_ATTACK 5
+#define ACTION_SELECT 7      /* Action::Select (停在自家建筑/无事可做时的光标) */
 #define ACTION_CAPTURE 9
 #define ACTION_SABOTAGE 16
 #define ACTION_GUARDAREA 26
@@ -94,6 +97,29 @@ void OU_CopyEvt(char* dst, const char* src);
 
 /* 对象 WhatAmI (虚表 0x2C, 三重守卫)。 */
 int OU_WhatAmI(void* p);
+
+/* ---------------- 建筑类型标记 (只读) ----------------
+ * 偏移取自引擎 BuildingTypeClass 的 INI 加载 (0x4608A0..0x460B20), 是 exe 的
+ * 结构布局, 不随 mod 变。进楼判定就是这三个标记, 引擎没给现成接口:
+ *   Bunker=yes         NATBNK 坦克碉堡: 载具开进去驻守
+ *   UnitAbsorb=yes     NATUNE 隧道口: 载具开进去被吸收
+ *   InfantryAbsorb=yes YAPOWR 生物反应炉: 步兵进去被吸收
+ * 非建筑/类型指针读不到回 0 (调用方按"不支持"处理)。 */
+#define OFF_BLDT_BUNKER     0x16ABu
+#define OFF_BLDT_UNITABSORB 0x16AEu
+#define OFF_BLDT_INFABSORB  0x16AFu
+int OU_BldFlag(void* bld, unsigned off);
+
+/* ---------------- 建筑载员容量 (只读) ----------------
+ * 容量 = 建筑类型 +0x5E0 (TechnoTypeClass::Passengers, int; 电厂 5 / 隧道口 6);
+ * 已占 = 0x473460(ecx = 建筑 +0x114), 引擎自己累加每个乘客的 Size (double)。
+ * **不要读 [建筑+0x114]**: 那是"乘客个数", 与 Passengers 不同量纲。
+ * 只对吸收型建筑问这两个数。 */
+#define OFF_TT_PASSENGERS 0x5E0u
+#define OFF_BLD_PAX       0x114u
+int OU_BldCapacity(void* bld);   /* 类型 Passengers; 非建筑/读不到回 0 */
+int OU_BldUsedSize(void* bld);   /* 已占槽数; 非建筑/读不到回 0 */
+
 /* 类型判定 (聚合 WhatAmI): 可实现下令的机动单位 (单位/步兵/飞机);
  * 可作战目标 (上面三类 + 建筑)。 */
 int OU_IsUnit(void* p);

@@ -264,8 +264,7 @@ static int SO_FireDest(int houseIdx, int srcID, unsigned char srcRtti,
 }
 
 /* Action(光标) → Mission(订单): gamemd 0x4D74E0 跳转表实证
- * (Enter3→7 载具, Capture9→8, Sabotage16→17;
- * 建筑上的 Enter/GuardArea 一律按进驻 17, 与原生驻军同形)。
+ * (Enter3→7 载具/建筑都是 7, Capture9→8, Sabotage16→17)。
  * actWhat = OU_WhatAmI(下令单位): 先过类内重映射 (OU_RemapAction, 复刻
  * InfantryClass 0x51F190 / UnitClass 0x738890) —— 工程师对血厚敌楼的
  * Damage(28)→Capture(9), 不再误判成攻击 (否则会误发主武器攻击)。
@@ -277,10 +276,16 @@ static int SO_MissionFor(int actWhat, int targetWhat, int action)
     if (action == ACTION_ATTACK || action == 53 || action == 63 ||
         action == 64 || action == 71)
         return MISSION_ATTACK;
+    /* 建筑也是 Enter(7): 引擎 0x4D76C6 只发 SetMission(7, 0, 目标, 0),
+     * Sabotage(17) 只对应 Action::Sabotage(16)。 */
     if (action == ACTION_ENTER)
-        return (targetWhat == ABS_BUILDING) ? MISSION_SABOTAGE : MISSION_ENTER;
+        return MISSION_ENTER;
     if (action == ACTION_SABOTAGE)
         return MISSION_SABOTAGE;
+    /* SelfDeploy(4) = Ares 给自家 Bunker 建筑的光标; 引擎对 Action 4 发的是
+     * "就地部署" (SetMission(16,0,0,0), 目标丢弃), 进楼得用 Enter(7)。 */
+    if (action == ACTION_SELFDEPLOY)
+        return MISSION_ENTER;
     if (action == ACTION_GUARDAREA && targetWhat == ABS_BUILDING)
         return MISSION_SABOTAGE;
     if (action == ACTION_CAPTURE)
