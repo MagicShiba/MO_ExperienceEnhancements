@@ -37,7 +37,7 @@
 #include "OrderUtil.h"
 #include "SoundFx.h"
 #include "LightingPreset.h"
-#include <emmintrin.h>          /* 云影压暗的 SSE2 版 (见 Wth_CloudFillSse2) */
+#include <emmintrin.h>          /* 云影压暗的 SSE2 行填充 */
 
 /* ---------------- 引擎结构 (只读) ---------------- */
 
@@ -2170,13 +2170,16 @@ static void Wth_CldBlur(int passes)
                       2 * g_CldTex[row + x] +
                       g_CldTex[row + ((x + 1) & CLD_MASK)]) >> 2);
         }
-        for (x = 0; x < CLD_TEX; x++)
+        /* 源和目标分离, 纵向核也按行访问以保持连续读写。 */
+        for (y = 0; y < CLD_TEX; y++)
         {
-            for (y = 0; y < CLD_TEX; y++)
-                g_CldTex[y * CLD_TEX + x] = (unsigned char)
-                    ((g_CldDet[((y + CLD_MASK) & CLD_MASK) * CLD_TEX + x] +
-                      2 * g_CldDet[y * CLD_TEX + x] +
-                      g_CldDet[((y + 1) & CLD_MASK) * CLD_TEX + x]) >> 2);
+            const unsigned char* prev = g_CldDet + ((y + CLD_MASK) & CLD_MASK) * CLD_TEX;
+            const unsigned char* cur = g_CldDet + y * CLD_TEX;
+            const unsigned char* next = g_CldDet + ((y + 1) & CLD_MASK) * CLD_TEX;
+            unsigned char* dst = g_CldTex + y * CLD_TEX;
+
+            for (x = 0; x < CLD_TEX; x++)
+                dst[x] = (unsigned char)((prev[x] + 2 * cur[x] + next[x]) >> 2);
         }
     }
 }
@@ -2188,7 +2191,7 @@ static void Wth_CloudBake(void)
     const int n = CLD_TEX * CLD_TEX;
     const float inv = 1.0f / (float)CLD_TEX;
     LARGE_INTEGER q0, q1, fq;
-    int tx, ty, lo, hi, k, thr, hits, target, edge255;
+    int tx, ty, lo, hi, thr, hits, target, edge255;
 
     if (g_CldTexOk == g_Cfg.cloudStyle) return;
     g_CldTexOk = g_Cfg.cloudStyle;
@@ -2219,11 +2222,11 @@ static void Wth_CloudBake(void)
         }
     }
 
-    /* 二分校准阈值: 覆盖率对阈值单调, 12 次就到 1/4096 精度 */
+    /* 阈值是整数, 区间只剩相邻值时 lo 已收敛, 不必再扫描云图。 */
     target = n * st->cover / 100;
     lo = 0;
     hi = 255;
-    for (k = 0; k < 12; k++)
+    while (hi - lo > 1)
     {
         thr = (lo + hi) >> 1;
         if (Wth_CldFill(thr, edge255, NULL) < target) hi = thr;
@@ -2405,52 +2408,61 @@ static __inline void Wth_CldRow(unsigned short* dp, int n, int at, int ab,
     }
 }
 
-/* 块循环 + 块内插值: 标量与 SSE2 共用, 两条路的 alpha 场因此逐位一致。
- * 每行算出左右两列的 alpha (at/ab) 与行首指针, 交给 rowFill 落笔。 */
-typedef void (*WthCldRowFn)(unsigned short* dp, int n, int at, int ab,
-                            int phase, unsigned rsh, unsigned gm);
-
-static void Wth_CloudFillRows(unsigned char* base, int pitch, int ox, int oy,
-                              int cols, int rows, int w, int h,
-                              unsigned rsh, unsigned gm, WthCldRowFn rowFill)
-{
-    int by, bx;
-
-    for (by = 0; by < rows; by++)
+/* 块循环 + 块内插值: 标量与 SSE2 共用同一份遍历与取整公式。
+ * 行填充器按编译期类型选择, 不在每 8 像素上做间接调用。 */
+struct WthCldScalarRow {
+    static __inline void Fill(unsigned short* dp, int n, int at, int ab,
+                             int phase, unsigned rsh, unsigned gm)
     {
-        const unsigned char* a0 = g_CldF + by * g_CldStride;
-        const unsigned char* a1 = a0 + g_CldStride;
-        int y0 = by * WTH_CLOUD_BLK;
-        int y1 = y0 + WTH_CLOUD_BLK;
-
-        if (y1 > h) y1 = h;
-        for (bx = 0; bx < cols; bx++)
-        {
-            int v00 = a0[bx], v10 = a0[bx + 1];
-            int v01 = a1[bx], v11 = a1[bx + 1];
-            int x0 = bx * WTH_CLOUD_BLK;
-            int x1 = x0 + WTH_CLOUD_BLK;
-            int n, y;
-
-            if ((v00 | v10 | v01 | v11) < 2) continue;   /* 整块几乎全透明 */
-            if (x1 > w) x1 = w;
-            n = x1 - x0;
-            for (y = y0; y < y1; y++)
-            {
-                int fy = kCldW[y - y0];                  /* smoothstep 权重 0..253 */
-                int at = v00 + ((((v01 - v00) >> 1) * fy) >> 7);
-                int ab = v10 + ((((v11 - v10) >> 1) * fy) >> 7);
-                unsigned short* dp = (unsigned short*)
-                    (base + (size_t)(oy + y) * (size_t)pitch) + ox + x0;
-
-                if (at < 0) at = 0; else if (at > 255) at = 255;
-                if (ab < 0) ab = 0; else if (ab > 255) ab = 255;
-                if ((at | ab) < 2) continue;
-                rowFill(dp, n, at, ab, y & 3, rsh, gm);
-            }
-        }
+        Wth_CldRow(dp, n, at, ab, phase, rsh, gm);
     }
+};
+
+/* 同一份循环分别在标量与 SSE2 目标下实例化, 使 SIMD 行函数可以直接内联。 */
+#define WTH_CLD_FILL_ROWS(NAME, ATTR) \
+template<class Row> ATTR static void NAME(unsigned char* base, int pitch, int ox, int oy, \
+                              int cols, int rows, int w, int h, \
+                              unsigned rsh, unsigned gm) \
+{ \
+    int by, bx; \
+ \
+    for (by = 0; by < rows; by++) \
+    { \
+        const unsigned char* a0 = g_CldF + by * g_CldStride; \
+        const unsigned char* a1 = a0 + g_CldStride; \
+        int y0 = by * WTH_CLOUD_BLK; \
+        int y1 = y0 + WTH_CLOUD_BLK; \
+ \
+        if (y1 > h) y1 = h; \
+        for (bx = 0; bx < cols; bx++) \
+        { \
+            int v00 = a0[bx], v10 = a0[bx + 1]; \
+            int v01 = a1[bx], v11 = a1[bx + 1]; \
+            int x0 = bx * WTH_CLOUD_BLK; \
+            int x1 = x0 + WTH_CLOUD_BLK; \
+            int n, y; \
+ \
+            if ((v00 | v10 | v01 | v11) < 2) continue;   /* 整块几乎全透明 */ \
+            if (x1 > w) x1 = w; \
+            n = x1 - x0; \
+            for (y = y0; y < y1; y++) \
+            { \
+                int fy = kCldW[y - y0];                  /* smoothstep 权重 0..253 */ \
+                int at = v00 + ((((v01 - v00) >> 1) * fy) >> 7); \
+                int ab = v10 + ((((v11 - v10) >> 1) * fy) >> 7); \
+                unsigned short* dp = (unsigned short*) \
+                    (base + (size_t)(oy + y) * (size_t)pitch) + ox + x0; \
+ \
+                if (at < 0) at = 0; else if (at > 255) at = 255; \
+                if (ab < 0) ab = 0; else if (ab > 255) ab = 255; \
+                if ((at | ab) < 2) continue; \
+                Row::Fill(dp, n, at, ab, y & 3, rsh, gm); \
+            } \
+        } \
+    } \
 }
+
+WTH_CLD_FILL_ROWS(Wth_CloudFillRows, )
 
 #if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
 #define WTH_HAVE_SSE2 1
@@ -2462,23 +2474,14 @@ static int WthSse2Ok(void)
     return s_WthSse2;
 }
 
-/* SSE2 常量缓存: 行填充每帧被调上千次, 常量不能每行重建。rsh/gm 一帧内不变,
- * 换 565/555 时重建一次。 */
+/* SSE2 常量只在整幅入口检查, 换 565/555 时重建一次。 */
 static unsigned s_CldRsh = 0xFFFFFFFFu, s_CldGm;
 static __m128i s_CldM5, s_CldMg, s_CldK256, s_CldZero, s_CldKw, s_CldC5, s_CldCrs;
 static __m128i s_CldKd[4];
 
 __attribute__((target("sse2")))
-static void Wth_CldRowSse2(unsigned short* dp, int n, int at, int ab,
-                           int phase, unsigned rsh, unsigned gm)
+static void Wth_CldSse2Init(unsigned rsh, unsigned gm)
 {
-    __m128i km, dv, v, r, g, b;
-
-    if (n < WTH_CLOUD_BLK)                   /* 右边缘的残块走标量 */
-    {
-        Wth_CldRow(dp, n, at, ab, phase, rsh, gm);
-        return;
-    }
     if (rsh != s_CldRsh || gm != s_CldGm)
     {
         int k;
@@ -2500,30 +2503,47 @@ static void Wth_CldRowSse2(unsigned short* dp, int n, int at, int ab,
                 (short)(kBayer[k * 4 + 0] * 16 + 8), (short)(kBayer[k * 4 + 1] * 16 + 8),
                 (short)(kBayer[k * 4 + 2] * 16 + 8), (short)(kBayer[k * 4 + 3] * 16 + 8));
     }
-
-    /* 块内 alpha: a_i = at + ((ab-at)/2 * w_i >> 7), 一次算 8 个 */
-    km = _mm_sub_epi16(s_CldK256,
-            _mm_min_epi16(_mm_set1_epi16(255), _mm_max_epi16(s_CldZero,
-                _mm_add_epi16(
-                    _mm_set1_epi16((short)at),
-                    _mm_srai_epi16(
-                        _mm_mullo_epi16(
-                            _mm_srai_epi16(_mm_set1_epi16((short)(ab - at)), 1),
-                            s_CldKw), 7)))));
-    dv = s_CldKd[phase];
-    v = _mm_loadu_si128((const __m128i*)dp);
-    r = _mm_and_si128(_mm_srl_epi16(v, s_CldCrs), s_CldM5);
-    g = _mm_and_si128(_mm_srl_epi16(v, s_CldC5), s_CldMg);
-    b = _mm_and_si128(v, s_CldM5);
-
-    r = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(r, km), dv), 8);
-    g = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(g, km), dv), 8);
-    b = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(b, km), dv), 8);
-    _mm_storeu_si128((__m128i*)dp,
-        _mm_or_si128(_mm_sll_epi16(r, s_CldCrs),
-            _mm_or_si128(_mm_slli_epi16(g, 5), b)));
 }
+
+struct WthCldSse2Row {
+    __attribute__((target("sse2"), always_inline))
+    static __inline void Fill(unsigned short* dp, int n, int at, int ab,
+                              int phase, unsigned rsh, unsigned gm)
+    {
+        __m128i km, dv, v, r, g, b;
+
+        if (n < WTH_CLOUD_BLK)                   /* 右边缘的残块走标量 */
+        {
+            Wth_CldRow(dp, n, at, ab, phase, rsh, gm);
+            return;
+        }
+        /* 块内 alpha: a_i = at + ((ab-at)/2 * w_i >> 7), 一次算 8 个 */
+        km = _mm_sub_epi16(s_CldK256,
+                _mm_min_epi16(_mm_set1_epi16(255), _mm_max_epi16(s_CldZero,
+                    _mm_add_epi16(
+                        _mm_set1_epi16((short)at),
+                        _mm_srai_epi16(
+                            _mm_mullo_epi16(
+                                _mm_srai_epi16(_mm_set1_epi16((short)(ab - at)), 1),
+                                s_CldKw), 7)))));
+        dv = s_CldKd[phase];
+        v = _mm_loadu_si128((const __m128i*)dp);
+        r = _mm_and_si128(_mm_srl_epi16(v, s_CldCrs), s_CldM5);
+        g = _mm_and_si128(_mm_srl_epi16(v, s_CldC5), s_CldMg);
+        b = _mm_and_si128(v, s_CldM5);
+
+        r = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(r, km), dv), 8);
+        g = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(g, km), dv), 8);
+        b = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(b, km), dv), 8);
+        _mm_storeu_si128((__m128i*)dp,
+            _mm_or_si128(_mm_sll_epi16(r, s_CldCrs),
+                _mm_or_si128(_mm_slli_epi16(g, 5), b)));
+    }
+};
+
+WTH_CLD_FILL_ROWS(Wth_CloudFillRowsSse2, __attribute__((target("sse2"))))
 #endif
+#undef WTH_CLD_FILL_ROWS
 
 static void Wth_CloudFill(unsigned char* base, int pitch, int ox, int oy,
                           int cols, int rows, int w, int h)
@@ -2534,12 +2554,14 @@ static void Wth_CloudFill(unsigned char* base, int pitch, int ox, int oy,
 #ifdef WTH_HAVE_SSE2
     if (WthSse2Ok())
     {
-        Wth_CloudFillRows(base, pitch, ox, oy, cols, rows, w, h, rsh, gm,
-                          Wth_CldRowSse2);
+        Wth_CldSse2Init(rsh, gm);
+        Wth_CloudFillRowsSse2<WthCldSse2Row>(base, pitch, ox, oy,
+                                          cols, rows, w, h, rsh, gm);
         return;
     }
 #endif
-    Wth_CloudFillRows(base, pitch, ox, oy, cols, rows, w, h, rsh, gm, Wth_CldRow);
+    Wth_CloudFillRows<WthCldScalarRow>(base, pitch, ox, oy,
+                                    cols, rows, w, h, rsh, gm);
 }
 
 /* ---------------- 图像档绘制 ---------------- */
