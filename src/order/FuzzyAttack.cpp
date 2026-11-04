@@ -76,6 +76,16 @@ static void FA_EnsureInit(void)
     if (!g_FaEnable) LogLine("fuzzyattack: OFF");
 }
 
+/* 设置页改完热键后回读 (ini 已写盘)。 */
+void FuzzyAttack_ReloadHotkey(void)
+{
+    FA_EnsureInit();
+    g_FaEnable = GetPrivateProfileIntA(FA_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
+    OU_ParseHotkey("Ctrl+Middle", &g_FaHk);
+    OU_ReadHotkey(FA_SECTION, "Hotkey", &g_FaHk);
+    if (g_FaHk.disabled) g_FaEnable = 0;
+}
+
 /* ---------------- 小工具 (通用部分见 OrderUtil.h) ---------------- */
 
 /* 强制攻击: MegaMission(Attack, Target=敌对象, Dst=空, 直接下令 flag=0)。 */

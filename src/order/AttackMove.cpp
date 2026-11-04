@@ -56,6 +56,13 @@ static void AM_EnsureInit(void)
     if (!g_AmEnable) LogLine("attackmove: OFF");
 }
 
+/* 设置页改完热键后回读 (ini 已写盘)。 */
+void AttackMove_ReloadHotkey(void)
+{
+    AM_EnsureInit();
+    g_AmEnable = OU_ReadHotkeySingle(AM_SECTION, "AttackMove", "X2", &g_AmHk);
+}
+
 static int AM_Fire(int houseIdx, int srcID, unsigned char srcRtti,
                    int tgtID, unsigned char tgtRtti,
                    int dstID, unsigned char dstRtti, int plan,

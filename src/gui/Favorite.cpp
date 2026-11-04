@@ -64,6 +64,8 @@ static int s_LiftPx = 25;       /* 投影后再上移的像素 (贴地/建筑高
 static int s_ArrowInset = 16;   /* 边缘箭头离视图边的像素 */
 static int s_ArrowLen = 11;     /* 箭头大小 (像素) */
 static int s_ArrowCenter = 0;   /* 1 = 箭头画在画面中心的同心圆轨道上 */
+static int s_ArrowNone = 0;     /* 1 = 完全不画指向箭头 (优先于 s_ArrowCenter) */
+static int s_Stars = 1;         /* 0 = 不画单位头顶的收藏星 (按钮列仍可见) */
 static int s_CenterR = 36;      /* 最内圈半径 (像素) */
 static int s_CenterGap = 26;    /* 每个槽向外多一圈的增量 (像素) */
 static int s_ArrowLite = 15;    /* 一槽离屏箭头超过这么多个就整体半透明 */
@@ -225,8 +227,10 @@ void Fav_EnsureInit(void)
     {
         char mode[16];
         OU_ReadString(FAV_SECTION, "ArrowMode", "edge", mode, sizeof(mode));
+        s_ArrowNone = (mode[0] == 'n' || mode[0] == 'N') ? 1 : 0;
         s_ArrowCenter = (mode[0] == 'c' || mode[0] == 'C') ? 1 : 0;
     }
+    s_Stars = GetPrivateProfileIntA(FAV_SECTION, "StarEnable", 1, g_IniPath) ? 1 : 0;
     s_CenterR = GetPrivateProfileIntA(FAV_SECTION, "CenterRadius", 36, g_IniPath);
     s_CenterR = Fav_Max(8, Fav_Min(400, s_CenterR));
     s_CenterGap = GetPrivateProfileIntA(FAV_SECTION, "CenterGap", 26, g_IniPath);
@@ -256,7 +260,10 @@ void Fav_EnsureInit(void)
     q = AppendCStr(buf, q, "/", sizeof(buf));
     q += UtoA((unsigned)s_LiftPx, buf + q);
     q = AppendCStr(buf, q, " arrow=", sizeof(buf));
-    q = AppendCStr(buf, q, s_ArrowCenter ? "center" : "edge", sizeof(buf));
+    q = AppendCStr(buf, q, s_ArrowNone ? "none" : (s_ArrowCenter ? "center" : "edge"),
+                   sizeof(buf));
+    q = AppendCStr(buf, q, " star=", sizeof(buf));
+    q += UtoA((unsigned)s_Stars, buf + q);
     q = AppendCStr(buf, q, " lite=", sizeof(buf));
     q += UtoA((unsigned)s_ArrowLite, buf + q);
     q = AppendCStr(buf, q, " max=", sizeof(buf));
@@ -474,8 +481,8 @@ static int Fav_Jump(int slot)
     return 1;
 }
 
-/* 星星按钮按下沿。Ctrl = 立即收当前选中集; 否则只记起点, 由 Fav_PressPoll
- * 决定是长按清空还是松开跳转。 */
+/* 星星按钮按下沿。空槽 = 单击直接收藏 (不用 Ctrl), 已用槽 = Ctrl 覆盖收藏 /
+ * 单击跳转; 长按清空由 Fav_PressPoll 结算。 */
 void Fav_PressBegin(int slot, void** sel, int selN, int ctrl)
 {
     Fav_EnsureInit();
@@ -485,8 +492,11 @@ void Fav_PressBegin(int slot, void** sel, int selN, int ctrl)
     s_PressSlot = slot;
     s_PressT0 = Fav_Now();
     s_PressDone = 0;
+    /* 空槽: 点一下就是"收进这里", 不再需要 Ctrl —— 空槽没有可跳转/可清空的东西,
+     * 单击只可能是想收藏。已用槽仍要 Ctrl 才覆盖 (单击留给跳转)。 */
+    if (!ctrl && !s_Used[slot]) ctrl = 1;
     if (!ctrl) return;
-    s_PressDone = 1;                         /* Ctrl 语义只收藏, 不参与长按 */
+    s_PressDone = 1;                         /* 收藏语义不参与长按 */
     if (!sel || selN <= 0)
     {
         LogLine("fav: store skip (no selection)");
@@ -530,12 +540,46 @@ void Fav_PressPoll(void)
     if (!s_PressDone) Fav_Jump(slot);
 }
 
+/* 右键点星星按钮: 不显示 -> 边缘 -> 中心 -> 不显示 三态轮转 (只改运行时,
+ * 不回写 ini; ESC 设置页里改的那一档才落盘)。 */
 void Fav_ToggleArrowMode(void)
 {
     Fav_EnsureInit();
     if (!s_Enable) return;
-    s_ArrowCenter = s_ArrowCenter ? 0 : 1;
-    LogLine(s_ArrowCenter ? "fav: arrow=center" : "fav: arrow=edge");
+    if (s_ArrowNone) { s_ArrowNone = 0; s_ArrowCenter = 0; }
+    else if (!s_ArrowCenter) { s_ArrowCenter = 1; }
+    else { s_ArrowNone = 1; s_ArrowCenter = 0; }
+    LogLine(s_ArrowNone ? "fav: arrow=none"
+                        : (s_ArrowCenter ? "fav: arrow=center" : "fav: arrow=edge"));
+}
+
+int Fav_ArrowMode(void)
+{
+    Fav_EnsureInit();
+    if (s_ArrowNone) return 0;
+    return s_ArrowCenter ? 2 : 1;
+}
+
+void Fav_SetArrowMode(int mode)
+{
+    Fav_EnsureInit();
+    s_ArrowNone = (mode <= 0) ? 1 : 0;
+    s_ArrowCenter = (mode == 2) ? 1 : 0;
+    LogLine(s_ArrowNone ? "fav: arrow=none"
+                        : (s_ArrowCenter ? "fav: arrow=center" : "fav: arrow=edge"));
+}
+
+int Fav_StarsEnabled(void)
+{
+    Fav_EnsureInit();
+    return s_Stars;
+}
+
+void Fav_SetStarsEnabled(int on)
+{
+    Fav_EnsureInit();
+    s_Stars = on ? 1 : 0;
+    LogLine(s_Stars ? "fav: star on" : "fav: star off");
 }
 
 /* ---------------- 绘制: 星星 + 指向箭头 (分两趟) ---------------- */
@@ -721,6 +765,7 @@ int Fav_DrawBeaconArrows(void* surf, int w, int h, int pitch)
     Fav_EnsureInit();
     Fav_ScenCheck();
     if (!s_Enable || !s_BeaconArrow) return 0;
+    if (s_ArrowNone) return 0;      /* 箭头指示 = 不显示时连信标箭头一起收掉 */
     if (!g_Calibrated) return 0;
     if (!*(volatile unsigned char*)(size_t)ADDR_SCEN_STARTED) return 0;
     if (!surf || !IsPlausiblePtr(surf)) return 0;
@@ -810,6 +855,8 @@ static int Fav_DrawMarks(void* surf, int w, int h, int pitch, int arrows)
     unsigned char* base;
     int slot;
 
+    if (arrows) { if (s_ArrowNone) return 0; }
+    else if (!s_Stars) return 0;
     if (!Fav_CanDraw(surf, w, h, pitch)) return 0;
     FM_GetViewRects(&a, NULL);
     if (a.Width < 64 || a.Height < 64) return 0;

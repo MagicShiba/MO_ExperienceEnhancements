@@ -9,3 +9,8 @@ void Observer_Poll(void);
 /* 本机是否为观战者（只读，与 [Features] Observer 开关无关）。
  * 判据同 Observer_Poll：CurrentPlayer == Observer，或本机房是任一观战槽。 */
 int Observer_LocalIsSpectator(void);
+
+/* 设置页运行期读写 ([Features] Observer)。只影响 Poll 里的对齐动作，
+ * 不影响 LocalIsSpectator 的判据。 */
+int  Observer_Enabled(void);
+void Observer_SetEnabled(int on);

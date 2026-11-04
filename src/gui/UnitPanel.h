@@ -18,6 +18,15 @@
 /* 读 [UnitPanel] 配置 (幂等)。 */
 void UP_EnsureInit(void);
 
+/* 面板总开关 ([UnitPanel] Enable)。关掉整块不画、不吞点击。 */
+int  UP_Enabled(void);
+void UP_SetEnabled(int on);
+
+/* 左侧按钮列的三个可关项: which 0=折叠 1=WASD切换 2=收藏槽。
+ * 三个都关 = 整列不显示, 面板贴回左下角。 */
+int  UP_BtnShown(int which);
+void UP_SetBtnShown(int which, int on);
+
 /* 每循环 (prepare 钩): 快照选中集 / 摆位 / 取点击 / 悬停。 */
 void UP_Poll(void);
 

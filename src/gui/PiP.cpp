@@ -429,19 +429,27 @@ static int PiP_EnsureSurfs(int rw, int rh)
     return 1;
 }
 
+/* 关窗 (侧栏按钮): 失焦、清目标、释放离屏面、抹掉点击区。 */
+static void PiP_CloseWindow(const char* why)
+{
+    g_Show = 0;
+    g_Focus = g_Drag = g_Pan = g_PendingUnfocus = g_HasContent = 0;
+    PiP_FollowClear("pip: follow OFF (window closed)");
+    PiP_DropSurfs();
+    g_PipX = g_PipY = g_PipW = g_PipH = 0;
+    LogLine(why);
+}
+
 /* 开/关小窗 (侧栏按钮)。打开时落回右上角, 且目标重取"打开时的主视图中心"。 */
 static void PiP_Toggle(void)
 {
-    g_Show = !g_Show;
-    g_Focus = g_Drag = g_Pan = g_PendingUnfocus = g_HasContent = 0;
-    if (!g_Show)
+    if (g_Show)
     {
-        PiP_FollowClear("pip: follow OFF (window closed)");
-        PiP_DropSurfs();
-        g_PipX = g_PipY = g_PipW = g_PipH = 0;
-        LogLine("pip: window OFF (sidebar button)");
+        PiP_CloseWindow("pip: window OFF (sidebar button)");
         return;
     }
+    g_Show = 1;
+    g_Focus = g_Drag = g_Pan = g_PendingUnfocus = g_HasContent = 0;
     s_WantX = -1; s_WantY = -1;    /* 落回默认右上角 */
     g_Pinned = 0;                  /* 目标 = 当前主相机中心 (渲染时取) */
     g_SurfJustBuilt = 0;
@@ -451,6 +459,91 @@ static void PiP_Toggle(void)
     g_CamW = 0;
     g_Fail = 0;                    /* 用户主动开窗 = 立刻重试离屏面 */
     LogLine("pip: window ON (sidebar button)");
+}
+
+/* ---------------- 设置项 (ESC 设置页) ----------------
+ * 尺寸/倍率一变, 已有离屏面的尺寸就不再匹配。这里直接丢掉: g_RW/g_HasContent
+ * 一并清 0, 于是到下一帧 AfterMap 重建之前 PiP_DrawOnComposite 原地返回,
+ * 不会出现"拿旧面按新倍率反推出错误贴窗尺寸"的那一帧。 */
+static void PiP_InvalidateSurfs(void)
+{
+    if (!g_Show) return;
+    PiP_DropSurfs();
+    g_HasContent = 0;
+}
+
+int PiP_Enabled(void) { PiP_EnsureInit(); return g_Enable; }
+
+void PiP_SetEnabled(int on)
+{
+    PiP_EnsureInit();
+    on = on ? 1 : 0;
+    if (g_Enable == on) return;
+    g_Enable = on;
+    g_Fail = 0;
+    /* 不关窗: 只把离屏面丢掉 (g_Show 照旧)。模块关着时 PiP_Off() 已经挡住所有
+     * 绘制/点击, 而留着 g_Show 才能让"菜单里关掉又取消"原样回滚。 */
+    if (!on) PiP_InvalidateSurfs();
+    LogLine(on ? "pip: module ON" : "pip: module OFF");
+}
+
+int PiP_Operate(void) { PiP_EnsureInit(); return g_Operate; }
+
+void PiP_SetOperate(int on)
+{
+    PiP_EnsureInit();
+    on = on ? 1 : 0;
+    if (g_Operate == on) return;
+    g_Operate = on;
+    LogLine(g_Operate ? "pip: operate ON" : "pip: operate OFF");
+}
+
+int PiP_AutoJump(void) { PiP_EnsureInit(); return g_AutoJump; }
+
+void PiP_SetAutoJump(int on)
+{
+    PiP_EnsureInit();
+    on = on ? 1 : 0;
+    if (g_AutoJump == on) return;
+    g_AutoJump = on;
+    if (g_AutoJump) g_AutoSeen = 0;   /* 打开后先跳一次当前最新事件 */
+    LogLine(g_AutoJump ? "pip: auto-jump ON" : "pip: auto-jump OFF");
+}
+
+int PiP_Width(void) { PiP_EnsureInit(); return g_DispW; }
+
+void PiP_SetWidth(int w)
+{
+    PiP_EnsureInit();
+    if (w < 64) w = 64;
+    if (w > 1024) w = 1024;
+    if (w == g_DispW) return;
+    g_DispW = w;
+    PiP_InvalidateSurfs();
+}
+
+int PiP_Height(void) { PiP_EnsureInit(); return g_DispH; }
+
+void PiP_SetHeight(int h)
+{
+    PiP_EnsureInit();
+    if (h < 48) h = 48;
+    if (h > 1024) h = 1024;
+    if (h == g_DispH) return;
+    g_DispH = h;
+    PiP_InvalidateSurfs();
+}
+
+int PiP_Scale(void) { PiP_EnsureInit(); return g_ScaleNum; }
+
+void PiP_SetScale(int n)
+{
+    PiP_EnsureInit();
+    n = (n == 1) ? 1 : 2;
+    if (n == g_ScaleNum) return;
+    g_ScaleNum = n;
+    PiP_InvalidateSurfs();
+    LogLine(n == 1 ? "pip: scale 1x" : "pip: scale 2x");
 }
 
 /* ---------------- 相机 / 视口状态快照 ---------------- */

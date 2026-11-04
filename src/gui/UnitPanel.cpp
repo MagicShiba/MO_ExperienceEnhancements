@@ -42,7 +42,7 @@
 #define UP_BTN_W    18
 #define UP_BTN_H    18
 #define UP_BTN_GAP  2
-#define UP_BTN_FIXED 2          /* 折叠 / 操作模式: 恒定两个 */
+#define UP_BTN_FIXED 2          /* 折叠 / 操作模式: 两个固定键 (可各自关掉) */
 #define UP_BTN_MAX  (UP_BTN_FIXED + FAV_SLOT_MAX)
 #define UP_GAP      1           /* 按钮列与九宫格的间距 */
 #define UP_COLS_MAX 3           /* 每页最多 3x3; 实际用几行几列由 s_Cols/s_Rows 决定 */
@@ -88,6 +88,9 @@ static int s_Enable = 1;
 static int s_Margin = 0;
 static int s_FontPx = 11;
 static int s_Collapsed = 0;
+static int s_BtnFold = 1;        /* 左栏: 折叠键 */
+static int s_BtnWasd = 1;        /* 左栏: 键盘移动 (WASD) 切换键 */
+static int s_BtnFav = 1;         /* 左栏: 收藏槽按钮 */
 static int s_ActionLines = 0;    /* 1=强制开启引擎单位行动线 (原版点击移动线) */
 static int s_Vis = 0;            /* 本帧该不该显示 */
 static int s_LoggedGeom = 0;     /* 摆位只记一次日志 (没有截图时靠它核对几何) */
@@ -98,7 +101,11 @@ static char s_FaceCfg[64];
 static int s_Px, s_Py, s_Pw, s_Ph;
 static int s_Gx, s_Gy;
 static int s_Bx, s_By[UP_BTN_MAX];
-static int s_BtnN = UP_BTN_FIXED;  /* 本帧真实按钮数 = 2 + 露出的收藏槽数 */
+/* 视觉位置 -> 逻辑按钮 (UP_BTN_*)。三组按钮各自可关, 关掉的就不占位, 所以
+ * 位置和按钮不再是同一个下标 —— 绘制/命中/点击统一过这张表。 */
+static int s_BtnId[UP_BTN_MAX];
+static int s_BtnN = 0;           /* 本帧真实按钮数 (0 = 整列关掉) */
+static int s_HasBtnCol = 0;      /* 有按钮列: 面板整体右移一个按钮宽 */
 static int s_BtnTop;             /* 按钮列顶端 (框比按钮列矮时, 命中区要往上扩) */
 static int s_Cbx, s_Cby;         /* 折叠态那个按钮 */
 
@@ -114,6 +121,7 @@ static void* s_Pick[UP_PICK_MAX];
 static int   s_PickN = 0;
 static void* s_PickHost = NULL;
 static int Up_PickHas(void* o);          /* 定义在输入段, 绘制段要用 */
+static void Up_KmClear(void);            /* 定义在键盘段, 设置接口要用 */
 /* 悬停 */
 static int s_HoverCell = -1;
 static int s_HoverBtn = -1;
@@ -346,6 +354,11 @@ void UP_EnsureInit(void)
     s_Margin = GetPrivateProfileIntA(UP_SECTION, "Margin", 0, g_IniPath);
     s_FontPx = GetPrivateProfileIntA(UP_SECTION, "FontPx", 11, g_IniPath);
     s_Collapsed = GetPrivateProfileIntA(UP_SECTION, "Collapsed", 0, g_IniPath) ? 1 : 0;
+    s_BtnFold = GetPrivateProfileIntA(UP_SECTION, "BtnFold", 1, g_IniPath) ? 1 : 0;
+    s_BtnWasd = GetPrivateProfileIntA(UP_SECTION, "BtnWasd", 1, g_IniPath) ? 1 : 0;
+    s_BtnFav = GetPrivateProfileIntA(UP_SECTION, "BtnFav", 1, g_IniPath) ? 1 : 0;
+    /* 折叠键关掉就没法展开, 记着的折叠态一律作废 */
+    if (!s_BtnFold) s_Collapsed = 0;
     s_ActionLines = GetPrivateProfileIntA(UP_SECTION, "ActionLines", 0, g_IniPath) ? 1 : 0;
     if (s_Margin < 0) s_Margin = 0;
     if (s_Margin > 200) s_Margin = 200;
@@ -362,12 +375,70 @@ void UP_EnsureInit(void)
     q += UtoA((unsigned)s_FontPx, buf + q);
     q = AppendCStr(buf, q, " fold=", sizeof(buf));
     q += UtoA((unsigned)s_Collapsed, buf + q);
+    q = AppendCStr(buf, q, " btn=", sizeof(buf));
+    q += UtoA((unsigned)s_BtnFold, buf + q);
+    q += UtoA((unsigned)s_BtnWasd, buf + q);
+    q += UtoA((unsigned)s_BtnFav, buf + q);
     q = AppendCStr(buf, q, " face=", sizeof(buf));
     AppendCStr(buf, q, s_FaceCfg, sizeof(buf));
     LogLine(buf);
 }
 
-/* ---------------- 版式 ---------------- */
+/* ---------------- 设置页接口 ---------------- */
+
+int UP_Enabled(void)
+{
+    UP_EnsureInit();
+    return s_Enable;
+}
+
+void UP_SetEnabled(int on)
+{
+    UP_EnsureInit();
+    s_Enable = on ? 1 : 0;
+    if (!s_Enable)
+    {
+        /* 关掉就当场收尾: 不等下一次 Poll (菜单开着时主循环停着, 键盘门
+         * 可能还带着"有可动单位"的状态继续吞 W/A/S/D)。 */
+        s_Vis = 0;
+        s_KeyMove = 0;
+        s_KeyMoveSel = 0;
+        Up_KmClear();
+        s_Pend = 0;
+        s_PendRb = 0;
+    }
+    LogLine(s_Enable ? "up: enable on" : "up: enable off");
+}
+
+int UP_BtnShown(int which)
+{
+    UP_EnsureInit();
+    if (which == 0) return s_BtnFold;
+    if (which == 1) return s_BtnWasd;
+    return s_BtnFav;
+}
+
+void UP_SetBtnShown(int which, int on)
+{
+    UP_EnsureInit();
+    if (which == 0) s_BtnFold = on ? 1 : 0;
+    else if (which == 1) s_BtnWasd = on ? 1 : 0;
+    else s_BtnFav = on ? 1 : 0;
+    /* 关掉折叠键就展开 (否则折叠态再也点不开); 关掉 WASD 键要同时收掉模式,
+     * 否则键还在被吞、界面上却没有任何指示。 */
+    if (!s_BtnFold) s_Collapsed = 0;
+    if (!s_BtnWasd && s_KeyMove) { s_KeyMove = 0; s_KeyMoveSel = 0; Up_KmClear(); }
+    if (g_Log)
+    {
+        char buf[64];
+        unsigned q = 0;
+        q = AppendCStr(buf, q, "up: btn fold/wasd/fav=", sizeof(buf));
+        q += UtoA((unsigned)s_BtnFold, buf + q);
+        q += UtoA((unsigned)s_BtnWasd, buf + q);
+        q += UtoA((unsigned)s_BtnFav, buf + q);
+        LogLine(buf);
+    }
+}
 
 static void Up_Layout(void)
 {
@@ -383,18 +454,27 @@ static void Up_Layout(void)
      * 上/下内边距不对称 (8/6): 框带上方留宽一点压住标题感, 下方留给页码块。 */
     s_Pw = UP_PAD_L + UP_PAD_R + s_Cols * UP_CELL_W + (s_Cols - 1) * UP_CELL_GAP;
     s_Ph = UP_PAD_T + UP_PAD_B + s_Rows * UP_CELL_H + (s_Rows - 1) * UP_CELL_GAP;
-    s_Px = vx + s_Margin + UP_BTN_W + UP_GAP;
+    /* 按钮列可以整列关掉 (三组都关): 那时面板贴回左下角, 不再给按钮留宽度。 */
+    s_HasBtnCol = (s_BtnFold || s_BtnWasd || (s_BtnFav && Fav_RevealCount() > 0)) ? 1 : 0;
+    s_Px = vx + s_Margin + (s_HasBtnCol ? UP_BTN_W + UP_GAP : 0);
     s_Py = vy + vh - s_Margin - s_Ph;
     if (s_Py < vy) s_Py = vy;
     s_Bx = vx + s_Margin;
     s_Gx = s_Px + UP_PAD_L;
     s_Gy = s_Py + UP_PAD_T;
     /* 按钮列自下而上排; 底边钉在视口底 (== 框底), 不随面板格数浮动。
-     * 收藏按钮按用过的槽逐个露出, 新按钮出现在上一格上方; [Favorite] 关掉时
-     * Fav_RevealCount() 回 0, 这里就只剩两个固定按钮。 */
-    s_BtnN = UP_BTN_FIXED + Fav_RevealCount();
-    if (s_BtnN > UP_BTN_MAX) s_BtnN = UP_BTN_MAX;
-    if (s_BtnN < UP_BTN_FIXED) s_BtnN = UP_BTN_FIXED;
+     * 折叠键 / WASD 键各受一个开关管, 收藏槽按用过的槽逐个露出 ([Favorite]
+     * 关掉时 Fav_RevealCount() 回 0)。s_BtnId 把"第几个位置"映射到逻辑按钮,
+     * 关掉的那组直接不占位。 */
+    s_BtnN = 0;
+    if (s_BtnFold) s_BtnId[s_BtnN++] = UP_BTN_FOLD;
+    if (s_BtnWasd) s_BtnId[s_BtnN++] = UP_BTN_MODE;
+    if (s_BtnFav)
+    {
+        int k, n = Fav_RevealCount();
+        for (k = 0; k < n && s_BtnN < UP_BTN_MAX; k++)
+            s_BtnId[s_BtnN++] = UP_BTN_FAV1 + k;
+    }
     by = vy + vh - s_Margin;
     for (i = 0; i < s_BtnN; i++)
     {
@@ -406,6 +486,8 @@ static void Up_Layout(void)
     s_Cbx = vx + s_Margin;
     s_Cby = vy + vh - s_Margin - UP_BTN_H;
     if (s_Cby < vy) s_Cby = vy;
+    /* 折叠键被关掉时不允许停在折叠态 (否则永远展开不回来) */
+    if (!s_BtnFold) s_Collapsed = 0;
 }
 
 static int Up_PtIn(int x, int y, int rx, int ry, int rw, int rh)
@@ -415,16 +497,20 @@ static int Up_PtIn(int x, int y, int rx, int ry, int rw, int rh)
 
 static int Up_HitPanel(int x, int y)
 {
-    int top;
+    int top, left;
     if (s_Collapsed) return Up_PtIn(x, y, s_Cbx, s_Cby, UP_BTN_W, UP_BTN_H);
+    if (!s_ListN)
+    {
+        /* 没选中东西时框不显示, 只有按钮列算面板; 整列关掉就什么都不算 */
+        if (!s_HasBtnCol) return 0;
+        return Up_PtIn(x, y, s_Bx, s_BtnTop, UP_BTN_W, s_Py + s_Ph - s_BtnTop);
+    }
+    if (!s_HasBtnCol) return Up_PtIn(x, y, s_Px, s_Py, s_Pw, s_Ph);
     /* 按钮列可能比框还高 (框只有一两格时), 命中区取两者并集 */
     top = s_Py;
     if (s_BtnTop < top) top = s_BtnTop;
-    /* 没选中东西时框不显示, 只有按钮列算面板 */
-    if (!s_ListN)
-        return Up_PtIn(x, y, s_Bx, s_BtnTop, UP_BTN_W, s_Py + s_Ph - s_BtnTop);
-    /* 按钮列 + 九宫格框 = 一整块 */
-    return Up_PtIn(x, y, s_Bx, top, (s_Px + s_Pw) - s_Bx, (s_Py + s_Ph) - top);
+    left = s_Bx;
+    return Up_PtIn(x, y, left, top, (s_Px + s_Pw) - left, (s_Py + s_Ph) - top);
 }
 
 /* 第 i 格左上角 (含 1px 间隙的行列步进) */
@@ -453,13 +539,16 @@ static int Up_HitCell(int x, int y)
     return cy * s_Cols + cx;
 }
 
-/* 按钮命中: 0..s_BtnN-1, -1 = 不在按钮上 (折叠态用 UP_BTN_FOLD) */
+/* 按钮命中: 返回逻辑按钮 UP_BTN_*, -1 = 不在按钮上。位置和按钮不是同一个
+ * 下标 (整组可以被关掉), 所以一律过 s_BtnId。 */
 static int Up_HitBtn(int x, int y)
 {
     int i;
-    if (s_Collapsed) return Up_PtIn(x, y, s_Cbx, s_Cby, UP_BTN_W, UP_BTN_H) ? UP_BTN_FOLD : -1;
+    if (s_Collapsed)
+        return (s_BtnFold && Up_PtIn(x, y, s_Cbx, s_Cby, UP_BTN_W, UP_BTN_H))
+                   ? UP_BTN_FOLD : -1;
     for (i = 0; i < s_BtnN; i++)
-        if (Up_PtIn(x, y, s_Bx, s_By[i], UP_BTN_W, UP_BTN_H)) return i;
+        if (Up_PtIn(x, y, s_Bx, s_By[i], UP_BTN_W, UP_BTN_H)) return s_BtnId[i];
     return -1;
 }
 
@@ -1801,6 +1890,35 @@ static void Up_Star(unsigned char* base, int pitch, int W, int H,
                 OU_Put(base, W, H, pitch, NULL, x + i, y + j, r, g, b, a);
 }
 
+/* "⇋" (两向切换): 上面一支左箭头, 下面一支右箭头, 2px 笔画 (1px 在 18px 按钮
+ * 里太细, 压在地图上就糊了)。用在 WASD 切换键上。 */
+static const char* const k_Exch[12] = {
+    "..XX.......",
+    ".XXX.......",
+    "XXXXXXXXXXX",
+    "XXXXXXXXXXX",
+    ".XXX.......",
+    "..XX.......",
+    "........XX.",
+    ".......XXX.",
+    "XXXXXXXXXXX",
+    "XXXXXXXXXXX",
+    ".......XXX.",
+    "........XX."
+};
+
+static void Up_Exch(unsigned char* base, int pitch, int W, int H,
+                    int x, int y, unsigned r, unsigned g, unsigned b)
+{
+    int j, i;
+    for (j = 0; j < 12; j++)
+        for (i = 0; i < 11; i++)
+            if (k_Exch[j][i] == 'X')
+                OU_Put(base, W, H, pitch, NULL, x + i, y + j, r, g, b, 255);
+}
+
+/* 三角: right=1 尖朝右 (尖在中列最右), right=0 尖朝左。
+ * 每行宽度 len = 6-|j-5|, 靠尖那一侧收窄, 另一侧对齐成竖边。 */
 static void Up_Tri(unsigned char* base, int pitch, int W, int H,
                    int x, int y, int right, unsigned r, unsigned g, unsigned b)
 {
@@ -1812,7 +1930,7 @@ static void Up_Tri(unsigned char* base, int pitch, int W, int H,
         int i;
         for (i = 0; i < len; i++)
             OU_Put(base, W, H, pitch, NULL,
-                   x + (right ? i : (len - 1 - i)), y + j, r, g, b, 255);
+                   x + (right ? i : (half + i)), y + j, r, g, b, 255);
     }
 }
 
@@ -2066,30 +2184,26 @@ static void Up_DrawButtons(unsigned char* base, int pitch, int W, int H)
     int i;
     for (i = 0; i < s_BtnN; i++)
     {
+        int id = s_BtnId[i];
         int x = s_Bx, y = s_By[i];
-        int hot = (s_HoverBtn == i);
-        int active = (i == UP_BTN_FOLD && s_Collapsed) ||
-                     (i == UP_BTN_MODE && s_KeyMove);
+        int hot = (s_HoverBtn == id);
+        int active = (id == UP_BTN_FOLD && s_Collapsed) ||
+                     (id == UP_BTN_MODE && s_KeyMove);
         unsigned char cr, cg, cb;
         Up_BtnBg(base, pitch, W, H, x, y, hot, active);
-        /* 图标按 18px 框居中: 三角 6x11, 三条 10x2, 星 11x11 */
-        if (i == UP_BTN_FOLD) { cr = 235; cg = 235; cb = 245; }
+        /* 图标按 18px 框居中: 三角 6x11, ⇋ 11x12, 星 11x11 */
+        if (id == UP_BTN_FOLD) { cr = 235; cg = 235; cb = 245; }
         else if (active) { cr = 240; cg = 200; cb = 80; }
         else if (hot) { cr = 255; cg = 240; cb = 200; }
         else { cr = 195; cg = 195; cb = 205; }
-        if (i == UP_BTN_FOLD)
+        if (id == UP_BTN_FOLD)
             Up_Tri(base, pitch, W, H, x + 6, y + 4, s_Collapsed, cr, cg, cb);
-        else if (i == UP_BTN_MODE)
-        {
-            int k;
-            for (k = 0; k < 3; k++)
-                Up_Fill(base, pitch, W, H, x + 4, y + 4 + k * 4, 10, 2,
-                        cr, cg, cb, 255);
-        }
+        else if (id == UP_BTN_MODE)
+            Up_Exch(base, pitch, W, H, x + 4, y + 3, cr, cg, cb);
         else
         {
             /* 收藏槽: 有收藏 = 该槽满色星; 空槽 = 同色暗星 (提示"这里还能收藏")。 */
-            int slot = i - UP_BTN_FAV1;
+            int slot = id - UP_BTN_FAV1;
             unsigned r = 0, g = 0, b = 0;
             Fav_Color(slot, &r, &g, &b);
             if (!Fav_Used(slot))
@@ -2313,8 +2427,8 @@ static void Up_ClickAt(int mx, int my)
     }
     if (btn >= UP_BTN_FAV1)
     {
-        /* 收藏槽: Ctrl+左键 = 收藏当前选中集 (整组); 不按 Ctrl 时按下只记起点,
-         * 长按清空 / 松开跳转都在 Favorite 的 PressPoll 里结算。 */
+        /* 收藏槽: 空槽单击 = 直接收下当前选中集 (整组); 已用槽单击只记起点,
+         * 长按清空 / 松开跳转都在 Favorite 的 PressPoll 里结算, Ctrl+左键覆盖收藏。 */
         void* sel[FAV_GROUP_MAX];
         int n = 0, i;
         int ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) ? 1 : 0;

@@ -158,7 +158,11 @@ static int PwrCacheEnsure(void)
     wchar_t line[32];
     char b1[16], b2[16];
     house = *(void**)(size_t)ADDR_PLAYERP;
-    if (!house || !IsPlausiblePtr(house)) return 0;
+    /* 没开局 / 已结算 / 换图收尾时可能没有玩家: 先要求"对局中", 再探 +0x53A4 这段
+     * 可读 (两个 int)。IsPlausiblePtr 只判对齐, 不保证这段可读。 */
+    if (!*(volatile unsigned char*)(size_t)ADDR_SCEN_STARTED) return 0;
+    if (!house) return 0;
+    if (MemReadableBytes((char*)house + HOUSE_POWER_OUT, 8) < 8) return 0;
     output = *(int*)((char*)house + HOUSE_POWER_OUT);
     drain = *(int*)((char*)house + HOUSE_POWER_DRAIN);
     if (output < 0 || drain < 0 || output > 2000000 || drain > 2000000)

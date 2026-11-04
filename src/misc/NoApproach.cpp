@@ -12,7 +12,7 @@
  * 规划模式 (Z 路径点) 走原版。
  *
  * 联机: 只读查询 + 对自家单位不下令, 不发事件, 不影响联机。
- * 配置 [Features] NoApproach (缺失=1, 改后重启)。 */
+ * 配置 [Features] NoApproach (缺失=1; 也可在 ESC 设置页改, 现读现用)。 */
 
 #include <windows.h>
 #include "EngineAddr.h"
@@ -58,6 +58,19 @@ static int NA_IsObj(void* p)
 {
     if (!p || !IsPlausiblePtr(p)) return 0;
     return OU_InExe((unsigned)(size_t)*(void***)p);
+}
+
+/* 设置页运行期读写。 */
+int NoApproach_Enabled(void)
+{
+    NA_EnsureInit();
+    return g_NaEnable;
+}
+
+void NoApproach_SetEnabled(int on)
+{
+    NA_EnsureInit();
+    g_NaEnable = on ? 1 : 0;
 }
 
 /* 0x4D77BD 钩子: 回 0=跑原指令; 回 0x4D7CC0=当已处理 (单位停原地)。 */

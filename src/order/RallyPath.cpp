@@ -65,6 +65,8 @@ static int g_RpInit = 0;
 static int g_RpEnable = 1;
 static int g_RpMaxNodes = 12;
 
+static void RP_EnsureInit(void);
+
 /* ---------------- 折线表 (本机旁挂, 不存档) ---------------- */
 
 typedef struct
@@ -242,6 +244,20 @@ static void RP_ClearAll(void)
     g_RpHouse = 0;
     g_RpLastFrame = -1;
     g_RpSyncFrame = -1;
+}
+
+/* 设置页开关用: 关掉时把本机折线一并丢掉 (只清本机旁挂表, 不动引擎聚集点)。 */
+int RallyPath_Enabled(void)
+{
+    RP_EnsureInit();
+    return g_RpEnable;
+}
+
+void RallyPath_SetEnabled(int on)
+{
+    RP_EnsureInit();
+    g_RpEnable = on ? 1 : 0;
+    if (!g_RpEnable) RP_ClearAll();
 }
 
 /* 是不是本机当前玩家的建筑 (Owner == CurrentPlayer)。

@@ -79,18 +79,67 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
   插入，点击文本框按最近字符边界定位光标；回车提交、Esc 取消，失去焦点或点击
   别处时提交。
   `InvalidateRect + UpdateWindow` 重绘；其它消息原样转发。
-- 左侧第一项为“GUI功能”，右侧按功能组显示：`通用`（建筑队列、放置时建筑
-  驱逐单位、放置建筑时显示预览 0/25/50/75/100）、`超级武器侧边栏`（侧栏总开关、排序方式、显示行数、面板停靠边）、
-  `底栏功能`（视图缩放、暂停和帧进、网格显示、底栏截图键）、`侧边栏`（侧栏
-  滚动条、隐藏侧栏功能）、`游戏控制`（自定义游戏速度开关与速度滑条）、
-  `环境显示`（光照预设、光照参数、调色比例、矿石光照、天气绘制方式、天气、云层
-  （云影/雾气/关闭 三段）、云影风格）与
-  `杂项`（玩家颜色、阵营 UI、箱子类型图标、设置页帧率上限 60）。分组竖线与
+- 左栏第一项为“GUI功能”，右侧按功能组显示：`建筑`（建筑队列、放置时建筑
+  驱逐单位、放置建筑时显示预览 0/25/50/75/100、折线集结点、快捷维修
+  关闭/自动/半自动）、`超级武器侧边栏`（侧栏总开关、排序方式、显示行数、
+  面板停靠边）、`底栏功能`（视图缩放、暂停和帧进、网格显示、底栏截图键）、
+  `侧边栏`（侧栏滚动条、隐藏侧栏功能、显示耗电与耗时）、`单位面板`（启用单位
+  面板、左侧按钮四段、收藏星标、箭头指示）、`小窗口`（启用、窗内左键操作、
+  自动跟随雷达事件、尺寸一行（宽/高）、分辨率倍率）。分组竖线与
   分组文本同高，分组文本与子项文本左对齐。
+  “游戏控制”与“杂项”两组在第 5 页（见下）。
+- 左栏第三项为“显示设置”（`EDIT_PAGE_DISP` / `s_DispLayout`）：`环境显示`
+  （光照预设、光照参数、调色比例、矿石光照、天气绘制方式、天气、云层
+  （云影/雾气/关闭 三段）、云影风格 → 分割线 → 光照修复总开关）与
+  `界面外观`（玩家颜色、阵营 UI）。光照修复这个总开关管的是上面整组参数
+  "改完要不要自动重建 convert"，所以摆在组末、与参数之间用分割线（`EG_SEP`）隔开。
+  这一页与 GUI 页**共用 item 枚举、段名表和 `Esc_ApplyGui` 分派**，只是行表不同，
+  所以加行/移动分组只改 `s_GuiLayout` / `s_DispLayout` 两张表。
+  页身份只影响编辑态归属（`Esc_EditIs(page, item)`、`Esc_ApplyNum(page, ...)`），
+  "非文本页"一律按 `page != EDIT_PAGE_TEXT` 判，别写回 `== EDIT_PAGE_GUI`。
+- 左栏第四项为“快捷键”（`EDIT_PAGE_KEYS` / `s_KeyLayout`）：`下令`（中键移动
+  (划战线) = SmartOrder / 模糊下令 (分配目标) = SmartArea / 快速建立巡逻圈 /
+  快速砍树 / 模糊攻击）与`杂项`（选择被心控单位/移动攻击/侵略模式）。这一页
+  只有 `EG_HOTKEY` 一种控件：标签 + 右侧值框。**两套中键的标签容易写串**：
+  `[SmartOrder]` 是裸中键按住划一条线让单位沿线散开，`[SmartArea]` 是 Shift+
+  中键的范围分配。
+  - 点行 = 进**捕获态**：16ms 定时器（`ESC_HK_TIMER`）扫 `GetAsyncKeyState`，
+    新按下的非修饰键按顺序攒进组合，**全部松开**才结算 —— 这样 `Ctrl+Z+Middle`
+    能等齐三个键，单键也不会等超时。进捕获时先把"已按住的键"快照进 `s_HkPrev`
+    （点这一行的左键、切页残留的修饰键都不算用户输入）；还没按主键就松开修饰键
+    = 改主意，该修饰位撤掉。Esc 或点别处取消，8 秒无动作也自动取消。
+  - 结算走 `OU_HotkeyText` 规范化成 `Ctrl+Z+Middle` 这种串，**直接 `Esc_WriteIniRaw`
+    写盘 + 调该模块的 `XX_ReloadHotkey()`**。热键是模块里的运行期状态，走
+    `Esc_QueueRaw` 排队的话这一局不生效，所以不进队列；取消菜单时按
+    `s_HkBak`（打开菜单时备份的 ini 原串）写回并重新回读。
+  - 表是 `s_Hotkeys`（item / section / key / 默认串 / 回读函数）。加一个热键 =
+    加一行枚举 + `kLabelKey` 一格 + `s_Hotkeys` 一行 + `s_KeyLayout` 一行 + 语言键。
+    `def` 必须与模块自己 `OU_ParseHotkey` 的默认串一致（ini 缺键时显示用）。
+  - 显示串由 ini 现读再规范化，所以 ini 里手写 `ctrl+mmb` 这里会显示成
+    `Ctrl+Middle`；读不到就用 `def`。
+- 左栏第五项为“游戏控制”（`EDIT_PAGE_CTRL` / `s_CtrlLayout`）：`游戏控制`
+  （自定义游戏速度开关与速度滑条 → 分割线 → 游戏存档缩略图、观战修复、
+  显示单位范围 (Ctrl)（数值格 + 胶囊同一行）、阻止无攻击力单位靠近目标）与
+  `杂项`（箱子类型图标、设置页帧率上限 60、结算页退出按钮）。这一页原本散在
+  GUI 页末尾，因为条目变多单独开了一页；它同样与 GUI 页共用 item / 控件 /
+  分派表。游戏速度是**本局临时参数**，其余都是长期选项，所以滑条下面画一条
+  分割线（`{ EG_SEP, 0 }`，item 不参与任何查表）。
+- 页表由左栏行下标直接选（`Esc_PageAt(sel)`，下标 = `EDIT_PAGE_*`）：加一页 =
+  `ESC_LEFT_ROWS + 1` + 一个 `LeftItemN` 文案 + `Esc_PageAt` 加一条分支 +
+  自己的行表/滚动量。首组判定用 `i != 0` 而不是 `item != 0`，否则第一组不是
+  `GUI_GROUP_GENERAL` 的页会平白多一段组间距。
 - “天气”一行放雨/雪/火雨/雷电四个独立开关（火雨只有粒子画法下有效），样式与
   分段选择行一致：开 = 金色文字 + 金色横线，关 = 灰色文字 + 灰色横线，点
   文字切换、可多个同时开。四个开关只在本次运行内有效，不写 INI；以后加
   天气种类只需扩 s_Toggle 表和该行的段数（`ESC_TRIO_N`）。
+- “左侧按钮”一行是 `EG_UPBTN`：四段 [关闭][折叠][wasd][收藏]。段 0 是**状态段**
+  （三组全关时亮，点它 = 三组全关），段 1..3 各自独立取反；打开任一段就自动
+  脱离“关闭”。三个开关落在 `[UnitPanel] BtnFold/BtnWasd/BtnFav`，点击处理在
+  `Esc_ApplyGui` 的 `GUI_ITEM_UP_BTNS` 分支里自己写 INI（不走 `s_Toggle`）。
+  段数常量 `ESC_UPBTN_N`，段名直接取 `s_GuiLabel` 里连着的那四个 item
+  （`GUI_ITEM_UP_OFF + i`），与天气行同做法。
+- “箭头指示”三档（不显示 / 边缘 / 中心）走 `s_Choice` 表，取值 = `Fav_ArrowMode()`
+  （0/1/2），落盘 `[Favorite] ArrowMode = none|edge|center`。
 - “云层”一行是**三段互斥**（`EG_CLOUD`）：原子表 = [云影][雾气][关闭]，整行就是
   云层的三态，没有独立开关控件 —— “关闭”即第三段，从“关”切到“雾气”是一步。
   一段就是一个取值（`Weather_CloudMode` 0/1/2），段序（显示顺序）与取值不同序，
@@ -109,7 +158,18 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
   未选中段灰色，横条贴行底，与文本视觉间距 2px（字形底部自带 ~3px 空隙，
   代码上线顶伸进文本框 1px 抵消）。
 - 鼠标悬停的内容行画一层暗紫色高亮（组标题/分隔条不参与），光标在右面板
-  行区内移动或进出该区时触发重绘；两页（GUI 功能 / 文本显示调整）都生效。
+  行区内移动或进出该区时触发重绘；五页（GUI 功能 / 文本显示调整 / 显示设置 /
+  快捷键 / 游戏控制）都生效。
+- **混合格行**（`EG_MIX` / `s_GuiCells`）把几个"小标题 + 控件"并排放一行：
+  格 item 落在 `s_Toggle` 画胶囊开关，落在 `s_Num` 画可编辑数值框，小标题统一
+  取 `s_GuiLabel`。目前两处：小窗口`尺寸`（宽 / 高，原先是两条拖动条）与
+  `显示单位范围 (Ctrl)`（对空高度 + 启用开关）。几何走控件流（`Esc_RowAtoms`），
+  命中/编辑/绘制三处共用 `Esc_MixCellAt` + `Esc_MixCellBox`（数值格 = [小标题][缝]
+  [数值框]，开关格只有胶囊）；`Esc_NumBoxFor` 也要认这几种格，否则点框定位光标
+  会落到最右的步进框上。
+  **胶囊格不带小标题**（与普通开关行的胶囊一样自证状态），所以胶囊要写在 cells
+  最后一个：原子流整串右对齐到 `rowL+rowW-ESC_CTL_RIGHT`，胶囊放最后才会与普通
+  开关行的胶囊落在同一列；放前面就成了"行中间一个胶囊"，与其它行错位。
 - "游戏速度"为 滑条 + `[- 数值 +]`：点按钮一次 ±5（与滑条吸附档一致，到边界
   按钮置灰），点数字框可直接输入任意值（含非 5 倍数），点轨道跳值并进入拖动；
   数值超过上限显示 MAX。
@@ -141,7 +201,7 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
   表项 `invert` 必须为 0。页首还有两行灰字说明（`EG_NOTE`：常用字体文件名、
   常用字号），不可点。
   该页内容较高，超出面板时用鼠标滚轮滚动（滚动量吸附到行顶，右侧画滑块，
-  两页都支持）。滚轮作用域是整个对话框客户区，无论光标在左面板还是右面板
+  每页都有自己的一份滚动量）。滚轮作用域是整个对话框客户区，无论光标在左面板还是右面板
   都滚当前选中的页；光标位置取 `GetCursorPos`（滚轮消息可能由引擎转发，
   `lp` 的坐标系不保证是屏幕坐标，不能直接拿来换算命中）。滑块 thumb 高度 =
   `可视高²/内容总高`，与实际可滚比例一致。
@@ -179,8 +239,10 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
   会比同一行的框低 3px。
 - **分割线只用在页内分节**：组与组之间不画（组标题 + `pg->gap` 已足够分隔），
   `TX_SEP5/6/7` 只在"其它文本"组内。线 2px、`0x4E/0x4C/0x4E` + alpha 150。
-- **两页内间距共用一套常量**（`ESC_GROUP_H=26` / `ESC_BLOCK_GAP=6`，都从
-  `EscPage.groupH/gap` 读）：两个页面的行距必须一致，加新页也别单独定。
+  分割线行**占满一行高（`ESC_ROW_H`）**，线画在行中间 —— 行高与普通行一致，
+  上下行距才不会因为插线而变窄。
+- **各页内间距共用一套常量**（`ESC_GROUP_H=26` / `ESC_BLOCK_GAP=6`，都从
+  `EscPage.groupH/gap` 读）：所有页面的行距必须一致，加新页也别单独定。
 - **模块归属 `OPM_*` + `Esc_OptGet/Set`**：同一套 `TX_*` 行分属四个模块
   （`MsgText` / `SWPanel` / `VecText` / `PowerDisplay`），表项带 `mod`，
   读写与落盘节名都由它推（`Esc_OptSection`：`OPM_PWR` 的键住在 `[VecText]`）。
@@ -252,6 +314,20 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
   胶囊开关本身才会切换，点击整行文字不生效。排序行右侧同时显示“按阵营/填充”，
   点击整行切换；行数行右侧为 `- N +`，点减/加按钮调整，点中间文本框可直接输入
   （1~40，提交时夹取范围）。文本页所有数值行同样支持直接输入。
+- “小窗口”一组（`GUI_ITEM_PIP_*`，`[PiP] Enable/Operate/AutoJump/Width/Height/
+  Scale`）：开关三行走 `s_Toggle`，宽高走 `s_Num`，倍率走 `s_Choice`（段名固定
+  `1x`/`2x`，不进语言文件）。宽高/倍率会重建 PiP 离屏面，所以这两行的滑条
+  必须"松开才提交"——见 `Esc_SlideDefer`（调色比例也在这个名单里）。
+  细节见 `notes/画中画.md` §交互。
+- “启用单位面板”（`GUI_ITEM_UP_ENABLE`，`[UnitPanel] Enable`）关掉 = 整块不画、
+  不吞点击，并当场收掉键盘移动状态（菜单开着时主循环停着，keyboard gate 可能
+  还带着“有可动单位”继续吞 W/A/S/D）。
+- “收藏星标”（`GUI_ITEM_FAV_STAR`，`[Favorite] StarEnable`）只管单位头顶那颗星，
+  收藏按钮与跳转不受影响。
+- “折线集结点”开关（`GUI_ITEM_RALLY`，`[RallyPath] Enable`）：关掉立即
+  `RallyPath_SetEnabled(0)` → 清本机折线表、钩子门返回 0（引擎恢复原版单点聚集点）；
+  开回来只恢复模块行为，不清任何引擎数据。Z 只是"追加尾巴"的修饰键，开关本身
+  不碰输入。
 - 设置项回写主 INI 的 `[BottomBar] ScaleEnable/PauseEnable/GridEnable`、
   `[SWSidebar] Enable/FillMode/MaxRows/Side`、`[Sidebar] ScrollEnable/
   HideEnable/Mode`、`[Features] BuildQueue` 与 `[PlaceScatter] Mode`。
@@ -270,11 +346,13 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
   zh 系列无对应文件用 `zh-CN.ini`，其它语言无对应文件用 `en-US.ini`。
 - 左侧标题栏的语言分段可运行时覆盖为 `ZH` 或 `EN`，`AUTO` 恢复跟随系统。
   覆盖只改内存选择（不写 INI），重启游戏后回到 AUTO。
-- 菜单标题和占位项读取 `[EscMenu]` 的 `LeftTitle`、`LeftItem1/2`、
-   `RightTitle`、`RightItem1/2`；GUI 设置读取 `GuiTitle`、`GuiGroupBottom`、
+- 菜单标题和占位项读取 `[EscMenu]` 的 `LeftTitle`、`LeftItem1/2/3/4`、
+   `RightTitle`、`RightItem1/2`；GUI 设置读取 `GuiTitle`、`DispTitle`、
+   `KeyTitle`、
+   `GuiGroupAppear`、`GuiGroupBottom`、
    `GuiScale`、`GuiPause`、`GuiGrid`、`GuiGroupSws`、`GuiSws`、`GuiSort`、
    `GuiRows`、`GuiBuildQueue`、`GuiScatter`、`GuiScatterOff/OnPlace/Auto`、
-   `GuiPlacePrev`、
+   `GuiPlacePrev`、`GuiRally`、
    `GuiGroupSidebar`、`GuiSideScroll`、`GuiSideHide`、
    `GuiSideHideOff/Full/Radar/Bare`、`GuiSwsSide`、`GuiSwsSideRight/Left`、
    `GuiOn`、`GuiOff`、`GuiSortFaction`、`GuiSortFill`、`GuiSkin*`、`GuiColor`；

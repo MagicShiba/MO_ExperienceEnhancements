@@ -50,6 +50,32 @@ static void WR_EnsureInit(void)
     else LogLine("wrange: ON (ctrl+single, aa-ground)");
 }
 
+/* ---------------- 设置页运行期读写 ---------------- */
+
+int WeaponRange_Enabled(void)
+{
+    WR_EnsureInit();
+    return g_WrEnable;
+}
+
+void WeaponRange_SetEnabled(int on)
+{
+    WR_EnsureInit();
+    g_WrEnable = on ? 1 : 0;
+}
+
+int WeaponRange_Height(void)
+{
+    WR_EnsureInit();
+    return g_WrAAZ;
+}
+
+void WeaponRange_SetHeight(int v)
+{
+    WR_EnsureInit();
+    g_WrAAZ = (v < 0) ? 0 : (v > 8192 ? 8192 : v);
+}
+
 /* ---------------- 类型取得 (DeployPreview 同式) ---------------- */
 
 static int WR_InTypeSet(void* p) { return OU_InVec(ADDR_TYPARRAY, p); }

@@ -107,6 +107,16 @@ static void PC_EnsureInit(void)
                        : "pcircle: event patrol circle OFF");
 }
 
+/* 设置页改完热键后回读 (ini 已写盘)。 */
+void PatrolCircle_ReloadHotkey(void)
+{
+    PC_EnsureInit();
+    g_PcEnable = GetPrivateProfileIntA(PC_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
+    OU_ParseHotkey("Z+Middle", &g_PcHk);
+    OU_ReadHotkey(PC_SECTION, "Hotkey", &g_PcHk);
+    if (g_PcHk.disabled) g_PcEnable = 0;
+}
+
 /* ---------------- 小工具 (通用部分见 OrderUtil.h) ---------------- */
 
 static int PC_IsFoot(void* p)

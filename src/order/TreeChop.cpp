@@ -50,6 +50,16 @@ static void TC_EnsureInit(void)
     if (!g_TcEnable) LogLine("treechop: OFF");
 }
 
+/* 设置页改完热键后回读 (ini 已写盘)。 */
+void TreeChop_ReloadHotkey(void)
+{
+    TC_EnsureInit();
+    g_TcEnable = GetPrivateProfileIntA(TC_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
+    OU_ParseHotkey("Ctrl+Z+Middle", &g_TcHk);
+    OU_ReadHotkey(TC_SECTION, "Hotkey", &g_TcHk);
+    if (g_TcHk.disabled) g_TcEnable = 0;
+}
+
 /* 地面单位才能砍树。 */
 static int TC_IsChopper(void* p)
 {

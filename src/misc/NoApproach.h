@@ -6,3 +6,7 @@
  * regs: ESI=this(FootClass*), EBX=pTarget(ObjectClass*)。
  * 回 0=跑原指令; 回 0x4D7CC0=当已处理 (单位停原地)。 */
 extern "C" __declspec(dllexport) unsigned __cdecl NoApproach_Hook(void* regs);
+
+/* 设置页运行期读写 ([Features] NoApproach)。钩子里现读, 关掉下一帧就回原版。 */
+int  NoApproach_Enabled(void);
+void NoApproach_SetEnabled(int on);

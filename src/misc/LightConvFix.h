@@ -22,5 +22,6 @@ int  LightConv_WorldReady(void);
 /* [Environment] LightFixEnable, 默认 1: 自动修复 (改光照后的逐格重建 / 读档后补刷)。
  * 关掉就是引擎原版表现 (锯齿残留 + 读档后亮度停在重建那一刻)。 */
 int  LightFix_Enabled(void);
+void LightFix_SetEnabled(int on);
 
 #endif /* MOE_LIGHTCONVFIX_H */

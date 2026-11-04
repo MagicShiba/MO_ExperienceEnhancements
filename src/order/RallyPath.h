@@ -5,3 +5,7 @@
 
 void RallyPath_Poll(void);
 void RallyPath_Draw(void* surf, int w, int h, int pitch);
+
+/* 设置页开关 (ESC 菜单 建筑 分组): 只切本机行为与旁挂表, 落盘由菜单排队。 */
+int RallyPath_Enabled(void);
+void RallyPath_SetEnabled(int on);

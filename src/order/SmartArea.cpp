@@ -70,6 +70,17 @@ static void SA_EnsureInit(void)
     if (!g_SaEnable) LogLine("smartarea: OFF");
 }
 
+/* 设置页改完热键后回读 (ini 已写盘)。组合键的"认领中键"几个判定都现读 g_SaHk,
+ * 所以改完立刻生效, 不用清别的状态。 */
+void SmartArea_ReloadHotkey(void)
+{
+    SA_EnsureInit();
+    g_SaEnable = GetPrivateProfileIntA(SA_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
+    OU_ParseHotkey("Shift+Middle", &g_SaHk);
+    OU_ReadHotkey(SA_SECTION, "Hotkey", &g_SaHk);
+    if (g_SaHk.disabled) g_SaEnable = 0;
+}
+
 /* 认领中键: 开且组合全按住 (含主键), 且无 Ctrl (归模糊);
  * Z 不禁 (用户习惯按住 Z, 巡逻圈见认领会自己让路)。
  * 注意: 松开瞬间主键已抬起, 认领必掉; 松开判定另用 SA_ComboHeld

@@ -244,6 +244,7 @@ static void RA_Pop(void)
     s_RaQN--;
 }
 
+
 /* ---------------- 建筑数组稳定门 (同 SWSBar: 启动期半初始化垃圾会致 fault) --- */
 
 static void* s_RaPrevItems = NULL;
@@ -376,6 +377,33 @@ static unsigned s_RaDblMs = 0;  /* 上一次按下的 GetTickCount, 配合 s_RaD
 static int s_RaDblSet = 0;
 static int s_RaDblX = 0;
 static int s_RaDblY = 0;
+
+/* ---------------- 设置页运行期读写 ----------------
+ * Mode 只在 EnsureInit 读一次 ini, 所以这里直接改内存值; 关掉时把待发队列清空 ——
+ * 这些指针可能在关掉期间被引擎销毁, 重开时留着就是野指针。 */
+int RepairAll_Mode(void)
+{
+    RA_EnsureInit();
+    return g_RaMode;
+}
+
+void RepairAll_SetMode(int mode)
+{
+    char buf[48];
+    unsigned p = 0;
+
+    RA_EnsureInit();
+    mode = RA_Clamp(mode, 0, 2);
+    if (mode == g_RaMode) return;
+    g_RaMode = mode;
+    s_RaQHead = 0;
+    s_RaQN = 0;
+    s_RaPending = 0;
+    p = AppendCStr(buf, p, "repairall: mode=", sizeof(buf));
+    p = AppendInt(buf, p, sizeof(buf), g_RaMode);
+    (void)p;
+    LogLine(buf);
+}
 
 /* 双击判定, 用**墙钟毫秒** (GetTickCount) 而不是引擎逻辑帧。
  * 逻辑帧就是游戏速度: GameSpeed=0 不限速时"12 帧"只有几十毫秒, 手点追不上。

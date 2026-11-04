@@ -27,14 +27,14 @@ enum {
 #define LIGHT_PRESET_CUSTOM   (-1)
 #define LIGHT_PRESET_COUNT     6
 
-/* 调色比例 (不改任何光照字段, 只决定"单位/建筑/玩家色跟不跟着当前色调走"):
- *   0   = 地形按每格自己的光源色重建, 单位/建筑保持原色 (与地图自带光照一致);
- *   100 = 在此之上把玩家色与单位/建筑也染成当前色调 (引擎触发器的范围);
- *   中间值在 Color1 上线性插值。
- * 详见 notes/光照预设.md 3.2。 */
+/* 调色比例 (等于"用哪一种光照"):
+ *   0   = 默认光照: 逐格重建地形 (每格保留点光源色), 单位/建筑不染色;
+ *   100 = 触发光照: 引擎触发器那条整池覆写 (点光源色只剩亮度, 单位/建筑一起染);
+ *   中间 = 逐格重建 + 按比例给单位/建筑/玩家色上色。
+ * 详见 notes/光照预设.md §5 "调色比例"。 */
 #define LIGHT_MIX_MAX          100
 
-/* 每循环调用: 认出场景重开 (新开/读档) 后把光照恢复成地图原值。 */
+/* 每循环调用: 场景重开 (新开/读档) 后按引擎现值重算一遍光照。 */
 void Lighting_Poll(void);
 
 /* 当前预设号 (LIGHT_PRESET_*)。 */
@@ -46,8 +46,8 @@ void Lighting_ApplyPreset(int preset);
 int  Lighting_GetParam(int idx);
 void Lighting_SetParam(int idx, int value);
 
-/* 调色比例读写 (0..LIGHT_MIX_MAX); 改比例会立刻按当前字段重算一遍。
- * 长期设置: 落盘 [Environment] LightMix (默认 0 = 不染色), 越局保留。 */
+/* 调色比例读写 (0..LIGHT_MIX_MAX, 含义见上)。长期设置: 落盘
+ * [Environment] LightMix, 越局保留。 */
 int  Lighting_Mix(void);
 void Lighting_SetMix(int mix);
 

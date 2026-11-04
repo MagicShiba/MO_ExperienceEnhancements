@@ -7,6 +7,24 @@
 /* 读 [PiP] 节 (幂等)。 */
 void PiP_EnsureInit(void);
 
+/* ---------------- 设置项 (ESC 设置页「小窗口」组) ----------------
+ * 取/设的都是运行时状态, 落盘由调用方排队写 ini。宽/高/倍率一变离屏面尺寸
+ * 就不匹配, setter 里会直接丢掉旧面, 由下一帧 AfterMap 按新尺寸重建 ——
+ * 所以拖动滑条必须"松开才提交"(见 Esc_SlideDefer), 别每帧调。 */
+int  PiP_Enabled(void);
+void PiP_SetEnabled(int on);      /* 0 = 模块停用: 侧栏按钮与小窗都不再出现,
+                                   * 但窗的开合状态保留 (取消菜单可原样回滚) */
+int  PiP_Operate(void);
+void PiP_SetOperate(int on);      /* 窗内左键操作 (点/框选) */
+int  PiP_AutoJump(void);
+void PiP_SetAutoJump(int on);     /* 有新雷达事件就把小窗跳过去 */
+int  PiP_Width(void);
+void PiP_SetWidth(int w);
+int  PiP_Height(void);
+void PiP_SetHeight(int h);
+int  PiP_Scale(void);             /* 离屏渲染倍率: 1 或 2 */
+void PiP_SetScale(int n);
+
 /* AfterMap 钩内 (窗口面已还原) 调: 跑第二摄像机离屏渲染 (不贴窗)。 */
 void PiP_AfterMap(void);
 

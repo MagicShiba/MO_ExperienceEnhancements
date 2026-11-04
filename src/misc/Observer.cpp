@@ -40,6 +40,19 @@ static void OB_EnsureInit(void)
     g_ObEnable = GetPrivateProfileIntA(OB_SECTION, "Observer", 1, g_IniPath) ? 1 : 0;
 }
 
+/* 设置页运行期读写。 */
+int Observer_Enabled(void)
+{
+    if (!g_ObInit) OB_EnsureInit();
+    return g_ObEnable;
+}
+
+void Observer_SetEnabled(int on)
+{
+    if (!g_ObInit) OB_EnsureInit();
+    g_ObEnable = on ? 1 : 0;
+}
+
 /* ---------------- 房属性判据 ---------------- */
 
 /* 节点表可用时才用节点判据。 */

@@ -174,6 +174,9 @@ FPS 钉住（任何档位 1x、位置固定）：`Simple_` 入口收串并跳过
 
 - 侧栏穹顶“闪电+负载/电力”（PowerMode=1 为余量数字），y 锚底边；侧栏面与主面双份同像素。
 - 闪电 10x16 二值直写；数值取 CurrentPlayer+0x53A4/0x53A8；颜色 d*4<o*3 绿，d<=o 黄，否则红。
+  **没开局/已结算时可能没有玩家**：先判 `0xA8ED5C`（对局中），再
+  `MemReadableBytes(house+0x53A4, 8)` 探可读（`IsPlausiblePtr` 只判对齐、不保证这段
+  可读）；任一不过就当没有玩家，跳过绘制。
 - 字号/字体与资金同源；值变才重光栅。
 - 四路同画：Message::Draw、prepare 0x4F42F0、BlitSidebar 0x6A70E0、UpdatePrimarySurface 0x4F4780。naked 只许 "m" 操作数。
 - 上屏唯 BlitSidebar 内 CopyFromPart；禁每帧调 BlitSidebar（光标拖影）。

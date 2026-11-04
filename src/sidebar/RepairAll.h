@@ -12,6 +12,11 @@
  * 纯只读查询 + OutList 标准事件入队。 */
 void RepairAll_Poll(void);
 
+/* 设置页运行期读写 ([RepairAll] Mode): 0=关闭 1=半自动 2=自动。
+ * 关掉时顺手清掉待发队列 (重开时不留旧对象指针)。 */
+int  RepairAll_Mode(void);
+void RepairAll_SetMode(int mode);
+
 /* 维修快捷键 ToggleRepariModeCommandClass::Execute (0x536FA0, 偷 7B:
  * `push -1 ; mov ecx,0x87F7E8`, 无 rel)。按住 Ctrl 或连按两下时吞掉原版
  * (不进维修光标模式), 改为给所有该修的建筑排队发 Repair(0x15) 事件;

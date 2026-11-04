@@ -84,6 +84,14 @@ int LightFix_Enabled(void)
     return s_On;
 }
 
+/* ESC 的开关只改内存里的门, 落盘走设置页统一的队列。关掉不撤销已重建的 convert
+ * (它与当时的光照一致, 留着不会退化成锯齿)。 */
+void LightFix_SetEnabled(int on)
+{
+    LF_EnsureInit();
+    s_On = on ? 1 : 0;
+}
+
 /* 光照字段在 ScenarioClass 对象 (Instance 指针解引用) 上, 不是 MapClass。 */
 static unsigned LF_ScenObj(void)
 {

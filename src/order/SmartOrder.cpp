@@ -76,6 +76,17 @@ static void SO_EnsureInit(void)
     if (!g_SoEnable) LogLine("smartorder: OFF");
 }
 
+/* 设置页改完热键后回读 (ini 已写盘)。Enable 一起重读: 把 Hotkey 写成 None
+ * 等于禁用, 改回有效键要能重新启用。 */
+void SmartOrder_ReloadHotkey(void)
+{
+    SO_EnsureInit();
+    g_SoEnable = GetPrivateProfileIntA(SO_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
+    OU_ParseHotkey("Middle", &g_SoHk);
+    OU_ReadHotkey(SO_SECTION, "Hotkey", &g_SoHk);
+    if (g_SoHk.disabled) g_SoEnable = 0;
+}
+
 /* ---------------- 小工具 (通用部分见 OrderUtil.h) ---------------- */
 
 /* ---------------- 类型自校准 (公共实现见 OrderUtil.h) ---------------- */

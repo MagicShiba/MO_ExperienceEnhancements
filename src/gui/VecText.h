@@ -40,7 +40,8 @@ enum {
     VTO_CREDIT_DY,       /* CreditDY 资金垂直偏移 (-8..8) */
     VTO_BRIEF_OWN,       /* BriefOwn 简报正文自绘 */
     VTO_BRIEF_WIDTH,     /* BriefWidth 简报盒宽 (0=引擎 453) */
-    VTO_BRIEF_MARK       /* BriefMark 简报块描边 */
+    VTO_BRIEF_MARK,      /* BriefMark 简报块描边 */
+    VTO_SCORE_EXIT       /* ScoreExit 任务结算页"退出游戏"按钮 */
 };
 int  VecText_GetOption(int id);
 void VecText_SetOption(int id, int value);

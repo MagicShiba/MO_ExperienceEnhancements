@@ -2,3 +2,5 @@
 #pragma once
 
 void MindSelect_Poll(void);
+/* 设置页改完 [Features] MindSelect 后回读 (ini 已写盘; 幂等)。 */
+void MindSelect_ReloadHotkey(void);

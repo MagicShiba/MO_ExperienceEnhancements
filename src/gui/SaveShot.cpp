@@ -602,11 +602,24 @@ static void SS_DefaultDir(void)
     AppendCStr(s_SaveDir, p, "\\Saved Games", MAX_PATH_LEN);
 }
 
-void SaveShot_EnsureInit(void)
+/* 装三处钩子 (幂等)。配置关着时不装, 之后在设置页打开再补装 ——
+ * 钩子入口第一句都查 s_Enable, 所以关掉时它们立刻回原版。 */
+static void SS_InstallHooks(void)
 {
     static const unsigned char kDlg[5]  = { 0x53, 0x8B, 0x5C, 0x24, 0x10 };
     static const unsigned char kBtn[6]  = { 0x81, 0xEC, 0x8C, 0x01, 0x00, 0x00 };
     static const unsigned char kTail[5] = { 0x6A, 0x05, 0x56, 0xFF, 0xD7 };
+    static int done = 0;
+
+    if (done) return;
+    done = 1;
+    s_OrigSaveDlg = SS_Hook(SS_ADDR_SAVE_DLG, kDlg, 5, (void*)SS_SaveDlgProc, "savedlg");
+    s_BtnDrawOrig = (SS_BtnDrawFn)SS_Hook(0x6071E0u, kBtn, 6, (void*)SS_BtnDrawGuard, "btndraw");
+    SS_InstallMenuTail(kTail);
+}
+
+void SaveShot_EnsureInit(void)
+{
     int w;
 
     if (s_Init) return;
@@ -625,9 +638,22 @@ void SaveShot_EnsureInit(void)
     SS_DefaultDir();
     if (!s_Enable) return;
     LogLine("saveshot: on");
-    s_OrigSaveDlg = SS_Hook(SS_ADDR_SAVE_DLG, kDlg, 5, (void*)SS_SaveDlgProc, "savedlg");
-    s_BtnDrawOrig = (SS_BtnDrawFn)SS_Hook(0x6071E0u, kBtn, 6, (void*)SS_BtnDrawGuard, "btndraw");
-    SS_InstallMenuTail(kTail);
+    SS_InstallHooks();
+}
+
+/* 设置页运行期读写: 打开时补装钩子 (原配置可能一直是关的)。 */
+int SaveShot_Enabled(void)
+{
+    SaveShot_EnsureInit();
+    return s_Enable;
+}
+
+void SaveShot_SetEnabled(int on)
+{
+    SaveShot_EnsureInit();
+    s_Enable = on ? 1 : 0;
+    if (s_Enable) SS_InstallHooks();
+    LogLine(s_Enable ? "saveshot: on" : "saveshot: off");
 }
 
 /* ---------------- 取图 ---------------- */

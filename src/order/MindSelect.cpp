@@ -69,6 +69,13 @@ static void MS_EnsureInit(void)
     g_MsEnable = OU_ReadHotkeySingle(MS_SECTION, "MindSelect", "Shift+P", &g_MsHk);
 }
 
+/* 设置页改完热键后回读 (ini 已写盘)。组合键判定现读 g_MsHk, 改完立刻生效。 */
+void MindSelect_ReloadHotkey(void)
+{
+    MS_EnsureInit();
+    g_MsEnable = OU_ReadHotkeySingle(MS_SECTION, "MindSelect", "Shift+P", &g_MsHk);
+}
+
 /* ---------------- 判定 + 单步 ---------------- */
 
 /* 引擎可选性 (纯读调用, 对应 Phobos SelectCaptured 里的 pTechno->IsSelectable()):

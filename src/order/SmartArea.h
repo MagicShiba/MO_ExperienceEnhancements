@@ -10,5 +10,7 @@ int SmartArea_ClaimsMiddle(void);
 int SmartArea_ShiftMiddleOnly(void);
 
 void SmartArea_Poll(void);
+/* 设置页改完 [SmartArea] Hotkey 后回读 (ini 已写盘; 幂等)。 */
+void SmartArea_ReloadHotkey(void);
 
 void SmartArea_Draw(void* surf, int w, int h, int pitch);

@@ -7,6 +7,8 @@
  * 热键边沿切换标记 + 空闲扫描 + 分批发标准 Attack 事件。
  * 只读查询 + OutList 标准事件入队。 */
 void Aggressive_Poll(void);
+/* 设置页改完 [Aggressive] Hotkey 后回读 (ini 已写盘; 幂等)。 */
+void Aggressive_ReloadHotkey(void);
 
 /* 渲染期画标记图标 (MOE_DrawUILayers 内调): 在每个已标记单位上方 blit。 */
 void Aggressive_Draw(void* surf, int w, int h, int pitch);

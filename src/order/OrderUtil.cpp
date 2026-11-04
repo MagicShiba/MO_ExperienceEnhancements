@@ -1145,6 +1145,88 @@ int OU_ParseHotkey(const char* spec, OU_Hotkey* out)
     return 1;
 }
 
+/* 单个 VK 的规范名 (OU_ParseHotkey 能认回来的最短写法)。别名不列: 反查只要
+ * 一种写法, 否则 ini 里改一次大小写就换一个显示形态。0 = 认不出。 */
+static const char* OU_VkName(unsigned vk)
+{
+    static const struct { unsigned vk; const char* name; } tab[] =
+    {
+        { VK_SPACE,   "Space" },  { VK_TAB,     "Tab" },
+        { VK_RETURN,  "Enter" },  { VK_BACK,    "Backspace" },
+        { VK_INSERT,  "Insert" }, { VK_DELETE,  "Delete" },
+        { VK_HOME,    "Home" },   { VK_END,     "End" },
+        { VK_PRIOR,   "PageUp" }, { VK_NEXT,    "PageDown" },
+        { VK_UP,      "Up" },     { VK_DOWN,    "Down" },
+        { VK_LEFT,    "Left" },   { VK_RIGHT,   "Right" },
+        { VK_PAUSE,   "Pause" },
+        { VK_MBUTTON, "Middle" }, { VK_LBUTTON, "LMB" },
+        { VK_RBUTTON, "RMB" },
+        { VK_XBUTTON1, "X1" },    { VK_XBUTTON2, "X2" },
+        { VK_NUMPAD0, "Num0" },   { VK_NUMPAD1, "Num1" },
+        { VK_NUMPAD2, "Num2" },   { VK_NUMPAD3, "Num3" },
+        { VK_NUMPAD4, "Num4" },   { VK_NUMPAD5, "Num5" },
+        { VK_NUMPAD6, "Num6" },   { VK_NUMPAD7, "Num7" },
+        { VK_NUMPAD8, "Num8" },   { VK_NUMPAD9, "Num9" },
+    };
+    int i;
+    if (vk >= VK_F1 && vk <= VK_F24)
+    {
+        static char s_f[4];
+        int n = (int)vk - VK_F1 + 1;
+
+        s_f[0] = 'F';
+        if (n < 10) { s_f[1] = (char)('0' + n); s_f[2] = 0; }
+        else
+        {
+            s_f[1] = (char)('0' + n / 10);
+            s_f[2] = (char)('0' + n % 10);
+            s_f[3] = 0;
+        }
+        return s_f;
+    }
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9'))
+    {
+        static char s_c[2];
+        s_c[0] = (char)vk;
+        s_c[1] = 0;
+        return s_c;
+    }
+    for (i = 0; i < (int)(sizeof(tab) / sizeof(tab[0])); i++)
+        if (tab[i].vk == vk) return tab[i].name;
+    return NULL;
+}
+
+void OU_HotkeyText(const OU_Hotkey* hk, char* buf, int buflen)
+{
+    unsigned q = 0;
+    int i;
+
+    if (!buf || buflen < 2) return;
+    buf[0] = 0;
+    if (!hk || hk->disabled)
+    {
+        AppendCStr(buf, 0, "None", (unsigned)buflen);
+        return;
+    }
+    if (hk->mods & OU_MOD_CTRL)  q = AppendCStr(buf, q, "Ctrl+", (unsigned)buflen);
+    if (hk->mods & OU_MOD_ALT)   q = AppendCStr(buf, q, "Alt+", (unsigned)buflen);
+    if (hk->mods & OU_MOD_SHIFT) q = AppendCStr(buf, q, "Shift+", (unsigned)buflen);
+    if (hk->mods & OU_MOD_WIN)   q = AppendCStr(buf, q, "Win+", (unsigned)buflen);
+    for (i = 0; i <= hk->nExtra && i <= OU_HK_MAXEXTRA; i++)
+    {
+        unsigned vk = (i < hk->nExtra) ? hk->extra[i] : hk->vk;
+        const char* nm = OU_VkName(vk);
+
+        if (nm) q = AppendCStr(buf, q, nm, (unsigned)buflen);
+        else
+        {
+            q = AppendCStr(buf, q, "VK", (unsigned)buflen);
+            q = AppendInt(buf, q, (unsigned)buflen, (int)vk);
+        }
+        if (i < hk->nExtra) q = AppendCh(buf, q, '+', (unsigned)buflen);
+    }
+}
+
 /* 帧内缓存: GetAsyncKeyState 是 user32 系统调用 (~1us), 而一帧里十来个 Draw
  * 各查一遍 Ctrl/Shift/中键就是十几 us 白烧 (实测 sm/msgtail 段)。同一游戏帧
  * 内同一键只问一次系统; 暂停时帧号冻结 (迷你循环), 用 16ms 墙钟兜底重查,

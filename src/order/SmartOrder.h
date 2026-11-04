@@ -2,5 +2,7 @@
 #pragma once
 
 void SmartOrder_Poll(void);
+/* 设置页改完 [SmartOrder] Hotkey 后回读 (ini 已写盘; 幂等)。 */
+void SmartOrder_ReloadHotkey(void);
 /* 渲染期橡皮线 (MOExperience_MessageDrawHook 内调用, armed 时才画)。 */
 void SmartOrder_Draw(void* surf, int w, int h, int pitch);

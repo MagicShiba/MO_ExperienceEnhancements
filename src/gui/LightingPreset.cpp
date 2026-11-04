@@ -7,8 +7,8 @@
  * 全是临时设置: 不写 ini, 不广播。ESC 菜单取消回滚到打开菜单时的值; 换图时回到
  * 新地图自带的值; 运行期改过的光照会随存档保留 (存盘写的就是这些字段)。
  *
- * 自动那条链路 (场景重开后按引擎现值重算 + 全格 convert 重建) 属于"光照修复",
- * 受 [Environment] LightFixEnable 总开关管; 菜单里的手动改光照不受影响。
+ * [Environment] LightFixEnable 只管自动链路 (进图/读档补刷、引擎改光照后重建),
+ * 手动改菜单不受它影响; 手动结果长什么样由调色比例决定, 见 Light_Refresh。
  */
 
 #include <windows.h>
@@ -152,19 +152,29 @@ static int Light_UseOurs(const int* v)
     return s_HaveOrig && Light_Same(v, s_Orig) && !Light_Same(s_Wrote, s_Orig);
 }
 
-/* 让新光照上屏。先按当前比例给玩家色 / 单位 / 建筑染色, 再逐格重建 convert ——
- * 每格颜色由 CellClass::CalculateLightSourceLighting (0x484180) 现算 (环境光打底,
- * 叠上周围灯光源按距离衰减的颜色), 这是地面光斑有颜色的唯一来源, 不能用
- * RecalcLighting(具体 R,G,B) 整池覆写; 逐格重建还会把刚染的地形盖掉, 顺序不能反。
+/* 让新光照上屏。渲染方式由调色比例决定, 每次点击都重算一遍:
  *
- * 比例为 0 且上一轮没染过就不碰单位/建筑: 那次 RecalcLighting 会把它们的 convert
- * 按 1000 写回, 抹掉脚本给单位上的色; 染过则必须再走一次 (比例 0 = 清洗)。
+ *   100 = 触发光照: 引擎触发器 (SetTintRed/Green/Blue) 那条
+ *         RecalcLighting(tint×10, …, 0), 整池覆写 —— 每格的点光源色被抹平只剩
+ *         亮度, 单位/建筑一起被染, 与触发色逐位一致。
+ *   0   = 默认光照: 逐格重建 convert (与建图同路, 点光源色都在), 单位/建筑不染色。
+ *   中间 = 逐格重建 + 按比例给玩家色 / 单位 / 建筑上色。
  *
- * 收尾的 RecalcLighting(-1,-1,-1,0) 只按各自 Color1 重算渐变 + 触发重画, 不改色
- * (引擎每帧的普通分支 0x53C38E 就是这么调的)。 */
+ * 先染色再重建: 逐格重建会盖掉刚染的地形, 顺序不能反。比例为 0 且上一轮染过时
+ * 要走一次 1000,1000,1000 的清洗, 把池 [0] 默认件写回原色 —— 整池覆写会染脏它,
+ * 而 InitLightConvert 的快速路径 (0x544E94) 不校验它的 Color1。
+ * 收尾的 RecalcLighting(-1,-1,-1,0) 只重算渐变 + 触发重画, 不改色。 */
 static void Light_Refresh(const int* v)
 {
     if (!Light_Scen()) return;
+
+    if (s_Mix >= LIGHT_MIX_MAX)
+    {
+        s_Tinted = 1;
+        ((FnRecalcLighting)(size_t)FN_RECALC_LIGHTING)(
+            v[P_RED] * 10, v[P_GREEN] * 10, v[P_BLUE] * 10, 0);
+        return;
+    }
 
     if (s_Mix > 0 || s_Tinted)
     {
@@ -172,8 +182,22 @@ static void Light_Refresh(const int* v)
                               s_Mix);
         s_Tinted = (s_Mix > 0);
     }
-    LightConv_RebuildCells();          /* 不受 LightFixEnable 管: 手动改必须能上屏 */
+    LightConv_RebuildCells();
     ((FnRecalcLighting)(size_t)FN_RECALC_LIGHTING)(-1, -1, -1, 0);
+}
+
+/* 日志片段 " amb=.. tint=r,g,b" (应用与场景重开两处共用)。 */
+static unsigned Light_AppendVals(char* msg, unsigned p, unsigned cap, const int* v)
+{
+    p = AppendCStr(msg, p, " amb=", cap);
+    p = AppendInt(msg, p, cap, v[P_AMBIENT]);
+    p = AppendCStr(msg, p, " tint=", cap);
+    p = AppendInt(msg, p, cap, v[P_RED]);
+    p = AppendCh(msg, p, ',', cap);
+    p = AppendInt(msg, p, cap, v[P_GREEN]);
+    p = AppendCh(msg, p, ',', cap);
+    p = AppendInt(msg, p, cap, v[P_BLUE]);
+    return p;
 }
 
 static void Light_Apply(const int* v)
@@ -184,15 +208,8 @@ static void Light_Apply(const int* v)
 
     if (s_WroteOk && !Light_Same(v, s_Wrote))
     {
-        p = 0;
-        p = AppendCStr(msg, p, "lighting: apply amb=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), v[P_AMBIENT]);
-        p = AppendCStr(msg, p, " tint=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), v[P_RED]);
-        p = AppendCh(msg, p, ',', sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), v[P_GREEN]);
-        p = AppendCh(msg, p, ',', sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), v[P_BLUE]);
+        p = AppendCStr(msg, 0, "lighting: apply", sizeof(msg));
+        p = Light_AppendVals(msg, p, sizeof(msg), v);
         p = AppendCStr(msg, p, " lv=", sizeof(msg));
         p = AppendInt(msg, p, sizeof(msg), v[P_LEVEL]);
         p = AppendCStr(msg, p, " gr=", sizeof(msg));
@@ -226,7 +243,7 @@ void Lighting_Poll(void)
     unsigned p;
 
     LP_EnsureInit();
-    /* 光照修复整体关闭: 不自动重算、不盖回用户那组, 引擎原版怎么做就怎么做。 */
+    /* 关闭: 自动链路全停, 引擎原版怎么做就怎么做。 */
     if (!LightFix_Enabled()) return;
 
     if (s_Pending)
@@ -255,15 +272,8 @@ void Lighting_Poll(void)
             s_Preset = LIGHT_PRESET_ORIGINAL;
         }
 
-        p = 0;
-        p = AppendCStr(msg, p, "lighting: scene reopen amb=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), v[P_AMBIENT]);
-        p = AppendCStr(msg, p, " tint=", sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), v[P_RED]);
-        p = AppendCh(msg, p, ',', sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), v[P_GREEN]);
-        p = AppendCh(msg, p, ',', sizeof(msg));
-        p = AppendInt(msg, p, sizeof(msg), v[P_BLUE]);
+        p = AppendCStr(msg, 0, "lighting: scene reopen", sizeof(msg));
+        p = Light_AppendVals(msg, p, sizeof(msg), v);
         p = AppendCStr(msg, p, use_ours ? " -> ours" : " -> engine", sizeof(msg));
         p = AppendCStr(msg, p, " n=", sizeof(msg));
         p = AppendInt(msg, p, sizeof(msg), waited);
@@ -292,6 +302,7 @@ void Lighting_Poll(void)
 extern "C" __declspec(dllexport) DWORD __cdecl Lighting_ScenStartHook(void* regs)
 {
     (void)regs;
+    s_Tinted = 0;              /* 新场景的 convert 池由引擎重建, 上一局的染色作废 */
     if (!LightFix_Enabled()) return 0;     /* 关闭: 连 pending 都不置 */
     s_Pending = 1;
     s_PendWait = 0;
@@ -304,6 +315,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl Lighting_ScenStartHook(void* regs
 extern "C" __declspec(dllexport) DWORD __cdecl Lighting_LoadReadyHook(void* regs)
 {
     (void)regs;
+    s_Tinted = 0;
     if (!LightFix_Enabled()) return 0;
     s_Pending = 1;
     s_PendWait = 0;
@@ -345,7 +357,8 @@ int Lighting_Mix(void)
     return s_Mix;
 }
 
-/* 换比例: 值一个都不动, 只按新比例把同一组字段重算一遍, 方便直接对比。 */
+/* 换比例: 值一个都不动, 只按新比例把同一组字段重算一遍, 方便直接对比。
+ * 值没变也照算 —— 这一行的两端 (默认 / 触发) 是按钮, 点一下就该看到结果。 */
 void Lighting_SetMix(int mix)
 {
     int v[LIGHT_PARAM_N];
@@ -353,7 +366,6 @@ void Lighting_SetMix(int mix)
     LP_EnsureInit();
     if (mix < 0) mix = 0;
     if (mix > LIGHT_MIX_MAX) mix = LIGHT_MIX_MAX;
-    if (mix == s_Mix) return;
     s_Mix = mix;
 
     if (!Light_InGame()) return;

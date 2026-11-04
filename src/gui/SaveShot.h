@@ -10,6 +10,11 @@
 /* 读 [SaveShot] (幂等)。 */
 void SaveShot_EnsureInit(void);
 
+/* 设置页运行期读写 ([SaveShot] Enable): 关掉后所有钩子入口立刻回原版
+ * (存/读档界面变回引擎原样), 已缓存的缩略图留在内存里不动。 */
+int  SaveShot_Enabled(void);
+void SaveShot_SetEnabled(int on);
+
 /* 消息帧钩里紧接 Shot_CapturePending 之后调: 只在本局还没抓过图时补一张兜底图。 */
 void SaveShot_Tick(void);
 

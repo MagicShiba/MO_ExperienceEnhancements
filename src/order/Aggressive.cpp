@@ -96,6 +96,13 @@ static void AG_EnsureInit(void)
     else LogLine("aggressive: ON (Alt+A; enemy building in guard range; mouse-mapped order)");
 }
 
+/* 设置页改完热键后回读 (ini 已写盘)。 */
+void Aggressive_ReloadHotkey(void)
+{
+    AG_EnsureInit();
+    g_AgEnable = OU_ReadHotkeySingle(AG_SECTION, "Hotkey", "Alt+A", &g_AgHk);
+}
+
 /* ---------------- 小工具 ---------------- */
 
 /* 对象 Fetch_ID (身份; 失败回 0)。rttiOut 透出 RTTI 字节 (可空)。 */

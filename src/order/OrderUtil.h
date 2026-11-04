@@ -348,6 +348,11 @@ int OU_ReadHotkey(const char* section, const char* key, OU_Hotkey* io);
 int OU_ReadHotkeySingle(const char* section, const char* key,
                         const char* def, OU_Hotkey* io);
 
+/* 规范化反写: OU_Hotkey -> "Ctrl+Z+Middle" (顺序 Ctrl/Alt/Shift/Win, 再附加键,
+ * 最后主键)。disabled 写 "None"。设置页显示与落盘都用它, 所以 ini 里手写的
+ * 大小写/别名会被统一成 OU_ParseHotkey 能认回来的最短写法。 */
+void OU_HotkeyText(const OU_Hotkey* hk, char* buf, int buflen);
+
 /* ---------------- 场景 (只读) ---------------- */
 
 #define OU_SCEN_NAME_MAX 0x2D   /* ScenarioClass::Name 的 wchar 上限 (含结尾 0) */

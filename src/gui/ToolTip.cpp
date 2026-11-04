@@ -23,7 +23,7 @@
  * 钩子经 dist/MOExperience.dll.inj 由 Syringe 挂载:
  *   0x6A93D9 = ToolTip_Extend, 5 (mov eax,0xB07BC4)
  * 开关关/类型非法/求值失败一律返回 0 跑原指令 (=原版行为)。
- * 配置 [Features] ToolTips (缺失=默认值, 改后重启):
+ * 配置 [Features] ToolTips (缺失=默认值; 也可在 ESC 设置页改, 现读现用):
  *   ToolTips=1 (1=追加第三行, 0=原版两行)
  */
 
@@ -33,6 +33,7 @@
 #include "Icon.h"
 #include "ScaleBar.h"
 #include "SideScroll.h"
+#include "ToolTip.h"
 
 #define TT_SECTION "Features"
 
@@ -106,6 +107,20 @@ static void ToolTip_EnsureInit(void)
     BuildPaths();
     GtEnsureLog();
     g_TTEnable = GetPrivateProfileIntA(TT_SECTION, "ToolTips", 1, g_IniPath) ? 1 : 0;
+    LogLine(g_TTEnable ? "tooltip: power+time ON" : "tooltip: power+time OFF");
+}
+
+/* 设置页运行期读写: 现读现用, 钩子里每帧判 g_TTEnable。 */
+int ToolTip_Enabled(void)
+{
+    ToolTip_EnsureInit();
+    return g_TTEnable;
+}
+
+void ToolTip_SetEnabled(int on)
+{
+    ToolTip_EnsureInit();
+    g_TTEnable = on ? 1 : 0;
     LogLine(g_TTEnable ? "tooltip: power+time ON" : "tooltip: power+time OFF");
 }
 

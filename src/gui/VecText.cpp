@@ -78,6 +78,7 @@ typedef struct {
     int BriefWidth; /* 简报盒宽 (0=沿用引擎 453) */
     int BriefAdv;   /* 格宽基准: 0=字号+字距, 1=字体前进宽+字距 */
     int Bold;
+    int ScoreExit;  /* 1=任务结算对话框挂"退出游戏"按钮 */
     int LogDetail;  /* 1=逐字日志 */
     int Perf;       /* 1=每 2s 记性能账 */
     int Render;
@@ -721,7 +722,9 @@ static INT_PTR __stdcall VecScoreDlgEntry(HWND hDlg, UINT msg,
         if (!g_OrigScoreDlgProc) return FALSE;
         /* 必须在原版 WM_INITDIALOG 前建: 才能被 0x60F9A0 挂上
          * 0x610CA0 子类并走 0x612B70 原版自绘。 */
-        if (g_OrigStandaloneShow)
+        /* 按钮建不建看 [VecText] ScoreExit (ESC 设置页可改); 现读, 下发对话框
+         * 就生效, 不用重新初始化。 */
+        if (g_OrigStandaloneShow && g_VT.ScoreExit)
         {
             RECT rc;
             cont = GetDlgItem(hDlg, 0x423);   /* 原版“继续” */
@@ -2380,6 +2383,7 @@ void VecText_EnsureInit(void)
         { "BriefMark",  &g_VT.BriefMark,  1,   0, 1    },
         { "BriefWidth", &g_VT.BriefWidth, 620, 0, 4000 },
         { "BriefAdv",   &g_VT.BriefAdv,   1,   0, 1    },
+        { "ScoreExit",  &g_VT.ScoreExit,  1,   0, 1    },
         { "Perf",       &g_VT.Perf,       0,   0, 1    },
         { "Render",     &g_VT.Render,     0,   0, 1    },
     };
@@ -2436,6 +2440,7 @@ int VecText_GetOption(int id)
     case VTO_BRIEF_OWN:   return g_VT.BriefOwn;
     case VTO_BRIEF_WIDTH: return g_VT.BriefWidth;
     case VTO_BRIEF_MARK:  return g_VT.BriefMark;
+    case VTO_SCORE_EXIT:  return g_VT.ScoreExit;
     default:              return 0;
     }
 }
@@ -2474,6 +2479,9 @@ void VecText_SetOption(int id, int value)
         break;
     case VTO_BRIEF_MARK:
         g_VT.BriefMark = value ? 1 : 0;
+        break;
+    case VTO_SCORE_EXIT:
+        g_VT.ScoreExit = value ? 1 : 0;
         break;
     default:
         break;
