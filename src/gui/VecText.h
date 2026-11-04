@@ -30,6 +30,25 @@ int VecText_FontPx(void);
  * 要跟标题/按钮同号就用这个, 别自己按行高推。 */
 int VecText_ResolvedPx(void);
 
+/* ---------------- ESC 设置页运行期读写 (只改内存, 不写 INI) ----------------
+ * 字号/粗体/资金/简报都是每帧现读, 改完下一帧就生效;
+ * 换字体要清字形缓存, SetFace 里已做。 */
+enum {
+    VTO_FONT_PX = 0,     /* [VecText] FontPx (0=自动校准) */
+    VTO_BOLD,            /* Bold */
+    VTO_CREDIT_PX,       /* CreditPx 资金字号 (0=跟随全局) */
+    VTO_CREDIT_DY,       /* CreditDY 资金垂直偏移 (-8..8) */
+    VTO_BRIEF_OWN,       /* BriefOwn 简报正文自绘 */
+    VTO_BRIEF_WIDTH,     /* BriefWidth 简报盒宽 (0=引擎 453) */
+    VTO_BRIEF_MARK       /* BriefMark 简报块描边 */
+};
+int  VecText_GetOption(int id);
+void VecText_SetOption(int id, int value);
+void VecText_GetFace(wchar_t* out, int cap);
+void VecText_SetFace(const wchar_t* face);
+void VecText_SaveOptions(void);
+void VecText_RestoreOptions(void);
+
 /* ---------------- 超武列表整体接管 (Print 入口收集, 消息帧统一重绘) ----------------
  * VecText.cpp 只做高层级隐藏+收集 (不管内容细节, 不逐行绘制);
  * SWPanel.cpp 的超武面板每帧从此表取新鲜行整块重绘 (同一 DLL, 直接共享)。

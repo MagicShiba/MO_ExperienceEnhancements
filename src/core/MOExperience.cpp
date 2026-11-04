@@ -1382,6 +1382,22 @@ int MOE_DrawUILayers(void* surf, int surfW, int surfH, int surfPitch,
     return drew;
 }
 
+/* 原版消息链表只做渲染; 单机未接管战役框时先画它, 再叠自定义 UI。
+ * 0x5D4A94 的 ECX 是链表头, +0x2C 为 Draw_All(bool)。 */
+static int DrawNativeMessagesBelowUI(void* regs)
+{
+    typedef void (__attribute__((thiscall)) *DrawAllFn)(void*, int);
+    void* list;
+    void** vt;
+    if (OU_IsMP() || MsgText_Enabled() || !regs) return 0;
+    list = *(void**)((char*)regs + OFF_REG_ECX);
+    if (!IsPlausiblePtr(list)) return 0;
+    vt = *(void***)list;
+    if (!IsPlausiblePtr(vt)) return 0;
+    ((DrawAllFn)vt[0x2C / sizeof(void*)])(list, 1);
+    return 1;
+}
+
 /* ---------------- 每帧消息渲染 (0x5D4A94) ----------------
  * 唯一的消息帧出口: 各模块按层级从下往上叠画, 任一步失败都回退原版。
  * 绘制顺序 (后者压前者):
@@ -1397,10 +1413,9 @@ static DWORD MsgDrawBody(void* regs)
     unsigned tick;
     int surfW, surfH, surfPitch;
     int bitLineH = 0, screenW = 0;
-    int drew = 0;
+    int drew = 0, nativeDrew = 0;
     static int s_firstDraw = 1;
 
-    (void)regs;
     /* 画中画离屏渲染期间: 若这条消息帧链路被二次进入, 会把 UI 文字画进小窗离屏面
      * (超武列表/操作提示/战役框等), 也会让 PiP_DrawOnComposite 递归。直接空转。 */
     if (PiP_InRender()) return 0;
@@ -1463,6 +1478,8 @@ static DWORD MsgDrawBody(void* regs)
         Perf_Add(PF_D_FAV, tFav);
     }
 
+    nativeDrew = DrawNativeMessagesBelowUI(regs);
+    drew |= nativeDrew;
     drew |= MOE_DrawUILayers(surf, surfW, surfH, surfPitch, &bitLineH, &screenW, NULL);
 
     {
@@ -1481,7 +1498,7 @@ static DWORD MsgDrawBody(void* regs)
     tOne = Perf_Now();
     {
         int pwr = PowerDisplay_DrawSb();
-        if (pwr < 0) { StatTick(tick, pwr == -1 ? 2 : 4); Perf_Add(PF_T_PWR, tOne); Perf_Add(PF_MSG_TAIL, tSeg); return 0; }
+        if (pwr < 0) { StatTick(tick, pwr == -1 ? 2 : 4); Perf_Add(PF_T_PWR, tOne); Perf_Add(PF_MSG_TAIL, tSeg); return nativeDrew ? ADDR_AFTER_MSGLIST_DRAW : 0; }
         if (pwr == 1) drew = 1;
     }
     Perf_Add(PF_T_PWR, tOne);
@@ -1522,8 +1539,8 @@ static DWORD MsgDrawBody(void* regs)
         LogLine(buf);
     }
     /* 接管开即恒跳过原版, 不看本帧画没画出 (否则空帧原版闪一帧)。
-     * 未接管才放行原版。 */
-    if (MsgText_Enabled()) return ADDR_AFTER_MSGLIST_DRAW;
+     * 单机原版已在 UI 之前画过则不再重复; 其余未接管路径放行原版。 */
+    if (nativeDrew || MsgText_Enabled()) return ADDR_AFTER_MSGLIST_DRAW;
     return 0;
 }
 
@@ -1550,7 +1567,8 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MsgListEntry(void* r
         static int s_logged = 0;
         if (!s_logged) { s_logged = 1; LogLine("green: engine list empty, render from entry"); }
     }
-    MOExperience_MessageDrawHook(regs);
+    /* 入口 ECX 是 MessageListClass, 不是 0x5D4A94 处的链表头。 */
+    MOExperience_MessageDrawHook(NULL);
     return 0;
 }
 

@@ -80,17 +80,31 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
   别处时提交。
   `InvalidateRect + UpdateWindow` 重绘；其它消息原样转发。
 - 左侧第一项为“GUI功能”，右侧按功能组显示：`通用`（建筑队列、放置时建筑
-  驱逐单位）、`超级武器侧边栏`（侧栏总开关、排序方式、显示行数、面板停靠边）、
+  驱逐单位、放置建筑时显示预览 0/25/50/75/100）、`超级武器侧边栏`（侧栏总开关、排序方式、显示行数、面板停靠边）、
   `底栏功能`（视图缩放、暂停和帧进、网格显示、底栏截图键）、`侧边栏`（侧栏
   滚动条、隐藏侧栏功能）、`游戏控制`（自定义游戏速度开关与速度滑条）、
-  `环境显示`（光照预设、光照参数、调色比例、矿石光照、天气绘制方式、天气、云影、
-  云影风格）与
+  `环境显示`（光照预设、光照参数、调色比例、矿石光照、天气绘制方式、天气、云层
+  （云影/雾气/关闭 三段）、云影风格）与
   `杂项`（玩家颜色、阵营 UI、箱子类型图标、设置页帧率上限 60）。分组竖线与
   分组文本同高，分组文本与子项文本左对齐。
 - “天气”一行放雨/雪/火雨/雷电四个独立开关（火雨只有粒子画法下有效），样式与
   分段选择行一致：开 = 金色文字 + 金色横线，关 = 灰色文字 + 灰色横线，点
   文字切换、可多个同时开。四个开关只在本次运行内有效，不写 INI；以后加
   天气种类只需扩 s_Toggle 表和该行的段数（`ESC_TRIO_N`）。
+- “云层”一行是**三段互斥**（`EG_CLOUD`）：原子表 = [云影][雾气][关闭]，整行就是
+  云层的三态，没有独立开关控件 —— “关闭”即第三段，从“关”切到“雾气”是一步。
+  一段就是一个取值（`Weather_CloudMode` 0/1/2），段序（显示顺序）与取值不同序，
+  映射表 `kCldSegMode`；当前段由 `Esc_CloudSeg()` 反查，绘制与命中共用。
+  点击只写一个键：`Esc_QueueValue(... CloudMode, kCldSegMode[atom])`。`s_Toggle` 里
+  那条 `WTH_CLOUD` 保留，但 `section/key` 已置 NULL（键由这一行的点击处理自己写），
+  它只供设置项快照用，画面上不再画胶囊。
+- “放置建筑时显示预览”一行是五段互斥 `关/25/50/75/100`（首段文案 `GuiPlacePrevOff`，
+  其余是数字）：值即 `[PlacementPreview] Opacity` 百分比，0 = 关闭，100 = 不透明。
+  展开虚影没有自己的开关（`[DeployPreview]` 已无 `Ghost` 键），跟这一档走，
+  两处虚影同一来源。
+  所有行类型都按同一套控件流定位 (`Esc_RowFlow`)，所以折行、命中、悬停自动一致；
+  点击处理里要自己判点在哪个原子上 —— `Esc_ApplyGui` 在这行先于 s_Toggle 的通用
+  取反分支。
 - 分段选择行（含语言切换、天气行、排序行）每段底下都画横线：选中段金色、
   未选中段灰色，横条贴行底，与文本视觉间距 2px（字形底部自带 ~3px 空隙，
   代码上线顶伸进文本框 1px 抵消）。
@@ -115,10 +129,17 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
 - “云影风格”8 个预设固定两行、每行四个（`ESC_STYLE_PER`），两条都右对齐：
   团状积云 / 大块稀疏 / 细碎云 / 平滑层云 / 阴天 / 疏密不均 / 条状云带 / 卷云
   （强扭曲拉丝 + 最扁压缩的高空薄纱）。落盘 `[Environment] CloudStyle` 写序号。
-- 左侧第二项为“文本显示调整”，右侧按三组显示：`作战文本信息`（战役文本框
-  开关、文本行数、背景透明度、显示位置、水平对齐、宽度、打字机显示、滚动条）、
-  `聊天文本框`（自定义输入框、单机名字前缀）与`操作与战斗提示`（启用开关、
-  文本颜色、显示行数、宽度、滚动条、显示雷达事件）。组间用分割线隔开。
+- 左侧第二项为“文本显示调整”，右侧按组显示（组标题 + 组间距分隔，**组间不画线**）：
+  `作战文本信息`（字体、开关、行数、背景透明度、显示位置、水平对齐、边距
+  （左/顶/底 三格）、宽度、打字机显示、滚动条）、
+  `聊天文本框`（自定义输入框、单机名字前缀、预设文本）、
+  `操作与战斗提示`（开关、字体、背景透明度、文本颜色、显示行数、宽度、滚动条、
+  显示雷达事件）、`超武倒计时面板`（开关、字体、样式 统一/原本、背景透明度）、
+  `其它文本`（= `[VecText]`：字体、资金字号与偏移、底部电力 关闭/余量/负载·电力
+  + 边距 左/底、启用简报重排、简报宽度、简报边框）。
+  **"样式"两段与 `SWPanel` 的 `Classic` 同向**（0=统一面板 1=原本样式），
+  表项 `invert` 必须为 0。页首还有两行灰字说明（`EG_NOTE`：常用字体文件名、
+  常用字号），不可点。
   该页内容较高，超出面板时用鼠标滚轮滚动（滚动量吸附到行顶，右侧画滑块，
   两页都支持）。滚轮作用域是整个对话框客户区，无论光标在左面板还是右面板
   都滚当前选中的页；光标位置取 `GetCursorPos`（滚轮消息可能由引擎转发，
@@ -134,11 +155,76 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
   （`max < maxRowH`）时退化成逐像素滚。
   行高/组距不要为了“刚好放得下”去压 —— 换分辨率总会遇到只差几十像素的情况，
   交给上面的滚动。
-- 文本页设置回写主 INI 的 `[MsgText] CampEnable/MaxLines/BoardOpacity/
-  CampBottom/CampCentered/MaxWidth/CampAnim/CampBarSide/ChatEdit/ChatNameSP/
-  HintShow/HintColorFollow/HintMaxLines/HintMaxWidth/HintBarSide/
-  HintRadarShow`，并经 `MsgText_GetOption/SetOption`、`ChatEdit_Enabled/
-  SetEnabled`、`ChatEdit_ShowNameSP/SetShowNameSP` 立即生效。
+- “边距”排在“显示位置 / 水平对齐”**之后**：两个坐标是否起效由前两行决定，
+  灰显跟着上面改起来更直观（顺序只由 `s_TextLayout` 的表序决定）。
+- “边距”一行是文本页的多格行 (`EG_CELLS`)：`[行标题][小标题][数值框]` ×3，
+  三格都是独立 item（`TX_CAMP_MARGIN_L/T/B`，值/上下限仍在 `s_TextNum` 里，
+  编辑态按 item 记，与光照参数行同做法）。**灰显 = 这个坐标现在不起作用**：
+  左（`PosX`）只在“左对齐”下生效，顶（`PosY`）只在“顶部”显示下生效，
+  底（`CampBottomMargin`）只在“底部”显示下生效；判据在 `Esc_TextCellActive`。
+  灰显只压小标题与数值框颜色（`Esc_DrawEditBox(..., dim)`），不拦编辑 ——
+  先填值再切显示位置是常见用法。加新的多格行只需往 `s_TCells` 加一行。
+- **说明行 `EG_NOTE`**：整段灰字，按行宽折行（`Esc_NoteLines` 数行 → `Esc_RowFlow`
+  填 `f.lines` → `Esc_RowH` 得整数倍行高，`Esc_DrawNoteRow` 用同一算法绘制）。
+  不参与命中，文案键 `TextFontNote1/2`。
+- **字体行 `EG_FONT`**：一行四件 `[字体名框][字号][字号框][粗体]`，几何只在
+  `Esc_FontGeom` 算一次，整块右对齐到与其它行同一条右界。名字框封顶
+  （`ESC_FONT_FACE_MAX=150`），否则宽面板上"字号"两个字会被挤没。
+  `s_TFonts[]` 记四个目标（战役框 / 提示 / 超武面板 / `[VecText]`）的行 item、
+  字号 item、`FT_*`、模块选项号与落盘键；字号 item 无独立文案（`kTextKey` 写
+  NULL），行标题共用 `TextFont`。点框 = 编辑字名（`Esc_FaceBegin` 绑 `s_FaceBuf`，
+  `LiEdBind` 不清字，光标落在点处），点"字号"或数字 = 编辑字号，点"粗体" =
+  切粗体并立刻落盘；滚轮只认字号框那一段（`mx` 在 `[px, bx)`）。
+  "粗体"与分段/开关共用 `Esc_SegTextAt`，只是文字基线取行内居中 —— 贴底基线
+  会比同一行的框低 3px。
+- **分割线只用在页内分节**：组与组之间不画（组标题 + `pg->gap` 已足够分隔），
+  `TX_SEP5/6/7` 只在"其它文本"组内。线 2px、`0x4E/0x4C/0x4E` + alpha 150。
+- **两页内间距共用一套常量**（`ESC_GROUP_H=26` / `ESC_BLOCK_GAP=6`，都从
+  `EscPage.groupH/gap` 读）：两个页面的行距必须一致，加新页也别单独定。
+- **模块归属 `OPM_*` + `Esc_OptGet/Set`**：同一套 `TX_*` 行分属四个模块
+  （`MsgText` / `SWPanel` / `VecText` / `PowerDisplay`），表项带 `mod`，
+  读写与落盘节名都由它推（`Esc_OptSection`：`OPM_PWR` 的键住在 `[VecText]`）。
+  加新行别直接调某个模块的 getter，否则 `mod` 一列形同虚设。
+- **字符串值（字体名）走 `Esc_QueueStr`**：`Esc_QueueValue` 只搬 int。同一个
+  `(节,键)` 只留最后一次（打字是逐字符的，不合并会写几百次）。
+- **"底部显示电力信息"一个下拉管两个键**（`PowerBottom` 开关 + `PowerMode`）：
+  `EscTextChoice` 的 `get/set` 字段就是给它用的，落盘时两个键一起排。
+  换 `[VecText]` 字体后必须 `PowerDisplay_Invalidate()`：底电覆盖位图的缓存键里
+  没有字面（字号/粗体/模式在键里）；切粗体要 `VecFlushGlyphs()`，VecText 的
+  字形缓存键里同样没有粗体（合成粗只改像素、不改前进宽）。
+- `[-]`/`[+]` 是 `Esc_StepButton`：`ESC_STEP_BTN_W = ESC_STEP_BTN_H = 20`（正方形），
+  边框走 `Esc_Outline` 四边全描。数值框/文本条同高，行高 26 时上下各留 3px。
+- “预设文本”是文本页的 `EG_TEXT` 块：**标题一行 + 每条一行**（行高
+  `ESC_ROW_H*(1+条数)`），屏幕上不出现字面的 `\n`。几何只在 `Esc_QuickGeom`
+  算一次（框铺到按钮列左侧，右端 `[-][+]`），绘制/命中/行高都读它 ——
+  行高由 `Esc_RowFlow` 填 `f.lines`；`Esc_CtlHit` 用整块矩形判命中，
+  `Esc_TextApply` 再按同一份几何细判是哪条框 / 哪个按钮。
+  `[-]` 删该条、`[+]` 在该条**之后**插一条空条目并进入编辑（`Esc_QuickAdd`）。
+- 数据是**条目表** `s_QItem[24][161]`（与 ChatEdit 的 `CE_PRESET_N/CE_BUF_N` 对齐），
+  ini 落盘时才拼成一行字面 `\n` 串（`Esc_QuickJoin`），读回按同一规则拆
+  （`Esc_QuickLoad`，空条目跳过、两端空白去掉）。`Esc_QuickUtf8Len` 挡住超长
+  （聊天框只读 `ESC_QUICK_RAW` 字节，写出去读不回来等于静默丢条目）。
+- 点框即进编辑，**光标落在点击处**：`Esc_QuickGeom` 给出框位，点击 x 减去框左内边距
+  得到文本坐标（已滚动时补 `Esc_QuickView` 的起始像素），`Esc_QuickCurAt` 逐字符
+  取最近的缝（与数字框 `Esc_EditCurAt` 同口径）。`Esc_QuickBegin(hDlg, idx, curAt)`
+  第三参传 -1 才是末尾（`+` 新增空条目走这条）。
+  **换算**：滚动起点 `start` 的像素偏移 = `宽(整串) − 宽(s+start)`，不是
+  `宽(s+start)`（后者会平白多算一整串宽）。
+- 编辑是**就地**的：`LiEdit` 直接绑在该条缓冲上（`s_QEdit` 记哪条，用 `LiEdBind`
+  —— `LiEdInit` 会先 `buf[0]=0`，绑已有内容会把这条清空，别用），敲一个字就
+  `Esc_QuickSync(1)`（拼串→排落盘→`ChatEdit_SetQuickText`），所以聊天框里立刻可查，
+  不用等回车。编辑会话与数字框互斥：开一个先收另一个。
+- **任意字符只能从对话框消息来** —— `Esc_DlgProc` 截 `WM_CHAR`/`WM_IME_CHAR` 写
+  缓冲（数字框只认 0-9，走按键轮询），回车/Esc/退格这类控制字在轮询里处理
+  （`Esc_QuickPoll`），对话框那份直接吞掉，免得漏给引擎触发菜单快捷行为。
+  光标横向滚动用二分找起点（每次测量都要过一遍 GDI，不能逐字试）。
+- 取消（点“取消”/`Esc_RestoreSettings`）整表退回打开菜单时的快照，回灌聊天框但
+  **不排落盘**（`Esc_QuickSync(0)`）。
+- 文本页落盘的节名由 `Esc_OptSection(mod)` 推（`[MsgText]` / `[SWPanel]` /
+  `[VecText]`），键名分散在各表：`s_TextNum[].key`、`s_TChoice[].key`、
+  `s_TToggle[].key`、`s_TFonts[].faceKey/boldKey`。改动经 `MsgText_*` /
+  `SWPanel_*` / `VecText_*` / `PowerDisplay_*` 立即生效；取消时四个模块各自的
+  `*_RestoreOptions()` 一起回退（`Esc_SaveSettings` 里统一快照）。
 - “战役文本框”关闭时 `MsgText_DrawFrame` 与 `MsgText_Enabled` 一起返回 0，
   整个消息框交回引擎原版绘制（战役与操作/战斗提示一起回原版），此时提示组
   选项只写入 INI、不生效，重新开启战役文本框后恢复。
@@ -188,6 +274,7 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
    `RightTitle`、`RightItem1/2`；GUI 设置读取 `GuiTitle`、`GuiGroupBottom`、
    `GuiScale`、`GuiPause`、`GuiGrid`、`GuiGroupSws`、`GuiSws`、`GuiSort`、
    `GuiRows`、`GuiBuildQueue`、`GuiScatter`、`GuiScatterOff/OnPlace/Auto`、
+   `GuiPlacePrev`、
    `GuiGroupSidebar`、`GuiSideScroll`、`GuiSideHide`、
    `GuiSideHideOff/Full/Radar/Bare`、`GuiSwsSide`、`GuiSwsSideRight/Left`、
    `GuiOn`、`GuiOff`、`GuiSortFaction`、`GuiSortFill`、`GuiSkin*`、`GuiColor`；

@@ -312,6 +312,19 @@ static inline void LiEdInit(LiEdit* e, wchar_t* buf, int cap)
     buf[0] = 0;
 }
 
+/* 绑到**已有内容**的缓冲上, 不清字 (就地编辑一条已存在的数据时用;
+ * 用 LiEdInit 会先把 buf[0] 清零 —— 输入框点一下就变空了)。 */
+static inline void LiEdBind(LiEdit* e, wchar_t* buf, int cap, int len)
+{
+    e->buf = buf;
+    e->cap = cap;
+    e->len = (len < cap) ? len : cap - 1;
+    e->cur = e->len;
+    e->anchor = -1;
+    e->view = 0;
+    e->blinkT = 0;
+}
+
 /* 光标闪烁复位 (按键/点击后立刻亮着)。 */
 static inline void LiEdTouch(LiEdit* e)
 {

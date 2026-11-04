@@ -2409,6 +2409,113 @@ void VecText_EnsureInit(void)
          "- dt=", g_VT.DigitTrack, NULL);
 }
 
+/* ---------------- 设置页运行期读写 ----------------
+ * 只改内存: 字号/粗体/资金/简报都是每帧现读, 下一帧即生效。
+ * 字形缓存按字宽/字高/面做键 (粗细与字体不在键里), 换字体/切粗体都得手动作废。 */
+
+static VTConfig s_SavedVT;
+static int s_HaveSavedVT = 0;
+
+static void VecFlushGlyphs(void)
+{
+    int i;
+
+    for (i = 0; i <= VC_MASK; i++) g_VC[i].used = 0;
+    g_PxValid = 0;
+}
+
+int VecText_GetOption(int id)
+{
+    VecText_EnsureInit();
+    switch (id)
+    {
+    case VTO_FONT_PX:     return g_VT.FontPx;
+    case VTO_BOLD:        return g_VT.Bold;
+    case VTO_CREDIT_PX:   return g_VT.CreditPx;
+    case VTO_CREDIT_DY:   return g_VT.CreditDY;
+    case VTO_BRIEF_OWN:   return g_VT.BriefOwn;
+    case VTO_BRIEF_WIDTH: return g_VT.BriefWidth;
+    case VTO_BRIEF_MARK:  return g_VT.BriefMark;
+    default:              return 0;
+    }
+}
+
+void VecText_SetOption(int id, int value)
+{
+    VecText_EnsureInit();
+    switch (id)
+    {
+    case VTO_FONT_PX:
+        if (value < 0) value = 0;
+        if (value > 40) value = 40;
+        g_VT.FontPx = value;
+        break;
+    case VTO_BOLD:
+        g_VT.Bold = value ? 1 : 0;
+        VecFlushGlyphs();
+        break;
+    case VTO_CREDIT_PX:
+        if (value < 0) value = 0;
+        if (value > 40) value = 40;
+        g_VT.CreditPx = value;
+        break;
+    case VTO_CREDIT_DY:
+        if (value < -8) value = -8;
+        if (value > 8) value = 8;
+        g_VT.CreditDY = value;
+        break;
+    case VTO_BRIEF_OWN:
+        g_VT.BriefOwn = value ? 1 : 0;
+        break;
+    case VTO_BRIEF_WIDTH:
+        if (value < 0) value = 0;
+        if (value > 4000) value = 4000;
+        g_VT.BriefWidth = value;
+        break;
+    case VTO_BRIEF_MARK:
+        g_VT.BriefMark = value ? 1 : 0;
+        break;
+    default:
+        break;
+    }
+}
+
+void VecText_GetFace(wchar_t* out, int cap)
+{
+    if (!out || cap <= 0) return;
+    out[0] = 0;
+    VecText_EnsureInit();
+    MultiByteToWideChar(CP_UTF8, 0, g_VT.FontFace, -1, out, cap);
+    out[cap - 1] = 0;
+}
+
+void VecText_SetFace(const wchar_t* face)
+{
+    VecText_EnsureInit();
+    if (!face || !face[0]) face = L"simhei.ttf";
+    WideCharToMultiByte(CP_UTF8, 0, face, -1, g_VT.FontFace,
+                        sizeof(g_VT.FontFace), NULL, NULL);
+    g_VT.FontFace[sizeof(g_VT.FontFace) - 1] = 0;
+    ResolveFontFace(g_VT.FontFace, "vtext", g_VTFace, L"Microsoft YaHei");
+    VecFlushGlyphs();
+}
+
+void VecText_SaveOptions(void)
+{
+    VecText_EnsureInit();
+    s_SavedVT = g_VT;
+    s_HaveSavedVT = 1;
+}
+
+void VecText_RestoreOptions(void)
+{
+    VecText_EnsureInit();
+    if (!s_HaveSavedVT) return;
+    g_VT = s_SavedVT;
+    ResolveFontFace(g_VT.FontFace, "vtext", g_VTFace, L"Microsoft YaHei");
+    VecFlushGlyphs();
+}
+
 /* ---------------- FPS 钉住绘制 (Render 尾 0x4F4589, Ares 之后) ----------------
  * 本帧 Simple_ 收到的计数器串, 以固定字号画到固定位 (x=0, 底上 32,
  * 与 Ares 同锚点), 任何档位都是 1x。只画窗口面, 大面跳过。

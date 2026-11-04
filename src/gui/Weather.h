@@ -2,10 +2,11 @@
  *
  * 图像档: art.ini 的 RAIN/SNOW.SHP 整屏帧, 引擎 blit 平铺进视图区。
  * 粒子档: 自绘雨丝/雪花/火星, 逐帧推进, 连续平滑 (三种天气共用一套粒子, 只是参数
- * 不同)。火雨只有粒子形态, 与画法无关。云影是独立的一层 (云图压暗), 与降水无关。
+ * 不同)。火雨只有粒子形态, 与画法无关。云层是独立的一层 (云图压暗 = 云影,
+ * 同一张图混向雾色 = 雾气, 雾色跟雨雪一样受环境光), 与降水无关。
  *
- * 雨、雪各自独立开关 (同时开就是雨夹雪), 只在本次运行有效; 云影开关与画法是
- * 长期设置, 落盘到 [Environment] 的 CloudEnable / DrawMode。
+ * 雨、雪各自独立开关 (同时开就是雨夹雪), 只在本次运行有效; 云层模式与降水
+ * 画法是长期设置, 落盘到 [Environment] 的 CloudMode / DrawMode。
  */
 #pragma once
 
@@ -31,11 +32,16 @@ void Weather_SetFire(int on);
 int  Weather_Thunder(void);
 void Weather_SetThunder(int on);
 
-/* 云影 (云图压暗)。独立于雨/雪, 可单独开; 长期生效 (菜单里改会落盘)。 */
-int  Weather_Cloud(void);
-void Weather_SetCloud(int on);
+/* 云层模式: 关 / 云影 (压暗) / 雾气 (混向雾色)。一档就是一个值, 独立于雨/雪,
+ * 长期生效 (菜单里改会落盘 [Environment] CloudMode)。 */
+#define WEATHER_CLOUD_OFF     0
+#define WEATHER_CLOUD_SHADOW  1
+#define WEATHER_CLOUD_FOG     2
+#define WEATHER_CLOUD_MODE_N  3
+int  Weather_CloudMode(void);
+void Weather_SetCloudMode(int mode);
 
-/* 云影风格预设 (cumulus / big / small / sheet / overcast / patchy / streak /
+/* 云层风格预设 (cumulus / big / small / sheet / overcast / patchy / streak /
  * cirrus)。每种是一套独立的噪声语汇 (各自的置换表 + y 轴压缩比), 不是同一张图
  * 调浓淡。菜单里选会落盘到 [Environment] CloudStyle。 */
 #define WEATHER_CLOUD_STYLE_N  8      /* 与 Weather.cpp 的 kCldStyle 行数一致 */

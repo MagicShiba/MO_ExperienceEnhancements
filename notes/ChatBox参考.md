@@ -128,3 +128,27 @@
 4. 逐字宽度走 `GtCharAdv` 记忆表, 不逐字问 GDI。
 
 缓存变量名避开 Windows 短宏 (如 `s_lh` 会展开, 编译报错无指向)。
+
+## 预设文本（[MsgText] QuickText）
+
+一行存，条目之间用**字面的 `\n`**（`gg\n进攻中路\n111`）：聊天只发单行，真换行用不上，
+拿 `\n` 分隔正好避开英文逗号。空条目与两端空白丢掉，最多 24 条、单条 161 字（`CE_BUF_N-1`）。
+
+- 上下键翻的是一张**合并表**：`[输入历史 0..N-1] + [预设 0..M-1]`。新开一局历史为空，
+  上键第一下就落在第一条预设，回车即发送；历史没翻完时先走历史（不破坏“上键=上一条”）。
+  下键反走，退到 0 再退就恢复翻页前那行。
+- 设置页“聊天文本框 → 预设文本”改完立刻 `ChatEdit_SetQuickText` 生效（不用重启），
+  ini 落盘跟其它设置一样等关菜单；取消整串退回（`Esc_SaveSettings` 时留底）。
+- ini 是 UTF-8：读用 `OU_ReadString` + `Lang_Utf8ToWide`（解出替换字符就退回 ACP），
+  写由 `Esc_WriteIniRaw` 直接改文件字节（不经 profile API，不会被 ACP 回转吃掉）。
+
+## 关掉提示框 = 回到单框
+
+`HintShow=0` 时 sp=1 的消息不再掉进只画不出的提示环：
+- 捕获 (`MsgText_AddMessageHook`) 里 `sp` 直接记 0，进战役环；
+- 雷达事件 (`RingPushRadar`) 同样改投战役环，且 `kind` 降级成普通行 ——
+  战役框的 `opRowCap` 与 `radarCap` 是分开算的，留着 `KIND_RADAR` 会全被行数闸丢掉；
+- `MsgText_PollRadar` 的闸门只留 `HintRadarShow`（不再要求 `HintShow`）；
+- 运行时刚关掉时 `HintRingMigrate()` 把环里现存条目整批搬进战役环，屏幕上已有的不消失。
+
+战役框关掉 (`CampEnable=0`) 不走这条路：那时 `MsgText_Enabled()=0`，整份消息 UI 交回引擎原版。

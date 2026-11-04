@@ -20,6 +20,8 @@
 #include <windows.h>
 #include <imm.h>
 #include "GdiText.h"
+#include "Lang.h"
+#include "OrderUtil.h"
 #include "MsgText.h"
 #include "LineEdit.h"
 #include "Patch.h"
@@ -109,6 +111,15 @@ static wchar_t ce_HistStash[CE_BUF_N];
 static int ce_HistStashLen = 0;
 static int ce_Esc = 0;   /* 本次开框按过 Esc (取消语义, 关框不记历史) */
 
+/* 预设文本 ([MsgText] QuickText): 一行存, 条目之间用**字面的 \n** 分隔
+ * (游戏聊天只发单行, 用不到真换行, 所以拿 \n 当分隔符正好避开英文逗号)。
+ * 上下键翻完输入历史后继续翻它们 —— 新开一局一条历史都没有, 按上键第一下
+ * 就落在第一条预设, 回车即发送。 */
+#define CE_PRESET_N   24
+#define CE_PRESET_RAW 12288
+static wchar_t ce_Preset[CE_PRESET_N][CE_BUF_N];
+static int ce_PresetCount = 0;
+
 static unsigned ce_CmdTick = 0; /* Ctrl 组合键上次处理时刻 (Input 钩/轮询握手) */
 static unsigned ce_NavTick = 0; /* 退格/Delete 上次处理时刻 (Input 钩/轮询握手) */
 /* WM_CHAR 摘除钩 (定义在后, 开框时懒安装): 行缓冲游标快照 + 安装前置声明 */
@@ -139,6 +150,44 @@ static int CE_SafeRange(const void* p, unsigned n)
     return 1;
 }
 
+/* 拆预设串: 字面 \n / 真换行 / \r 都算分隔; 两端空白去掉; 空条目跳过。 */
+static void CE_PresetSplit(const wchar_t* s)
+{
+    ce_PresetCount = 0;
+    while (s && *s && ce_PresetCount < CE_PRESET_N)
+    {
+        const wchar_t* b;
+        int len, i;
+
+        while (*s == L' ' || *s == L'\t') s++;
+        b = s;
+        while (*s && *s != L'\r' && *s != L'\n' &&
+               !(*s == L'\\' && s[1] == L'n')) s++;
+        len = (int)(s - b);
+        while (len > 0 && (b[len - 1] == L' ' || b[len - 1] == L'\t')) len--;
+        if (len > CE_BUF_N - 1) len = CE_BUF_N - 1;
+        if (len > 0)
+        {
+            for (i = 0; i < len; i++) ce_Preset[ce_PresetCount][i] = b[i];
+            ce_Preset[ce_PresetCount][len] = 0;
+            ce_PresetCount++;
+        }
+        if (*s == L'\\' && s[1] == L'n') s += 2;
+        else if (*s) s++;
+    }
+}
+
+/* [MsgText] QuickText: 主 ini 是 UTF-8。 */
+static void CE_PresetLoad(void)
+{
+    static char raw[CE_PRESET_RAW];
+    static wchar_t w[CE_PRESET_RAW];
+
+    OU_ReadString(MSG_SECTION, "QuickText", "", raw, sizeof(raw));
+    Lang_Utf8ToWide(w, w + CE_PRESET_RAW, (const unsigned char*)raw);
+    CE_PresetSplit(w);
+}
+
 static void CE_EnsureInit(void)
 {
     if (ce_Init) return;
@@ -152,6 +201,7 @@ static void CE_EnsureInit(void)
     ce_ImeFsMode = GetPrivateProfileIntA(MSG_SECTION, "ImeFullscreen", -1, g_IniPath);
     if (ce_ImeFsMode < 0) ce_ImeFsMode = -1;
     if (ce_ImeFsMode > 1) ce_ImeFsMode = 1;
+    CE_PresetLoad();
     MsgText_CampStyle(&ce_Face, &ce_Px, &ce_Bold);
     {
         char sb[128], t1[16];
@@ -373,17 +423,33 @@ static void CE_SetLine(const wchar_t* s, int len)
     LiEdTouch(&ce_Ed);
 }
 
-static void CE_HistApply(int idx)
+/* 翻页表 = 输入历史 (0 = 最新) 后接预设文本。下标越界前先把列表长度算清:
+ * 预设是可以在设置页里改的, 翻到一半列表变短要能兜住。 */
+static int CE_NavTotal(void)
 {
-    CE_SetLine(ce_Hist[idx], ce_HistLen[idx]);
+    return ce_HistCount + ce_PresetCount;
 }
 
+static void CE_HistApply(int idx)
+{
+    if (idx < ce_HistCount) CE_SetLine(ce_Hist[idx], ce_HistLen[idx]);
+    else
+    {
+        int p = idx - ce_HistCount;
+
+        if (p < 0 || p >= ce_PresetCount) return;
+        CE_SetLine(ce_Preset[p], lstrlenW(ce_Preset[p]));
+    }
+}
+
+/* 上下键: 先翻历史, 历史翻到底继续翻预设; 往下退回时先退预设再退历史,
+ * 最后恢复翻页前那行。 */
 static void CE_HistMove(int dir)
 {
     int k;
     if (dir < 0)   /* Up: 更旧 */
     {
-        if (ce_HistCount <= 0) return;
+        if (CE_NavTotal() <= 0) return;
         if (ce_HistIdx < 0)
         {
             int n = (ce_Ed.len < CE_BUF_N) ? ce_Ed.len : CE_BUF_N - 1;
@@ -392,7 +458,7 @@ static void CE_HistMove(int dir)
             ce_HistStashLen = n;
             ce_HistIdx = 0;
         }
-        else if (ce_HistIdx < ce_HistCount - 1) ce_HistIdx++;
+        else if (ce_HistIdx < CE_NavTotal() - 1) ce_HistIdx++;
         else return;   /* 已到最旧 */
         CE_HistApply(ce_HistIdx);
     }
@@ -1319,6 +1385,14 @@ void ChatEdit_SetShowNameSP(int on)
 {
     CE_EnsureInit();
     ce_ChatNameSP = on ? 1 : 0;
+}
+
+/* 设置页提交预设文本时调用 (传整串, 内部按 \n 拆): 立刻生效, 不用重启。
+ * 正在翻页的话把翻页下标夹回有效范围, 免得指向已被删掉的条目。 */
+void ChatEdit_SetQuickText(const wchar_t* raw)
+{
+    CE_PresetSplit(raw);
+    if (ce_HistIdx >= CE_NavTotal()) ce_HistIdx = -1;
 }
 
 /* ---------------- 帧入口 ---------------- */

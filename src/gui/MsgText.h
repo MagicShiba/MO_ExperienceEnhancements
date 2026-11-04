@@ -81,11 +81,26 @@ enum {
     MSG_OPT_HINT_WIDTH,
     MSG_OPT_HINT_BAR,
     MSG_OPT_HINT_RADAR,
-    MSG_OPT_COUNT
+    /* 战役框三个边距坐标 (设置页"边距"一行: 左/顶/底)。底部模式用底边距,
+     * 顶部模式用顶边距; 左 = 水平对齐为"左对齐"时才起作用。 */
+    MSG_OPT_CAMP_POSX,
+    MSG_OPT_CAMP_POSY,
+    MSG_OPT_CAMP_BOTTOMMARGIN,
+    /* 字体/字号/粗细 (设置页"字体"一行) 与提示框底板不透明度。 */
+    MSG_OPT_CAMP_FONT_PX,
+    MSG_OPT_CAMP_BOLD,
+    MSG_OPT_HINT_FONT_PX,
+    MSG_OPT_HINT_BOLD,
+    MSG_OPT_HINT_OPACITY
 };
 
 int  MsgText_GetOption(int id);
 void MsgText_SetOption(int id, int value);
+
+/* 字体名 (设置页可编辑): which 0=战役框 / 1=操作与战斗提示。
+ * 读写配置串 (如 "msyh.ttc"), SetFace 立刻重新解析, 下一帧即生效。 */
+void MsgText_GetFace(int which, wchar_t* out, int cap);
+void MsgText_SetFace(int which, const wchar_t* face);
 
 /* ESC 设置页取消: 整份运行期配置快照/恢复 (不碰 INI)。 */
 void MsgText_SaveOptions(void);

@@ -16,9 +16,9 @@
  *
  * 与 Phobos 避让: 每帧检测 Phobos.dll, 已加载则完全不画, 避免双层预览。
  *
- * 配置 [PlacementPreview]: Enable=1, Translucency=0/25/50/75 (默认 75)。
- * Translucency 同时是展开预览虚影 ([DeployPreview] Ghost) 的透明度,
- * 由 DeployPreview 通过 PlacementPreview_GetTranslucency 直接取用。
+ * 配置 [PlacementPreview]: Opacity=0/25/50/75/100 (默认 25, 100 = 不透明), 0 = 关闭。
+ * 同一档同时也是展开预览虚影的浓度 (DeployPreview 通过 PlacementPreview_Opacity
+ * 取用), 所以展开虚影没有自己的开关。
  */
 
 #include <windows.h>
@@ -87,42 +87,62 @@ typedef void (__fastcall *PpDrawShp)(void* surf, void* pal, void* shp,
 /* ---------------- 配置 ---------------- */
 
 static int g_PpInit = 0;
-static int g_PpEnable = 1;
-static int g_PpTrans = 75;
+static int g_PpOpacity = 25;   /* 0 = 关闭; 25/50/75/100 由淡到不透明 */
 
-static void PP_EnsureInit(void)
+/* 归一: 只留 0/25/50/75/100 五档 (引擎半透明档位与混合权重都按这五档)。 */
+static int PP_NormOpacity(int v)
+{
+    if (v <= 0) return 0;
+    if (v >= 100) return 100;
+    if (v >= 75) return 75;
+    if (v >= 50) return 50;
+    if (v >= 25) return 25;
+    return 0;
+}
+
+static void PP_LogOpacity(void)
 {
     char buf[48];
     unsigned p = 0;
-    int t;
-    if (g_PpInit) return;
-    g_PpInit = 1;
-    BuildPaths();
-    GtEnsureLog();
-    g_PpEnable = GetPrivateProfileIntA(PP_SECTION, "Enable", 1, g_IniPath) ? 1 : 0;
-    t = GetPrivateProfileIntA(PP_SECTION, "Translucency", 75, g_IniPath);
-    if (t >= 75) t = 75;
-    else if (t >= 50) t = 50;
-    else if (t >= 25) t = 25;
-    else t = 0;
-    g_PpTrans = t;
-    if (!g_PpEnable)
+
+    if (g_PpOpacity <= 0)
     {
         LogLine("placeprev: OFF");
         return;
     }
-    p = AppendCStr(buf, p, "placeprev: ON trans=", sizeof(buf));
-    p += UtoA((unsigned)t, buf + p);
+    p = AppendCStr(buf, p, "placeprev: ON opacity=", sizeof(buf));
+    p += UtoA((unsigned)g_PpOpacity, buf + p);
     LogLine(buf);
+}
+
+static void PP_EnsureInit(void)
+{
+    if (g_PpInit) return;
+    g_PpInit = 1;
+    BuildPaths();
+    GtEnsureLog();
+    g_PpOpacity = PP_NormOpacity(
+        GetPrivateProfileIntA(PP_SECTION, "Opacity", 25, g_IniPath));
+    PP_LogOpacity();
 }
 
 /* ---------------- 公共虚影绘制 (放置预览 / 展开预览共用) ---------------- */
 
-/* [PlacementPreview] Translucency 当前生效值 (展开预览等模块共用同一档)。 */
-int PlacementPreview_GetTranslucency(void)
+int PlacementPreview_Opacity(void)
 {
     PP_EnsureInit();
-    return g_PpTrans;
+    return g_PpOpacity;
+}
+
+void PlacementPreview_SetOpacity(int pct)
+{
+    int v;
+
+    PP_EnsureInit();
+    v = PP_NormOpacity(pct);
+    if (v == g_PpOpacity) return;
+    g_PpOpacity = v;
+    PP_LogOpacity();
 }
 
 /* ---------------- 形状/调色板解析 (1:1 与缩放两条路径共用) ---------------- */
@@ -195,18 +215,22 @@ static void* PP_ResolvePal(void* owner)
     return pal;
 }
 
-/* 原尺寸引擎 blit: (cx,cy) = 画布中心, 裁剪框 (0,0,bw,bh)。 */
+/* 原尺寸引擎 blit: (cx,cy) = 画布中心, 裁剪框 (0,0,bw,bh)。
+ * opacity 100 = 不加任何半透明档位 (不透明)。 */
 static void PP_Blit1to1(void* surf, void* shp, int frame, void* pal,
-                        int cx, int cy, int trans, int bw, int bh)
+                        int cx, int cy, int opacity, int bw, int bh)
 {
     Point2D point;
     RectangleStruct bounds;
     unsigned flags;
 
     flags = PP_FLAG_CENTERED | PP_FLAG_NONZERO | PP_FLAG_MULTIPASS;
-    if (trans == 25) flags |= PP_FLAG_TRANS25;
-    else if (trans == 50) flags |= PP_FLAG_TRANS50;
-    else if (trans == 75) flags |= PP_FLAG_TRANS75;
+    if (opacity < 100)
+    {
+        if (opacity >= 75) flags |= PP_FLAG_TRANS25;
+        else if (opacity >= 50) flags |= PP_FLAG_TRANS50;
+        else flags |= PP_FLAG_TRANS75;
+    }
 
     bounds.X = 0;
     bounds.Y = 0;
@@ -220,13 +244,14 @@ static void PP_Blit1to1(void* surf, void* shp, int frame, void* pal,
 }
 
 static void PP_DrawGhost1to1(void* type, void* owner, void* surf,
-    int x, int y, int trans)
+    int x, int y, int opacity)
 {
     void* shp;
     void* pal;
     int frame, w, h;
 
     if (!surf || !IsPlausiblePtr(surf)) return;
+    if (opacity <= 0) return;
     if (!PP_ResolveShape(type, &shp, &frame, NULL, NULL)) return;
     pal = PP_ResolvePal(owner);
     if (!pal) return;
@@ -234,7 +259,7 @@ static void PP_DrawGhost1to1(void* type, void* owner, void* surf,
     w = GtSurfGet(surf, GtVT_GET_WIDTH);
     h = GtSurfGet(surf, GtVT_GET_HEIGHT);
     if (w <= 0 || h <= 32) return;
-    PP_Blit1to1(surf, shp, frame, pal, x, y, trans, w, h - 32);  /* 不画进工具栏 */
+    PP_Blit1to1(surf, shp, frame, pal, x, y, opacity, w, h - 32);  /* 不画进工具栏 */
 }
 
 /* ---------------- 缩放档: 离屏原尺寸渲染 + 最近邻缩放 + 半透明混合 ----------------
@@ -331,19 +356,18 @@ static unsigned short PP_Mix16(unsigned short s, unsigned short d, unsigned ws)
                           |   ((sb * ws + db * wd) >> 8));
 }
 
-/* 把缓存位图混合写进目标面 (调用方已锁面), 裁剪到 (0,0,w,h)。 */
+/* 把缓存位图混合写进目标面 (调用方已锁面), 裁剪到 (0,0,w,h)。
+ * 源权重按 opacity 百分比算 (100 = 直接覆盖)。 */
 static void PP_BlendBmp(unsigned char* base, int pitch, int w, int h,
-                        int dx, int dy, int trans)
+                        int dx, int dy, int opacity)
 {
     unsigned short* bmp = (unsigned short*)s_PpBmp;
     unsigned ws;
     int x, y, x0, x1, y0, y1;
 
     if (!bmp || s_PpBmpW <= 0 || s_PpBmpH <= 0) return;
-    if (trans >= 75) ws = 64u;
-    else if (trans >= 50) ws = 128u;
-    else if (trans >= 25) ws = 192u;
-    else ws = 256u;
+    ws = (unsigned)(opacity * 256 / 100);
+    if (ws > 256u) ws = 256u;
 
     x0 = dx < 0 ? -dx : 0;
     y0 = dy < 0 ? -dy : 0;
@@ -370,7 +394,7 @@ static void PP_BlendBmp(unsigned char* base, int pitch, int w, int h,
 /* 缩放档绘制: 视图空间锚点 (vx,vy) → 屏幕矩形, 半透明混合写入 surf。
  * 返回消耗的目标面像素数 (0 = 没画)。 */
 static int PP_DrawGhostZoomed(void* type, void* owner, void* surf,
-                              int vx, int vy, int trans)
+                              int vx, int vy, int opacity)
 {
     void *shp, *pal, *scr;
     int frame, sw, sh, bw, bh, dw, dh;
@@ -416,7 +440,7 @@ static int PP_DrawGhostZoomed(void* type, void* owner, void* surf,
         if (!sc) return 0;
         memset(sc, 0, (size_t)spit * (size_t)bh);
         GtUnlock(scr);
-        PP_Blit1to1(scr, shp, frame, pal, bw / 2, bh / 2, 0, bw, bh);
+        PP_Blit1to1(scr, shp, frame, pal, bw / 2, bh / 2, 100, bw, bh);
         sc = GtLock(scr);
         if (!sc) return 0;
         if (!PP_BuildScaled(sc, spit, bw, bh, dw, dh))
@@ -438,7 +462,7 @@ static int PP_DrawGhostZoomed(void* type, void* owner, void* surf,
     if (tw <= 0 || th <= 32 || tpit < tw * 2) return 0;
     db = GtLock(surf);
     if (!db) return 0;
-    PP_BlendBmp(db, tpit, tw, th - 32, x0 - dw / 2, y0 - dh / 2, trans);
+    PP_BlendBmp(db, tpit, tw, th - 32, x0 - dw / 2, y0 - dh / 2, opacity);
     GtUnlock(surf);
     return dw * dh;
 }
@@ -446,18 +470,19 @@ static int PP_DrawGhostZoomed(void* type, void* owner, void* surf,
 /* 视图空间锚点画虚影 (展开预览等界面层用): 1x 直通引擎 blit,
  * 缩放档走离屏缩放+混合。返回消耗的目标面像素数 (1x 恒 1)。 */
 int PlacementPreview_DrawGhostView(void* type, void* owner, void* surf,
-                                   int vx, int vy, int trans)
+                                   int vx, int vy, int opacity)
 {
     int sx, sy;
     if (!type || !IsPlausiblePtr(type)) return 0;
     if (!surf || !IsPlausiblePtr(surf)) return 0;
+    if (opacity <= 0) return 0;
     vx += PP_OFFSET_X;
     vy += PP_OFFSET_Y;
     /* 缩放路径失败 (面不合适/画布过大) 不退回 1:1: 大小和位置都会错。 */
     if (SB_Zoomed())
-        return PP_DrawGhostZoomed(type, owner, surf, vx, vy, trans);
+        return PP_DrawGhostZoomed(type, owner, surf, vx, vy, opacity);
     if (!SB_ViewToScreen(vx, vy, &sx, &sy)) { sx = vx; sy = vy; }
-    PP_DrawGhost1to1(type, owner, surf, sx, sy, trans);
+    PP_DrawGhost1to1(type, owner, surf, sx, sy, opacity);
     return 1;
 }
 
@@ -479,7 +504,7 @@ static DWORD PP_DrawBody(void* regs)
 
     (void)regs;
     PP_EnsureInit();
-    if (!g_PpEnable) return 0;
+    if (g_PpOpacity <= 0) return 0;
 
     /* 避让 Phobos: 已加载则完全跳过 (不加载图像, 也不画)。 */
     if (GetModuleHandleA("Phobos.dll") != NULL) return 0;
@@ -518,7 +543,7 @@ static DWORD PP_DrawBody(void* regs)
 
     surf = *(void**)(PP_ADDR_TEMP_SURF);
     if (!surf || !IsPlausiblePtr(surf)) return 0;
-    PP_DrawGhost1to1(type, building, surf, point.X, point.Y, g_PpTrans);
+    PP_DrawGhost1to1(type, building, surf, point.X, point.Y, g_PpOpacity);
     return 0;   /* 返回 0 = 继续执行被覆盖的原指令 (mov ecx,[0x880990]) */
 }
 

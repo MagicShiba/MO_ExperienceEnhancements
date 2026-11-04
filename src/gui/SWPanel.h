@@ -12,3 +12,20 @@ void SWPanel_EnsureInit(void);
 /* 渲染期: 主画布尺寸同时回填给收集门 (坐标系一致才收, 否则走原版)。
  * 返回 1=画出, 0=无新鲜行, -1=GDI失败, -2=Lock失败。 */
 int SWPanel_Draw(void* surf, int bitLineH, int surfW, int surfH, int surfPitch);
+
+/* ESC 设置页运行期读写 (只改内存, 不写 INI; 帧内下次绘制即生效)。 */
+enum {
+    SWO_ENABLE = 0,   /* [SWPanel] Enable */
+    SWO_FONT_PX,      /* FontPx (0 = 跟点阵字高) */
+    SWO_BOLD,         /* Bold */
+    SWO_CLASSIC,      /* Classic: 1=原本样式, 0=统一面板 */
+    SWO_OPACITY       /* Opacity 底板不透明度 */
+};
+int  SWPanel_GetOption(int id);
+void SWPanel_SetOption(int id, int value);
+void SWPanel_GetFace(wchar_t* out, int cap);
+void SWPanel_SetFace(const wchar_t* face);
+
+/* 取消设置时整份退回 (与 MsgText_SaveOptions/RestoreOptions 同语义)。 */
+void SWPanel_SaveOptions(void);
+void SWPanel_RestoreOptions(void);

@@ -85,6 +85,70 @@ static struct {
     unsigned char cov[PWR_COV_W * PWR_COV_H];
 } g_PwrCache = { -1, -1, -1, -1, -1, 0, 0 };
 
+/* ---------------- 设置页运行期读写 ----------------
+ * 只改内存, 下一帧按新值重画 (缓存键含值/字号/粗体/模式)。 */
+
+static PowerCfg s_SavedPwr;
+static int s_HaveSavedPwr = 0;
+
+int PowerDisplay_GetOption(int id)
+{
+    PowerDisplay_EnsureInit();
+    switch (id)
+    {
+    case PWO_ENABLE: return g_Cfg.Bottom;
+    case PWO_MODE:   return g_Cfg.Mode;
+    case PWO_X:      return g_Cfg.X;
+    case PWO_PAD:    return g_Cfg.Pad;
+    default:         return 0;
+    }
+}
+
+void PowerDisplay_SetOption(int id, int value)
+{
+    PowerDisplay_EnsureInit();
+    switch (id)
+    {
+    case PWO_ENABLE:
+        g_Cfg.Bottom = value ? 1 : 0;
+        break;
+    case PWO_MODE:
+        g_Cfg.Mode = value ? 1 : 0;
+        break;
+    case PWO_X:
+        if (value < 0) value = 0;
+        if (value > 4096) value = 4096;
+        g_Cfg.X = value;
+        break;
+    case PWO_PAD:
+        if (value < 0) value = 0;
+        if (value > 200) value = 200;
+        g_Cfg.Pad = value;
+        break;
+    default:
+        break;
+    }
+}
+
+void PowerDisplay_SaveOptions(void)
+{
+    PowerDisplay_EnsureInit();
+    s_SavedPwr = g_Cfg;
+    s_HaveSavedPwr = 1;
+}
+
+void PowerDisplay_RestoreOptions(void)
+{
+    PowerDisplay_EnsureInit();
+    if (!s_HaveSavedPwr) return;
+    g_Cfg = s_SavedPwr;
+}
+
+void PowerDisplay_Invalidate(void)
+{
+    g_PwrCache.mode = -1;
+}
+
 /* 读值+配字号+备字形: 1=缓存有效, 0=跳过(无玩家/值非法), -1=GDI失败/超大。
  * 无锁无面, 锁内可调。 */
 static int PwrCacheEnsure(void)

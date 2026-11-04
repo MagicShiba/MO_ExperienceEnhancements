@@ -3,10 +3,9 @@
  *
  * 预览: 物理中键按住时, 以光标格画展开后地基黄框 (引擎 CoordsToClient
  * 投影, 每角取其框内格高, 平地高地同式), 细框套目标格, 方便对墙对齐。
- * 可选半透明展开虚影 ([DeployPreview] Ghost=1): 每块地基上叠加展开后
- * 建筑的 Buildup/Image 静态帧, 画在黄框与轨迹线之上; 界面缩放档按缩放比
- * 缩放位图后混合写入 (每帧有像素预算)。透明度统一取
- * [PlacementPreview] Translucency, 本模块不单独配置。
+ * 可选半透明展开虚影: 每块地基上叠加展开后建筑的 Buildup/Image 静态帧,
+ * 画在黄框与轨迹线之上; 界面缩放档按缩放比缩放位图后混合写入 (每帧有像素
+ * 预算)。浓度(=是否显示)统一取 [PlacementPreview] Opacity, 本模块不单独配置。
  * 落点 = 光标格 + (大地基 -1,-1), 预览=移动目标=实际落点同一套数学
  * (TryToDeploy 0x7393C0 反汇编+运行时双确认)。
  *
@@ -57,9 +56,8 @@ static int g_DpInit = 0;
 static int g_DpEnable = 1;
 static int g_DpAuto = 1;     /* 1=单基地车裸中键点按自动开过去+到位展开 */
 static int g_DpTimeoutMs = 45000;
-static int g_DpGhost = 1;     /* 1=展开位置显示半透明建筑虚影 */
-                            /* 透明度不单独配置: 恒取 [PlacementPreview] Translucency,
-                             * 与手放建筑的预览虚影同一档 (单一来源, 免两处对不上)。 */
+/* 虚影浓度不单独配置: 恒取 [PlacementPreview] Opacity (0 = 两处虚影都关),
+ * 与手放建筑的预览同一档 (单一来源, 免两处对不上)。 */
 
 /* 虚影缓存: 选中里第一个可展开单位的展开建筑类型 + 单位 (取玩家色)。 */
 static void* s_DpBld = 0;
@@ -78,8 +76,6 @@ static void DP_EnsureInit(void)
     if (to < 5) to = 5;
     if (to > 300) to = 300;
     g_DpTimeoutMs = to * 1000;
-    g_DpGhost = GetPrivateProfileIntA(DP_SECTION, "Ghost", 1, g_IniPath) ? 1 : 0;
-    PlacementPreview_GetTranslucency();   /* 同时完成放置预览配置读取 (虚影透明度来源) */
     LogLine(g_DpEnable ? "deployprev: ON" : "deployprev: OFF");
 }
 
@@ -1054,21 +1050,22 @@ static void* DP_LiveBldUnit(void)
  * 不给上限会拖帧。用完就只留黄框 (下一帧重置)。 */
 #define DP_GHOST_PIX_BUDGET 700000
 static int s_DpGhostBudget = 0;
+static int s_DpGhostOpacity = 0;   /* 本帧浓度 (=0 则整帧只有黄框) */
 
 /* 在 (bx,by) 地基左上格画展开后建筑半透明虚影 (画在黄线之上)。
- * 透明度/偏移与放置预览同源; 缩放档由 PlacementPreview 自己缩放位图。
+ * 浓度/偏移与放置预览同源; 缩放档由 PlacementPreview 自己缩放位图。
  * 返回消耗的目标面像素数 (供每帧预算)。 */
 static int DP_DrawGhostPlot(void* surf, int bx, int by, void* bld,
                             void* owner, int fbZ)
 {
     int z, vx, vy, used;
-    if (!g_DpGhost || !bld || !IsPlausiblePtr(bld)) return 0;
+    if (s_DpGhostOpacity <= 0 || !bld || !IsPlausiblePtr(bld)) return 0;
     if (s_DpGhostBudget <= 0) return 0;    /* 本帧预算用完: 剩下的块只留黄框 */
     DP_CornerZ(bx, by, fbZ, &z);
     if (!DP_CornerLepView(bx * 256 + 128, by * 256 + 128, z + 1, &vx, &vy))
         return 0;
     used = PlacementPreview_DrawGhostView(bld, owner, surf, vx, vy,
-                                          PlacementPreview_GetTranslucency());
+                                          s_DpGhostOpacity);
     s_DpGhostBudget -= used;
     return used;
 }
@@ -1107,6 +1104,7 @@ void DeployPreview_Draw(void* surf, int w, int h, int pitch)
     /* 四角投影在认领分支之后算 (认领态提前返回, 省 8 次投影)。 */
     s_DpLocked = 0;
     s_DpGhostBudget = DP_GHOST_PIX_BUDGET;   /* 每帧重置虚影像素预算 */
+    s_DpGhostOpacity = PlacementPreview_Opacity();   /* 0 = 本帧不画虚影 */
     /* 认领态多框预览 (与松手执行同一套分配, 所见即所得): 起点=按下格,
      * 终点=当前格, Shift 锁轴。未认领时走下面单框路径。 */
     if (s_DpArmed && s_DpDepN0 > 0)

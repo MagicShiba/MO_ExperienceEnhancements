@@ -23,6 +23,10 @@ int  ChatEdit_Enabled(void);
 void ChatEdit_SetEnabled(int on);
 void ChatEdit_SetShowNameSP(int on);
 
+/* 预设文本 ([MsgText] QuickText): 上下键翻完输入历史后继续翻这些条目。
+ * 传整串, 内部按字面 \n 拆 (空条目/两端空白丢掉); 设置页提交时调用, 立刻生效。 */
+void ChatEdit_SetQuickText(const wchar_t* raw);
+
 /* 单人聊天框: 对话框函数按 [SessionClass 0xA8B238]==0/5 判单人并跳过聊天框
  * 四处逻辑。ChatBoxSP=1 时跳过 session 检查 (保留其余旗标检查),
  * 返回 0 走原版。 */

@@ -112,6 +112,92 @@ void SWPanel_EnsureInit(void)
     LogLine(buf);
 }
 
+/* ---------------- 设置页运行期读写 ----------------
+ * 只改内存里的 g_SW (帧内下次绘制读它), 不碰 INI; 落盘由设置页排队。 */
+
+static SWPanelCfg s_SavedSw;
+static int s_HaveSavedSw = 0;
+
+int SWPanel_GetOption(int id)
+{
+    SWPanel_EnsureInit();
+    switch (id)
+    {
+    case SWO_ENABLE:  return g_SW.Enable;
+    case SWO_FONT_PX: return g_SW.FontPx;
+    case SWO_BOLD:    return g_SW.Bold;
+    case SWO_CLASSIC: return g_SW.Classic;
+    case SWO_OPACITY: return g_SW.Opacity;
+    default:          return 0;
+    }
+}
+
+void SWPanel_SetOption(int id, int value)
+{
+    SWPanel_EnsureInit();
+    switch (id)
+    {
+    case SWO_ENABLE:
+        g_SW.Enable = value ? 1 : 0;
+        /* 收集门看这个全局: 关掉就整块不画, 原版列表照常显示。 */
+        g_SWPanelOn = g_SW.Enable;
+        break;
+    case SWO_FONT_PX:
+        if (value < 0) value = 0;
+        if (value > 64) value = 64;
+        g_SW.FontPx = value;
+        break;
+    case SWO_BOLD:
+        g_SW.Bold = value ? 1 : 0;
+        break;
+    case SWO_CLASSIC:
+        g_SW.Classic = value ? 1 : 0;
+        break;
+    case SWO_OPACITY:
+        if (value < 0) value = 0;
+        if (value > 100) value = 100;
+        g_SW.Opacity = value;
+        break;
+    default:
+        break;
+    }
+}
+
+void SWPanel_GetFace(wchar_t* out, int cap)
+{
+    if (!out || cap <= 0) return;
+    out[0] = 0;
+    SWPanel_EnsureInit();
+    MultiByteToWideChar(CP_UTF8, 0, g_SW.FontFace, -1, out, cap);
+    out[cap - 1] = 0;
+}
+
+void SWPanel_SetFace(const wchar_t* face)
+{
+    SWPanel_EnsureInit();
+    if (!face || !face[0]) face = L"msyh.ttc";
+    WideCharToMultiByte(CP_UTF8, 0, face, -1, g_SW.FontFace,
+                        sizeof(g_SW.FontFace), NULL, NULL);
+    g_SW.FontFace[sizeof(g_SW.FontFace) - 1] = 0;
+    ResolveFontFace(g_SW.FontFace, "sw", g_SWFace, L"Microsoft YaHei");
+}
+
+void SWPanel_SaveOptions(void)
+{
+    SWPanel_EnsureInit();
+    s_SavedSw = g_SW;
+    s_HaveSavedSw = 1;
+}
+
+void SWPanel_RestoreOptions(void)
+{
+    SWPanel_EnsureInit();
+    if (!s_HaveSavedSw) return;
+    g_SW = s_SavedSw;
+    g_SWPanelOn = g_SW.Enable;
+    ResolveFontFace(g_SW.FontFace, "sw", g_SWFace, L"Microsoft YaHei");
+}
+
 static int SWLen(const wchar_t* s)
 {
     int l = 0;

@@ -199,7 +199,9 @@ static ChatMsg* MsgAt(MsgRing* r, int i)
 static void CopyW(wchar_t* dst, const wchar_t* src, int cap)
 {
     int i = 0;
-    if (!src || !IsPlausiblePtr(src)) { dst[0] = 0; return; }
+    /* UTF-16 字符串只要求两字节对齐; HouseClass::UIName 位于 +0x1602A。 */
+    unsigned addr = (unsigned)(size_t)src;
+    if (addr < 0x00010000u || addr >= 0x7FF00000u || (addr & 1u)) { dst[0] = 0; return; }
     while (src[i] && i < cap - 1) { dst[i] = src[i]; i++; }
     dst[i] = 0;
 }
@@ -228,7 +230,9 @@ static unsigned g_RadarSeq = 0;   /* 新雷达事件序号 (只增不减, 清历
 
 static void RingPushRadar(int type, short cx, short cy)
 {
-    ChatMsg* m = &g_HintBuf[g_HintRing.head];
+    /* 提示框关掉时雷达事件退回战役框 (没提示框了, 不能让战斗事件凭空消失)。 */
+    MsgRing* r = g_Cfg.HintShow ? &g_HintRing : &g_CampRing;
+    ChatMsg* m = &r->buf[r->head];
     const wchar_t* nm = (type >= 0 && type < RADAR_NAME_N)
                       ? g_Cfg.RadarNameW[type] : g_Cfg.RadarNameOtherW;
     wchar_t* p = m->text;
@@ -242,13 +246,15 @@ static void RingPushRadar(int type, short cx, short cy)
     m->color  = 0;
     m->born   = now;
     m->expire = now + (unsigned)g_Cfg.HintRadarHold;
-    m->sp     = 1;
+    /* sp 跟着去向走 (战役框只挑 wantSp=0); kind 一律留 RADAR —— 画中画的
+     * MsgText_LatestRadar 靠它认事件, 行数闸那边对战役框不看 kind。 */
+    m->sp     = g_Cfg.HintShow ? 1 : 0;
     m->kind   = KIND_RADAR;
     m->cellX  = cx;
     m->cellY  = cy;
 
-    g_HintRing.head = (g_HintRing.head + 1) % g_HintRing.cap;
-    if (g_HintRing.count < g_HintRing.cap) g_HintRing.count++;
+    r->head = (r->head + 1) % r->cap;
+    if (r->count < r->cap) r->count++;
     g_RadarSeq++;
 }
 
@@ -262,13 +268,38 @@ static int      s_ReSeenY[RE_SEEN_MAX];
 static int      s_ReSeenF[RE_SEEN_MAX];
 static int      s_ReSeenN = 0;
 
+/* 操作与战斗提示框关掉时 (HintShow=0), sp=1 的消息不再"消失", 而是退回
+ * 战役框 (sp 记 0)。这就是"关掉提示框 = 回到原版单框"的语义: 引擎原生把
+ * 它们和战役消息画在同一个框里, 这里照做。
+ * 注意: 战役框关掉 (CampEnable=0) 不在此列 —— 那时整个消息 UI 交回引擎原版。 */
+static int HintGoesToCamp(void)
+{
+    return g_Cfg.HintShow ? 0 : 1;
+}
+
+/* 提示环里剩的条目整批搬进战役环 (运行时刚关掉提示框: 屏幕上已有的提示
+ * 不应该凭空消失)。顺序保持入队顺序, 雷达事件降级成普通行 (战役框不记点击区)。 */
+static void HintRingMigrate(void)
+{
+    int i;
+
+    for (i = 0; i < g_HintRing.count; i++)
+    {
+        ChatMsg* m = MsgAt(&g_HintRing, i);
+
+        RingPush(&g_CampRing, m->name, m->text, m->color, m->expire, m->born, 0);
+    }
+    g_HintRing.head = 0;
+    g_HintRing.count = 0;
+}
+
 static void MsgText_PollRadar(void)
 {
     static int s_lastFrame = -1;
     void* arr;                  /* 指针数组基址 */
     int cnt, i, j, k, fr, keep;
 
-    if (!g_Cfg.Enable || !g_Cfg.HintShow || !g_Cfg.HintRadarShow)
+    if (!g_Cfg.Enable || !g_Cfg.HintRadarShow || !g_Cfg.CampEnable)
     {
         s_ReSeenN = 0;
         return;
@@ -363,16 +394,24 @@ static int MsgVisibleMul(ChatMsg* m, unsigned mul)
  * 最新的在 count-1。只读, 不消耗任何状态。 */
 int MsgText_LatestRadar(short* cx, short* cy, unsigned* seq)
 {
-    int i;
-    for (i = g_HintRing.count - 1; i >= 0; i--)
+    int i, pass;
+
+    /* 提示框关掉后雷达事件进战役环, 两个环都要找 (提示环优先, 那里有条目
+     * 就说明提示框是开着的)。 */
+    for (pass = 0; pass < 2; pass++)
     {
-        ChatMsg* m = MsgAt(&g_HintRing, i);
-        if (m->kind != KIND_RADAR) continue;
-        if (!MsgVisibleMul(m, 1)) continue;
-        if (cx) *cx = m->cellX;
-        if (cy) *cy = m->cellY;
-        if (seq) *seq = g_RadarSeq;
-        return 1;
+        MsgRing* r = pass ? &g_CampRing : &g_HintRing;
+
+        for (i = r->count - 1; i >= 0; i--)
+        {
+            ChatMsg* m = MsgAt(r, i);
+            if (m->kind != KIND_RADAR) continue;
+            if (!MsgVisibleMul(m, 1)) continue;
+            if (cx) *cx = m->cellX;
+            if (cy) *cy = m->cellY;
+            if (seq) *seq = g_RadarSeq;
+            return 1;
+        }
     }
     return 0;
 }
@@ -528,6 +567,10 @@ static void MsgText_LoadConfig(void)
     g_Cfg.CampBottom = g_Cfg.CampBottom ? 1 : 0;
     if (g_Cfg.CampBottomMargin < 0) g_Cfg.CampBottomMargin = 0;
     if (g_Cfg.CampBottomMargin > 2000) g_Cfg.CampBottomMargin = 2000;
+    if (g_Cfg.PosX < 0) g_Cfg.PosX = 0;
+    if (g_Cfg.PosX > 2000) g_Cfg.PosX = 2000;
+    if (g_Cfg.PosY < 0) g_Cfg.PosY = 0;
+    if (g_Cfg.PosY > 2000) g_Cfg.PosY = 2000;
     g_Cfg.CampCentered = g_Cfg.CampCentered ? 1 : 0;
     g_Cfg.CampAnim = g_Cfg.CampAnim ? 1 : 0;
     g_Cfg.CampEnable = g_Cfg.CampEnable ? 1 : 0;
@@ -583,6 +626,14 @@ int MsgText_GetOption(int id)
     case MSG_OPT_HINT_WIDTH:   return g_Cfg.HintMaxWidth;
     case MSG_OPT_HINT_BAR:     return g_Cfg.HintBarSide;
     case MSG_OPT_HINT_RADAR:   return g_Cfg.HintRadarShow;
+    case MSG_OPT_CAMP_POSX:    return g_Cfg.PosX;
+    case MSG_OPT_CAMP_POSY:    return g_Cfg.PosY;
+    case MSG_OPT_CAMP_BOTTOMMARGIN: return g_Cfg.CampBottomMargin;
+    case MSG_OPT_CAMP_FONT_PX: return g_Cfg.FontHeight;
+    case MSG_OPT_CAMP_BOLD:    return g_Cfg.Bold;
+    case MSG_OPT_HINT_FONT_PX: return g_Cfg.HintFontHeight;
+    case MSG_OPT_HINT_BOLD:    return g_Cfg.HintBold;
+    case MSG_OPT_HINT_OPACITY: return g_Cfg.HintOpacity;
     default:                   return 0;
     }
 }
@@ -626,8 +677,14 @@ void MsgText_SetOption(int id, int value)
         g_Cfg.CampBarSide = value;
         break;
     case MSG_OPT_HINT_SHOW:
+    {
+        int was = g_Cfg.HintShow;
+
         g_Cfg.HintShow = value ? 1 : 0;
+        /* 刚关掉: 提示环里现存的条目搬回战役框, 不让屏幕上已有的信息凭空消失。 */
+        if (was && !g_Cfg.HintShow) HintRingMigrate();
         break;
+    }
     case MSG_OPT_HINT_COLOR:
         g_Cfg.HintColorFollow = value ? 1 : 0;
         break;
@@ -652,9 +709,75 @@ void MsgText_SetOption(int id, int value)
     case MSG_OPT_HINT_RADAR:
         g_Cfg.HintRadarShow = value ? 1 : 0;
         break;
+    case MSG_OPT_CAMP_POSX:
+        if (value < 0) value = 0;
+        if (value > 2000) value = 2000;
+        g_Cfg.PosX = value;
+        break;
+    case MSG_OPT_CAMP_POSY:
+        if (value < 0) value = 0;
+        if (value > 2000) value = 2000;
+        g_Cfg.PosY = value;
+        break;
+    case MSG_OPT_CAMP_BOTTOMMARGIN:
+        if (value < 0) value = 0;
+        if (value > 2000) value = 2000;
+        g_Cfg.CampBottomMargin = value;
+        break;
+    case MSG_OPT_CAMP_FONT_PX:
+        if (value < 0) value = 0;       /* 0 = 跟着点阵字高 */
+        if (value > 64) value = 64;
+        g_Cfg.FontHeight = value;
+        break;
+    case MSG_OPT_CAMP_BOLD:
+        g_Cfg.Bold = value ? 1 : 0;
+        break;
+    case MSG_OPT_HINT_FONT_PX:
+        if (value < 0) value = 0;
+        if (value > 64) value = 64;
+        g_Cfg.HintFontHeight = value;
+        break;
+    case MSG_OPT_HINT_BOLD:
+        g_Cfg.HintBold = value ? 1 : 0;
+        break;
+    case MSG_OPT_HINT_OPACITY:
+        if (value < 0) value = 0;
+        if (value > 100) value = 100;
+        g_Cfg.HintOpacity = value;
+        break;
     default:
         break;
     }
+}
+
+/* 配置串 <-> 宽串 (设置页编辑用)。配置串是 UTF-8 (ini 同编码)。 */
+void MsgText_GetFace(int which, wchar_t* out, int cap)
+{
+    const char* s;
+
+    if (!out || cap <= 0) return;
+    out[0] = 0;
+    MsgText_EnsureInit();
+    s = which ? g_Cfg.HintFontFace : g_Cfg.FontFace;
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, out, cap);
+    out[cap - 1] = 0;
+}
+
+void MsgText_SetFace(int which, const wchar_t* face)
+{
+    char* dst;
+    int cap;
+
+    MsgText_EnsureInit();
+    dst = which ? g_Cfg.HintFontFace : g_Cfg.FontFace;
+    cap = (int)(which ? sizeof(g_Cfg.HintFontFace) : sizeof(g_Cfg.FontFace));
+    if (!face || !face[0]) face = L"msyh.ttc";
+    WideCharToMultiByte(CP_UTF8, 0, face, -1, dst, cap, NULL, NULL);
+    dst[cap - 1] = 0;
+    if (which)
+        ResolveFontFace(g_Cfg.HintFontFace, "hint", g_HintFace, L"Microsoft YaHei");
+    else
+        ResolveFontFace(g_Cfg.FontFace, "camp", g_CampFace, L"Microsoft YaHei");
 }
 
 void MsgText_SaveOptions(void)
@@ -667,7 +790,11 @@ void MsgText_SaveOptions(void)
 void MsgText_RestoreOptions(void)
 {
     MsgText_EnsureInit();
-    if (s_HaveSavedCfg) g_Cfg = s_SavedCfg;
+    if (!s_HaveSavedCfg) return;
+    g_Cfg = s_SavedCfg;
+    /* 字体串跟着回去, 解析结果也要重来 (否则界面上字没变回去)。 */
+    ResolveFontFace(g_Cfg.FontFace, "camp", g_CampFace, L"Microsoft YaHei");
+    ResolveFontFace(g_Cfg.HintFontFace, "hint", g_HintFace, L"Microsoft YaHei");
 }
 
 static const char* const kRadarNameDef[RADAR_NAME_N] =
@@ -806,6 +933,16 @@ static int      g_BodyLen[MAX_PICKED];          /* 合成串总字符数 */
 static int      g_Reveal[MAX_PICKED];           /* 本帧已揭示字符数 (DrawBox 填写) */
 static wchar_t  g_Compose[MAX_PICKED][MAX_NAME_W + MAX_TEXT_W + 4];
 
+/* HouseClass::UIName (YRpp +0x1602A) 已包含玩家名或本方国家的本地化名。
+ * 只为已确认的本地聊天补名, 无名系统/战役消息必须保持无名。 */
+static const wchar_t* LocalChatName(void)
+{
+    void* house = *(void**)ADDR_CURPLAYER;
+    if (!house || !IsPlausiblePtr(house)) return NULL;
+    const wchar_t* name = (const wchar_t*)((char*)house + 0x1602Au);
+    return name[0] ? name : NULL;
+}
+
 extern "C" __declspec(dllexport) DWORD __cdecl MsgText_AddMessageHook(void* regs){
     unsigned char* esp;
     const wchar_t* argName;
@@ -815,7 +952,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgText_AddMessageHook(void* regs
     unsigned p;
 
     MsgText_EnsureInit();
-    if (!g_Cfg.Enable) return 0;
 
     esp = *(unsigned char**)((char*)regs + OFF_REG_ESP);
     if (!esp || !IsPlausiblePtr(esp)) return 0;
@@ -826,14 +962,17 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgText_AddMessageHook(void* regs
     argTimeout = *(unsigned*)(esp + STK_ARG_TIMEOUT);
     argSP      = *(unsigned*)(esp + STK_ARG_SP);
 
-    /* 自己的话跟本地玩家色, 只补无名回声 (战役单机回声无名+默认色)。
-     * 有名消息游戏自带真方案号, 一律不动。
-     * 联机一律不插手: 联机回声游戏自带真名+真方案号, 且 MatchSent 只按文本
-     * 匹配, 同名同句会误伤别人的发言归属。
-     * 直接改栈上颜色参数: 原生标签和我方环同色 (纯显示, 非模拟)。 */
+    /* 0x55F0F5 的 AddMessage 是对话框提交的本地回声, 原生输入框也走这里。
+     * 指纹补充自绘输入路径; 不能给所有无名消息补本方名, 以免冒认系统提示。
+     * 原生按 Name 指针非空就追加冒号, 关闭前缀必须传 NULL 而不是空串。
+     * 环里始终保留真实名, 允许自绘框运行时切换 ChatNameSP。 */
     if (!OU_IsMP())
     {
-        if (ChatEdit_MatchSent(argMsg))
+        int sent = ChatEdit_MatchSent(argMsg);
+        int localEcho = *(unsigned*)esp == 0x0055F0FAu || sent;
+        if ((!argName || !argName[0]) && localEcho) argName = LocalChatName();
+        /* 发送指纹跟色沿用自绘启用时的范围, 原版输入不改颜色。 */
+        if (g_Cfg.Enable && sent)
         {
             int ls = LocalPlayerScheme(NULL);
             if (ls >= 0)
@@ -842,12 +981,19 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgText_AddMessageHook(void* regs
                 argColor = (unsigned)ls;
             }
         }
+        if (argName && !argName[0]) argName = NULL;
+        *(const wchar_t**)(esp + STK_ARG_NAME) = ChatEdit_ShowNameSP() ? argName : NULL;
     }
+
+    /* 名称规范化也服务于原生框, 不受自绘总开关影响。 */
+    if (!g_Cfg.Enable) return 0;
 
     {
         unsigned born = GtClockNow();
         unsigned exp = ExpireStamp((int)argTimeout);
         int sp = (int)argSP ? 1 : 0;
+        /* 提示框关掉: sp=1 退回战役框, 记成战役行 (不被 wantSp=0 的挑选挡掉)。 */
+        if (sp && HintGoesToCamp()) sp = 0;
         if (sp) RingPush(&g_HintRing, argName, argMsg, (int)argColor, exp, born, sp);
         else RingPush(&g_CampRing, argName, argMsg, (int)argColor, exp, born, sp);
     }
@@ -1061,10 +1207,15 @@ static int PickLines(MsgRing* R, int wantSp, int ignoreTimeout, unsigned tmoMul,
         const wchar_t* seg;
         int cnt = 0, off = 0;
         int cap;                       /* 这一条所属路的行数上限 */
+        int isRadar;                   /* 真·雷达行 (战役框里的不算, 见下) */
         if (m->sp != wantSp) continue;
+        /* 雷达事件的专用行数闸只在提示框 (wantSp=1) 里成立: 提示框关掉后雷达
+         * 事件也进战役环, 那时 radarCap = rowBudget - opRowCap 会算成 0,
+         * 当成雷达行就等于整条被丢掉。战役框里按普通行算。 */
+        isRadar = (m->kind == KIND_RADAR && wantSp != 0);
         /* ignoreTimeout (展开态) 只冻住雷达事件历史 —— 操作提示照常按引擎
          * 超时消失, 免得展开时框里堆着一堆早就该走的操作提示。 */
-        if (m->kind == KIND_RADAR)
+        if (isRadar)
         {
             if (!ignoreTimeout && !MsgVisibleMul(m, 1)) continue;
             cap = radarCap;
@@ -1112,7 +1263,7 @@ static int PickLines(MsgRing* R, int wantSp, int ignoreTimeout, unsigned tmoMul,
             if (*seg == L'\n') { seg++; off++; }
         }
         if (cnt <= 0) continue;
-        if (m->kind == KIND_RADAR) radarRows += cnt;
+        if (isRadar) radarRows += cnt;
         else opRows += cnt;
         g_LineCnt[picked] = cnt;
         g_Picked[picked] = i;
@@ -1628,9 +1779,9 @@ int MsgText_DrawFrame(void* surf, int bitLineH, int screenW,
         s_lastClock = nowC;
     }
 
-    /* 雷达事件: 扫引擎的活对象表, 把新冒出来的事件写进提示环。
-     * 放在排版之前 —— 本帧排版就能看见刚发生的事件。 */
-    if (g_Cfg.HintShow && g_Cfg.HintRadarShow) MsgText_PollRadar();
+    /* 雷达事件: 扫引擎的活对象表, 把新冒出来的事件写进提示环 (提示框关掉时
+     * 写进战役环, 见 RingPushRadar)。放在排版之前 —— 本帧排版就能看见刚发生的事件。 */
+    if (g_Cfg.HintRadarShow) MsgText_PollRadar();
 
     /* 战役框可见性: 有活消息, 或鼠标悬停 (已画出的框区/触发条);
      * 超时隐藏后, 鼠标移到触发条 (与顶部文本左右对齐的 1 行高绿框)
