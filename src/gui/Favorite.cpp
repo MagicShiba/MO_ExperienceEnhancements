@@ -22,26 +22,23 @@
 
 #define FAV_SECTION "Favorite"
 
-/* 星星字形 13x13 (面板按钮里那个是 11x11, 画在单位头顶要再大一圈)。 */
-#define FAV_STAR_W 13
-#define FAV_STAR_H 13
-/* 一槽每帧最多画几颗星: 大组选中的星星会糊成一片, 而且每颗星要 300 次像素
- * 混合, 上限按"看得清"定, 不按槽容量定 (箭头/跳转仍用整组)。 */
+/* 星星字形 11x10, 与选中面板按钮上的那颗等大。 */
+#define FAV_STAR_W 11
+#define FAV_STAR_H 10
+/* 一槽每帧最多画几颗星: 大组选中的星星会糊成一片, 而且每颗星要两趟共两百多次
+ * 像素混合, 上限按"看得清"定, 不按槽容量定 (箭头/跳转仍用整组)。 */
 #define FAV_STAR_MAX 32
 static const char* const k_FavStar[FAV_STAR_H] = {
-    ".............",
-    "......X......",
-    ".....XXX.....",
-    ".....XXX.....",
-    "XXXXXXXXXXXXX",
-    ".XXXXXXXXXXX.",
-    "..XXXXXXXXX..",
-    "...XXXXXXX...",
-    "...XXXXXXX...",
-    "..XX.....XX..",
-    ".XX.......XX.",
-    ".X.........X.",
-    "............."
+    ".....X.....",
+    "....XXX....",
+    "....XXX....",
+    "XXXXXXXXXXX",
+    ".XXXXXXXXX.",
+    "..XXXXXXX..",
+    "...XXXXX...",
+    "...XX.XX...",
+    "..XX...XX..",
+    ".XX.....XX."
 };
 
 typedef struct {

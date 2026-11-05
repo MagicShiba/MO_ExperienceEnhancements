@@ -51,6 +51,7 @@
 #include "NoApproach.h"
 #include "WeaponRange.h"
 #include "LightConvFix.h"
+#include "MOEVersion.h"
 
 #define ESC_SECTION          "EscMenu"
 #define ESC_REG_ESI          0x0Cu          /* Syringe REGISTERS: ESI */
@@ -103,6 +104,16 @@
 #define ESC_COLOR_LABEL_W    128
 #define ESC_LANG_N           3
 #define ESC_LANG_GAP         14
+
+/* 左栏最底部: 链接行 (自上而下 bilibili / GitHub, 末行右侧还有版本号) 与
+ * 语言切换。图标不用位图资源, 22x22 遮罩直接写像素 (见 kIconGithub)。 */
+#define ESC_LINK_N           2    /* 底部链接行数, 也是 s_LinkText 的下标数 */
+#define ESC_FOOT_H           32
+#define ESC_FOOT_ICON        22   /* 字形遮罩边长 */
+#define ESC_FOOT_PAD         3    /* 圆底比字形每边大这么多 (= 28 直径) */
+#define ESC_FOOT_GAP         8    /* 圆底与文字之间 */
+#define ESC_GH_URL           L"https://github.com/MagicShiba/MO_ExperienceEnhancements"
+#define ESC_BILI_URL         L"https://space.bilibili.com/335956233"
 #define ESC_TEXT_CELL_N      3   /* 文本页多格行的格数 (边距行: 左/顶/底) */
 
 #define ESC_SW_W             44
@@ -308,6 +319,13 @@ static int  s_Init = 0;
 static int  s_Enable = 1;
 static int  s_Sel = 0;
 static int  s_GuiMissing = 0;
+/* 本局是否联机 (GameMode 3/4): 面板照常显示, 会分叉的项置灰只读, 见 Esc_MpLocked。 */
+static int  s_Mp = 0;
+/* 左栏底部: 版本号 + 链接行。链接文案与网址被语言文件覆盖 (初值是兜底)。 */
+static wchar_t s_Ver[ESC_LABEL_CAP];
+static wchar_t s_LinkText[ESC_LINK_N][ESC_LABEL_CAP] = { L"bilibili", L"GitHub" };
+static wchar_t s_LinkUrl[ESC_LINK_N][ESC_LABEL_CAP] = { ESC_BILI_URL, ESC_GH_URL };
+static int     s_LinkHot = -1;   /* 鼠标所在链接行, -1 = 不在任何一行 */
 
 static const wchar_t* s_Missing = ESC_MISSING_EN;
 static const wchar_t* s_MissingNotice = ESC_MISSING_NOTICE_EN;
@@ -1000,6 +1018,17 @@ static void Esc_LoadFam(const char* const* keys, wchar_t* dst, int cap, int n,
                 (int)(sizeof((arr)[0]) / sizeof(wchar_t)),                    \
                 (int)(sizeof(arr) / sizeof((arr)[0])), (text))
 
+/* "v" + MOE_VERSION 转宽字符。版本号只有一份定义 (MOEVersion.h), 面板不另写。 */
+static void Esc_BuildVersion(void)
+{
+    int i;
+
+    s_Ver[0] = L'v';
+    for (i = 0; MOE_VERSION[i] && i < ESC_LABEL_CAP - 2; i++)
+        s_Ver[i + 1] = (wchar_t)MOE_VERSION[i];
+    s_Ver[i + 1] = 0;
+}
+
 static void Esc_LoadAllText(void)
 {
     if (Lang_IsChinese())
@@ -1070,6 +1099,12 @@ static void Esc_LoadAllText(void)
     ESC_LOAD_FAM(kPwrCapKey, s_TCellCapPwr, 1);
     /* 放置预览首段 (0) 显示"关闭", 其余是数字 */
     Esc_GuiText("GuiPlacePrevOff", s_GuiPlacePrev[0], 32);
+    /* 底部链接: 语言文件缺键时保留初值 */
+    Esc_LoadText("GuiBilibili", s_LinkText[0], ESC_LABEL_CAP);
+    Esc_LoadText("GuiBilibiliUrl", s_LinkUrl[0], ESC_LABEL_CAP);
+    Esc_LoadText("GuiGithub", s_LinkText[1], ESC_LABEL_CAP);
+    Esc_LoadText("GuiGithubUrl", s_LinkUrl[1], ESC_LABEL_CAP);
+    Esc_BuildVersion();
 }
 
 
@@ -1178,10 +1213,18 @@ static int Esc_ContentTop(const RECT* p, int missing)
     return missing ? y + ESC_WARN_H + ESC_WARN_GAP : y;
 }
 
-/* 左栏最底下那一条是语言切换: 页名列表到这条线为止。绘制与命中共用。 */
+/* 左栏底部的纵坐标, 绘制与命中共用 (从下往上排):
+ *   语言切换 (最后一行) -> 链接行 (它上面 ESC_LINK_N 行) -> 一条分隔线。
+ * 页名列表到分隔线为止, 见 Esc_Panel / Esc_HitLeft。 */
 static int Esc_LangY(const RECT* p)
 {
     return p->bottom - ESC_PAD - ESC_ROW_H;
+}
+
+/* 链接区整块的顶 (语言行之上一条分隔线再加 ESC_LINK_N 行)。页名列表到此为止。 */
+static int Esc_FootY(const RECT* p)
+{
+    return Esc_LangY(p) - ESC_SEP_GAP - ESC_FOOT_H * ESC_LINK_N;
 }
 
 static void Esc_IntToW(wchar_t* dst, unsigned value, int cap)
@@ -1482,6 +1525,25 @@ typedef struct {
     unsigned char kind;
     unsigned char item;
 } EscGuiRowInfo;
+
+/* 联机只读项: 改了会让本机与其它玩家分叉, 或模块本身在联机就不接管 (点了只会
+ * 让人以为生效)。明细与理由见 notes/ESC菜单.md §4 末尾"联机"。 */
+static int Esc_MpLocked(int page, int item)
+{
+    if (!s_Mp || page == EDIT_PAGE_TEXT) return 0;
+    switch (item)
+    {
+    case GUI_ITEM_GAMESPEED_ON:
+    case GUI_ITEM_GAMESPEED:
+    case GUI_ITEM_FPS:
+    case GUI_ITEM_PAUSE:
+    case GUI_ITEM_SKIN:
+    case GUI_ITEM_COLOR:
+    case GUI_ITEM_SAVE_SHOT:
+        return 1;
+    }
+    return 0;
+}
 
 /* GUI 页 (界面功能): 按键/底栏/侧栏/游戏控制。与显示设置页共用同一套
  * item/段名表, 只是行的归属不同。 */
@@ -2076,7 +2138,7 @@ static void Esc_Panel(void* surf, RECT* p, const wchar_t* title,
     for (i = 0; i < n; i++, rowY += ESC_ROW_H)
     {
         /* 底部那条是语言切换, 页名不许压上去 */
-        if (rowY + ESC_ROW_H > Esc_LangY(p) - ESC_SEP_GAP) break;
+        if (rowY + ESC_ROW_H > Esc_FootY(p) - ESC_SEP_GAP) break;
 
         if (rows[i].selected)
             Esc_Fill(surf, rowL, rowY, rowW, ESC_ROW_H, 0x7B, 0x20, 0x7B, 255);
@@ -3432,10 +3494,199 @@ static void Esc_DrawLangBottom(void* surf, const RECT* p)
     if (bodyH > ESC_ROW_H) bodyH = ESC_ROW_H;
     for (i = 0; i < ESC_LANG_N; i++)
         if (s_LangMode[i] == mode) value = i;
-    Esc_Fill(surf, p->left + ESC_PAD, y - ESC_SEP_GAP, p->right - p->left - ESC_PAD * 2,
-             1, 0x7B, 0x79, 0x7B, 160);
+    /* 两条分隔线: 页名 | 链接行 | 语言切换 (各自独立一条) */
+    Esc_Fill(surf, p->left + ESC_PAD, Esc_FootY(p) - ESC_SEP_GAP,
+             p->right - p->left - ESC_PAD * 2, 1, 0x7B, 0x79, 0x7B, 160);
+    Esc_Fill(surf, p->left + ESC_PAD, y - ESC_SEP_GAP,
+             p->right - p->left - ESC_PAD * 2, 1, 0x7B, 0x79, 0x7B, 160);
     Esc_LangLayout(p, xs, ws);
     Esc_DrawSegs(surf, xs, ws, s_LangLabel, ESC_LANG_N, value, y, bodyH);
+}
+
+/* ---------------- 链接行 (左栏底部, 语言切换上面) ----------------
+ * 每行: 暗色圆底 + 图标 + 文字, 整块可点, 开对应主页; 末行右侧另有版本号。
+ * 文案与网址来自语言文件 (GuiGithub / GuiBilibili 及两者的 *Url), 不显示网址。 */
+
+/* 22x22 覆盖率遮罩, 由 icons/icon_a_*.png 生成 (python tools/ghicon.py):
+ * 底色当透明、图案当覆盖率, 每格 0~f, 边缘自带抗锯齿。 */
+static const char* const kIconGithub[ESC_FOOT_ICON] = {
+    "000199620000000037a700",
+    "000afffe96adb86aeffe30",
+    "000cfbcfffffffffebdf50",
+    "000df617cd8789ec30bf50",
+    "000df8000000000001cf50",
+    "003ef4000000000000afe0",
+    "00afa00000000000002df4",
+    "00df6000000000000009f8",
+    "00ef5000000000000008fa",
+    "00cf600000000000000bf7",
+    "009f900000000000000ff5",
+    "005fe40000000000009fe1",
+    "000cfd500000000019ff60",
+    "0004cffca500008adff910",
+    "0ac319efff2006ffed5000",
+    "1dfc302afc0002ee510000",
+    "01dfb108fa0001de300000",
+    "003efc7cfa0001de300000",
+    "0004cffffa0001de300000",
+    "000015adfa0001de300000",
+    "00000006f80000ce300000",
+    "0000000160000056000000",
+};
+
+static const char* const kIconBili[ESC_FOOT_ICON] = {
+    "0000000000000000000000",
+    "0001be8000000005dd2000",
+    "0002eff90000005eff5000",
+    "00007eff700005eff90000",
+    "005bdffffddddefffec700",
+    "09ffffffffffffffffffc2",
+    "5ffffffffffffffffffff9",
+    "cff6000000000000003dfd",
+    "fff0000000000000000aff",
+    "fff0001100000012000aff",
+    "fff003dd300000be600aff",
+    "fff005ff500000ffa00aff",
+    "fff004ff400000ffa00aff",
+    "fff001bc1000008d300aff",
+    "fff0000000000000000aff",
+    "fff0000000000000000aff",
+    "fff0000000000000000aff",
+    "cff6000000000000003dfd",
+    "5ffffffffffffffffffff9",
+    "09ffffffffffffffffffc2",
+    "005bddddddddddddddc700",
+    "0000000000000000000000",
+};
+
+/* 每行的字形与颜色, 下标同 s_LinkText。 */
+static const char* const* const kLinkGlyph[ESC_LINK_N] = { kIconBili, kIconGithub };
+static const unsigned char kLinkRgb[ESC_LINK_N][3] = {
+    {   0, 161, 214 },   /* bilibili: 品牌蓝 */
+    { 255, 255, 255 }    /* GitHub: 白 */
+};
+
+/* 链接组: 圆底左缘 / 文字左缘 / 第 i 行的顶。绘制与命中共用这几个口径。 */
+static int Esc_LinkL(const RECT* p)
+{
+    return p->left + ESC_PAD + ESC_TEXT_INSET;
+}
+
+static int Esc_LinkTextX(const RECT* p)
+{
+    return Esc_LinkL(p) + ESC_FOOT_ICON + ESC_FOOT_PAD * 2 + ESC_FOOT_GAP;
+}
+
+static int Esc_LinkY(const RECT* p, int i)
+{
+    return Esc_FootY(p) + i * ESC_FOOT_H;
+}
+
+/* 圆底 + 字形。hot 时圆底提亮一档。 */
+static void Esc_LinkIcon(void* surf, int x, int y, int link, int hot)
+{
+    unsigned char* base;
+    const char* const* glyph = kLinkGlyph[link];
+    const unsigned char* rgb = kLinkRgb[link];
+    int w = ESC_FOOT_ICON, h = ESC_FOOT_ICON, pitch, i, j;
+    int ox = x, oy = y, d = ESC_FOOT_ICON + ESC_FOOT_PAD * 2;
+
+    Esc_Capsule(surf, x - ESC_FOOT_PAD, y - ESC_FOOT_PAD, d, d,
+                hot ? 46u : 24u, hot ? 48u : 26u, hot ? 56u : 32u, 235);
+
+    base = Esc_LockRect(surf, &x, &y, &w, &h, &pitch);
+    if (!base) return;
+    /* 一次锁定整块后逐格写像素: 逐格调 Esc_Fill 会锁/解锁近五百次。 */
+    for (j = 0; j < h; j++)
+    {
+        const char* m = glyph[oy + j - y];
+        unsigned short* row = (unsigned short*)(base + (size_t)(y + j) * pitch
+                                                + (size_t)x * 2);
+        for (i = 0; i < w; i++)
+        {
+            char c = m[ox + i - x];
+            int lv = c <= '9' ? c - '0' : c - 'a' + 10;
+
+            if (lv)
+                row[i] = Blend16(row[i], rgb[0], rgb[1], rgb[2], (unsigned)lv * 17u);
+        }
+    }
+    GtUnlock(surf);
+}
+
+static void Esc_DrawLinkRow(void* surf, const RECT* p, int link)
+{
+    int bodyH = Esc_TextHeight(ESC_BODY_PX, ESC_BODY_SLOT);
+    int y = Esc_LinkY(p, link);
+    int ty = y + (ESC_FOOT_H - bodyH) / 2;
+    int hot = s_LinkHot == link;
+    int tw = Esc_TextWidth(s_LinkText[link], ESC_BODY_PX, ESC_BODY_SLOT);
+    int vw;
+
+    Esc_LinkIcon(surf, Esc_LinkL(p), y + (ESC_FOOT_H - ESC_FOOT_ICON) / 2, link, hot);
+    /* 平时白字, 悬停转金; 可点性靠颜色, 不画下划线 */
+    Esc_Text(surf, s_LinkText[link], Esc_LinkTextX(p), ty, tw + 2,
+             ESC_BODY_PX, ESC_BODY_SLOT,
+             hot ? 255 : 236, hot ? 206 : 236, hot ? 110 : 236);
+
+    if (link != ESC_LINK_N - 1) return;
+    vw = Esc_TextWidth(s_Ver, ESC_BODY_PX, ESC_BODY_SLOT);
+    Esc_Text(surf, s_Ver, p->right - ESC_PAD - ESC_TEXT_INSET - vw, ty,
+             vw + 2, ESC_BODY_PX, ESC_BODY_SLOT, 150, 148, 150);
+}
+
+static void Esc_DrawFootLines(void* surf, const RECT* p)
+{
+    int i;
+
+    for (i = 0; i < ESC_LINK_N; i++) Esc_DrawLinkRow(surf, p, i);
+}
+
+static int Esc_LinkHit(const RECT* p, int mx, int my)
+{
+    int i;
+
+    if (mx < Esc_LinkL(p) - ESC_FOOT_PAD) return -1;
+    for (i = 0; i < ESC_LINK_N; i++)
+    {
+        int y = Esc_LinkY(p, i);
+
+        if (my >= y && my < y + ESC_FOOT_H
+            && mx < Esc_LinkTextX(p) + Esc_TextWidth(s_LinkText[i], ESC_BODY_PX,
+                                                     ESC_BODY_SLOT))
+            return i;
+    }
+    return -1;
+}
+
+/* 面板不逐帧重绘, 悬停色得自己触发一次重画。 */
+static void Esc_FootHover(HWND hDlg, int mx, int my)
+{
+    RECT a, b;
+    int hot;
+
+    if (!Esc_Layout(hDlg, &a, &b)) return;
+    hot = Esc_LinkHit(&a, mx, my);
+    if (hot == s_LinkHot) return;
+    s_LinkHot = hot;
+    Esc_Redraw(hDlg);
+}
+
+/* shell32 不在链接库里, 现取一次 ShellExecuteW。 */
+static void Esc_OpenLink(int link)
+{
+    typedef int (WINAPI* EscShellExec)(HWND, const wchar_t*, const wchar_t*,
+                                       const wchar_t*, const wchar_t*, int);
+    static EscShellExec s_open = NULL;
+
+    if (!s_open)
+    {
+        HMODULE lib = LoadLibraryA("shell32.dll");
+
+        if (lib) s_open = (EscShellExec)GetProcAddress(lib, "ShellExecuteW");
+    }
+    if (!s_open) { LogLine("esc: no ShellExecuteW"); return; }
+    s_open(NULL, L"open", s_LinkUrl[link], NULL, NULL, SW_SHOWNORMAL);
 }
 
 /* 分段行: 段落在第几行由控件流给, 文字与横条的相对位置见 Esc_SegText。 */
@@ -4050,6 +4301,10 @@ static void Esc_RowsPanel(void* surf, RECT* p, const EscPage* pg, HWND hDlg)
             if (EscIn(rowL, y, rowW, rh, hovX, hovY))
                 Esc_Fill(surf, rowL, y, rowW, rh, 123, 32, 123, 70);
             Esc_DrawPageRow(surf, rowL, y, rowW, bodyH, kind, item, pg);
+            /* 联机只读项: 整行压一层暗色。压在这里而不是让每个行类型自己
+             * 换颜色 —— 行类型会越加越多, 一处漏了就看着像"能点"。 */
+            if (Esc_MpLocked(pg->page, item))
+                Esc_Fill(surf, rowL, y, rowW, rh, 0, 0, 0, 120);
         }
     }
     s_ClipBot = 0;
@@ -4090,6 +4345,7 @@ static void Esc_DrawPanels(void* surf, HWND hDlg)
     if (!Esc_Layout(hDlg, &a, &b)) return;
 
     Esc_Panel(surf, &a, s_LeftTitle, leftRows, ESC_LEFT_ROWS);
+    Esc_DrawFootLines(surf, &a);
     Esc_DrawLangBottom(surf, &a);
     /* 菜单暂停主循环, 这两页仍须同步原版速度控件的改动。 */
     if (s_Sel == EDIT_PAGE_GUI || s_Sel == EDIT_PAGE_CTRL) GameSpeed_Poll();
@@ -4481,7 +4737,7 @@ static int Esc_HitLeft(const RECT* a, int mx, int my, int* index)
 
     for (i = 0, rowY = Esc_ContentTop(a, 0); i < ESC_LEFT_ROWS; i++, rowY += ESC_ROW_H)
     {
-        if (rowY + ESC_ROW_H > Esc_LangY(a) - ESC_SEP_GAP) break;
+        if (rowY + ESC_ROW_H > Esc_FootY(a) - ESC_SEP_GAP) break;
         if (EscIn(rowL, rowY, rowW, ESC_ROW_H, mx, my)) { *index = i; return 1; }
     }
     return 0;
@@ -5184,6 +5440,7 @@ static int Esc_WheelValue(HWND h, const RECT* b, int mx, int my, int delta)
 
     if (s_EditOn) return 0;
     if (!Esc_HitPage(b, pg, mx, my, &index, &rowTop)) return 0;
+    if (Esc_MpLocked(page, index)) return 0;   /* 联机只读项: 滚轮也不改值 */
     index = Esc_NumberItem(b, page, index, rowTop, mx, my);
     if (index < 0) return 0;
     EscNumber n = Esc_Number(page, index);
@@ -5314,11 +5571,15 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         }
         if (Esc_EditClick(h, &b, mx, my)) return 0;
         if (s_EditOn || s_QOn) Esc_EditCommit(h);
+        index = Esc_LinkHit(&a, mx, my);
+        if (index >= 0) { Esc_OpenLink(index); return 0; }
         index = Esc_LangHit(&a, mx, my);
         if (index >= 0) { Esc_ApplyLang(h, index); return 0; }
         if (Esc_HitLeft(&a, mx, my, &index)) { Esc_Select(h, index); return 0; }
         if (Esc_HitPage(&b, Esc_PageAt(s_Sel), mx, my, &index, &rowY))
         {
+            /* 联机只读项: 吞掉这次点击 (不往下走, 也不能漏给引擎的隐藏控件)。 */
+            if (Esc_MpLocked(s_Sel, index)) return 0;
             if (s_Sel == EDIT_PAGE_TEXT) Esc_TextApply(h, &b, index, mx, my, rowY);
             else Esc_ApplyGui(h, &b, s_Sel, index, mx, my, rowY);
             return 0;
@@ -5327,7 +5588,8 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_MOUSEMOVE:
         if (s_SlideDrag < 0 || s_Sel == EDIT_PAGE_TEXT)
         {
-            /* 不在拖动条时: 光标动了就刷悬停高亮 */
+            /* 不在拖动条时: 光标动了就刷悬停高亮 (行高亮 + 底部链接) */
+            Esc_FootHover(h, mx, my);
             Esc_HoverNudge(h, mx, my);
             break;
         }
@@ -5442,6 +5704,9 @@ static void Esc_OnShow(HWND hDlg)
     EscMenu_EnsureInit();
     if (!s_Enable) return;
 
+    /* 联机 (3/4) 也照常接管首页, 只把会分叉的项置灰 (Esc_MpLocked)。 */
+    s_Mp = OU_IsMP();
+
     /* 所有 ESC 对话框 (首页 + 各级子页) 都要做两件事:
      *   1) 告诉限帧模块"菜单开着" —— 只有这时才限速, 菜单关掉立刻放行
      *   2) 子类化 —— 面板自绘/编辑框轮询
@@ -5449,13 +5714,13 @@ static void Esc_OnShow(HWND hDlg)
     FrameCap_SetActiveDlg(hDlg);
     Esc_Subclass(hDlg);
 
-    if (OU_IsMP()) return;
-    /* Only the ESC home page has the Game Controls button; 3003 sub-pages do not. */
+    /* 只有首页带 1313 游戏控制按钮, 3003 子页没有。 */
     if (!GetDlgItem(hDlg, ESC_ID_GAMECONTROLS)) return;
 
     if (s_Host != hDlg)
     {
         s_CancelDown = 0;
+        s_LinkHot = -1;
         Esc_EditEnd(NULL);
         Esc_FlushPending();
         Esc_SaveSettings();
