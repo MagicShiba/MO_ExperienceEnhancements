@@ -1,36 +1,24 @@
-/* SoundFx.cpp - 按 sound.ini 的名字播引擎音效 (VocClass)。
- *
- * 名字 -> 下标走引擎自己的 FindIndex (大小写不敏感), 不自己扫表: 条目字段 Ares
- * 可能改过, 只有引擎的解析算权威。
- *
- * 播放在屏幕层, 没有"世界里的声源", 所以走 PlayGlobal 而不是 PlayAt, 距离感由
- * 音量与 pan 直接表达。音量参数是倍率, 见 EngineAddr.h。
- *
- * 循环音 (Control 含 loop) 必须自持一条 AudioController: PlayGlobal 把事件绑到
- * 它身上, 之后 End 才能淡出停掉; AudioIndex 必须填 ADDR_AUDIO_IDX_INST, 否则
- * End 认不出自己的事件, 静默空转。
- *
- * 纯本地发声: 只写音频事件表, 不碰模拟状态, 联机安全。
+/* SoundFx.cpp - 按 sound.ini 条目名调用引擎全局音效, 不碰模拟状态。
+ * 名字由引擎解析, 音量与声像直接传给 PlayGlobal。
+ * 循环音自持 AudioController; 调用方检查存活并限频重起, 不修改条目优先级。
  */
 
 #include <windows.h>
 #include "SoundFx.h"
 #include "EngineAddr.h"
 
-/* VocClass::PlayGlobal: fastcall(ecx=下标, edx=pan, 栈=音量 float / 控制器),
- * 回归时弹 8 字节 (ret 8) —— 与 GCC 的 __fastcall 对栈参的处理一致。 */
+/* PlayGlobal: fastcall(ecx=下标, edx=pan, 栈=音量/控制器), ret 8。 */
 typedef void (__fastcall *SfxPlayGlobalFn)(int idx, int pan, float vol,
                                            void* ctrl);
 
 /* VocClass::FindIndex: fastcall(ecx=名字) -> 下标 / -1。 */
 typedef int (__fastcall *SfxFindIndexFn)(const char* name);
 
-/* AudioController::End: thiscall (ecx=this), 无栈参 (ret)。
- * 32 位下 thiscall 与"ecx 传第一个参数、edx 是个无关的寄存器"的 fastcall 同构。 */
+/* 无栈参的 thiscall 用 fastcall 传 this, edx 不使用。 */
 typedef void (__fastcall *SfxCtrlEndFn)(void* self, void* edxUnused);
+typedef void* (__fastcall *SfxCtrlGetEventFn)(void* self, void* edxUnused);
 
-/* YRpp AudioController 的逐字段复制 (只在这里用, 所以不进 EngineAddr.h:
- * 那是"引擎地址与结构偏移"的出处, 这里要的是完整布局)。 */
+/* YRpp AudioController 布局, 20 字节。 */
 typedef struct {
     void*  Event;
     unsigned Stamp;
@@ -50,7 +38,7 @@ typedef struct {
 static SfxCache s_Cache[SFX_CACHE_N];
 static int      s_CacheN;
 static SfxCtrl  s_Loop[SFX_LOOP_N];
-static int      s_LoopIdx[SFX_LOOP_N] = {-1, -1};   /* 每通道在循环的音效下标, -1 = 无 */
+static int      s_LoopActive[SFX_LOOP_N];           /* 通道持有控制器 */
 
 int Sfx_Index(const char* name)
 {
@@ -60,7 +48,7 @@ int Sfx_Index(const char* name)
     for (i = 0; i < s_CacheN; i++)
         if (!lstrcmpiA(s_Cache[i].name, name)) return s_Cache[i].idx;
 
-    /* 表未装载时返回 -1: 不写缓存, 下一次调用再问 (读到音效表是要等的)。 */
+    /* 失败不缓存, 允许音效表装载后重试。 */
     i = ((SfxFindIndexFn)(size_t)FN_VOC_FINDINDEX)(name);
     if (i < 0) return -1;
     if (s_CacheN < SFX_CACHE_N)
@@ -108,19 +96,35 @@ int Sfx_LoopStart(int ch, const char* name, int pan, int vol)
     ctrl->Unused = 0;
 
     ((SfxPlayGlobalFn)(size_t)FN_VOC_PLAYGLOBAL)(idx, pan, Sfx_Vol(vol), ctrl);
-    /* PlayGlobal 末尾的 SetEvent 把事件写进控制器首字段: 这里还是空, 说明这次
-     * 没起声 (声音总开关关着 / 采样没装载 / 条目 Limit 已满)。不认成功, 让调用
-     * 方过一会儿再试。 */
+    /* 未绑定事件时由调用方限频重试。 */
     if (!ctrl->Event) return 0;
-    s_LoopIdx[ch] = idx;
+
+    s_LoopActive[ch] = 1;
     return 1;
+}
+
+int Sfx_LoopAlive(int ch)
+{
+    void* event;
+
+    if (ch < 0 || ch >= SFX_LOOP_N || !s_LoopActive[ch]) return 0;
+    /* 引擎核对类型与创建代次, 不能把复用后的事件当成自己的继续播放。 */
+    event = ((SfxCtrlGetEventFn)(size_t)FN_AUDIO_CTRL_GETEVENT)(&s_Loop[ch], NULL);
+    if (event && *(unsigned*)((char*)event + OFF_AUDIO_EVENT_STATE) != 4)
+        return 1;
+
+    /* GetEvent 可能已清 Event; Stop 仍负责清通道占用与剩余控制器字段。 */
+    Sfx_LoopStop(ch);
+    return 0;
 }
 
 void Sfx_LoopStop(int ch)
 {
-    if (ch < 0 || ch >= SFX_LOOP_N || s_LoopIdx[ch] < 0) return;
-    s_LoopIdx[ch] = -1;
-    ((SfxCtrlEndFn)(size_t)FN_AUDIO_CTRL_END)(&s_Loop[ch], NULL);
+    if (ch < 0 || ch >= SFX_LOOP_N || !s_LoopActive[ch]) return;
+    s_LoopActive[ch] = 0;
+    /* 设备关闭时不访问旧事件, 只清本地句柄。 */
+    if (*(volatile unsigned*)(size_t)ADDR_AUDIO_ENABLED)
+        ((SfxCtrlEndFn)(size_t)FN_AUDIO_CTRL_END)(&s_Loop[ch], NULL);
     s_Loop[ch].Event = NULL;
     s_Loop[ch].EventType = NULL;
 }

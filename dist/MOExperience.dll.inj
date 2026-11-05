@@ -153,3 +153,7 @@
 ; 后刷新光照, 见 src/gui/LightingPreset.cpp
 0x67E6C4 = Lighting_LoadReadyHook, 6
 0x683E75 = Lighting_ScenStartHook, 7
+; 本地音频: voice创建请求32个, 采样缓存预算8MiB。
+0x406C2C = AudioCapacity_VoiceInit, 5
+0x406E41 = AudioCapacity_VoiceReinit, 5
+0x403F33 = AudioCapacity_Cache, 5

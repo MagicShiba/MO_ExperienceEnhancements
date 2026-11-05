@@ -19,6 +19,8 @@ int  Sfx_Play(const char* name, int pan, int vol);
 
 /* 循环音 (sound.ini 里 Control 含 loop 的条目): 在指定通道起一条并持有它的
  * AudioController, 直到 Sfx_LoopStop。同一通道只跟一条, 换名字会先停旧的;
- * 不同通道互不影响。返回 1 = 正在循环。 */
+ * 不同通道互不影响, 不修改原始优先级。返回 1 = 已建立事件, 不保证始终可闻。
+ * 调用方周期检查 Alive, 返回 0 后限频重试 Start; 主动关闭时 Stop 取消循环。 */
 int  Sfx_LoopStart(int ch, const char* name, int pan, int vol);
+int  Sfx_LoopAlive(int ch);
 void Sfx_LoopStop(int ch);

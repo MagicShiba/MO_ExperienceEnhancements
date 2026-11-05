@@ -750,9 +750,17 @@ static int Fm_RadarRect(RectangleStruct* out)
 /* ---------------- 摘侧栏 gadget ----------------
  * 只碰两个地址确定的内联数组 (cameo / 页签), 落在静态 .data 段, 是引擎自己的
  * 侧栏对象。Disabled 写 GadgetClass+0x1E —— 引擎 GadgetClass::Disable (0x4E1460)
- * 写的同一个字节, 命中测试与输入都会跳过, 点击于是落到地图上。 */
+ * 写的同一个字节, 命中测试与输入都会跳过, 点击于是落到地图上。
+ *
+ * ⚠ 这个字节是引擎的**语义状态**, 不是本模块的开关: 页签按钮 +0x1E 表示"该页签
+ * 有没有内容" (AddCameo 0x6A6300 里 IsEnabled 为假就 Enable 0x4E1450, 页签空了
+ * 引擎自己 Disable), 绘制 0x69DEB0 按它选激活帧/空帧。所以只能"改前快照 →
+ * 改后写回", 绝不能统一写 0: 无脑清零会把步兵/防御/载具三个空页签画成亮图标,
+ * 而引擎之后再没有"页签从有到空"的事件把它关回去 → 一进图就 4 个页签全亮。 */
 
-static void Fm_DisarmAt(unsigned g, int colX, int topH)
+/* 几何校验通过才返回 1 并给出对象指针: 只摘/复真正属于侧栏列的那些,
+ * 顶部一簇 (资金条/那两个小按钮) 与别的窗口控件一律不碰。 */
+static int Fm_GadPick(unsigned g, int colX, int topH, unsigned char** out)
 {
     unsigned char* p = (unsigned char*)(size_t)g;
     int x, y, w, h;
@@ -760,15 +768,22 @@ static void Fm_DisarmAt(unsigned g, int colX, int topH)
     y = *(int*)(p + GAD_Y);
     w = *(int*)(p + GAD_W);
     h = *(int*)(p + GAD_H);
-    if (w <= 0 || h <= 0 || w > 512 || h > 512) return;
-    if (x < -512 || x > 8192) return;
-    if (y < -512 || y > 8192) return;
-    if (y < topH) return;              /* 顶上一簇 (资金条/那两个按钮) 要留 */
-    if (x < colX - 8) return;          /* 不在侧栏列里, 不归我们管 */
-    if (x > colX + 256) return;
-    p[GAD_DISAB] = 1;
-    p[GAD_REDRAW] = 1;
+    if (w <= 0 || h <= 0 || w > 512 || h > 512) return 0;
+    if (x < -512 || x > 8192) return 0;
+    if (y < -512 || y > 8192) return 0;
+    if (y < topH) return 0;            /* 顶上一簇 (资金条/那两个按钮) 要留 */
+    if (x < colX - 8) return 0;        /* 不在侧栏列里, 不归我们管 */
+    if (x > colX + 256) return 0;
+    *out = p;
+    return 1;
 }
+
+/* 摘之前的 Disabled 快照。s_GadSnap = 0 表示"本模块没摘过", 此时侧栏控件的
+ * 状态完全是引擎的, 恢复路径一个字节都不许写。 */
+static unsigned char s_CameoDisab[FM_CAMEO_N];
+static unsigned char s_TabDisab[FM_TAB_N];
+static int s_GadSnap = 0;
+
 
 /* 顶部雷达 gadget 的屏幕矩形不会随 SidebarBounds.X 自动移动。
  * 全隐藏只禁用这三个控件, 切回后恢复进入全隐藏前的 Disabled 状态。 */
@@ -804,42 +819,49 @@ static int s_DisarmFrame = -1;
 static void Fm_DisarmSidebarGadgets(int colX, int topH)
 {
     int i, fr = *(int*)(size_t)ADDR_FRAME_COUNT;
+    unsigned char* p;
     /* 帧门: 同帧重复 poll 写同值, 每帧摘一次即可 (引擎帧内 Enable 回去下帧重摘)。 */
     if (fr == s_DisarmFrame) return;
     s_DisarmFrame = fr;
     for (i = 0; i < FM_CAMEO_N; i++)
-        Fm_DisarmAt(ADDR_CAMEO_ARRAY + (unsigned)i * FM_CAMEO_STRIDE, colX, topH);
+    {
+        if (!Fm_GadPick(ADDR_CAMEO_ARRAY + (unsigned)i * FM_CAMEO_STRIDE, colX, topH, &p)) continue;
+        /* 首次进摘态记快照; 之后读到 0 说明是引擎自己开的 (隐藏态里造出了
+         * 兵营/工厂), 跟着更新, 免得切回完整显示后那个页签还是暗的。 */
+        if (!s_GadSnap || p[GAD_DISAB] == 0) s_CameoDisab[i] = p[GAD_DISAB];
+        p[GAD_DISAB] = 1;
+        p[GAD_REDRAW] = 1;
+    }
     for (i = 0; i < FM_TAB_N; i++)
-        Fm_DisarmAt(ADDR_TAB_ARRAY + (unsigned)i * FM_TAB_STRIDE, colX, topH);
+    {
+        if (!Fm_GadPick(ADDR_TAB_ARRAY + (unsigned)i * FM_TAB_STRIDE, colX, topH, &p)) continue;
+        if (!s_GadSnap || p[GAD_DISAB] == 0) s_TabDisab[i] = p[GAD_DISAB];
+        p[GAD_DISAB] = 1;
+        p[GAD_REDRAW] = 1;
+    }
+    s_GadSnap = 1;
 }
 
-/* "完全显示"模式: 把我们摘掉的 gadget 恢复回可用 (清 Disabled 标志)。
- * 只碰同一个数组里同样通过校验的那些, 不越界写。 */
-static void Fm_RearmAt(unsigned g, int colX, int topH)
-{
-    unsigned char* p = (unsigned char*)(size_t)g;
-    int x, y, w, h;
-    x = *(int*)(p + GAD_X);
-    y = *(int*)(p + GAD_Y);
-    w = *(int*)(p + GAD_W);
-    h = *(int*)(p + GAD_H);
-    if (w <= 0 || h <= 0 || w > 512 || h > 512) return;
-    if (x < -512 || x > 8192) return;
-    if (y < -512 || y > 8192) return;
-    if (y < topH) return;
-    if (x < colX - 8) return;
-    if (x > colX + 256) return;
-    p[GAD_DISAB] = 0;
-    p[GAD_REDRAW] = 1;
-}
-
+/* "完全显示"模式: 按摘之前的快照写回。没摘过 (s_GadSnap=0) 就什么都不做 ——
+ * 这是"空页签也显示"的修复点, 之前这里是无条件清 Disabled。 */
 static void Fm_RearmSidebarGadgets(int colX, int topH)
 {
     int i;
+    unsigned char* p;
+    if (!s_GadSnap) return;
     for (i = 0; i < FM_CAMEO_N; i++)
-        Fm_RearmAt(ADDR_CAMEO_ARRAY + (unsigned)i * FM_CAMEO_STRIDE, colX, topH);
+    {
+        if (!Fm_GadPick(ADDR_CAMEO_ARRAY + (unsigned)i * FM_CAMEO_STRIDE, colX, topH, &p)) continue;
+        p[GAD_DISAB] = s_CameoDisab[i];
+        p[GAD_REDRAW] = 1;
+    }
     for (i = 0; i < FM_TAB_N; i++)
-        Fm_RearmAt(ADDR_TAB_ARRAY + (unsigned)i * FM_TAB_STRIDE, colX, topH);
+    {
+        if (!Fm_GadPick(ADDR_TAB_ARRAY + (unsigned)i * FM_TAB_STRIDE, colX, topH, &p)) continue;
+        p[GAD_DISAB] = s_TabDisab[i];
+        p[GAD_REDRAW] = 1;
+    }
+    s_GadSnap = 0;
 }
 
 /* 侧栏列起点 (cameo/页签/雷达摆放与鼠标判定的基准)。视口铺满后引擎算出来错 168,
@@ -1546,8 +1568,9 @@ void FM_Poll(void)
     }
     else if (!s_GadgetsArmed)
     {
-        /* 恢复可用只需做一次: 引擎不会自己把 Disabled 置回去 (它只 Enable 自己
-         * 摘的那些), 所以进 FULL 态时补一遍就够, 之后每帧不再碰这 244 个对象。*/
+        /* 恢复只需做一次: 按摘之前的快照写回, 没摘过就一个字节都不碰 ——
+         * 页签的 Disabled 是引擎表达"这一页有没有内容"的位, 清 0 会让空页签
+         * 全部亮出来 (见上面 Fm_GadPick 的说明)。*/
         Fm_RearmSidebarGadgets(colX, topH);
         s_GadgetsArmed = 1;
     }

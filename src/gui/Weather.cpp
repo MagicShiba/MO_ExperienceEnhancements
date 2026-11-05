@@ -12,7 +12,8 @@
  * 落地: 按节拍在**整个视图区**里随机取点 (不按上下半屏筛 —— 这是正交俯视, 屏幕上方
  * 同样是地面), 溅起几颗水滴/火星, 不查地形高度也不拿视图底边当地面 (底边只是屏幕
  * 边界); 火雨再留一团烟。
- * 云层: 视图区上盖一层自平铺 Perlin 云图。压暗是云影, 混向雾色是雾气; 独立开关,
+ * 云层: 视口上盖一层自平铺 Perlin 云图, **贴在世界坐标上** (相机右移 1px, 屏幕上的
+ * 云纹左移 1px), 按逻辑时间整像素漂移。压暗是云影, 混向雾色是雾气; 独立开关,
  * 与雨/雪无关。
  *
  * 图像档的节奏: 引擎动画按逻辑帧播 —— art.ini 的 Rate 在读 ini 时就已经换算成
@@ -38,7 +39,7 @@
 #include "OrderUtil.h"
 #include "SoundFx.h"
 #include "LightingPreset.h"
-#include <emmintrin.h>          /* 云层落笔的 SSE2 行填充 */
+#include "WeatherCloudBlend.h"
 
 /* ---------------- 引擎结构 (只读) ---------------- */
 
@@ -1963,16 +1964,9 @@ static void Wth_PxRip(unsigned char* base, int pitch, int ox, int oy,
  * 烘焙完按目标覆盖率**二分校准**阈值: 上面的 remap 会把面积再缩一次 (云心要求
  * detail 也过阈值), 直接拿覆盖率当阈值的话 45% 只剩零头。
  *
- * 两条必须守住的点:
- *   1) 场是 (cols+1)*(rows+1) 的堆上数组, 按**实际视图尺寸**分配。固定尺寸静态
- *      数组在大视图下越界, 会把后面的全局变量当 alpha 读成整片黑块。
- *   2) 落笔时在 8x8 块内做 smoothstep 插值: 整块共用一个 alpha 有台阶, 线性插值
- *      只有 C0 连续, 云边陡处会有一圈 Mach 带 (像 8x8 马赛克网)。
- *
- * 落笔是对整屏同一比例的**线性混合** (c*m8 + tgt*(256-m8), tgt=0 即压暗), 均值不变
- * => 色比不漂, 不会"盖一层灰"或水面发紫。SSE2 与标量同一条公式, 逐位一致。 */
-#define WTH_CLOUD_BLK    8
-
+ * 256² 浓度图只在风格/口径变化时生成, 再预展开成像素密度的周期 alpha 图。
+ * 每帧只按世界坐标偏移顺序读取, 不做逐像素噪声、插值或除法。
+ * 混色在最终 5/6 位通道量化前加入屏幕固定 Bayer 抖动, 标量与 SSE2 逐位一致。 */
 #define CLD_TEX        256      /* 云图边长 (2 的幂: 采样回绕靠 & (CLD_TEX-1)) */
 #define CLD_MASK       (CLD_TEX - 1)
 /* y 方向格数上限: 压扁会把 y 的格数乘 100/sq (常见 2 倍), 最细一层就成了 3~4 个纹素
@@ -2142,23 +2136,36 @@ static int Wth_CldFill(int thr, int edge255, unsigned char* out)
 {
     const int n = CLD_TEX * CLD_TEX;
     int i, hits = 0;
+    float inverse[256];
+    unsigned char root[256];
 
+    /* 阈值校准会多次扫描同一张图, 非线性变换按 256 种输入建表即可。 */
+    for (i = 0; i < 256; i++)
+    {
+        float cv = (float)(i - thr) / (float)edge255;
+        if (cv <= 0.0f) inverse[i] = 0.0f;
+        else
+        {
+            if (cv > 1.0f) cv = 1.0f;
+            cv = cv * cv * (3.0f - 2.0f * cv);
+            inverse[i] = 1.0f / cv;
+        }
+        if (out) root[i] = (unsigned char)Wth_ISqrt((unsigned)(i * 255));
+    }
     for (i = 0; i < n; i++)
     {
-        float cv = (float)((int)g_CldBase[i] - thr) / (float)edge255;
+        float inv = inverse[g_CldBase[i]];
         float d;
 
-        if (cv <= 0.0f) { if (out) out[i] = 0; continue; }
-        if (cv > 1.0f) cv = 1.0f;
-        cv = cv * cv * (3.0f - 2.0f * cv);       /* smoothstep: 阈值处导数连续 */
-        d = ((float)g_CldDet[i] * (1.0f / 255.0f) - (1.0f - cv)) / cv;
+        if (inv == 0.0f) { if (out) out[i] = 0; continue; }
+        d = 1.0f - (1.0f - (float)g_CldDet[i] * (1.0f / 255.0f)) * inv;
         if (d < 0.0f) d = 0.0f; else if (d > 1.0f) d = 1.0f;
         if (d > 0.03f) hits++;
         if (out)
         {
             /* 开方: remap 的中性值落在 0.5, 直接当 alpha 会整体偏淡, 开方把中段抬
              * 起来, 云心才是"实"的而不是一层薄纱 */
-            out[i] = (unsigned char)Wth_ISqrt((unsigned)((int)(d * 255.0f + 0.5f) * 255));
+            out[i] = root[(int)(d * 255.0f + 0.5f)];
         }
     }
     return hits;
@@ -2209,6 +2216,7 @@ static void Wth_CldFogFill(int floor255)
     const int cutHi = n - cutLo;
     int hist[256];
     int i, lo = 0, hi = 255, cum;
+    unsigned char remap[256];
 
     for (i = 0; i < 256; i++) hist[i] = 0;
     for (i = 0; i < n; i++) hist[g_CldBase[i]]++;
@@ -2224,16 +2232,17 @@ static void Wth_CldFogFill(int floor255)
     }
     if (hi <= lo) hi = lo + 1;
 
-    for (i = 0; i < n; i++)
+    for (i = 0; i < 256; i++)
     {
-        float t = (float)((int)g_CldBase[i] - lo) / (float)(hi - lo);
+        float t = (float)(i - lo) / (float)(hi - lo);
 
         if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
         t = t * t * (3.0f - 2.0f * t);      /* smoothstep */
         t = t * t;                          /* 中段压低: 薄处更薄, 浓处不变 */
-        g_CldTex[i] = (unsigned char)((float)floor255 +
-                                      (float)(255 - floor255) * t + 0.5f);
+        remap[i] = (unsigned char)((float)floor255 +
+                                  (float)(255 - floor255) * t + 0.5f);
     }
+    for (i = 0; i < n; i++) g_CldTex[i] = remap[g_CldBase[i]];
 }
 
 /* 烘焙云图。换风格或切换云影/雾气 (两套浓度场) 会重烘一次, 其余时候只是查表。 */
@@ -2346,342 +2355,112 @@ static void Wth_CloudBake(void)
     }
 }
 
-/* 屏幕像素 -> 云层浓度 0..255。双线性; 负坐标靠 >>8 / &CLD_MASK 自然取模。
- * 两轴同一个平铺周期 —— 云块"扁"是烘焙时压进纹理的, 这里 1:1 采样即可。雾气共用
- * 同一个周期: 雾团尺度靠烘焙的低频层调 (bPer 小 = 团大), 采样端放大只会压成一片白纱。 */
-static int Wth_CloudSample(int wx, int wy)
-{
-    int tile = g_Cfg.cloudScale * CLD_TILE_MUL;
-    int qx, qy, fx, fy, x0, y0, x1, a, b;
-    const unsigned char* r0;
-    const unsigned char* r1;
+/* 当前口径只保留一张预展开 alpha 图。周期上限 4096, 内存上限 16MiB;
+ * 极大 CloudScale 使用受限周期, 不让显示选项占掉 32 位游戏的大块地址空间。 */
+#define CLD_ALPHA_MAX 4096
+static unsigned char* g_CldAlpha;
+static int g_CldPeriod, g_CldAlphaKey = -1, g_CldAlphaOpacity = -1;
+static int g_CldBakedFloor = -1;
+static WthCloudTone g_CldTone;
 
-    if (tile < CLD_TEX) tile = CLD_TEX;
-    qx = (int)((long long)wx * (CLD_TEX * 256) / tile);
-    qy = (int)((long long)wy * (CLD_TEX * 256) / tile);
-    x0 = (qx >> 8) & CLD_MASK;
-    y0 = (qy >> 8) & CLD_MASK;
-    fx = qx & 255;
-    fy = qy & 255;
-    x1 = (x0 + 1) & CLD_MASK;
-    r0 = g_CldTex + y0 * CLD_TEX;
-    r1 = g_CldTex + (((y0 + 1) & CLD_MASK) * CLD_TEX);
-    a = r0[x0] + ((r0[x1] - r0[x0]) * fx >> 8);
-    b = r1[x0] + ((r1[x1] - r1[x0]) * fx >> 8);
-    return a + ((b - a) * fy >> 8);
-}
-
-/* 一处云层的强度 = 烘进图里的浓度 × 不透明度。云影是压暗的 alpha, 雾气是混色的
- * alpha, 同一份值。 */
-static int Wth_CloudAlpha(int wx, int wy)
-{
-    return Wth_CloudSample(wx, wy) * g_Cfg.cloudOpacity / 255;
-}
-
-static unsigned char* g_CldF;      /* alpha 场: g_CldStride * (rows+1) 字节 */
-static int g_CldStride, g_CldCap;
-static int g_CldCols, g_CldRows;
-static int g_CldW, g_CldH, g_CldKeyX, g_CldKeyY, g_CldKeyBake, g_CldHave;
-
-/* 场按需扩容 (只在视图变大时), 放不下就当没有云影, 不会越界。 */
-static int Wth_CloudAlloc(int cols, int rows)
-{
-    int need = (cols + 1) * (rows + 1);
-
-    if (need <= g_CldCap) return 1;
-    if (g_CldF) LocalFree(g_CldF);
-    g_CldF = (unsigned char*)LocalAlloc(LMEM_FIXED, (SIZE_T)need);
-    g_CldCap = g_CldF ? need : 0;
-    return g_CldF != NULL;
-}
-
-static void Wth_CloudBuild(int w, int h)
-{
-    int cols = (w + WTH_CLOUD_BLK - 1) / WTH_CLOUD_BLK;
-    int rows = (h + WTH_CLOUD_BLK - 1) / WTH_CLOUD_BLK;
-    int dx = g_Tick * CLD_DRIFT_X / 60;
-    int dy = g_Tick * CLD_DRIFT_Y / 60;
-    int bx, by;
-
-    g_CldCols = cols;
-    g_CldRows = rows;
-    if (!Wth_CloudAlloc(cols, rows))
-    {
-        g_CldCols = g_CldRows = 0;
-        g_CldHave = 0;                  /* 下次再试, 别把"没分配"记成"已就绪" */
-        return;
-    }
-    g_CldStride = cols + 1;
-    Wth_CloudBake();        /* 幂等; 只有第一次开云影时才真跑 */
-    /* 多采一行一列: 插值时要用到右/下邻居, 不用在落笔时再判边界 */
-    for (by = 0; by <= rows; by++)
-    {
-        unsigned char* row = g_CldF + by * g_CldStride;
-        int wy = g_CamY + by * WTH_CLOUD_BLK + dy;
-
-        for (bx = 0; bx <= cols; bx++)
-            row[bx] = (unsigned char)Wth_CloudAlpha(g_CamX + bx * WTH_CLOUD_BLK + dx, wy);
-    }
-}
-
-/* 场只在镜头/漂移走了 4 像素或尺寸变了时重算: 云层的梯度很缓, 挪 4 像素引起的
- * alpha 变化不到 1, 肉眼看不出来, 但省掉了每帧几万次查表。
- * 换风格或换口径 (云影/雾气, 两套场都要重烘) 也要重算, 所以烘焙键一起进缓存键。 */
-static void Wth_CloudEnsure(int w, int h)
-{
-    int kx = (g_CamX + g_Tick * CLD_DRIFT_X / 60) >> 2;
-    int ky = (g_CamY + g_Tick * CLD_DRIFT_Y / 60) >> 2;
-    int key = g_Cfg.cloudStyle * 2 + (g_CloudMode == WEATHER_CLOUD_FOG);
-
-    if (g_CldHave && w == g_CldW && h == g_CldH && kx == g_CldKeyX &&
-        ky == g_CldKeyY && g_CldKeyBake == key)
-        return;
-    g_CldW = w;
-    g_CldH = h;
-    g_CldKeyX = kx;
-    g_CldKeyY = ky;
-    g_CldKeyBake = key;
-    g_CldHave = 1;
-    Wth_CloudBuild(w, h);
-}
-
-/* 4x4 有序抖动 (Bayer)。16bpp 的 5/6/5 在暗色上只有几档可走: 深蓝水 (5 位 R=6,
- * 6 位 G=12, 5 位 B=8) 压 20% 时, R 要掉 8% 才走一格、B 要掉 12.5% 才走一格, 于是
- * 一条平滑的 alpha 被量化成五六级台阶 —— 画面上就是一片片"断层"; 各通道还各自取整,
- * 色相比会漂 15% (深蓝发紫红就是这么来的)。
- * 把固定的 +128 换成按 4x4 Bayer 走的 8..248: 取整变成邻域里的比例混合, **均值不变**
- * (所以色相不变), 台阶变成细噪点。
- * 相位固定跟着屏幕走: 块起点恒为 8 的倍数, 所以块内相位恒为 i&3。 */
-static const unsigned char kBayer[16] = {
-     0,  8,  2, 10,
-    12,  4, 14,  6,
-     3, 11,  1,  9,
-    15,  7, 13,  5
-};
-
-/* 落笔混向的目标色 (与通道同宽: 5 位下 0..31, 6 位下 0..63)。0 = 压暗 (云影),
- * 非 0 = 混向雾色 (Wth_CldToneCalc 每帧按环境光算)。**不得超过通道满值**是硬要求:
- * 越界后 (r<<rsh)|(g<<5)|b 会把溢出位串进邻通道, 屏幕上就是彩色噪点。 */
-static int g_CldTgt[3] = { 0, 0, 0 };
-
-/* 云层的一个像素: 各通道线性混合到目标色, 权重 (256-m8)/256 (m8 = 256-alpha),
- * 余数按 dith/256 抖动。tgt 取 0 就是压暗, 取雾色就是泛起白雾。
- * 标量与 SSE2 同一条公式, 逐位一致。 */
-static __inline unsigned short Wth_TonePx(unsigned short v, unsigned m8,
-                                          unsigned rsh, unsigned gm,
-                                          unsigned dith)
-{
-    unsigned r, g, b, a = 256u - m8;
-
-    r = (((v >> rsh) & 31u) * m8 + (unsigned)g_CldTgt[0] * a + dith) >> 8;
-    g = (((v >> 5) & gm) * m8 + (unsigned)g_CldTgt[1] * a + dith) >> 8;
-    b = ((v & 31u) * m8 + (unsigned)g_CldTgt[2] * a + dith) >> 8;
-    return (unsigned short)((r << rsh) | (g << 5) | b);
-}
-
-/* 块内插值的权重表: 8 个像素中心在块内的位置 (0.5/8 … 7.5/8) 过 smoothstep,
- * 再放大到 256。**必须用 smoothstep 而不是 i/8 的线性权重** —— 线性插值只有 C0
- * 连续, 云边陡的地方 (alpha 每 8 像素跳十几级) 会在块边界留下一圈 Mach 带, 看着
- * 就是一张 8x8 的马赛克网。 */
-static const unsigned char kCldW[8] = { 3, 24, 59, 104, 152, 197, 232, 253 };
-
-/* 一行最多 8 像素的逐像素落笔: 块内 alpha 栅坡 + Bayer 抖动。标量版整行与
- * SSE2 版右缘残块共用。差值先 >>1 再乘权重, 是为了让 16 位乘法不溢出
- * (|差|<=255 x 253); 代价是负的奇数差会多算一档 (最多 2 级 alpha), 所以夹回。
- * phase = 屏幕行号 & 3 (抖动相位)。 */
-static __inline void Wth_CldRow(unsigned short* dp, int n, int at, int ab,
-                                int phase, unsigned rsh, unsigned gm)
-{
-    const unsigned char* dr = kBayer + phase * 4;
-    int i;
-
-    for (i = 0; i < n; i++)
-    {
-        int a = at + ((((ab - at) >> 1) * kCldW[i]) >> 7);
-
-        if (a < 0) a = 0; else if (a > 255) a = 255;
-        if (a)
-            dp[i] = Wth_TonePx(dp[i], 256u - (unsigned)a, rsh, gm,
-                               (unsigned)dr[i & 3] * 16u + 8u);
-    }
-}
-
-/* 块循环 + 块内插值: 标量与 SSE2 共用同一份遍历与取整公式。
- * 行填充器按编译期类型选择, 不在每 8 像素上做间接调用。 */
-struct WthCldScalarRow {
-    static __inline void Fill(unsigned short* dp, int n, int at, int ab,
-                             int phase, unsigned rsh, unsigned gm)
-    {
-        Wth_CldRow(dp, n, at, ab, phase, rsh, gm);
-    }
-};
-
-/* 同一份循环分别在标量与 SSE2 目标下实例化, 使 SIMD 行函数可以直接内联。 */
-#define WTH_CLD_FILL_ROWS(NAME, ATTR) \
-template<class Row> ATTR static void NAME(unsigned char* base, int pitch, int ox, int oy, \
-                              int cols, int rows, int w, int h, \
-                              unsigned rsh, unsigned gm) \
-{ \
-    int by, bx; \
- \
-    for (by = 0; by < rows; by++) \
-    { \
-        const unsigned char* a0 = g_CldF + by * g_CldStride; \
-        const unsigned char* a1 = a0 + g_CldStride; \
-        int y0 = by * WTH_CLOUD_BLK; \
-        int y1 = y0 + WTH_CLOUD_BLK; \
- \
-        if (y1 > h) y1 = h; \
-        for (bx = 0; bx < cols; bx++) \
-        { \
-            int v00 = a0[bx], v10 = a0[bx + 1]; \
-            int v01 = a1[bx], v11 = a1[bx + 1]; \
-            int x0 = bx * WTH_CLOUD_BLK; \
-            int x1 = x0 + WTH_CLOUD_BLK; \
-            int n, y; \
- \
-            if ((v00 | v10 | v01 | v11) < 2) continue;   /* 整块几乎全透明 */ \
-            if (x1 > w) x1 = w; \
-            n = x1 - x0; \
-            for (y = y0; y < y1; y++) \
-            { \
-                int fy = kCldW[y - y0];                  /* smoothstep 权重 0..253 */ \
-                int at = v00 + ((((v01 - v00) >> 1) * fy) >> 7); \
-                int ab = v10 + ((((v11 - v10) >> 1) * fy) >> 7); \
-                unsigned short* dp = (unsigned short*) \
-                    (base + (size_t)(oy + y) * (size_t)pitch) + ox + x0; \
- \
-                if (at < 0) at = 0; else if (at > 255) at = 255; \
-                if (ab < 0) ab = 0; else if (ab > 255) ab = 255; \
-                if ((at | ab) < 2) continue; \
-                Row::Fill(dp, n, at, ab, y & 3, rsh, gm); \
-            } \
-        } \
-    } \
-}
-
-WTH_CLD_FILL_ROWS(Wth_CloudFillRows, )
-
-#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
-#define WTH_HAVE_SSE2 1
-/* PF_XMMI64_INSTRUCTIONS_AVAILABLE = 10 (SSE2)。老 CPU 自动退回标量。 */
-static int s_WthSse2 = -1;
+#ifdef WTH_HAVE_SSE2
 static int WthSse2Ok(void)
 {
-    if (s_WthSse2 < 0) s_WthSse2 = IsProcessorFeaturePresent(10) ? 1 : 0;
-    return s_WthSse2;
+    static int available = -1;
+    if (available < 0) available = IsProcessorFeaturePresent(10) ? 1 : 0;
+    return available;
 }
-
-/* SSE2 常量只在整幅入口检查, 换 565/555 或雾色变了时重建一次。 */
-static unsigned s_CldRsh = 0xFFFFFFFFu, s_CldGm;
-static int s_CldTgtKey[3] = { -1, -1, -1 };
-static int s_CldTint;                 /* 目标色非 0 (= 雾气): 0 就跳过混合那一项 */
-static __m128i s_CldM5, s_CldMg, s_CldK256, s_CldZero, s_CldKw, s_CldC5, s_CldCrs;
-static __m128i s_CldKd[4];
-/* 混向的目标色: 通道值本身、通道值*256, 两者在整幅入口算一次。三通道各一份 ——
- * 雾色带色偏时 R/B 不再相同, 不能三通道共用一个。 */
-static __m128i s_CldTgt[3], s_CldTgt256[3];
-
-__attribute__((target("sse2")))
-static void Wth_CldSse2Init(unsigned rsh, unsigned gm)
-{
-    if (rsh != s_CldRsh || gm != s_CldGm ||
-        s_CldTgtKey[0] != g_CldTgt[0] || s_CldTgtKey[1] != g_CldTgt[1] ||
-        s_CldTgtKey[2] != g_CldTgt[2])
-    {
-        int k;
-
-        s_CldRsh = rsh;
-        s_CldGm = gm;
-        s_CldM5 = _mm_set1_epi16(0x1F);
-        s_CldMg = _mm_set1_epi16((short)gm);
-        s_CldK256 = _mm_set1_epi16(256);
-        s_CldZero = _mm_setzero_si128();
-        s_CldKw = _mm_setr_epi16(kCldW[0], kCldW[1], kCldW[2], kCldW[3],
-                                 kCldW[4], kCldW[5], kCldW[6], kCldW[7]);
-        s_CldC5 = _mm_cvtsi32_si128(5);
-        s_CldCrs = _mm_cvtsi32_si128((int)rsh);
-        s_CldTint = (g_CldTgt[0] | g_CldTgt[1] | g_CldTgt[2]) != 0;
-        for (k = 0; k < 3; k++)
-        {
-            s_CldTgtKey[k] = g_CldTgt[k];
-            s_CldTgt[k] = _mm_set1_epi16((short)g_CldTgt[k]);
-            s_CldTgt256[k] = _mm_set1_epi16((short)(g_CldTgt[k] * 256));
-        }
-        for (k = 0; k < 4; k++)              /* 抖动的 4 个行相位 (块恒 8 像素宽) */
-            s_CldKd[k] = _mm_setr_epi16(
-                (short)(kBayer[k * 4 + 0] * 16 + 8), (short)(kBayer[k * 4 + 1] * 16 + 8),
-                (short)(kBayer[k * 4 + 2] * 16 + 8), (short)(kBayer[k * 4 + 3] * 16 + 8),
-                (short)(kBayer[k * 4 + 0] * 16 + 8), (short)(kBayer[k * 4 + 1] * 16 + 8),
-                (short)(kBayer[k * 4 + 2] * 16 + 8), (short)(kBayer[k * 4 + 3] * 16 + 8));
-    }
-}
-
-struct WthCldSse2Row {
-    __attribute__((target("sse2"), always_inline))
-    static __inline void Fill(unsigned short* dp, int n, int at, int ab,
-                              int phase, unsigned rsh, unsigned gm)
-    {
-        __m128i km, dv, dr, dg, db, v, r, g, b;
-
-        if (n < WTH_CLOUD_BLK)                   /* 右边缘的残块走标量 */
-        {
-            Wth_CldRow(dp, n, at, ab, phase, rsh, gm);
-            return;
-        }
-        /* 块内 alpha: a_i = at + ((ab-at)/2 * w_i >> 7), 一次算 8 个。
-         * 直接算成 256-alpha (压暗权重), 下面三通道共用。 */
-        km = _mm_sub_epi16(s_CldK256,
-                _mm_min_epi16(_mm_set1_epi16(255), _mm_max_epi16(s_CldZero,
-                    _mm_add_epi16(
-                        _mm_set1_epi16((short)at),
-                        _mm_srai_epi16(
-                            _mm_mullo_epi16(
-                                _mm_srai_epi16(_mm_set1_epi16((short)(ab - at)), 1),
-                                s_CldKw), 7)))));
-        dv = s_CldKd[phase];
-        /* 混向雾色: 抖动之外再加 tgt*alpha (= tgt*256 - tgt*km)。压暗时 tgt=0, 直接
-         * 跳过 —— 云影是常用档, 省下这 6 条乘加。 */
-        dr = dg = db = dv;
-        if (s_CldTint)
-        {
-            dr = _mm_add_epi16(dv, _mm_sub_epi16(s_CldTgt256[0],
-                    _mm_mullo_epi16(s_CldTgt[0], km)));
-            dg = _mm_add_epi16(dv, _mm_sub_epi16(s_CldTgt256[1],
-                    _mm_mullo_epi16(s_CldTgt[1], km)));
-            db = _mm_add_epi16(dv, _mm_sub_epi16(s_CldTgt256[2],
-                    _mm_mullo_epi16(s_CldTgt[2], km)));
-        }
-        v = _mm_loadu_si128((const __m128i*)dp);
-        r = _mm_and_si128(_mm_srl_epi16(v, s_CldCrs), s_CldM5);
-        g = _mm_and_si128(_mm_srl_epi16(v, s_CldC5), s_CldMg);
-        b = _mm_and_si128(v, s_CldM5);
-
-        r = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(r, km), dr), 8);
-        g = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(g, km), dg), 8);
-        b = _mm_srli_epi16(_mm_add_epi16(_mm_mullo_epi16(b, km), db), 8);
-        _mm_storeu_si128((__m128i*)dp,
-            _mm_or_si128(_mm_sll_epi16(r, s_CldCrs),
-                _mm_or_si128(_mm_slli_epi16(g, 5), b)));
-    }
-};
-
-WTH_CLD_FILL_ROWS(Wth_CloudFillRowsSse2, __attribute__((target("sse2"))))
 #endif
-#undef WTH_CLD_FILL_ROWS
+
+static int Wth_CloudEnsure(void)
+{
+    int period = Wth_ClampI(g_Cfg.cloudScale * CLD_TILE_MUL, CLD_TEX, CLD_ALPHA_MAX);
+    int key = g_Cfg.cloudStyle * 2 + (g_CloudMode == WEATHER_CLOUD_FOG);
+    if (g_CldBakedFloor != g_Cfg.cloudFogFloor)
+    {
+        g_CldBaked = -1;
+        g_CldBakedFloor = g_Cfg.cloudFogFloor;
+        g_CldAlphaKey = -1;
+    }
+    if (g_CldAlpha && g_CldPeriod == period && g_CldAlphaKey == key &&
+        g_CldAlphaOpacity == g_Cfg.cloudOpacity) return 1;
+
+    if (!g_CldAlpha || g_CldPeriod != period)
+    {
+        /* 仅尺寸变化才分配, 失败时保留旧内存但不绘制失配的数据。 */
+        unsigned char* next = (unsigned char*)LocalAlloc(LMEM_FIXED, (SIZE_T)period * period);
+        if (!next) return 0;
+        if (g_CldAlpha) LocalFree(g_CldAlpha);
+        g_CldAlpha = next;
+        g_CldPeriod = period;
+    }
+    Wth_CloudBake();
+    LARGE_INTEGER begin, end, frequency;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&begin);
+    /* 横向坐标只计算一次; 插值全精度合并后再量化, 避免两次取整带来的暗偏。 */
+    unsigned short coord[CLD_ALPHA_MAX];
+    unsigned short weight[CLD_ALPHA_MAX];
+    for (int x = 0; x < period; x++)
+    {
+        int q = x * (CLD_TEX * 256) / period;
+        coord[x] = (unsigned short)(q >> 8);
+        weight[x] = (unsigned short)(q & 255);
+    }
+    for (int y = 0; y < period; y++)
+    {
+        int q = y * (CLD_TEX * 256) / period;
+        int ty = q >> 8, fy = q & 255;
+        const unsigned char* r0 = g_CldTex + ty * CLD_TEX;
+        const unsigned char* r1 = g_CldTex + ((ty + 1) & CLD_MASK) * CLD_TEX;
+        unsigned char* dst = g_CldAlpha + (size_t)y * period;
+        for (int x = 0; x < period; x++)
+        {
+            int tx = coord[x], nx = (tx + 1) & CLD_MASK, fx = weight[x];
+            int top = r0[tx] * (256 - fx) + r0[nx] * fx;
+            int bottom = r1[tx] * (256 - fx) + r1[nx] * fx;
+            int density = (top * (256 - fy) + bottom * fy + 32768) >> 16;
+            dst[x] = (unsigned char)((density * g_Cfg.cloudOpacity + 127) / 255);
+        }
+    }
+    g_CldAlphaKey = key;
+    g_CldAlphaOpacity = g_Cfg.cloudOpacity;
+    QueryPerformanceCounter(&end);
+    char msg[160];
+    unsigned p = 0;
+    p = WTH_L_S(msg, p, "weather: cloud alpha period=");
+    p = WTH_L_I(msg, p, period);
+    p = WTH_L_S(msg, p, " requested=");
+    p = WTH_L_I(msg, p, g_Cfg.cloudScale * CLD_TILE_MUL);
+    p = WTH_L_S(msg, p, " KiB=");
+    p = WTH_L_I(msg, p, period * period / 1024);
+    p = WTH_L_S(msg, p, " expand=");
+    p = WTH_L_I(msg, p, (int)((end.QuadPart - begin.QuadPart) * 1000 / frequency.QuadPart));
+    p = WTH_L_S(msg, p, "ms");
+    LogLine(msg);
+    return 1;
+}
+
+/* 相机可为负值; 漂移按逻辑时间, 用 64 位中间值防止长局乘法溢出。 */
+static int Wth_CloudOffset(int camera, int speed)
+{
+    long long pos = (long long)camera + (long long)(unsigned)g_Tick * speed / 60;
+    int r = (int)(pos % g_CldPeriod);
+    return r < 0 ? r + g_CldPeriod : r;
+}
 
 /* 落笔的目标色, 每帧一次。压暗 (云影) 时清零; 雾气按环境光算 —— 与雨雪同一条
  * 公式 (m = 环境光 + 色调 x 等级/1000, 单位都是百分比), 强度共用 WeatherLightMix
  * (0 = 纯白, 100 = 完全跟光照)。雾不发光, 夜里该是灰的。
  *
- * m 夹在 0..100 (雨雪那边放到 200): 目标色不超过通道满值, 见 g_CldTgt 的注释。 */
+ * m 夹在 0..100 (雨雪那边放到 200): 目标色不超过通道满值, 最终量化前保留 Bayer 抖动。 */
 static void Wth_CldToneCalc(unsigned gm)
 {
     int amb, lv, rgb[3], maxc[3], c;
 
     if (g_CloudMode != WEATHER_CLOUD_FOG)
     {
-        g_CldTgt[0] = g_CldTgt[1] = g_CldTgt[2] = 0;
+        g_CldTone.target[0] = g_CldTone.target[1] = g_CldTone.target[2] = 0;
         return;
     }
     amb = Lighting_GetParam(LIGHT_P_AMBIENT);
@@ -2699,29 +2478,58 @@ static void Wth_CldToneCalc(unsigned gm)
 
         if (m < 0) m = 0; else if (m > 100) m = 100;
         v = maxc[c] * m / 100;
-        g_CldTgt[c] = (maxc[c] * (100 - g_Cfg.lightMix) + v * g_Cfg.lightMix) / 100;
+        g_CldTone.target[c] = (maxc[c] * (100 - g_Cfg.lightMix) + v * g_Cfg.lightMix) / 100;
     }
 }
 
-static void Wth_CloudFill(unsigned char* base, int pitch, int ox, int oy,
-                          int cols, int rows, int w, int h)
+/* 每行按纹理周期切 span。即使视口比周期宽也可多次回绕, 抖动相位不重置。 */
+template<bool Fog, bool Simd>
+static void Wth_CloudRows(unsigned char* base, int pitch, int ox, int oy,
+                           int w, int h, int sx, int sy)
 {
-    unsigned rsh = (g_GBits == 6) ? 11u : 10u;
-    unsigned gm = (g_GBits == 6) ? 63u : 31u;
+#ifdef WTH_HAVE_SSE2
+    WthCloudSimd simd;
+    if (Simd) simd.Init(g_CldTone);
+#endif
+    for (int y = 0; y < h; y++)
+    {
+        const unsigned char* row = g_CldAlpha + (size_t)sy * g_CldPeriod;
+        unsigned short* dst = (unsigned short*)(base + (size_t)(oy + y) * pitch) + ox;
+        int x = 0, tx = sx;
+        while (x < w)
+        {
+            int n = g_CldPeriod - tx;
+            if (n > w - x) n = w - x;
+#ifdef WTH_HAVE_SSE2
+            if (Simd) WthCloudSse2<Fog>(dst + x, row + tx, n, ox + x, oy + y, g_CldTone, simd);
+            else
+#endif
+                WthCloudScalar<Fog>(dst + x, row + tx, n, ox + x, oy + y, g_CldTone);
+            x += n;
+            tx = 0;
+        }
+        if (++sy == g_CldPeriod) sy = 0;
+    }
+}
 
-    Wth_CldToneCalc(gm);
-
+static void Wth_CloudFill(unsigned char* base, int pitch, int ox, int oy, int w, int h)
+{
+    g_CldTone.rsh = (g_GBits == 6) ? 11u : 10u;
+    g_CldTone.gm = (g_GBits == 6) ? 63u : 31u;
+    Wth_CldToneCalc(g_CldTone.gm);
+    int sx = Wth_CloudOffset(g_CamX, CLD_DRIFT_X);
+    int sy = Wth_CloudOffset(g_CamY, CLD_DRIFT_Y);
+    bool fog = (g_CloudMode == WEATHER_CLOUD_FOG);
 #ifdef WTH_HAVE_SSE2
     if (WthSse2Ok())
     {
-        Wth_CldSse2Init(rsh, gm);
-        Wth_CloudFillRowsSse2<WthCldSse2Row>(base, pitch, ox, oy,
-                                          cols, rows, w, h, rsh, gm);
+        if (fog) Wth_CloudRows<true, true>(base, pitch, ox, oy, w, h, sx, sy);
+        else Wth_CloudRows<false, true>(base, pitch, ox, oy, w, h, sx, sy);
         return;
     }
 #endif
-    Wth_CloudFillRows<WthCldScalarRow>(base, pitch, ox, oy,
-                                    cols, rows, w, h, rsh, gm);
+    if (fog) Wth_CloudRows<true, false>(base, pitch, ox, oy, w, h, sx, sy);
+    else Wth_CloudRows<false, false>(base, pitch, ox, oy, w, h, sx, sy);
 }
 
 /* ---------------- 图像档绘制 ---------------- */
@@ -2808,7 +2616,7 @@ typedef struct {
 
 /* 一条循环音 (雨声 / 风声): 通道、条目、音量在装载时定死。 */
 typedef struct {
-    int started;                    /* 循环在响 */
+    int started;                    /* 已建立循环事件, 不代表始终可闻 */
     unsigned retry;                 /* 下次尝试起的时刻 (ms) */
     int sfx;                        /* SFX_LOOP_* 通道 */
     const char* name;               /* sound.ini 条目名 (g_Cfg 里的数组) */
@@ -2854,8 +2662,8 @@ static void Wth_LoopStop(WthLoop* l)
     }
 }
 
-/* 循环音的状态机: 开着就拉起, 起不来 2 秒退避再试 (名字解析失败 = 音效表还没
- * 装载, 不然每帧扫一遍几千条的表); 开关关了就停。 */
+/* 循环音事件被抢占/回收后不再有效: 开关仍开着就退避重试, 不提高优先级。
+ * 事件存活不等于可闻, 待播/延时态必须留给引擎, 不能重复创建; 关掉则取消重试。 */
 static void Wth_LoopTick(WthLoop* l, int on, unsigned now)
 {
     if (!on)
@@ -2863,10 +2671,17 @@ static void Wth_LoopTick(WthLoop* l, int on, unsigned now)
         Wth_LoopStop(l);
         return;
     }
+    if (l->started) l->started = Sfx_LoopAlive(l->sfx);
     if (!l->started && (int)(now - l->retry) >= 0)
     {
+        /* 名字无效时长退避, 避免反复扫描音效表; 资源竞争仅限频200ms。 */
+        if (Sfx_Index(l->name) < 0)
+        {
+            l->retry = now + 2000;
+            return;
+        }
         l->started = Sfx_LoopStart(l->sfx, l->name, 0x2000, l->vol);
-        if (!l->started) l->retry = now + 2000;
+        l->retry = now + 200;
     }
 }
 
@@ -3300,6 +3115,8 @@ int Weather_Draw(void)
     surfPitch = GtSurfGet(surf, GtVT_GET_PITCH);
     if (surfW <= 0 || surfH <= 0 || surfPitch <= 0) return 0;
     if (clip.Width < 16 || clip.Height < 16) return 0;
+    if (clip.X < 0 || clip.Y < 0 || clip.X > surfW || clip.Y > surfH ||
+        clip.Width > surfW - clip.X || clip.Height > surfH - clip.Y) return 0;
 
     /* d / g_Tick / dp 只算一次: Wth_LogicDelta 会推进帧号基准, 再调一次必返回 0,
      * 雨雪就不动了。 */
@@ -3315,20 +3132,19 @@ int Weather_Draw(void)
     if (g_CloudMode != WEATHER_CLOUD_OFF && g_Cfg.cloudOpacity > 0 && surfPitch >= surfW * 2)
     {
         long long tCld = Perf_Now();
-        unsigned char* cbase = GtLock(surf);
 
-        if (cbase)
+        /* 云图采样/首次烘焙不依赖渲染面, 放在锁外避免长时间占用引擎表面。 */
+        if (Wth_CloudEnsure())
         {
-            Wth_CloudEnsure(clip.Width, clip.Height);
-            /* 场的行列数来自 Wth_CloudBuild (按这次视图尺寸算的), 不在这里重算,
-             * 否则两边一旦不一致就会读到场外 */
-            if (g_CldCols > 0 && g_CldRows > 0)
+            unsigned char* cbase = GtLock(surf);
+
+            if (cbase)
             {
                 Wth_CloudFill(cbase, surfPitch, clip.X, clip.Y,
-                              g_CldCols, g_CldRows, clip.Width, clip.Height);
+                              clip.Width, clip.Height);
+                GtUnlock(surf);
                 drew = 1;
             }
-            GtUnlock(surf);
         }
         Perf_Add(PF_D_CLD, tCld);
     }

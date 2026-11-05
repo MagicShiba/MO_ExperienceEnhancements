@@ -35,7 +35,7 @@ struct SyHookDecl
 
 #define SYHOOK(a, s, n) { (a), (s), (n), 0u }
 
-/* 与 dist/MOExperience.dll.inj 逐行对应 (61 项, 顺序一致)。 */
+/* 与 dist/MOExperience.dll.inj 逐行对应, 顺序一致。 */
 static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(16))) =
 {
     SYHOOK(0x5D3BA0u, 6u, "MsgText_AddMessageHook"),
@@ -103,6 +103,10 @@ static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(
      * 只置标志, 见 LightingPreset.cpp */
     SYHOOK(0x67E6C4u, 6u, "Lighting_LoadReadyHook"),
     SYHOOK(0x683E75u, 7u, "Lighting_ScenStartHook"),
+    /* 音频初始化与设备重建, 见 AudioCapacity.cpp。 */
+    SYHOOK(0x406C2Cu, 5u, "AudioCapacity_VoiceInit"),
+    SYHOOK(0x406E41u, 5u, "AudioCapacity_VoiceReinit"),
+    SYHOOK(0x403F33u, 5u, "AudioCapacity_Cache"),
 };
 
 /* ---------------- Syringe 握手 ---------------- */

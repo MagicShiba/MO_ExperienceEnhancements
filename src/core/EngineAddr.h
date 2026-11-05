@@ -510,10 +510,22 @@
  * 音频系统"的凭据, 不设就整只函数空转。 */
 #define ADDR_AUDIO_IDX_INST     0x0087E294u
 
-/* AudioController::End (0x405FD0): thiscall, 淡出并释放事件。入口按 (Stamp,
- * EventType) 核对事件是否还活着, 已被引擎销毁时什么都不做, 所以跨读档/退局补
- * 一次 End 是安全的。 */
+/* AudioController::End: thiscall, 按 Stamp/EventType 验证归属后请求淡出。 */
 #define FN_AUDIO_CTRL_END       0x00405FD0u
+
+/* 音频系统启用标志; 设备关闭会释放事件池, 不可自行解引用旧 Event。 */
+#define ADDR_AUDIO_ENABLED      0x0087E2A0u
+
+/* AudioController::GetEvent: thiscall, 验证 EventType 与 Stamp, 失效返回 NULL。
+ * 先检查音频总开关, 不把池中复用的事件识别为原控制器的事件。 */
+#define FN_AUDIO_CTRL_GETEVENT  0x00406130u
+#define OFF_AUDIO_EVENT_STATE  0x1Cu      /* 4 = 已结束, 其余为待播/延时/在播 */
+
+/* 音频设备voice池创建: fastcall(ecx=设备, edx=请求数量), 返回实际创建数。 */
+#define FN_AUDIO_CREATE_VOICES  0x00403530u
+#define ADDR_AUDIO_VOICE_INIT   0x00406C2Cu  /* call CreateVoices, 5字节 */
+#define ADDR_AUDIO_VOICE_REINIT 0x00406E41u  /* 设备重建的同一调用 */
+#define ADDR_AUDIO_CACHE_BUDGET 0x00403F33u  /* mov edx, 0x100000, 5字节 */
 
 /* ==================== 事件 (EventClass) ==================== */
 
@@ -527,5 +539,7 @@
 #define REG_OFF_EDI             0x08u
 #define REG_OFF_EBP             0x10u
 #define REG_OFF_EAX             0x24u
+#define REG_OFF_ECX             0x20u
+#define REG_OFF_EDX             0x1Cu
 
 #endif /* MOE_ENGINEADDR_H */

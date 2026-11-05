@@ -1874,7 +1874,7 @@ static const char* const k_Star[11] = {
     ".XXXXXXXXX.",
     "..XXXXXXX..",
     "...XXXXX...",
-    "...XXXXX...",
+    "...XX.XX...",
     "..XX...XX..",
     ".XX.....XX.",
     "..........."
@@ -1897,14 +1897,14 @@ static const char* const k_Exch[12] = {
     ".XXX.......",
     "XXXXXXXXXXX",
     "XXXXXXXXXXX",
-    ".XXX.......",
-    "..XX.......",
-    "........XX.",
-    ".......XXX.",
+    "...........",
+    "...........",
+    "...........",
     "XXXXXXXXXXX",
     "XXXXXXXXXXX",
     ".......XXX.",
-    "........XX."
+    ".......XX..",
+    "..........."
 };
 
 static void Up_Exch(unsigned char* base, int pitch, int W, int H,
