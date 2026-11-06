@@ -6,6 +6,10 @@
  *   放大档 = 窗口 Composite 的 R (就地放大之前那块, 分辨率 < 视图区)
  *   缩小档 = 大面 s_LastFinal 的整面 R (分辨率 > 视图区)
  * 标签是 1/scale, 标 0.5x 时截图宽高正好是屏上的两倍。
+ *
+ * 落盘是异步的: 取图只把像素拷进自己的缓冲, 编码 (PNG 的 LZ77) 交给一个线程,
+ * 下一帧回来收结果写日志。屏幕上冻 1.5 秒的截图没人受得了, 而 0.5x 档的
+ * 6120x3735 原图编一次要 1.6 秒。
  */
 
 #include <windows.h>
@@ -13,10 +17,12 @@
 #include "GdiText.h"
 #include "ScaleBar.h"
 #include "PauseView.h"
+#include "ShotPng.h"
 #include "Shot.h"
 
 #define SHOT_SECTION "BottomBar"
 #define SHOT_FLASH 12                 /* 截成功后描黄边的帧数 */
+#define SHOT_JOBS 4                   /* 同时在编的截图上限 (连点也不会卡) */
 
 /* ---------------- 配置 / 状态 ---------------- */
 static int s_Init = 0;
@@ -28,6 +34,18 @@ static int s_Hov = 0;
 static int s_LbPrev = 0;
 static int s_Req = 0;                  /* 排队中的一次截图 */
 static int s_Flash = 0;                /* 成功反馈倒计时 */
+
+/* 一次异步编码。state: 0 空闲 / 1 线程在跑 / 2 已出结果待收。 */
+typedef struct {
+    unsigned short* pix;               /* 线程负责释放 */
+    int w, h, gbits;
+    char path[MAX_PATH_LEN];
+    volatile LONG state;
+    int ok;
+} ShotJob;
+
+static ShotJob s_Job[SHOT_JOBS];
+
 
 /* ---------------- 路径 ---------------- */
 
@@ -57,7 +75,7 @@ static unsigned Shot_PutNum(char* p, unsigned v, int digits)
     return (unsigned)digits;
 }
 
-/* SCRN.<yyyyMMdd-HHmmss-mmm>.BMP, 与 Ares 同名口径。out 需 MAX_PATH_LEN。 */
+/* SCRN.<yyyyMMdd-HHmmss-mmm>.PNG, 与 Ares 同名口径。out 需 MAX_PATH_LEN。 */
 static void Shot_MakeName(char* out)
 {
     SYSTEMTIME st;
@@ -79,7 +97,7 @@ static void Shot_MakeName(char* out)
     p += Shot_PutNum(out + p, (unsigned)st.wSecond, 2);
     out[p++] = '-';
     p += Shot_PutNum(out + p, (unsigned)st.wMilliseconds, 3);
-    AppendCStr(out, p, ".BMP", MAX_PATH_LEN);
+    AppendCStr(out, p, ".PNG", MAX_PATH_LEN);
 }
 
 /* ---------------- 16 位 BITFIELDS BMP ---------------- */
@@ -149,6 +167,56 @@ int Shot_WriteBmp565(const char* path, const unsigned short* pix, int w, int h)
     return 1;
 }
 
+/* ---------------- 异步编码 ---------------- */
+
+/* 线程里只做"像素 → 文件"; 日志与黄边反馈留给主线程收尾, 免得和引擎的日志
+ * 抢同一个文件指针。 */
+static DWORD WINAPI Shot_Worker(void* arg)
+{
+    ShotJob* j = (ShotJob*)arg;
+    int ok = ShotPng_Write565(j->path, j->pix, j->w, j->h, j->gbits);
+    VirtualFree(j->pix, 0, MEM_RELEASE);
+    j->pix = NULL;
+    j->ok = ok;
+    InterlockedExchange(&j->state, 2);
+    return 0;
+}
+
+/* 收回已出结果的槽: 写日志, 释放槽。每帧调一次。 */
+static void Shot_ReapJobs(void)
+{
+    char buf[MAX_PATH_LEN + 48], b1[16], b2[16];
+    unsigned p;
+    int i;
+    for (i = 0; i < SHOT_JOBS; i++)
+    {
+        ShotJob* j = &s_Job[i];
+        if (j->state != 2) continue;
+        p = AppendCStr(buf, 0, j->ok ? "shot: " : "shot: write failed ",
+                       sizeof(buf));
+        p = AppendCStr(buf, p, j->path, sizeof(buf));
+        if (j->ok)
+        {
+            p = AppendCh(buf, p, ' ', sizeof(buf));
+            UtoA((unsigned)j->w, b1);
+            p = AppendCStr(buf, p, b1, sizeof(buf));
+            p = AppendCh(buf, p, 'x', sizeof(buf));
+            UtoA((unsigned)j->h, b2);
+            p = AppendCStr(buf, p, b2, sizeof(buf));
+        }
+        LogLine(buf);
+        j->state = 0;
+    }
+}
+
+static ShotJob* Shot_AllocJob(void)
+{
+    int i;
+    for (i = 0; i < SHOT_JOBS; i++)
+        if (s_Job[i].state == 0) return &s_Job[i];
+    return NULL;
+}
+
 /* ---------------- 取图 ---------------- */
 
 static int Shot_Capture(void)
@@ -157,17 +225,18 @@ static int Shot_Capture(void)
     int vx, vy, vw, vh, pitch, i, j;
     unsigned char* base;
     unsigned short* pix;
-    char path[MAX_PATH_LEN];
-    char b1[16], b2[16], buf[MAX_PATH_LEN + 40];
-    unsigned p;
+    ShotJob* job;
+    HANDLE th;
 
     if (!SB_RawView(&surf, &vx, &vy, &vw, &vh)) return 0;
     pitch = GtSurfGet(surf, GtVT_GET_PITCH);
     if (pitch < GtSurfGet(surf, GtVT_GET_WIDTH) * 2) return 0;
+    job = Shot_AllocJob();
+    if (!job) return 0;            /* 四个都在编: 丢掉这次点击, 不排队积压 */
     pix = (unsigned short*)VirtualAlloc(NULL, (size_t)vw * (size_t)vh * 2u,
                                         MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!pix) return 0;
-    /* 读锁只包住整块拷出, 写盘放到解锁之后。 */
+    /* 读锁只包住整块拷出, 编码与写盘都在解锁之后。 */
     base = GtLock(surf);
     if (!base) { VirtualFree(pix, 0, MEM_RELEASE); return 0; }
     for (j = 0; j < vh; j++)
@@ -179,25 +248,17 @@ static int Shot_Capture(void)
     }
     GtUnlock(surf);
 
-    Shot_MakeName(path);
-    if (!Shot_WriteBmp565(path, pix, vw, vh))
-    {
-        VirtualFree(pix, 0, MEM_RELEASE);
-        LogLine("shot: write failed");
-        return 0;
-    }
-    VirtualFree(pix, 0, MEM_RELEASE);
-
-    p = AppendCStr(buf, 0, "shot: ", sizeof(buf));
-    p = AppendCStr(buf, p, path, sizeof(buf));
-    p = AppendCh(buf, p, ' ', sizeof(buf));
-    UtoA((unsigned)vw, b1);
-    p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCh(buf, p, 'x', sizeof(buf));
-    UtoA((unsigned)vh, b2);
-    p = AppendCStr(buf, p, b2, sizeof(buf));
-    LogLine(buf);
-    s_Flash = SHOT_FLASH;
+    Shot_MakeName(job->path);
+    job->pix = pix;
+    job->w = vw;
+    job->h = vh;
+    job->gbits = g_GBits;
+    job->ok = 0;
+    job->state = 1;
+    th = CreateThread(NULL, 0, Shot_Worker, job, 0, NULL);
+    if (th) CloseHandle(th);
+    else Shot_Worker(job);         /* 起不了线程就当场编, 至少图不丢 */
+    s_Flash = SHOT_FLASH;          /* 反馈给点击, 不等结果 */
     return 1;
 }
 
@@ -216,6 +277,11 @@ void Shot_EnsureInit(void)
     p += UtoA((unsigned)s_Show, buf + p);
     p = AppendCStr(buf, p, " dir=Screenshots", sizeof(buf));
     LogLine(buf);
+    /* 黄边反馈之外没有别的进度提示, 编码器在这里预热 (GDI+ 加载 ~1.5ms),
+     * 免得第一次截图在工作线程里现装。 */
+    if (s_Show)
+        LogLine(ShotPng_Init() ? "shot: png=gdiplus"
+                               : "shot: png unavailable (no gdiplus)");
 }
 
 int Shot_Visible(void)
@@ -232,6 +298,9 @@ void Shot_SetVisible(int enable)
     s_LbPrev = 0;
     s_Req = 0;
     s_Flash = 0;
+    /* ESC 菜单打开的功能不走 EnsureInit 的预热分支, 在这里补上, 免得第一次
+     * 截图才在编码线程里装 GDI+ (那段有 "只装一次" 的静态标志, 并发不划算)。 */
+    if (s_Show) ShotPng_Init();
 }
 
 int Shot_ButtonWidth(void)
@@ -263,6 +332,7 @@ void Shot_Poll(void)
 
 void Shot_CapturePending(void)
 {
+    Shot_ReapJobs();
     if (!s_Req) return;
     s_Req = 0;
     if (!Shot_Capture())

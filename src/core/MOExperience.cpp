@@ -1429,7 +1429,7 @@ static DWORD MsgDrawBody(void* regs)
      * 窗口面, 后面取到的 surf 才是 UI 该画的那张 (窗口面)。1x/放大档恒空操作。*/
     SB_RenderSwapOut();
     /* 截图: 此刻各档原图都齐了且还没画任何 UI (侧栏/底栏/刻度条/战役框/
-     * 画中画/tooltip 都在后面), 队列为空时是空操作。 */
+     * 画中画/tooltip 都在后面); 顺带收上一批异步编码的结果。 */
     Shot_CapturePending();
     /* 存档缩略图: 同一时刻按墙钟节流缓存一张无 UI 视口图 (存档对话框挡住战场时用)。 */
     SaveShot_Tick();
