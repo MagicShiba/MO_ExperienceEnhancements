@@ -1,4 +1,4 @@
-/* SidebarSkin.cpp - 强制指定阵营的侧栏/UI 皮肤 (纯本地视觉, 联机不应用)。
+/* SidebarSkin.cpp - 强制指定阵营的侧栏/UI 皮肤 (纯本地视觉, 联机也只用)。
  *
  * 引擎事实:
  *   0x534FA0  bool __fastcall Game::LoadUI(int sideIndex)  (ECX=side)
@@ -18,7 +18,6 @@
 #include "EngineAddr.h"
 #include "GdiText.h"
 #include "FullMap.h"
-#include "OrderUtil.h"
 #include "SidebarSkin.h"
 
 #define SK_SECTION          "Sidebar"
@@ -112,7 +111,6 @@ static int   s_SidePatch = 0;
 static int   s_CmpPatch = 0;
 static int   s_Applying = 0;
 static int   s_Pending = 0;
-static int   s_ActionLocal = 0;    /* pending switch came from Action 900 (allowed in MP) */
 
 static int Sk_EffectiveForce(void)
 {
@@ -220,15 +218,9 @@ static char __fastcall Sk_LoadUISide(int side)
     /* Action 900 只改变当前这局的显示, 不是持久设置。新局/读档重新走
      * LoadUI 时丢弃临时覆盖, 回到 INI/ESC 的 SkinSide。 */
     s_ActionForce = -1;
-    s_ActionLocal = 0;
     s_Pending = 0;
 
     if (!s_Force)
-    {
-        s_SkinSide = side;
-        return FN_LOAD_UI(side);
-    }
-    if (OU_IsMP())
     {
         s_SkinSide = side;
         return FN_LOAD_UI(side);
@@ -379,13 +371,6 @@ void SidebarSkin_Poll(void)
     }
     if (!s_Pending || s_Applying) return;
 
-    if (OU_IsMP() && !s_ActionLocal)
-    {
-        s_Pending = 0;
-        s_ActionLocal = 0;
-        return;
-    }
-
     scen = *(void**)ADDR_SCENARIO;
     if (!scen || !IsPlausiblePtr(scen)) return;
 
@@ -395,7 +380,6 @@ void SidebarSkin_Poll(void)
 
     Sk_Reload(target, actual, scen);
     s_Pending = 0;
-    s_ActionLocal = 0;
 }
 
 int SidebarSkin_Side(void)
@@ -416,26 +400,18 @@ void SidebarSkin_Set(int value)
     if (value < 0 || value > 4) value = 0;
     s_Force = value;
     s_ActionForce = -1;
-    s_ActionLocal = 0;
-
-    if (OU_IsMP())
-    {
-        s_Pending = 0;
-        return;
-    }
 
     /* 默认延迟到主循环稳定点应用; ESC 设置页会立即 Poll 以便预览。 */
     s_Pending = 1;
 }
 
-/* Action 900 switch: local-only visual, so it is allowed in multiplayer.
- * 只覆盖当前场景的显示, 不写 s_Force/INI; 新局或读档时由 Sk_LoadUISide 丢弃。 */
+/* Action 900 switch: 只覆盖当前场景的显示, 不写 s_Force/INI;
+ * 新局或读档时由 Sk_LoadUISide 丢弃。 */
 void SidebarSkin_SetAction(int value)
 {
     SidebarSkin_EnsureInit();
     if (value < 0 || value > 4) return;
     s_ActionForce = value;
-    s_ActionLocal = 1;
     s_Pending = 1;
 }
 

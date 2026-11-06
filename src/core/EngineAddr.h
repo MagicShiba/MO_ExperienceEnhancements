@@ -1,13 +1,6 @@
-/* EngineAddr.h - gamemd 引擎地址与结构偏移的唯一出处。
- *
- * 铁律: 新增引擎地址只许加在这个文件里, 不要在 .cpp 里写本地 #define ——
- * 同一地址的副本之间会悄悄跑偏 (`OFF_HOUSE_MONEY` 就分叉出 0x2F0 / 0x30C
- * 两个值), 读错字段的那处判据恒失败, 功能静默失效。
- * 每个地址后面必须能指出出处 (函数地址 / 指令字节 / YRpp 成员名), 因为引擎是
- * 按版本硬编码的, 没有出处就无法在换 exe 时复核。
- *
- * 本文件只含宏, 不依赖任何其它头, 可以在任何位置 include。
- */
+/* EngineAddr.h - gamemd 引擎地址与结构偏移的统一定义。
+ * 新增地址集中在此, 注明函数、指令或 YRpp 成员出处, 便于核验引擎兼容性。
+ * 本文件只含宏, 不依赖其它头。 */
 #ifndef MOE_ENGINEADDR_H
 #define MOE_ENGINEADDR_H
 
@@ -49,16 +42,18 @@
 #define ADDR_HOUSES_ITEMS       0xA8022Cu
 #define ADDR_HOUSES_COUNT       0xA80238u
 
-/* BuildingClass::Array。 */
-#define ADDR_BLD_ARR            0xA8EB40u
+/* 对象类型数组 (DynamicVectorClass<T*>), 取自 YRpp 对应类的 DEFINE_REFERENCE。 */
+#define ADDR_BLD_ARR            0xA8EB40u   /* BuildingClass::Array */
+#define ADDR_INF_ARR            0xA83DE8u   /* InfantryClass::Array */
+#define ADDR_UNIT_ARR           0x8B4108u   /* UnitClass::Array */
+#define ADDR_AIRCRAFT_ARR       0xA8E390u   /* AircraftClass::Array */
 
 /* HouseClass 偏移。 */
 #define OFF_HOUSE_INDEX         0x30u     /* HouseClass::ArrayIndex */
 #define OFF_HOUSE_TYPE          0x34u     /* HouseClass::Type -> HouseTypeClass* */
 #define OFF_IS_HUMAN            0x1ECu    /* HouseClass::IsHumanPlayer */
-/* HouseClass::Money。实证: gamemd 0x705DF3 = `mov eax,[ecx+0x30C]; ret`
- * (Available_Money), 0x4F9950 GiveMoney = `mov edx,[ecx+0x30C]; add; mov [ecx+0x30C]`。
- * 0x2F0 是错的 (曾误用于 RepairAll 的 Owner 校验)。 */
+/* HouseClass::Money: 0x705DF3 (Available_Money) 与 0x4F9950 (GiveMoney)
+ * 均通过 [ecx+0x30C] 访问。 */
 #define OFF_HOUSE_MONEY         0x30Cu
 
 /* HouseTypeClass::MultiplayPassive - 中立方为 1。 */
@@ -366,7 +361,9 @@
 /* 脏区表项数 (表指针 0xB0CE7C, 20B/项)。渲染只会在 count>0 时删末项,
  * 所以"提前把 count 清 0"= 一项都不动。 */
 #define ADDR_DIRTY_COUNT        0x00B0CE88u
-/* Unsorted::TacticalSelectables (12B/项, 上限 500) = 物件屏坐标表。 */
+/* Unsorted::TacticalSelectables (12B/项) = 物件屏坐标表。
+ * 容量引擎原版 500, 由 SelPoolCap.cpp 整表搬到堆上 4096; 表基址在运行时
+ * 会变, **只有 SelPoolCap 能碰这张表**, 别处不要再直接读写 0xB0CEC8。 */
 #define ADDR_TACTICAL_SELARR    0x00B0CEC8u
 /* 引擎"本帧整幅重画"标志 (GScreenClass::Render 的 mode 0 趟消费它)。 */
 #define ADDR_FULLREDRAW         0x00B0E63Cu
@@ -465,8 +462,9 @@
 #define OFF_BC_HOUSEID          0x110u
 #define FN_BC_VISIBLE           0x004308B0u
 
-/* 单机早退三处 (全是 `mov eax,[0xA8B238]` 起的 GameMode 判定)。
- * 见 notes/通信信标.md。 */
+/* 单机入口/尾段与组包拦截 (前两处是 `mov eax,[0xA8B238]` 起的 GameMode 判定, 第三处偷
+ * `mov ecx,[0xA8DA78]` 跳过组包/广播)。0x430CD4 联机也要挂 (记槽序号),
+ * 另两处只在单机。见 notes/通信信标.md。 */
 #define ADDR_BC_HOTKEY          0x005370A0u  /* Execute 入口, 5B mov eax,[sess] */
 #define ADDR_BC_HOTKEY_GO       0x005370AEu  /* 跳过判定, call 0x731A30 */
 #define ADDR_BC_HOTKEY_NEXT     0x005370A5u  /* 原指令之后 */
@@ -476,6 +474,63 @@
 #define ADDR_BC_SENDBUILD       0x00430D99u  /* 组 IPX 包起点, 6B mov ecx,[0xA8DA78] */
 #define ADDR_BC_SENDBUILD_SKIP  0x00430E50u  /* 共享收尾 (pop edi/esi/ebp/ebx) */
 #define ADDR_BC_SENDBUILD_NEXT  0x00430D9Fu
+
+/* 满了自动替换最旧一槽 (联机容量 3, 单机容量由池化决定)。两处判满:
+ *   0x430F4A  CanPlaceBeacon 的"满"返回 (xor al,al; ret 4, 共 5 字节), 唯一调用方是
+ *             SetPlaceBeaconMode 0x4AC9AD —— 返回 0 时它静默退出, B 键毫无反应。
+ *   0x430BD4  PlaceBeacon 的"满且本地 → 放弃"判定 (8 字节 cmp [esp+0x1F4],-1),
+ *             紧跟 je 0x430F20。此地址只由扫槽循环的出口顺序到达, 无跳转指向。
+ *             满时把挑中的槽号写回 [esp+0x1F4] 再跳 0x430BE2 分配对象; 分配完
+ *             0x430C33 读到的 id 已不是 -1, 于是走 0x430E5D 那段"按 id 覆盖指定
+ *             槽": 释放该槽旧信标、AllocatedCount--, 再装新的。随后组包广播的
+ *             包里 id 就是这一槽 —— 对端收到同一个包走的正是这段代码, 所以
+ *             联机的本地与对端跑同一段引擎逻辑, 不用额外的删除包。
+ * 不要改用 DeleteBeacon 0x4311C0 单槽删除: 它在 0x431355 判 [esp+0x13],
+ * 只有 (-1,-1) 的"删除选中"才为 1, 单槽删除根本不广播, 联机会各算各的。 */
+#define ADDR_BC_CANFULL         0x00430F4Au
+#define ADDR_BC_FULLCHK         0x00430BD4u
+#define ADDR_BC_FULLCHK_NEXT    0x00430BE2u  /* 越过 `je 0x430F20` 之后: 分配对象 */
+#define ADDR_BC_FULLCHK_GIVEUP  0x00430F20u  /* 原版早退 (pop 4 个寄存器后 ret 0x14) */
+
+/* ---------------- 单机信标数量上限 (BeaconCap) ----------------
+ * 使用原有 24 格作为单机池, 对象 HouseID 保持真实归属。
+ * Z 为分段寻址替换, L/H 为按池查询; 线性 8*3 遍历无需修改。
+ * DeleteAllBeacons 入口包装按 HouseID 过滤, 只调用定向 DeleteBeacon。 */
+#define ADDR_BC_CAP_Z1          0x00430BB1u  /* PlaceBeacon: lea eax,[ebx+ebx*2] */
+#define ADDR_BC_CAP_Z2          0x00430C64u  /* PlaceBeacon 写槽: lea ecx,[eax+ebx*2] */
+#define ADDR_BC_CAP_Z3          0x00430C67u  /* 同上: mov edx,ebx */
+#define ADDR_BC_CAP_Z4          0x00430E5Du  /* 按 id 覆盖段: lea eax,[eax+ebx*2] */
+#define ADDR_BC_CAP_Z5          0x00430E60u  /* 同上: mov ecx,ebx */
+#define ADDR_BC_CAP_Z6          0x00430F36u  /* CanPlaceBeacon: lea edx,[edx+edx*2] */
+#define ADDR_BC_CAP_Z9          0x00431221u  /* DeleteBeacon: lea ecx,[ecx+eax*2] */
+#define ADDR_BC_CAP_Z10         0x004312FAu  /* DeleteBeacon: lea edx,[ecx+ecx*2] */
+#define ADDR_BC_CAP_Z11         0x0043131Bu  /* DeleteBeacon 清槽: lea/mov/add 共 7B */
+#define ADDR_BC_CAP_Z13         0x004314B7u  /* EditBeaconMessage 定向寻址 */
+#define ADDR_BC_CAP_Z14         0x004315C5u  /* EditBeaconMessage 选中寻址 */
+
+#define ADDR_BC_CAP_L1          0x00430BCFu  /* PlaceBeacon 扫槽 cmp ecx,3 */
+#define ADDR_BC_CAP_L2          0x00430C49u  /* PlaceBeacon 再扫 cmp eax,3 */
+#define ADDR_BC_CAP_L3          0x00430F45u  /* CanPlaceBeacon cmp eax,3 */
+#define ADDR_BC_CAP_L4          0x00431004u  /* SelectBeacon cmp esi,3 */
+#define ADDR_BC_CAP_L5          0x00431124u  /* DeleteBeacon cmp esi,3 */
+#define ADDR_BC_CAP_L6          0x004311A5u  /* DeleteBeacon cmp edx,3 */
+#define ADDR_BC_CAP_L7          0x0043120Du  /* DeleteBeacon cmp edx,3 */
+#define ADDR_BC_CAP_L8          0x00431309u  /* DeleteBeacon cmp ebx,3 */
+#define ADDR_BC_CAP_L10         0x004314A3u  /* EditBeaconMessage 扫描 cmp edx,3 */
+#define ADDR_BC_CAP_L11         0x004315D9u  /* EditBeaconMessage 扫描 cmp eax,3 */
+#define ADDR_BC_CAP_L12         0x00431886u  /* 逐个绘制 cmp ebp,3 */
+
+#define ADDR_BC_CAP_H4          0x00431015u  /* SelectBeacon 外层 cmp eax,8 */
+#define ADDR_BC_CAP_H6          0x00431135u  /* DeleteBeacon 外层 cmp eax,8 */
+#define ADDR_BC_CAP_H7          0x004311AEu  /* DeleteBeacon 外层 cmp ebp,8 */
+#define ADDR_BC_CAP_H8          0x00431216u  /* DeleteBeacon 外层 cmp edi,8 */
+#define ADDR_BC_CAP_H9          0x004314ACu  /* EditBeaconMessage 扫描外层 cmp edi,8 */
+#define ADDR_BC_CAP_H11         0x0043181Du  /* 逐帧绘制 mov [esp+0x14],8 */
+
+#define ADDR_BC_CAP_DELETEALL       0x00431410u  /* 6B push ebp; mov ebp,ecx; mov eax,[ebp+60] */
+#define ADDR_BC_CAP_DELETEALL_NEXT  0x00431416u
+#define ADDR_BC_CAP_DELETE          0x004311C0u  /* thiscall(self, house, slot), ret 8 */
+#define ADDR_BC_CAP_RESET           0x00430980u  /* thiscall(self), 原生线性清 24 格 */
 
 /* ==================== 主窗口句柄 ==================== */
 

@@ -48,7 +48,7 @@ extern int g_LogDetail;
 
 /* ---------------- 帧内耗时探针 ([Log] Perf=1) ----------------
  * 只在主线程用; 关掉时 Perf_Now 直接返回 0, Perf_Add 见 0 立刻返回 (每帧几十次
- * 调用也只是几十条 if), 对帧率无可测影响。每 2s 往日志写一行 us/帧。
+ * 调用也只是几十条 if), 对帧率无可测影响。每 1s 往日志写一行 us/帧。
  * 用法: t = Perf_Now(); ...干活...; Perf_Add(PF_XXX, t);
  * Perf_Frame 每帧末调一次 (消息帧钩尾部), 负责累计帧数与结算。 */
 enum
@@ -63,7 +63,7 @@ enum
     /* prepare 里逐个 Poll (A 段: 输入/战斗类) */
     PF_A_AW, PF_A_BQ, PF_A_PC, PF_A_SO, PF_A_RP, PF_A_TC, PF_A_FA, PF_A_AM,
     PF_A_SA, PF_A_DP, PF_A_MS, PF_A_OT, PF_A_WPC, PF_A_MLC, PF_A_SWS,
-    PF_A_RA, PF_A_PS, PF_A_AG, PF_A_OB, PF_A_LIGHT, PF_A_BC,
+    PF_A_RA, PF_A_PS, PF_A_AG, PF_A_OB, PF_A_LIGHT, PF_A_BC, PF_A_SELC,
     /* prepare 后段 (B 段: 底栏/绘制类) */
     PF_B_PV, PF_B_SHOT, PF_B_VTS, PF_B_PUB, PF_B_MHK, PF_B_PWR, PF_B_PIPB,
     PF_B_SKIN, PF_B_PVP,

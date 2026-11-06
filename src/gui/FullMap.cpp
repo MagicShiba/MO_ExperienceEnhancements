@@ -180,7 +180,7 @@ void FM_EnsureInit(void)
     LogLine(buf);
 }
 
-/* 三态的固定行为 (不再有细化开关):
+/* 三态的固定行为:
  *   态0 FULL  一概不接管, 只把视口宽度改回原版值 (Fm_ApplyViewWidth), 于是引擎
  *               自己的几何判定/整条侧栏 blit/侧栏列起点/视口 gadget 全部回到原版。
  *               只 blit 整条侧栏面但视口仍全宽是不够的: 那一列几何会全错 168。
@@ -256,7 +256,7 @@ static int Fm_KeepRect(RectangleStruct* out, int* swOut, int* shOut)
     }
     k = sb->Y;
     if (k < 32 || k > 512) k = 158;
-    k += s_ExtraH;                        /* 用户要求: 再多露一点 */
+    k += s_ExtraH;
     if (k > sh) k = sh;
     if (k < 32) return 0;
     out->X = 0; out->Y = 0; out->Width = sw; out->Height = k;
@@ -318,8 +318,8 @@ static int FM_PtInKeepRegion(int px, int py)
 
 /* 侧栏"顶部那一块"(资金条 + 小地图 + 顶部两个按钮) 在**屏幕**上的矩形。
  * 与 FM_PtInKeepRegion / FM_RadarClickGate 同源 (Fm_KeepTopRect + Fm_ColumnX)。
- * 小窗 (PiP) 用它避让: 态 2 (只留顶部块) 时视口已铺到屏幕右缘, 这一块却仍压在
- * 画面上, 不躲就会盖住小地图。态 3 (全隐藏) 返回 0 —— 那时整块都没有, 右上角
+ * 小窗 (PiP) 用它避让: 态 1 (只留顶部块) 时视口已铺到屏幕右缘, 这一块却仍压在
+ * 画面上, 不躲就会盖住小地图。态 2 (全隐藏) 返回 0 —— 那时整块都没有, 右上角
  * 是干净的地图区, 小窗可以随便放。 */
 int FM_KeepTopRectScreen(RectangleStruct* out)
 {
@@ -700,10 +700,7 @@ void FM_Install(void)
     LogLine("fullmap: viewrect hook ON (surface full width / view follows mode)");
 }
 /* ---------------- 小地图矩形 (侧栏面内坐标) ----------------
- * 正确来源是 RadarClass+0x120C = 0x8809F4 这一个 RectangleStruct, 不是
- * 0xB04A00 那一组 —— 那组是侧栏顶部另一个 72x18 小控件 (实测 radar=11,20,72x18,
- * blit 出来正是用户看到的"简报按钮")。
- * 0x8809F4 每帧由 SidebarClass::Draw (0x6A6C34~0x6A6C6F) 从
+ * RadarClass+0x120C = 0x8809F4，每帧由 SidebarClass::Draw (0x6A6C34~0x6A6C6F) 从
  * [0xB07DC8/D0/D4/D8] 刷新; 引擎自己"只呈小地图"的那条分支 (0x6A7433) 用的
  * 也正是它, dst 公式与下面 Fm_BlitSb 里的一致。 */
 
@@ -842,8 +839,7 @@ static void Fm_DisarmSidebarGadgets(int colX, int topH)
     s_GadSnap = 1;
 }
 
-/* "完全显示"模式: 按摘之前的快照写回。没摘过 (s_GadSnap=0) 就什么都不做 ——
- * 这是"空页签也显示"的修复点, 之前这里是无条件清 Disabled。 */
+/* 完全显示时恢复 Disabled 快照；没摘过就不写，保留引擎的空页签状态。 */
 static void Fm_RearmSidebarGadgets(int colX, int topH)
 {
     int i;
@@ -944,7 +940,8 @@ static void Fm_ConsumeLayoutDirty(void)
     if (Fm_InitGuiForA()) s_LayoutDirty = 0;
 }
 
-/* 当前视口是不是"全宽"那套。屏幕布局量一律按 A 算 (跟 R 走会多出第二条侧栏)。 */static int Fm_ViewWide(void)
+/* 当前视口是不是"全宽"那套。屏幕布局量一律按 A 算 (跟 R 走会多出第二条侧栏)。 */
+static int Fm_ViewWide(void)
 {
     const RectangleStruct* vb = &s_ViewA;
     RectangleStruct* wb = (RectangleStruct*)(size_t)ADDR_WINDOWBOUNDS;
@@ -1146,7 +1143,7 @@ static void Fm_ApplyViewWidth(void)
     int sbW = *(int*)(size_t)ADDR_SIDEBAR_W;
     int winW, winH, x, y = 0, w, h, cw, oldW, oldH, d;
 
-    if (!s_Enable) return;
+    if (!s_Enable || SB_InRender()) return;
     MOE_SetPhase(MP_APPLY);
     if (sbW < 64 || sbW > 512) return;
     if (wb->Width < 640 || wb->Width > 8192) return;
@@ -1318,9 +1315,7 @@ static void Fm_ApplyViewWidth(void)
                 s_LayoutDirty = 0;
             }
         }
-        /* 缩小档 (以及宽度没变 / 帧门挡住的那几次) 没人跑 InitGUI ⇒ 补上。
-         * 这是"其它缩放挡位下侧栏图标不按位摆"的那一半: 一次性布局只有
-         * setDims 那条路会重算, 而那条路恰好在缩小档被禁掉了。 */
+        /* 未走 setDims 时仍须消费布局脏标记，缩小档也要按 A 重排侧栏。 */
         Fm_ConsumeLayoutDirty();
     }
 }
@@ -1328,7 +1323,7 @@ static void Fm_ApplyViewWidth(void)
 /* 缩放改档后立刻同步视口 (幂等, setDims 有帧门控)。 */
 void FM_SyncViewNow(void)
 {
-    if (!s_Enable) return;
+    if (!s_Enable || SB_InRender()) return;
     Fm_ApplyViewWidth();
     Fm_DirtyRedraw();
 }
@@ -1424,7 +1419,7 @@ void FM_Poll(void)
     int winW, sbW, colX, topH, colXcalc;
     int radarOk = 0;
 
-    if (!s_Enable) return;
+    if (!s_Enable || SB_InRender()) return;
     if (!g_Log) return;
     /* 引擎重建了面? (读档/改分辨率) —— 要在 Apply 之前知道, 好让它这一趟就把
      * 布局按 A 重跑。 */
@@ -1457,8 +1452,6 @@ void FM_Poll(void)
     if (s_Mode != s_LastLoggedMode || SB_Level() != s_LastLoggedZoom)
     {
         char b1[16], b2[16], buf[256];
-        RectangleStruct rr;
-        int okR;
         unsigned q = 0;
         s_LastLoggedMode = s_Mode;
         s_LastLoggedZoom = SB_Level();
@@ -1495,15 +1488,14 @@ void FM_Poll(void)
         UtoA((unsigned)Fm_ViewWide(), b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         q = AppendCStr(buf, q, " keep=", sizeof(buf));
         UtoA((unsigned)Fm_ModeKeep(), b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        okR = radarOk; rr = radar;   /* 1077 已取 (副作用幂等, 值相同)。 */
         q = AppendCStr(buf, q, " radar=", sizeof(buf));
-        if (okR)
+        if (radarOk)
         {
-            UtoA((unsigned)rr.Width, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+            UtoA((unsigned)radar.Width, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
             q = AppendCStr(buf, q, "x", sizeof(buf));
-            UtoA((unsigned)rr.Height, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+            UtoA((unsigned)radar.Height, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
             q = AppendCStr(buf, q, "@", sizeof(buf));
-            UtoA((unsigned)rr.X, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
+            UtoA((unsigned)radar.X, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         }
         else q = AppendCStr(buf, q, "none", sizeof(buf));
         q = AppendCStr(buf, q, " anchor=", sizeof(buf));

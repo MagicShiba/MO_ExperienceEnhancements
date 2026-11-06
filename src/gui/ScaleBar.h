@@ -10,7 +10,7 @@ void SB_EnsureInit(void);
  * 只判这个的钩子: 原版那条被整条换掉、不回调原版, 不在管事时不能装。*/
 int SB_Enabled(void);
 
-/* 运行时开关: 关闭前先回到 1x 并释放放大的离屏表面。 */
+/* 运行时开关: 关闭前先回到 1x 并释放缩小档离屏表面。 */
 void SB_SetEnabled(int enable);
 
 /* 每循环 (prepare 钩) 调: 摆刻度条矩形 + 处理点击换档 + 准备缩小档大面。 */
@@ -33,11 +33,13 @@ int SB_In(void);
 /* 1 = 缩小档 (视口比视图区大, scale>1)。 */
 int SB_Out(void);
 
-/* 1 = 当前档位不是 1x (放大或缩小, 且未 Safe)。 */
+/* 1 = 当前档位不是 1x (放大或缩小)。 */
 int SB_Zoomed(void);
 
 /* 缩小档: 每循环 (prepare) 准备离屏大面 + 按 R 重建 ZBuffer/ABuffer。 */
 void SB_PrepareSurface(void);
+/* 地图绘制未完成时不能修改视口、档位或缓冲尺寸。 */
+int SB_InRender(void);
 /* 缩小档: 让回窗口面 (光标擦除 / Render 中段 chrome 用)。 */
 void SB_RenderSuspend(int forCursor);
 void SB_RenderResume(void);
@@ -45,8 +47,6 @@ void SB_RenderResume(void);
 void SB_RenderSwapIn(void);
 /* 缩小档: 消息帧钩里还原 Composite/地图面 (之后才做降采样+UI)。 */
 void SB_RenderSwapOut(void);
-/* 缩小档: 三趟地图画完立刻还原窗口面 + 降采样 (须早于引擎 UI)。 */
-void SB_RenderAfterMap(void);
 /* 还原 (SB_RenderSwapOut) 之后的呈现段: 铺图外 + 降采样 (缩小档)。
  * 天气等"画进本帧原图"的层插在 SwapOut 与这一步之间, 缩小档下才会被
  * 一起降采样进窗口面。 */

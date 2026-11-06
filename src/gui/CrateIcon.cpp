@@ -21,6 +21,7 @@
 #include "EngineAddr.h"
 #include "GdiText.h"
 #include "GridView.h"
+#include "FullMap.h"
 #include "OrderUtil.h"
 #include "PcxImage.h"
 #include "CrateIcon.h"
@@ -175,19 +176,21 @@ static unsigned short Ci_Half(unsigned short v)
     return (unsigned short)(((r >> 1) << 11) | ((g >> 1) << 5) | (b >> 1));
 }
 
-/* 从表里取一格贴到 16 位面, 品红跳过; 只在 [0,W)×[0,H) 内落笔。 */
-static void Ci_Blit(unsigned char* base, int pitch, int W, int H,
-                    int x, int y, int slot, int half)
+/* 只写战场视口与目标面的交集, 底栏/侧栏不是每帧重画, 不能落入图标像素。 */
+static int Ci_Blit(unsigned char* base, int pitch, const RectangleStruct* clip,
+                   int x, int y, int slot, int half)
 {
     const unsigned short* src = s_Sheet + (slot / CI_COLS * CI_CELL_H) * CI_SHEET_W
                                         + (slot % CI_COLS) * CI_CELL_W;
     int r, c, c0 = 0, c1 = CI_CELL_W, r0 = 0, r1 = CI_CELL_H;
 
-    if (x >= W || y >= H || x + CI_CELL_W <= 0 || y + CI_CELL_H <= 0) return;
-    if (x < 0) c0 = -x;
-    if (y < 0) r0 = -y;
-    if (x + CI_CELL_W > W) c1 = W - x;
-    if (y + CI_CELL_H > H) r1 = H - y;
+    const int right = clip->X + clip->Width, bottom = clip->Y + clip->Height;
+    if (x >= right || y >= bottom ||
+        x + CI_CELL_W <= clip->X || y + CI_CELL_H <= clip->Y) return 0;
+    if (x < clip->X) c0 = clip->X - x;
+    if (y < clip->Y) r0 = clip->Y - y;
+    if (x + CI_CELL_W > right) c1 = right - x;
+    if (y + CI_CELL_H > bottom) r1 = bottom - y;
 
     for (r = r0; r < r1; r++)
     {
@@ -200,17 +203,29 @@ static void Ci_Blit(unsigned char* base, int pitch, int W, int H,
             dst[x + c] = half ? Ci_Half(v) : v;
         }
     }
+    return 1;
 }
 
 int CrateIcon_Draw(void* surf, int W, int H, int pitch)
 {
     const RectangleStruct* vb = (const RectangleStruct*)ADDR_VIEWBOUNDS;
+    RectangleStruct clip;
     unsigned char* base;
     int v[4], i, n = 0;
 
     Ci_Init();
     if (!s_On || !surf || !IsPlausiblePtr(surf)) return 0;
     if (W <= 0 || H <= 0 || pitch < W * 2) return 0;
+    FM_GetViewRects(&clip, 0);
+    /* 投影点写入 Composite 时使用与视口相同的 ViewBounds 原点。 */
+    clip.X -= vb->X;
+    clip.Y -= vb->Y;
+    if (clip.X < 0) { clip.Width += clip.X; clip.X = 0; }
+    if (clip.Y < 0) { clip.Height += clip.Y; clip.Y = 0; }
+    if (clip.X >= W || clip.Y >= H) return 0;
+    if (clip.Width > W - clip.X) clip.Width = W - clip.X;
+    if (clip.Height > H - clip.Y) clip.Height = H - clip.Y;
+    if (clip.Width <= 0 || clip.Height <= 0) return 0;
     if (!Ci_LoadSheet()) return 0;
     if (!GV_ViewCellRect(&v[0], &v[1], &v[2], &v[3])) return 0;
 
@@ -241,9 +256,8 @@ int CrateIcon_Draw(void* surf, int W, int H, int pitch)
         if (!OU_ProjWorld(cx * CI_LEP_CELL + CI_LEP_CELL / 2,
                           cy * CI_LEP_CELL + CI_LEP_CELL / 2, z, &sx, &sy))
             continue;
-        Ci_Blit(base, pitch, W, H, sx - vb->X - CI_CELL_W / 2 + CI_OFF_X,
-                sy - vb->Y - CI_CELL_H - CI_LIFT + CI_OFF_Y, s_List[i].slot, half);
-        n++;
+        n += Ci_Blit(base, pitch, &clip, sx - vb->X - CI_CELL_W / 2 + CI_OFF_X,
+                     sy - vb->Y - CI_CELL_H - CI_LIFT + CI_OFF_Y, s_List[i].slot, half);
     }
     GtUnlock(surf);
     return n > 0;

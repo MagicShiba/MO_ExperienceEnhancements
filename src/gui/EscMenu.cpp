@@ -69,7 +69,7 @@
 
 #define ESC_LEFT_W           300
 #define ESC_RIGHT_W          600
-/* 左栏只有两行页名, 让位优先级最低: 右侧内容栏差多少先从它身上扣。 */
+/* 空间不足时优先缩窄左栏, 保留右侧内容区。 */
 #define ESC_LEFT_MIN         176
 #define ESC_PANEL_GAP        10
 #define ESC_VMARGIN          24
@@ -119,8 +119,7 @@
 #define ESC_SW_W             44
 #define ESC_SW_H             20
 #define ESC_FLOW_MAX         12      /* 一行最多几个控件原子 (分段最多 8 段) */
-/* 开/关状态列按实测字宽 (见 Esc_StateW), 不再留固定 64px: 中英文都是
- * 两三个字符, 定宽等于白扔四十来像素给行标题。 */
+/* 开/关状态列由 Esc_StateW 按实测字宽布局。 */
 #define ESC_STATE_GAP        8
 #define ESC_CTL_RIGHT        12
 #define ESC_STEP_W           96
@@ -353,8 +352,7 @@ static EscName s_GuiPlacePrev[ESC_PLACE_PREV_N] = {
 static EscName s_GuiHide[ESC_HIDE_N];
 static EscName s_GuiSwsSide[ESC_SWS_SIDE_N];
 static EscName s_GuiWthMode[WEATHER_DRAW_N];
-/* 云层段: 云影 / 雾气 / 关闭 —— 关也是段, 这一行不再另挂胶囊开关。
- * 段序是显示顺序, 与 WEATHER_CLOUD_* 的取值不同序, 对应关系见 kCldSegMode。 */
+/* 云层三段: 云影 / 雾气 / 关闭。显示顺序与取值的映射见 kCldSegMode。 */
 #define ESC_CLD_SEG_N  WEATHER_CLOUD_MODE_N
 static EscName s_GuiWthLayer[ESC_CLD_SEG_N];
 static EscName s_GuiWthStyle[WEATHER_CLOUD_STYLE_N];
@@ -373,6 +371,9 @@ static EscName s_GuiPipScale[2] = { L"1x", L"2x" };
  * EscChoiceRepairGet/Apply —— 自动和半自动的顺序与 Mode 值相反)。 */
 #define ESC_REPAIR_N 3
 static EscName s_GuiRepair[ESC_REPAIR_N];
+/* 侵略模式目标两段: 仅建筑 / 所有敌方单位 ([Aggressive] Target)。 */
+#define ESC_AG_TGT_N 2
+static EscName s_GuiAgTarget[ESC_AG_TGT_N];
 /* 单位面板左侧按钮 四段 (段名直接取 s_GuiLabel 里连着的那四个 item, 与天气行同做法)。 */
 #define ESC_UPBTN_N 4
 
@@ -799,6 +800,7 @@ typedef struct {
     int pipEnable, pipOperate, pipAuto, pipW, pipH, pipScale;
     int repair;             /* 快捷维修 0/1/2 原值 ([RepairAll] Mode) */
     int tooltip, saveShot, observer, noApproach;   /* 各模块总开关 */
+    int agTarget;           /* 侵略模式目标 0=建筑 1=全部 ([Aggressive] Target) */
     int wrOn, wrH;          /* 显示单位范围: 开关 + 对空圈抬高 */
     int lightFix;           /* 光照修复 ([Environment] LightFixEnable) */
     /* 结算页退出按钮走 VecText 选项 (VTO_SCORE_EXIT), 由 VecText_SaveOptions
@@ -847,6 +849,7 @@ typedef struct {
     X(saveShot, SaveShot_Enabled, SaveShot_SetEnabled) \
     X(observer, Observer_Enabled, Observer_SetEnabled) \
     X(noApproach, NoApproach_Enabled, NoApproach_SetEnabled) \
+    X(agTarget, Aggressive_AllTargets, Aggressive_SetAllTargets) \
     X(wrOn, WeaponRange_Enabled, WeaponRange_SetEnabled) \
     X(wrH, WeaponRange_Height, WeaponRange_SetHeight) \
     X(lightFix, LightFix_Enabled, LightFix_SetEnabled)
@@ -891,6 +894,9 @@ static const char* const kGroupKey[GUI_GROUP_COUNT] = {
 /* 快捷维修的段名 (显示顺序 = s_GuiRepair 下标) */
 static const char* const kRepairKey[ESC_REPAIR_N] = {
     "GuiRepairOff", "GuiRepairAuto", "GuiRepairHalf"
+};
+static const char* const kAgTargetKey[ESC_AG_TGT_N] = {
+    "GuiAgTgtBuilding", "GuiAgTgtAll"
 };
 static const char* const kLabelKey[GUI_ITEM_COUNT] = {
     "GuiScale", "GuiPause", "GuiGrid", "GuiShot", "GuiSws", "GuiSort",
@@ -1074,6 +1080,7 @@ static void Esc_LoadAllText(void)
     ESC_LOAD_FAM(kSkinKey, s_GuiSkinName, 0);
     ESC_LOAD_FAM(kScatterKey, s_GuiScatter, 0);
     ESC_LOAD_FAM(kRepairKey, s_GuiRepair, 0);
+    ESC_LOAD_FAM(kAgTargetKey, s_GuiAgTarget, 0);
     ESC_LOAD_FAM(kHideKey, s_GuiHide, 0);
     ESC_LOAD_FAM(kSwsSideKey, s_GuiSwsSide, 0);
     ESC_LOAD_FAM(kWeatherKey, s_GuiWthMode, 0);
@@ -1527,7 +1534,9 @@ typedef struct {
 } EscGuiRowInfo;
 
 /* 联机只读项: 改了会让本机与其它玩家分叉, 或模块本身在联机就不接管 (点了只会
- * 让人以为生效)。明细与理由见 notes/ESC菜单.md §4 末尾"联机"。 */
+ * 让人以为生效)。明细与理由见 notes/ESC菜单.md §4 末尾"联机"。
+ * 阵营 UI 皮肤与玩家颜色不在此列: 它们只写本机渲染数据 (UI 资源/SHP 布局、
+ * House 的 ColorSchemeIndex 与 LightConvert 调色板), 不碰模拟, 联机各改各的。 */
 static int Esc_MpLocked(int page, int item)
 {
     if (!s_Mp || page == EDIT_PAGE_TEXT) return 0;
@@ -1537,8 +1546,6 @@ static int Esc_MpLocked(int page, int item)
     case GUI_ITEM_GAMESPEED:
     case GUI_ITEM_FPS:
     case GUI_ITEM_PAUSE:
-    case GUI_ITEM_SKIN:
-    case GUI_ITEM_COLOR:
     case GUI_ITEM_SAVE_SHOT:
         return 1;
     }
@@ -1577,14 +1584,12 @@ static const EscGuiRowInfo s_GuiLayout[] = {
     { EG_SWITCH, GUI_ITEM_PIP_ENABLE },
     { EG_SWITCH, GUI_ITEM_PIP_OPERATE },
     { EG_SWITCH, GUI_ITEM_PIP_AUTO },
-    /* 宽高并成一行 (可编辑数值格), 不再占两条拖动条 */
+    /* 宽高共用一行可编辑数值格。 */
     { EG_MIX,    GUI_ITEM_PIP_SIZE },
     { EG_CHOICE, GUI_ITEM_PIP_SCALE }
 };
 
-/* 游戏控制页 (左栏第 5 页): 游戏速度 / 存档缩略图 / 观战修复 / 范围圈 /
- * 无攻击力单位不靠近, 原来散在 GUI 页末尾的游戏控制组与杂项组挪到这里。
- * item/控件表与前两页共用, 所以点击与编辑走同一套分派。 */
+/* 游戏控制页与 GUI/显示页共用 item 和控件分派表。 */
 static const EscGuiRowInfo s_CtrlLayout[] = {
     { EG_GROUP,  GUI_GROUP_GAMECTRL },
     { EG_SWITCH, GUI_ITEM_GAMESPEED_ON },
@@ -2760,9 +2765,7 @@ static const EscGuiCells s_GuiCells[] = {
 
 ESC_FINDER(Esc_GuiCellsFind, EscGuiCells, s_GuiCells)
 
-/* 拖动期间只显示、松手才提交的滑条: 调色比例一次要重建 3.7 万格。其余滑条
- * (游戏速度) 拖动时直接生效。小窗口宽高改成了行内数值格, 不再有拖动条 ——
- * 那一项"必须立刻丢离屏面"的约束由 PiP_SetWidth/SetHeight 自己保证。 */
+/* 调色比例提交会重建地格光照, 仅在松手时生效。 */
 static int Esc_SlideDefer(int item)
 {
     return item == GUI_ITEM_LIGHT_MODE;
@@ -3177,6 +3180,13 @@ static int Esc_RowAtoms(int kind, int item, EscSegs sg, EscFlow* f, int* gap)
         f->w[0] = ESC_STEP_W;
         return 1;
     case EG_HOTKEY:
+        /* 侵略模式行: 左边目标范围两段, 右边热键框, 合成一行 (见 Esc_DrawHotkeyRow)。 */
+        if (item == GUI_ITEM_HK_AGGRESSIVE)
+        {
+            int n = Esc_NameAtoms(s_GuiAgTarget, ESC_AG_TGT_N, f);
+            f->w[n] = ESC_HK_W;
+            return n + 1;
+        }
         f->w[0] = ESC_HK_W;
         return 1;
     case EG_TRIO:
@@ -4095,14 +4105,26 @@ static void Esc_DrawHotkeyRow(void* surf, const EscFlow* f, int rowL,
                               int rowW, int rowY, int bodyH,
                               const wchar_t* label, int item)
 {
-    int rowLine = rowY + f->ln[0] * ESC_ROW_H;
+    /* 侵略模式行多出左边两段 (目标范围), 热键框永远是最后一个原子。 */
+    int agRow = (item == GUI_ITEM_HK_AGGRESSIVE);
+    int box = agRow ? ESC_AG_TGT_N : 0;
+    int rowLine = rowY + f->ln[box] * ESC_ROW_H;
     int textY = rowLine + (ESC_ROW_H - bodyH) / 2;
     int boxY = rowLine + (ESC_ROW_H - ESC_STEP_BTN_H) / 2;
-    int boxX = f->x[0], boxW = f->w[0];
+    int boxX = f->x[box], boxW = f->w[box];
     int cap = (item == s_HkCap);
     wchar_t txt[64];
 
     Esc_FlowLabel(surf, f, rowL, rowW, rowY, bodyH, label, 0);
+    if (agRow)
+    {
+        int sel = Aggressive_AllTargets() ? 1 : 0;
+        int i;
+
+        for (i = 0; i < ESC_AG_TGT_N; i++)
+            Esc_SegText(surf, s_GuiAgTarget[i], f->x[i], f->w[i],
+                        rowY + f->ln[i] * ESC_ROW_H, bodyH, i == sel);
+    }
     if (cap) lstrcpynW(txt, s_HkCapTxt, 64);
     else     Esc_HotkeyText(item, txt, 64);
 
@@ -5002,8 +5024,24 @@ static void Esc_ApplyGui(HWND hDlg, const RECT* right, int page, int index,
     Esc_RowFlow(kind, index, rowL, rowW, pg->labels[index], pg->segs(index), &f);
     pick = Esc_FlowAtomAt(&f, rowTop, mx, my);
 
-    /* 快捷键行: 点一下进捕获态 (页身份只决定归属, 这里只有一种控件)。 */
-    if (Esc_HotkeyFind(index)) { Esc_HkBegin(hDlg, index); return; }
+    /* 快捷键行: 点热键框进捕获态; 侵略模式行左边的两段是目标范围
+     * (仅建筑 / 所有敌方单位), 点哪段就是哪档。 */
+    if (Esc_HotkeyFind(index))
+    {
+        if (index == GUI_ITEM_HK_AGGRESSIVE && pick >= 0 && pick < ESC_AG_TGT_N)
+        {
+            if (pick != (Aggressive_AllTargets() ? 1 : 0))
+            {
+                Aggressive_SetAllTargets(pick);
+                Esc_QueueRaw("Aggressive", "Target",
+                             pick ? "all" : "building");
+                Esc_Redraw(hDlg);
+            }
+            return;
+        }
+        Esc_HkBegin(hDlg, index);
+        return;
+    }
 
     if (Esc_CellsKind(page, index))
     {

@@ -75,7 +75,7 @@ unsigned MemReadableBytes(const void* p, unsigned maxBytes)
 
 /* 无 CRT: 编译器可能把拷贝/清零循环优化成 memcpy/memset 调用, 自备实现。
  * 注意: 实现体必须用 volatile, 否则 -O2 会把函数体自身再认作标准语义、
- * 优化成一次对自己的调用 (实测 ToolTip 假对象清零因此死循环)。 */
+ * 优化成一次对自己的调用并无限递归。 */
 extern "C" void* memcpy(void* dst, const void* src, unsigned n)
 {
     volatile unsigned char* d = (volatile unsigned char*)dst;
@@ -147,8 +147,6 @@ const char* GtGameDir(void)
  * 坐标系里 (窗口 Composite = GtGameW/H)。实测两者恒等 —— 引擎窗口就是按游戏
  * 分辨率建的 (原生 1920=1920, 虚拟分辨率下客户区 1440=Composite 1440), 所以
  * 不做窗口→游戏的换算, 直接返回原始坐标。
- * (曾按 游戏面/客户区 比缩放: 游戏面取 Primary, 虚拟分辨率/全屏上采样下
- *  Primary 是显示器尺寸 2560x1600, 会把鼠标整体放大 → 线与光标错位。)
  *
  * 游戏逻辑尺寸 GtGameW/H 由 MOE 消息帧每帧喂 (窗口 Composite 尺寸), 供
  * ScaleBar/PauseView 等按屏幕宽高定位的 UI 用。 */
@@ -209,7 +207,7 @@ void LogLine(const char* body)
 
 /* ---------------- 帧内耗时探针 ----------------
  * 定位"开了 MOE 掉一半帧"这类问题时, 只知道总帧率没用, 得知道每帧这 2~5ms 花在
- * 哪一段。这里按段累计 QPC, 每 2s 输出一次 us/帧 (除以帧数, 所以与帧率无关)。
+ * 哪一段。这里按段累计 QPC, 每 1s 输出一次 us/帧 (除以帧数, 所以与帧率无关)。
  * 关闭时 Perf_Now 返回 0, 全部调用点立刻短路, 常驻无成本。 */
 static int       s_PfInit = 0;
 static int       s_PfOn = 0;
@@ -234,7 +232,7 @@ static const char* const kPfName[] =
     "gate", "fc", "gs", "prep", "fm", "sb", "ss",
     "aw", "bq", "pc", "so", "rp", "tc", "fa", "am",
     "sa", "dp", "ms", "ot", "wpc", "mlc", "sws",
-    "ra", "ps", "ag", "ob", "light", "bc",
+    "ra", "ps", "ag", "ob", "light", "bc", "selc",
     "pv", "shot", "vts", "pub", "mhk", "pwr", "pipb",
     "skin", "pvp",
     "msg", "msgtext", "msgswp", "msgdraw", "msgtail",
@@ -266,7 +264,7 @@ void Perf_EnsureInit(void)
     if (!s_PfFps) return;
     if (QueryPerformanceFrequency(&f) && f.QuadPart > 0) s_PfQpf = f.QuadPart;
     for (i = 0; i < PF_COUNT; i++) s_PfAcc[i] = 0;
-    LogLine(s_PfOn ? "perf: probe ON (us/frame, 2s window)"
+    LogLine(s_PfOn ? "perf: probe ON (us/frame, 1s window)"
                    : "perf: fps only (no per-segment timing)");
 }
 
@@ -284,7 +282,7 @@ void Perf_Add(int slot, long long t0)
     if (!t0 || slot < 0 || slot >= PF_COUNT) return;
     QueryPerformanceCounter(&t);
     s_PfAcc[slot] += t.QuadPart - t0;
-    if (slot < (int)PF_COUNT) s_PfCnt[slot]++;
+    s_PfCnt[slot]++;
 }
 
 void Perf_AddDelta(int slot, long long dt)
@@ -955,8 +953,7 @@ void GtUnpack16(unsigned short px, unsigned char* r, unsigned char* g,
     }
 }
 
-/* ---------------- GDI 光栅化 (七槽: 战役/提示/全局文本/超武面板/聊天输入/
- * 超武侧栏充能%/超武侧栏悬停名 各缓存一套) ----------------
+/* ---------------- GDI 光栅化 (各用途槽位见 GdiText.h) ----------------
  * 超武侧栏占两槽是有原因的: 充能百分比走 [SWSidebar] FontPx, 悬停名走全局
  * [VecText] 字号, 共用一个槽会让 GdiEnsure 每次都拆了重建 (CreateDIBSection
  * + CreateFontW), 反而比重新光栅还贵。 */
@@ -1085,7 +1082,6 @@ int GdiEnsure(int fontPx, int bold, int slot, const wchar_t* face)
     return 1;
 }
 
-/* 量一段文本在 maxW 内能放几个字符 */
 /* 单字 ABC 三段 (槽内记忆, 同字只问 GDI 一次)。 */
 int GtCharABC(wchar_t ch, int* pa, int* pb, int* pc)
 {
@@ -1134,7 +1130,7 @@ static void ClearDibRect(int cols, int rows)
     if (cols < 0) cols = 0;
     if (rows < 0) rows = 0;
     if (!g_G || !g_G->bits) return;
-    w = (cols * 4 + 3) >> 2;
+    w = cols;
     for (y = 0; y < rows; y++)
     {
         unsigned int* p = (unsigned int*)(g_G->bits + y * g_G->pitch);
@@ -1262,15 +1258,15 @@ void BlitCoverage(unsigned char* dstBase, int dstPitch, int surfW, int surfH,
             unsigned char* dibRow;
             unsigned short* dstRow;
             if (sy < 0 || sy >= surfH) continue;
-            dibRow = g_G->bits + y * g_G->pitch + x0 * 4;
-            dstRow = (unsigned short*)(dstBase + sy * dstPitch) + dx + x0;
+            dibRow = g_G->bits + y * g_G->pitch;
+            dstRow = (unsigned short*)(dstBase + sy * dstPitch + (dx + x0) * 2);
             if (alphaScale == 100u)
             {
                 for (x = x0; x < x1; x++)
                 {
                     unsigned cov = dibRow[x * 4 + 2];
                     if (!cov) continue;
-                    dstRow[x] = BlendDark(dstRow[x], cov);
+                    dstRow[x - x0] = BlendDark(dstRow[x - x0], cov);
                 }
             }
             else
@@ -1282,7 +1278,7 @@ void BlitCoverage(unsigned char* dstBase, int dstPitch, int surfW, int surfH,
                     if (!cov) continue;
                     a = (cov * alphaScale + 50u) / 100u;
                     if (a > 255u) a = 255u;
-                    dstRow[x] = BlendDark(dstRow[x], a);
+                    dstRow[x - x0] = BlendDark(dstRow[x - x0], a);
                 }
             }
         }
@@ -1294,15 +1290,15 @@ void BlitCoverage(unsigned char* dstBase, int dstPitch, int surfW, int surfH,
         unsigned char* dibRow;
         unsigned short* dstRow;
         if (sy < 0 || sy >= surfH) continue;
-        dibRow = g_G->bits + y * g_G->pitch + x0 * 4;
-        dstRow = (unsigned short*)(dstBase + sy * dstPitch) + dx + x0;
+        dibRow = g_G->bits + y * g_G->pitch;
+        dstRow = (unsigned short*)(dstBase + sy * dstPitch + (dx + x0) * 2);
         if (alphaScale == 100u)
         {
             for (x = x0; x < x1; x++)
             {
                 unsigned cov = dibRow[x * 4 + 2];
                 if (!cov) continue;
-                dstRow[x] = Blend16(dstRow[x], fr, fg, fb, cov);
+                dstRow[x - x0] = Blend16(dstRow[x - x0], fr, fg, fb, cov);
             }
         }
         else
@@ -1314,7 +1310,7 @@ void BlitCoverage(unsigned char* dstBase, int dstPitch, int surfW, int surfH,
                 if (!cov) continue;
                 a = (cov * alphaScale + 50u) / 100u;
                 if (a > 255u) a = 255u;
-                dstRow[x] = Blend16(dstRow[x], fr, fg, fb, a);
+                dstRow[x - x0] = Blend16(dstRow[x - x0], fr, fg, fb, a);
             }
         }
     }

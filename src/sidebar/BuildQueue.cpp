@@ -82,11 +82,9 @@
 
 #define BQ_CAP 50
 
-/* 重发窗口守卫: 同一条产线 (house,naval,cat) 发单后隔 2 个逻辑帧才允许再发。
- * 为什么按逻辑帧而不按轮询次数: Poll 挂在渲染 prepare 上 (每帧 1 次), 轮询次数
- * 与逻辑帧的比例随帧率/暂停/步进变化, 按次数计会变成"几百毫秒的哑等"。
- * 为什么 2 帧够: 引擎每逻辑帧派发一次 OutList, 事件执行后 Object 非空, 本函数
- * 自然跳过; 若被拒 (Object 仍空), 隔一帧就能重发 (=自愈)。 */
+/* 重发节流: 同一条产线 (house,naval,cat) 发单后至少隔 2 个逻辑帧。
+ * 联机事件还会经过 DoList 等待目标执行帧, 是否仍在途必须读标准事件队列,
+ * 不能用这两帧当作执行确认。Poll 挂在渲染 prepare 上, 节流只按逻辑帧。 */
 #define BQ_PEND_FRAMES 2
 /* 主工厂缓存槽为空时的重发间隔: 引擎可能拒单并清空槽, 每 2 帧照发会一直
  * 刷事件。单被接受后条目立刻被认领, 这个间隔不拖慢正常队列。 */
@@ -426,6 +424,52 @@ static int BQ_FacOnTypeAny(void* house, void* type)
     return 0;
 }
 
+/* YRpp EventClass / QueueClass: Count+Head+Tail+EventClass[capacity]。
+ * EventClass 是 111 字节紧凑布局: Type/IsExecuted/HouseIndex/Frame/DataBuffer。
+ * 只读检查本家建筑 PRODUCE (含原生点击首单), 让网络延迟决定等待时长。
+ * 两页共用此守卫是保守串行: 在途单落地后各自工厂仍可并行建造。 */
+static int BQ_QueuedProduce(unsigned address, unsigned capacity, void* house)
+{
+    unsigned char* queue = (unsigned char*)(size_t)address;
+    int count = *(int*)queue;
+    unsigned head = *(unsigned*)(queue + 4);
+    int houseIdx = *(int*)((char*)house + OFF_HOUSE_INDEX);
+    int i;
+    if (count < 0 || (unsigned)count > capacity || head >= capacity) return 1;
+    for (i = 0; i < count; i++)
+    {
+        unsigned slot = (head + (unsigned)i) & (capacity - 1u);
+        const unsigned char* ev = queue + 12u + slot * EVT_SIZE;
+        if (ev[0] == EVT_PRODUCE && !(ev[1] & 1u) && (int)(signed char)ev[2] == houseIdx &&
+            *(const int*)(ev + 7) == (int)ABS_BUILDINGTYPE)
+            return 1;
+    }
+    return 0;
+}
+
+static int BQ_ProduceInTransit(void* house)
+{
+    /* EventClass::OutList 128 / DoList 128*128 (YRpp EventClass.h)。 */
+    return BQ_QueuedProduce(ADDR_OUT_COUNT, EVT_CAP, house) ||
+           BQ_QueuedProduce(0x008B41F8u, 128u * 128u, house);
+}
+
+/* 同一产线只允许队首待确认条目参与认领/重试。一个 Factory.Object
+ * 只能消费一个本地订单, 未发送条目不能越过等待网络执行的队首。 */
+static int BQ_LineHasEarlier(int idx)
+{
+    const BQEntry* e = &g_BQList[idx];
+    int j;
+    for (j = 0; j < idx; j++)
+    {
+        const BQEntry* prev = &g_BQList[j];
+        if (prev->house == e->house && prev->naval == e->naval &&
+            prev->buildcat == e->buildcat)
+            return 1;
+    }
+    return 0;
+}
+
 /* 复刻一次点击下单 (PRODUCE 事件手工进 OutList, 见文件头)。
  * OutList 满返回 0 (下帧重试), 否则返回 1。 */
 static int BQ_FireProduce(void* house, void* type)
@@ -505,6 +549,17 @@ void BuildQueue_Poll(void)
         BQEntry* e = &g_BQList[i];
         void* factory;
         if (e->house != cur) continue;
+        if (BQ_LineHasEarlier(i)) continue;
+        /* 在途时模拟尚未变化, 不能认领、重发或据短暂权限/限造状态丢单。
+         * 原生首单同样在检查范围内, 防止 Shift 附加单抢在首单执行前发出。 */
+        if (BQ_ProduceInTransit(cur)) continue;
+        /* 先确认再算余量: 在产计数已包含本单, 不能再把 flying 当作未下单扣一次。 */
+        if (e->flying && BQ_FacOnTypeAny(cur, e->type))
+        {
+            BQ_RemoveAt(i);
+            i--;
+            continue;
+        }
         /* 限造余量不足的直接丢 (=原版"点不下"语义, 队列自愈)。 */
         if (BQ_LimitOf(e->type) &&
             BQ_RoomLeft(cur, e->type,
@@ -522,15 +577,10 @@ void BuildQueue_Poll(void)
             i--;
             continue;
         }
-        /* 认领: 本家任一工厂正在造本型。放置前 Object 一直是它, 放下后变空,
-         * 才会喂下一项; 按数组扫描, 不依赖主工厂缓存槽。 */
-        if (e->flying && BQ_FacOnTypeAny(cur, e->type))
-        {
-            BQ_RemoveAt(i);
-            i--;
-            continue;
-        }
         if (BQ_Pending(cur, e->naval, e->buildcat)) continue;
+        /* 缓存槽可被引擎拒单清空, 但实际在产/待放置对象仍然存在。
+         * 同型在产时不发第二单, 防止用同一个对象认领后续订单。 */
+        if (BQ_FacOnTypeAny(cur, e->type)) continue;
         factory = BQ_Resolve(cur, e->naval, e->buildcat);
         if (factory)
         {

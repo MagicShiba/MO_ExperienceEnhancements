@@ -38,6 +38,7 @@
 #include "TreeChop.h"
 #include "WaypointCap.h"
 #include "BeaconSP.h"
+#include "BeaconCap.h"
 #include "MegaListCap.h"
 #include "WeaponRange.h"
 #include "ScaleBar.h"
@@ -45,6 +46,7 @@
 #include "FrameCap.h"
 #include "Shot.h"
 #include "SaveShot.h"
+#include "SelPoolCap.h"
 #include "PiP.h"
 #include "Weather.h"
 #include "EscMenu.h"
@@ -332,14 +334,16 @@ static void PowerDrawBoth(void)
     tSeg = Perf_Now(); MindSelect_Poll(); Perf_Add(PF_A_MS, tSeg);
     tSeg = Perf_Now(); OrderThrottle_Poll(); Perf_Add(PF_A_OT, tSeg);
     tSeg = Perf_Now(); WpCap_Poll();      Perf_Add(PF_A_WPC, tSeg);
-    /* 通信信标 (B 键) 单机启用: 联机不装钩 (见 BeaconSP.cpp)。 */
-    tSeg = Perf_Now(); BeaconSP_Poll();   Perf_Add(PF_A_BC, tSeg);
+    /* 先确定信标槽布局, 再更新放置/替换钩子和序号表的索引语义。 */
+    tSeg = Perf_Now(); BeaconCap_Poll(); BeaconSP_Poll(); Perf_Add(PF_A_BC, tSeg);
     tSeg = Perf_Now(); MlCap_Poll();      Perf_Add(PF_A_MLC, tSeg);
+    /* 框选候选池 500 -> 4096 (纯本地 UI 数据, 联机同样装)。 */
+    tSeg = Perf_Now(); SelPool_Poll();    Perf_Add(PF_A_SELC, tSeg);
     tSeg = Perf_Now(); SWS_Poll();        Perf_Add(PF_A_SWS, tSeg);
     tSeg = Perf_Now(); RepairAll_Poll();  Perf_Add(PF_A_RA, tSeg);
     /* 侧栏放建筑时驱散地基上的自家单位 (只读+标准 Move 事件)。 */
     tSeg = Perf_Now(); PlaceScatter_Poll(); Perf_Add(PF_A_PS, tSeg);
-    /* 侵略模式: Alt+A 切换标记, 闲置单位自动打警戒范围内的敌方建筑。 */
+    /* 侵略模式: 切换本地标记, 为闲置单位向范围内敌方目标发送标准事件。 */
     tSeg = Perf_Now(); Aggressive_Poll(); Perf_Add(PF_A_AG, tSeg);
     /* 多观战修复 + 观战面板排序 (联机安全, 见 Observer.cpp)。 */
     tSeg = Perf_Now(); Observer_Poll();   Perf_Add(PF_A_OB, tSeg);
@@ -1665,10 +1669,8 @@ static int MOE_Readable(unsigned addr, unsigned len)
     return 1;
 }
 
-/* 崩溃现场: 读一个引擎 BSurface 的缓冲区间 (只读, 先过 MOE_Readable)。
- * 崩单里 tgt=0x00125CB4 这种低地址, 到底是"正在用的引擎面缓冲"还是"上一次
- * 分辨率/读档重建后**已释放的旧面**缓冲", 光看面对象地址分不出来 ——
- * 把 (base,size) 区间打出来跟 tgt 比才能一句话定性。 */
+/* 崩溃现场只读缓冲区间。BSurface +18 是长度，DSurface 同偏移是标志，
+ * 后者必须从已锁定的 DirectDraw 描述读取 pitch，不能把标志当成长度。 */
 static int MOE_SurfBuf(unsigned surf, unsigned* base, unsigned* size)
 {
     unsigned vt, w, h, bpp, buf, sz;
@@ -1681,10 +1683,20 @@ static int MOE_SurfBuf(unsigned surf, unsigned* base, unsigned* size)
     bpp = *(const unsigned*)(size_t)(surf + 0x10u);
     buf = *(const unsigned*)(size_t)(surf + 0x14u);
     sz = *(const unsigned*)(size_t)(surf + 0x18u);
+    if (vt == 0x7E85D4u)
+    {
+        unsigned desc, pitch;
+        if (!MOE_Readable(surf, 0x24u)) return 0;
+        desc = *(const unsigned*)(size_t)(surf + 0x20u);
+        if (!MOE_Readable(desc, 0x28u)) return 0;
+        pitch = *(const unsigned*)(size_t)(desc + 0x10u);
+        if (pitch == 0 || pitch > 65536u || h > 16384u) return 0;
+        sz = pitch * h;
+    }
     if (vt < 0x400000u || vt >= 0x7FF00000u) return 0;   /* 虚表必须在代码段 */
     if (w > 8192u || h > 8192u || bpp > 4u) return 0;
     if (buf < 0x10000u || buf >= 0x7FF00000u) return 0;
-    if (sz == 0 || sz > 0x4000000u) sz = w * h * (bpp ? bpp : 2u);
+    if (sz == 0 || sz > 0x40000000u) sz = w * h * (bpp ? bpp : 2u);
     *base = buf;
     *size = sz;
     return 1;
@@ -1789,8 +1801,7 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         UtoA((unsigned)(size_t)r->ExceptionAddress, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " tid=", sizeof(buf));
         UtoA((unsigned)GetCurrentThreadId(), b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-        /* 读写方向看 ExceptionInformation[0] (0=读 1=写 8=执行);
-         * 旧代码只看 NumberParameters, 访问冲突恒为 2 → 永远打 (read)。 */
+        /* 访问类型由 ExceptionInformation[0] 表示: 0=读、1=写、8=执行。 */
         p = AppendCStr(buf, p,
             (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
              r->NumberParameters >= 1 && r->ExceptionInformation[0] == 1)

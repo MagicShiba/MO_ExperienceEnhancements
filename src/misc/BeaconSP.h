@@ -1,6 +1,6 @@
-/* BeaconSP.h - 通信信标 (B 键放置) 单机启用 (实现见 BeaconSP.cpp)。
- * 单机专用: 联机不装钩, 已装的恢复原版字节 (实时判定, 不缓存)。 */
+/* B 键信标: 单机启用、满槽替换最旧。联机保留每家三槽和原生 IPX 广播;
+ * 此 UI 路径不能用于模拟命令, 模拟变更必须走标准事件。 */
 #pragma once
 
-/* 每循环轮询 (挂 PowerDrawBoth, 见 MOExperience.cpp): 按单机/联机懒装/卸钩。 */
+/* 按游戏模式轮询安装/恢复钩子。 */
 void BeaconSP_Poll(void);

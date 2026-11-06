@@ -118,6 +118,10 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
     `def` 必须与模块自己 `OU_ParseHotkey` 的默认串一致（ini 缺键时显示用）。
   - 显示串由 ini 现读再规范化，所以 ini 里手写 `ctrl+mmb` 这里会显示成
     `Ctrl+Middle`；读不到就用 `def`。
+  - **侵略模式行是个例外**：它把目标范围（仅建筑 / 所有敌方单位，`[Aggressive]
+    Target`）与热键并成一行，`Esc_RowAtoms` 给这一行 3 个原子（段 0、段 1、
+    热键框），热键框永远是最后一个原子。点在前两段 = 切范围（直接
+    `Aggressive_SetAllTargets` + `Esc_QueueRaw`），点其它地方才进捕获态。
 - 左栏第五项为“游戏控制”（`EDIT_PAGE_CTRL` / `s_CtrlLayout`）：`游戏控制`
   （自定义游戏速度开关与速度滑条 → 分割线 → 游戏存档缩略图、观战修复、
   显示单位范围 (Ctrl)（数值格 + 胶囊同一行）、阻止无攻击力单位靠近目标）与
@@ -362,11 +366,12 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
     item 与 `GUI_ITEM_*` 编号重叠。
   - 只读清单（会与其它玩家分叉，或模块本身联机就不接管）：游戏速度开关与滑条
     （GameSpeed 在 3/4 直接放行引擎）、设置页帧率上限（FrameCap 联机放行）、
-    暂停与帧进（PauseView 联机不接管）、阵营 UI 皮肤（`SidebarSkin_Set` 联机只
-    记 INI 不应用）、玩家颜色（直接写本机 House 的 `ColorSchemeIndex`，不走事件、
-    其它端看不到）、存档缩略图（联机没有存档界面）。
+    暂停与帧进（PauseView 联机不接管）、存档缩略图（联机没有存档界面）。
   - 不锁：侧栏 / 单位面板 / 小窗口 / 文本 / 光照 / 天气 / 热键页与各种下令辅助
     —— 它们是本机渲染，或走标准事件的输入辅助。
+  - 阵营 UI 皮肤与玩家颜色也不锁：两者都只写本机渲染数据（侧栏 SHP/调色板与
+    布局、House 的 `ColorSchemeIndex` 与 `LightConvert` 调色板），不发命令、
+    不碰模拟，联机各端各改各的显示。判据是"是否进入模拟"，不是"其它端能否看到"。
 - 原 WndProc 存在窗口属性 `MOE_EscOldProc`；经 `LineEdit.h` 的 `LiCallOld`
   转发（内部按 `IsWindowUnicode` 选 A/W）。
 

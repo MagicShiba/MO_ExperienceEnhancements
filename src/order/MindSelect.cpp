@@ -1,48 +1,26 @@
-/* MindSelect.cpp - Shift+P 结尾只剩心控单位 (收敛式过滤)。
- *
- * 原生 Shift+P 走的是全选 (P 处理无视 Shift), 所以单次加法/单次过滤都会被原生全选
- * 盖掉, 必须多轮收敛。用法: 点按 Shift+P (别长按)。作用域继承当前选中 (P 一次屏内,
- * 两次全图, 原生先全选, 本模块再收)。
- *
- * 每轮 (Shift+P 上升沿跑一次; 原生全选在消息泵同步落地, 渲染钩子看到边沿时已生效):
- *   1. 屏内 selectables 扫心控 → 原生 Select() 加入 (加法, 非心控零触碰)。
- *   2. 当前选中里非心控 → 清 IsSelected 标记并原地压缩 (只摘杂, 心控不动)。
- *   3. 两处都无心控 → 碰都不碰 (不清空原选中, 只记日志)。
- *
- * 判定口径 (对齐 Phobos Select Captured Units):
- *   IsMindControlled() && IsSelectable() && !MindControlledByAUnit
- * 排掉永久心控 (MCV/永久心灵支配者) 与引擎判不可选的 (工程兵/医疗兵等
- * IsSelectableCombatant=no; 建筑的 WhatAmI 判定由引擎自带)。
- *
- * 引擎调用 (二进制实证):
- *   TacticalSelectables @0xB0CEC8 (500 项定长, 条目 {Object*, X, Y}, 与 P/框选同源);
- *   CurrentObjects @0xA8ECB8 (+4 Items / +8 Cap / +16 Count);
- *   IsMindControlled 0x7105E0 (读 +0x2C0 || byte +0x2C4, 纯读);
- *   Select vtable+0x14C, IsSelectable vtable+0x64 (实现 0x6F32D0, 纯读);
- *   MindControlledByAUnit +0x2C4 (bool)。
- * 只读偏移 (写模拟一律禁止): IsAlive +0x90 / InLimbo +0x81 / IsSelected +0x83 /
- *   Health +0x6C。选中是本机 UI 状态, 无模拟事件, 联机安全。
- */
+/* Shift+P 在原生 P 全选落地后, 仅保留当前选中的临时心控单位并补入屏内候选。
+ * 判定为 IsMindControlled && IsSelectable && !MindControlledByAUnit。
+ * 仅修改本地选择列表和 IsSelected, 不改模拟状态、不发模拟事件。
+ * 没有心控候选时保持原选择。 */
 
 #include <windows.h>
 #include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "SelPoolCap.h"
 
 #define MS_SECTION "Features"
 
 /* ---------------- 私有地址 (共享部分见 OrderUtil.h) ---------------- */
 
-#define ADDR_SELECTABLES 0xB0CEC8u   /* Unsorted::TacticalSelectables (YRpp Unsorted.h:652) */
-#define SEL_CAP          500u        /* DEFINE_ARRAY_REFERENCE 上限 */
-#define OFF_SEL_NEXT     12u         /* {Object*, X, Y} (YRpp TacticalClass.h:13) */
+#define OFF_SEL_NEXT     12u         /* {Object*, X, Y} (YRpp TacticalClass.h:13) 基址见 SelPool_Base() */
 
 #define OFF_VEC_CAP    8u
 
 #define OFF_ISSELECTED 0x83u
 #define OFF_MCBYAUNIT  0x2C4u    /* TechnoClass::MindControlledByAUnit (bool 字节) */
 
-#define VT_SELECT       (0x14Cu / 4u)   /* 见文件头推导 */
+#define VT_SELECT       (0x14Cu / 4u)   /* ObjectClass::Select */
 #define VT_ISSELECTABLE (0x64u / 4u)    /* ObjectClass::IsSelectable */
 
 typedef int __attribute__((thiscall)) (*Fn_IsMindControlled)(void* self);
@@ -65,11 +43,10 @@ static void MS_EnsureInit(void)
     if (g_MsInit) return;
     g_MsInit = 1;
     BuildPaths();
-    /* 单行: 缺键=Shift+P 启用; 0=禁用; 其它按 Hotkey 串 (坏串留默认, None=禁用) */
     g_MsEnable = OU_ReadHotkeySingle(MS_SECTION, "MindSelect", "Shift+P", &g_MsHk);
 }
 
-/* 设置页改完热键后回读 (ini 已写盘)。组合键判定现读 g_MsHk, 改完立刻生效。 */
+/* 设置页写盘后回读热键。 */
 void MindSelect_ReloadHotkey(void)
 {
     MS_EnsureInit();
@@ -78,11 +55,7 @@ void MindSelect_ReloadHotkey(void)
 
 /* ---------------- 判定 + 单步 ---------------- */
 
-/* 引擎可选性 (纯读调用, 对应 Phobos SelectCaptured 里的 pTechno->IsSelectable()):
- * Health>0 && !InLimbo && WhatAmI!=Building && Type->IsSelectableCombatant
- * && Owner->IsControlledByCurrentPlayer() (0x50B6F0: 联机比 CurrentPlayer
- * 0xA83D4C, 单机读 House+0x1EC/+0x1ED)。心控时 Owner 已被改成控制方,
- * 故心控单位能过这条。 */
+/* 只读引擎可选性: 含所有权、存活和 IsSelectableCombatant 判定。 */
 static int MS_IsSelectable(void* u)
 {
     void** vt;
@@ -90,7 +63,7 @@ static int MS_IsSelectable(void* u)
     vt = *(void***)u;                     /* 调用方已验 u 合理 */
     if (!vt || !IsPlausiblePtr(vt)) return 0;
     fn = (Fn_IsSelectable)vt[VT_ISSELECTABLE];
-    /* 槽坏时按"可选"放行 (OU_WhatAmI 已成功走过该槽); MS_SelectOne 会自校验。 */
+    /* 无有效查询函数时交给原生 Select 最终判定。 */
     if (!fn || !IsPlausiblePtr((const void*)fn)) return 1;
     return fn(u) ? 1 : 0;
 }
@@ -129,11 +102,25 @@ static void MS_Round(void)
     int nS = 0, i;
     void** items;
     int cap, count, selMC = 0, kept = 0;
+    unsigned lim = SelPool_Capacity();
+    unsigned char* base = SelPool_Base();
+
+    /* 扫描上界: 候选池容量 (SelPoolCap 扩容后 4096, 没装还是 500) 与
+     * 本帧实际表项数取小 —— 只扫有效前缀, 不碰表尾之外残留的旧指针。 */
+    {
+        void* tac = *(void**)(size_t)ADDR_TACTICAL;
+        if (tac && IsPlausiblePtr(tac))
+        {
+            int c = *(int*)((char*)tac + OFF_TAC_SELCNT);
+            if (c <= 0) lim = 0;
+            else if ((unsigned)c < lim) lim = (unsigned)c;
+        }
+    }
 
     /* 1. 屏内心控收集 (加法源, 非心控零触碰)。 */
-    for (i = 0; i < (int)SEL_CAP && nS < MS_MC_CAP; i++)
+    for (i = 0; i < (int)lim && nS < MS_MC_CAP; i++)
     {
-        void* u = *(void**)(ADDR_SELECTABLES + (unsigned)i * OFF_SEL_NEXT);
+        void* u = *(void**)(base + (unsigned)i * OFF_SEL_NEXT);
         if (MS_IsMCd(u)) scrMC[nS++] = u;
     }
     /* 2. 当前选中清点 (只读, 不动)。 */
@@ -146,7 +133,7 @@ static void MS_Round(void)
         if (MS_IsMCd(items[i])) selMC++;
     /* 3. 两处都无心控 → 碰都不碰 (不清空原选中)。 */
     if (nS == 0 && selMC == 0) return;
-    /* 4. 选中去杂 (心控前移保留, 非心控摘标记; 先收后加, 条目数只增不乱)。 */
+    /* 4. 原地保留心控条目, 仅清除非心控对象的本地选中标记。 */
     for (i = 0; i < count; i++)
     {
         void* u = items[i];

@@ -1,11 +1,11 @@
 /* PlayerColor.cpp - ESC 设置页的"玩家颜色"。
  * 只改本机玩家的 HouseClass::ColorSchemeIndex 和所选方案的 LightConvert 调色板,
- * 不碰模拟状态。彩虹模式的色相自持 (不写 GameSpeed 那类全局), 换场景/联机自动收。 */
+ * 不碰模拟状态, 联机也只用 (两边各改各的显示)。彩虹模式的色相自持
+ * (不写 GameSpeed 那类全局), 换场景/换房屋自动收。 */
 
 #include <windows.h>
 #include "PlayerColor.h"
 #include "GdiText.h"
-#include "OrderUtil.h"
 
 #define PC_FN_HOUSE_COLOR     0x0050B840u
 #define PC_FN_HOUSE_LASER     0x0050BA00u
@@ -300,7 +300,6 @@ static int Pc_StartRainbow(void)
     void* light;
     int slot, index;
 
-    if (OU_IsMP()) return 0;
     house = Pc_CurrentHouse();
     if (!Pc_HouseAlive(house)) return 0;
 
@@ -427,11 +426,6 @@ unsigned short PlayerColor_RainbowSwatch(int index)
 void PlayerColor_Tick(void)
 {
     if (!s_Rainbow) return;
-    if (OU_IsMP())
-    {
-        Pc_StopRainbow();
-        return;
-    }
     if (s_RainbowHouse != Pc_CurrentHouse())
     {
         Pc_StopRainbow();

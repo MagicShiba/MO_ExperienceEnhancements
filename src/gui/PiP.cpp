@@ -12,7 +12,9 @@
 #include "PcxImage.h"
 #include "SidebarSkin.h"
 #include "OrderUtil.h"      /* OU_ObjId / OU_PtrAliveRaw: 跟随目标跨帧验活 */
+#include "SelPoolCap.h"     /* 候选池被整表搬过家, 读写一律经 SelPool_Base() */
 #include "PiP.h"
+#include "Resample565.h"
 
 #define PIP_SECTION "PiP"
 
@@ -98,7 +100,7 @@ static int g_RawAt = -1000;    /* 最近一次拿到原始格的帧号 */
 static int g_CamWX = 0, g_CamWY = 0, g_CamWZ = 0, g_CamW = 0; /* 本帧程序化相机跳转的精确世界坐标 */
 static unsigned g_AutoSeq = 0; /* 已跟随的雷达事件序号 */
 static int g_AutoSeen = 0;     /* g_AutoSeq 是否有意义 (开窗/开按钮后先跳一次最新事件) */
-static int g_LastRtX = 0x7fffffff, g_LastRtY = 0x7fffffff;  /* 上次记日志的目标 */
+static int g_LastRtX = 0x7fffffff, g_LastRtY = 0x7fffffff;  /* 上次成功渲染的目标，与可选物件表同源 */
 
 /* ---- 小窗跟随 (F) ----
  * 引擎的跟随挂在选中集上: 换选择/取消选中/下别的令都会把它清掉, 主窗口当场停下。
@@ -138,7 +140,7 @@ static int g_BtnPos[4][2] = { { 8, 155 }, { 25, 158 }, { 0, 160 }, { 0, 168 } };
 /* 可选/可见单元表快照 (最多各留这么多项)。脏区表只存项数即可:
  * 渲染只会在 count>0 时"删"末项, 提前把 count 清 0 就一项不动。 */
 #define PIP_SEL_ENT   12
-#define PIP_SEL_MAX   500     /* 引擎 AddSelectable 上限 0x1F4; 整表保存/还原 */
+#define PIP_SEL_MAX   4096    /* 候选池容量 (SelPoolCap 把引擎的 500 提到 4096); 整表保存/还原 */
 #define PIP_VIS_MAX   800
 #define PIP_FAIL_RETRY 120    /* 离屏面分配失败后隔多少帧再试 (别每帧刷日志) */
 
@@ -203,7 +205,8 @@ static void PiP_Order2(int* a, int* b)
 }
 
 /* 逐字节搬运。本工程无 CRT, memcpy 是 volatile 字节循环 (比这里慢), 所以自己写:
- * 非 volatile 的循环 -O2 会展开/向量化。只走点击/开窗这类低频路径 (上限 ~6KB)。 */
+ * 非 volatile 的循环 -O2 会展开/向量化。只走点击/开窗这类低频路径
+ * (候选池整表上限 4096 项 = 48KB)。 */
 static void PiP_CopyBytes(void* dst, const void* src, int n)
 {
     unsigned char* d = (unsigned char*)dst;
@@ -637,8 +640,7 @@ static int PiP_RenderCamera(int tx, int ty)
      * 免得还原时计数指向没被还原的项。 */
     sel_n = PiP_ClampCount(*(int*)((char*)tac + OFF_TAC_SELCNT), PIP_SEL_MAX);
     vis_n = PiP_ClampCount(*(int*)((char*)tac + OFF_TAC_VISCNT), PIP_VIS_MAX);
-    PiP_CopyBytes(g_ScratchSel, (const void*)(size_t)ADDR_TACTICAL_SELARR,
-                  sel_n * PIP_SEL_ENT);
+    PiP_CopyBytes(g_ScratchSel, SelPool_Base(), sel_n * PIP_SEL_ENT);
     PiP_CopyBytes(g_ScratchVis, (const void*)((char*)tac + OFF_TAC_VISARR), vis_n * 4);
 
     /* 主摄像机 / 面 / 缓冲 / 视口缓存 */
@@ -673,8 +675,7 @@ static int PiP_RenderCamera(int tx, int ty)
      * 重映射时临时装回去 —— ProcessClickCoords (0x6DA380) 正是靠这张表拾取物件,
      * 而表里的坐标是小窗视口坐标, 与重映射后的点击点同系。 */
     g_PipSelN = PiP_ClampCount(*(int*)((char*)tac + OFF_TAC_SELCNT), PIP_SEL_MAX);
-    PiP_CopyBytes(g_ScratchPipSel, (const void*)(size_t)ADDR_TACTICAL_SELARR,
-                  g_PipSelN * PIP_SEL_ENT);
+    PiP_CopyBytes(g_ScratchPipSel, SelPool_Base(), g_PipSelN * PIP_SEL_ENT);
 
     /* 还原主状态 (面 / 缓冲 / 视口 / 摄像机 / 各表) */
     for (i = 0; i < PIP_S_N; i++) PiP_SurfSet(i, s_surf[i]);
@@ -682,8 +683,7 @@ static int PiP_RenderCamera(int tx, int ty)
     *(int*)(size_t)ADDR_FULLREDRAW = s_fr;
     *(int*)(size_t)ADDR_DIRTY_COUNT = s_dirtycnt;
     *(int*)((char*)tac + OFF_TAC_SELCNT) = sel_n;
-    PiP_CopyBytes((void*)(size_t)ADDR_TACTICAL_SELARR, g_ScratchSel,
-                  sel_n * PIP_SEL_ENT);
+    PiP_CopyBytes(SelPool_Base(), g_ScratchSel, sel_n * PIP_SEL_ENT);
     *(int*)((char*)tac + OFF_TAC_VISCNT) = vis_n;
     PiP_CopyBytes((void*)((char*)tac + OFF_TAC_VISARR), g_ScratchVis, vis_n * 4);
     return 1;
@@ -716,7 +716,7 @@ static void PiP_ClampScreen(int* tx, int* ty)
     else *tx = mid;
 }
 
-/* 与 0x6D6070 相同的 256 取整: (v + (v<0 ? 255 : 0)) >> 8 (向下取整)。 */
+/* 与 0x6D6070 相同的除 256 运算：负数加 255 后右移，向零取整。 */
 static int PiP_Div256(int v)
 {
     return (v + ((v >> 31) & 255)) >> 8;
@@ -999,10 +999,8 @@ static void PiP_FollowTick(void)
 
 /* ---------------- 降采样贴窗 ---------------- */
 
-/* 窗内三个图标的 14x14 位图 (13x13 图形 + 右下 1px 黑影溢出): 低 14 位 = 本体,
- * 高 14 位 = 黑影, 位序即列 (bit0 = 最左)。由原手绘公式导出, 逐像素等价 ——
- * 黑影压住本体的地方按最终像素取值, 改表前先照原图重算。
- * slot 0 的黑影是后补的: 原实现只用 PxPut 画本体没画影, 三个按钮里它独缺一道。 */
+/* 窗内图标为 14x14 位图：低 14 位是本体，高 14 位是黑影，bit0 为最左列。
+ * 同一像素同时置位时本体优先。 */
 static const unsigned kIconBits[PIP_ICON_N][14] = {
     { 0x00000040u, 0x000000E0u, 0x01800040u, 0x00800040u,   /* 0 移动: 十字 + 四箭头 */
       0x00800040u, 0x00800842u, 0x00001FFFu, 0x37BC0842u,
@@ -1063,7 +1061,9 @@ static int PiP_Blit(void* dst, int X, int Y, int dW, int dH)
             (const unsigned short*)(sb + (size_t)(y * sc) * sp);
         unsigned short* drow =
             (unsigned short*)((unsigned char*)db + (size_t)(Y + y) * dp) + X;
-        for (x = 0; x < dW; x++) drow[x] = srow[x * sc];
+        /* g_Comp 是独立离屏面；只对不同目标面启用非重叠行内核。 */
+        if (sc == 2 && dst != g_Comp) R565_DownsampleRow2(srow, drow, dW);
+        else for (x = 0; x < dW; x++) drow[x] = srow[x * sc];
     }
     /* 聚焦=绿框, 跟随时=琥珀框 (跟随时主窗口不动, 这个色就是状态提示) */
     if (g_Border)
@@ -1215,7 +1215,7 @@ static int PiP_SwapIn(void)
     }
     if (g_ClkSelN > 0)
     {
-        unsigned char* p = (unsigned char*)(size_t)ADDR_TACTICAL_SELARR;
+        unsigned char* p = SelPool_Base();
         PiP_CopyBytes(g_ClkSelSave, p, g_ClkSelN * PIP_SEL_ENT);
         PiP_CopyBytes(p, g_ClkSelTmp, g_ClkSelN * PIP_SEL_ENT);
     }
@@ -1246,7 +1246,7 @@ void PiP_EndClickMap(void)
     /* 用 Begin 存的实例指针还原, 不能带着小窗状态回到主循环。 */
     tac = g_CamSave.tac;
     if (g_ClkSelN > 0)
-        PiP_CopyBytes((void*)(size_t)ADDR_TACTICAL_SELARR, g_ClkSelSave,
+        PiP_CopyBytes(SelPool_Base(), g_ClkSelSave,
                       g_ClkSelN * PIP_SEL_ENT);
     PiP_CamRestore(&g_CamSave);
     if (tac && IsPlausiblePtr(tac))

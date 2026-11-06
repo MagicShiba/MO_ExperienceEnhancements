@@ -1,30 +1,8 @@
-/* Aggressive.cpp - 侵略模式。
- *
- * Alt+A (Hotkey 可改) 把选中的作战单位 (Unit/Infantry/Aircraft) 加入/移出"侵略标记"
- * 集合 (全体已在集合内则整体移出, 否则整体加入)。已标记的单位闲置 (Mission=Guard/
- * Area_Guard/Stop) 时每隔 Interval 帧扫一次: 对警戒半径内的敌方建筑发一条与鼠标左键
- * 同形的标准事件 (经 OT_Fire / OutList 广播), 并在其上方画 icon_aggressive 图像。
- *
- * 目标只认**敌方**建筑, 忽略中立 (House->Type->MultiplayPassive, 与 SmartArea 同式)。
- * 订单 = 复刻引擎左键点击的真实派发链 (AG_UnitMission): 固有光标
- * (OU_MouseOverObjectNative, ignoreForce=1) → 类内重映射 → FootClass 的
- * Action→Mission 表。不做单位类型特判, 所以工程师自动占领、作战单位自动攻击,
- * 打不了的目标不下单。
- *
- * 联机: 不写任何模拟内存, 不直调改模拟的引擎函数。标记集合是本机 UI 状态 (同
- * MindSelect 的选中); 唯一的模拟变更 = 往 OutList 塞标准攻击/占领事件, 各端执行
- * 同一份原版代码; 其余全只读。
- *
- * 只读偏移 (反汇编实证): IsAlive 0x90 / InLimbo 0x81 / Health 0x6C /
- *   Owner 0x21C / Mission 0xAC (虚表槽 0x184) / Frame 0xA8ED84 /
- *   BuildingClass::Array 0xA8EB40 (Items@+4 / Count@+16) /
- *   House.ArrayIndex (CurrentPlayer+0x30)。
- *
- * TechnoClass::GetGuardRange(control=1) @ 0x707E60 (thiscall, 纯读): 返回 area-guard
- *   半径 = (GuardRange, 未设则最大武器射程) x2; 本模块 /2 得真射程 (入口必须取
- *   0x707E60, 原因见 notes/侵略模式.md)。TargetClass 构造器 FN_TGT_OBJ、
- *   MegaMission FN_MEGA 见 OrderUtil.h。
- */
+/* 侵略模式: 热键切换本机标记, 空闲单位定期寻找警戒范围内可下令目标。
+ * 订单沿用引擎光标判定和 Action→Mission 映射, 攻击使用 Target,
+ * 进入/占领/破坏使用 Destination。忽略被动中立, Target 可限为建筑。
+ * 联机只读模拟状态, 所有命令经 OU_FireMega / OT_Fire 标准事件广播;
+ * 不得直接调用改变模拟状态的引擎函数。 */
 
 #include <windows.h>
 #include "EngineAddr.h"
@@ -64,6 +42,7 @@ static int g_AgOffY = -20;
 static int g_AgInterval = 15;    /* 扫描间隔 (逻辑帧) */
 static int g_AgCooldown = 45;    /* 同一单位两次发令最小间隔 (逻辑帧) */
 static int g_AgRangePct = 100;   /* 攻击半径 = 真射程 x RangePercent% */
+static int g_AgAllTargets = 1;   /* 0=只打建筑 (Target=building) / 1=所有敌方单位 (默认) */
 
 static int g_AgPrev = 0;
 static void* g_AgHouse = 0;
@@ -92,8 +71,12 @@ static void AG_EnsureInit(void)
     g_AgRangePct = GetPrivateProfileIntA(AG_SECTION, "RangePercent", 100, g_IniPath);
     if (g_AgRangePct < 10) g_AgRangePct = 10;
     if (g_AgRangePct > 400) g_AgRangePct = 400;
-    if (!g_AgEnable) LogLine("aggressive: OFF");
-    else LogLine("aggressive: ON (Alt+A; enemy building in guard range; mouse-mapped order)");
+    {
+        char buf[32];
+        OU_ReadString(AG_SECTION, "Target", "all", buf, sizeof(buf));
+        g_AgAllTargets = (buf[0] == 'b' || buf[0] == 'B') ? 0 : 1;
+    }
+    LogLine(g_AgEnable ? "aggressive: ON" : "aggressive: OFF");
 }
 
 /* 设置页改完热键后回读 (ini 已写盘)。 */
@@ -101,6 +84,19 @@ void Aggressive_ReloadHotkey(void)
 {
     AG_EnsureInit();
     g_AgEnable = OU_ReadHotkeySingle(AG_SECTION, "Hotkey", "Alt+A", &g_AgHk);
+}
+
+/* 目标范围 (设置页分段): 1 = 所有敌方单位, 0 = 只打建筑。 */
+int Aggressive_AllTargets(void)
+{
+    AG_EnsureInit();
+    return g_AgAllTargets;
+}
+
+void Aggressive_SetAllTargets(int all)
+{
+    AG_EnsureInit();
+    g_AgAllTargets = all ? 1 : 0;
 }
 
 /* ---------------- 小工具 ---------------- */
@@ -142,46 +138,28 @@ static int AG_WeaponRange(void* u, int idx)
     return fn(u, idx);
 }
 
-/* 目标搜索半径 (轻子): 取类型的 GuardRange 原值 (GetGuardRange(0)，不可用时回 0)，
- * 未设则回退到主/副武器射程较大者。不能用 GetGuardRange(1)：它会把射程加倍后
- * 以 4096 轻子(16 格)封顶，无 GuardRange 的远射程单位会被严重截断。
+/* 目标搜索半径 (轻子): 取类型的 GuardRange 原值 (GetGuardRange(0)，不可用时回 0)
+ * 与主/副武器射程三者中的最大值 —— 有的单位 GuardRange 比真射程小 (不主动索敌的
+ * 支援/攻城单位), 只按 GuardRange 会够不到本来能打的目标。
+ * 不能用 GetGuardRange(1)：它会把射程加倍后以 4096 轻子(16 格)封顶，
+ * 无 GuardRange 的远射程单位会被严重截断。
  * 最后乘 RangePercent% (默认 100)。非法回 0。 */
 static int AG_GuardRange(void* u)
 {
-    int r;
+    int r, a, b;
     if (!u || !IsPlausiblePtr(u)) return 0;
     r = FN_GETGUARDRANGE(u, 0);
-    if (r <= 0)
-    {
-        int a = AG_WeaponRange(u, 0);
-        int b = AG_WeaponRange(u, 1);
-        r = (a > b) ? a : b;
-    }
+    a = AG_WeaponRange(u, 0);
+    b = AG_WeaponRange(u, 1);
+    if (a > r) r = a;
+    if (b > r) r = b;
     if (r <= 0) return 0;
     if (g_AgRangePct != 100) r = r * g_AgRangePct / 100;
     if (r < 128 || r > 65536) return 0;
     return r;
 }
 
-/* ---------------- 鼠标对应的事件: 单位固有光标 → 订单 ----------------
- *
- * 复刻 gamemd 左键点击的真实派发链 (反汇编实证), 不做兵种特判:
- *
- *   ① 取光标 OU_MouseOverObjectNative = vtbl+0x74 = Class::GetActionOnObject
- *      (InfantryClass 0x51E3B0 / UnitClass 0x73FD50 ...), 正是引擎点同一目标时调的那个。
- *
- *   ② 类内重映射 (InfantryClass::ObjectClickedAction 0x51F190 / UnitClass 0x738890):
- *      工程师对血厚敌楼的固有光标是 Damage(28), 引擎在这一层翻成 Capture(9)
- *      再派发 —— 所以必须照做, 否则会误发主武器攻击 (Mission=Attack)。
- *
- *   ③ FootClass::ObjectClickedAction (0x4D74E0) Action→Mission 表。
- *
- * 三者都封在 OrderUtil 的 OU_RemapAction / OU_NativeMission 里 (SmartOrder/
- * FuzzyAttack/AttackMove 共用同一份, 避免逐模块维护)。详见 notes/侵略模式.md。
- * 事件布局: Attack 放 Target=目标, 进驻/占领/破坏 放 Destination=目标。 */
-
-/* 单位 u 对建筑 t 的订单 = 实际左键会下的 Mission (ignoreForce=1, 无视修饰键)。
- * 本模块不下移动令 (光标为 Move 时不作为目标)。 */
+/* 使用共享的只读光标与类内重映射, 排除移动令。 */
 static int AG_UnitMission(void* u, void* t)
 {
     int ms = OU_NativeMission(u, t);
@@ -274,67 +252,97 @@ static void AG_ToggleSelect(void)
     else { for (i = 0; i < n; i++) AG_Add(sel[i], sid[i]); }
 }
 
-/* ---------------- 敌方建筑候选 (每轮建一次, 摊薄 GetCoords) ---------------- */
+/* ---------------- 敌方目标候选 (每轮建一次, 摊薄 GetCoords) ---------------- */
 
-#define AG_BLD_CAP 4096
+#define AG_TGT_CAP 4096     /* 候选表容量 (建筑优先收, 满了就不再收单位) */
+#define AG_SCAN_CAP 16384   /* 单个类型数组的合法 count 上限, 超出按脏数据跳过 */
 
-typedef struct { void* p; int id; int x, y; } AGBld;
-static AGBld s_AgBld[AG_BLD_CAP];
-static int s_AgBldN = 0;
+typedef struct { void* p; int id; int x, y; } AGTgt;
+static AGTgt s_AgTgt[AG_TGT_CAP];
+static int s_AgTgtN = 0;
 
 /* 中立阵营判定 (OU_HouseNeutral: House->Type->MultiplayPassive, SmartArea 同式)。
  * 自检: 本家不可能是被动中立。Mode: 0=未定, 1=启用过滤, 2=停用 (回"非本家即目标")。
  * 读不到一律按非中立 (不误伤候选取舍)。全程只读。 */
 static int g_AgNeutMode = 0;
 
-static void* s_AgPrevItems = 0;
-static int s_AgPrevCount = 0;
-static int s_AgStable = 0;
+/* 四个类型数组各自的两轮稳定门: 引擎在改数组时可能读到半初始化的 items/count
+ * (解引用会 fault), 只有连续两帧没变才当可用。0 号是建筑数组。 */
+#define AG_ARR_N 4
+static const unsigned s_AgArrBase[AG_ARR_N] = {
+    ADDR_BLD_ARR, ADDR_UNIT_ARR, ADDR_INF_ARR, ADDR_AIRCRAFT_ARR
+};
+static void* s_AgArrItems[AG_ARR_N];
+static int s_AgArrCount[AG_ARR_N];
+static int s_AgArrStable[AG_ARR_N];
 
 static void AG_Observe(void)
 {
-    void** items = ARR_ITEMS(ADDR_BLD_ARR);
-    int count = ARR_COUNT(ADDR_BLD_ARR);
-    if (!items || !IsPlausiblePtr(items) || count <= 0 || count > AG_BLD_CAP)
-    { s_AgPrevItems = 0; s_AgPrevCount = 0; s_AgStable = 0; return; }
-    if (items == s_AgPrevItems && count == s_AgPrevCount)
-    { if (s_AgStable < 2) s_AgStable++; return; }
-    s_AgPrevItems = items; s_AgPrevCount = count; s_AgStable = 1;
-}
-
-/* 收集存活、敌方 (忽略中立) 的建筑坐标 (数组半初始化垃圾会致 fault, 见稳定门)。 */
-static void AG_BuildCands(void* cur)
-{
-    void** items = ARR_ITEMS(ADDR_BLD_ARR);
-    int count = ARR_COUNT(ADDR_BLD_ARR);
-    int i;
-    s_AgBldN = 0;
-    if (!cur || !items || !IsPlausiblePtr(items)) return;
-    if (count <= 0 || count > AG_BLD_CAP) return;
-    /* 本家自检一次 (本家不可能是被动中立)。 */
-    if (g_AgNeutMode == 0)
-        g_AgNeutMode = OU_HouseNeutral(cur) ? 2 : 1;
-    for (i = 0; i < count && s_AgBldN < AG_BLD_CAP; i++)
+    int k;
+    for (k = 0; k < AG_ARR_N; k++)
     {
-        void* b = items[i];
-        void* own;
-        CoordStruct cb;
-        if (!b || !IsPlausiblePtr(b)) continue;
-        if (!OU_TechAliveRaw(b)) continue;
-        if (OU_WhatAmI(b) != ABS_BUILDING) continue;
-        own = *(void**)((char*)b + OFF_OWNER);
-        if (!own || !IsPlausiblePtr(own) || own == cur) continue;   /* 敌/中立 */
-        if (g_AgNeutMode == 1 && OU_HouseNeutral(own)) continue;  /* 忽略中立 */
-        if (!OU_GetCoords(b, &cb)) continue;
-        s_AgBld[s_AgBldN].p = b;
-        s_AgBld[s_AgBldN].id = AG_FetchId(b, 0);
-        s_AgBld[s_AgBldN].x = cb.X;
-        s_AgBld[s_AgBldN].y = cb.Y;
-        s_AgBldN++;
+        void** items = ARR_ITEMS(s_AgArrBase[k]);
+        int count = ARR_COUNT(s_AgArrBase[k]);
+        if (!items || !IsPlausiblePtr(items) || count <= 0 || count > AG_SCAN_CAP)
+        {
+            s_AgArrItems[k] = 0; s_AgArrCount[k] = 0; s_AgArrStable[k] = 0;
+            continue;
+        }
+        if (items == s_AgArrItems[k] && count == s_AgArrCount[k])
+        { if (s_AgArrStable[k] < 2) s_AgArrStable[k]++; continue; }
+        s_AgArrItems[k] = items; s_AgArrCount[k] = count; s_AgArrStable[k] = 1;
     }
 }
 
-/* 警戒范围内最近的、本单位真能对其下令 (鼠标对应订单) 的敌方建筑
+/* 收集存活、有坐标的非本家候选; 引擎光标最终判定可否下令。
+ * items/count 切换时可能不匹配, 只遍历可读前缀。 */
+static void AG_CollectArr(int k, void* cur)
+{
+    void** items = ARR_ITEMS(s_AgArrBase[k]);
+    int count = ARR_COUNT(s_AgArrBase[k]);
+    unsigned able;
+    int i;
+    if (s_AgArrStable[k] < 2) return;
+    if (!cur || !items || !IsPlausiblePtr(items)) return;
+    if (count <= 0 || count > AG_SCAN_CAP) return;
+    able = MemReadableBytes(items, (unsigned)count * 4u) / 4u;
+    if ((unsigned)count > able) count = (int)able;
+    if (count <= 0) return;
+    for (i = 0; i < count && s_AgTgtN < AG_TGT_CAP; i++)
+    {
+        void* p = items[i];
+        void* own;
+        CoordStruct c;
+        if (!p || !IsPlausiblePtr(p)) continue;
+        if (!OU_TechAliveRaw(p)) continue;
+        if (k == 0 ? (OU_WhatAmI(p) != ABS_BUILDING) : !OU_IsUnit(p)) continue;
+        own = *(void**)((char*)p + OFF_OWNER);
+        if (!own || !IsPlausiblePtr(own) || own == cur) continue;   /* 敌/中立 */
+        if (g_AgNeutMode == 1 && OU_HouseNeutral(own)) continue;   /* 忽略中立 */
+        if (!OU_GetCoords(p, &c)) continue;
+        s_AgTgt[s_AgTgtN].p = p;
+        s_AgTgt[s_AgTgtN].id = AG_FetchId(p, 0);
+        s_AgTgt[s_AgTgtN].x = c.X;
+        s_AgTgt[s_AgTgtN].y = c.Y;
+        s_AgTgtN++;
+    }
+}
+
+static void AG_BuildCands(void* cur)
+{
+    s_AgTgtN = 0;
+    if (!cur) return;
+    /* 本家自检一次 (本家不可能是被动中立)。 */
+    if (g_AgNeutMode == 0)
+        g_AgNeutMode = OU_HouseNeutral(cur) ? 2 : 1;
+    AG_CollectArr(0, cur);              /* 建筑: 两种模式都要 */
+    if (!g_AgAllTargets) return;
+    AG_CollectArr(1, cur);              /* 载具 */
+    AG_CollectArr(2, cur);              /* 步兵 */
+    AG_CollectArr(3, cur);              /* 飞机 */
+}
+
+/* 警戒范围内最近的、本单位真能对其下令 (鼠标对应订单) 的敌方目标
  * (圆心距离, 只算水平面)。outMs = 该订单 (攻击/占领/...)。 */
 static void* AG_FindTarget(void* u, int range, int* outId, int* outMs)
 {
@@ -346,20 +354,20 @@ static void* AG_FindTarget(void* u, int range, int* outId, int* outMs)
     *outMs = -1;
     if (!OU_GetCoords(u, &cu)) return 0;
     rr = (long long)range * (long long)range;
-    for (i = 0; i < s_AgBldN; i++)
+    for (i = 0; i < s_AgTgtN; i++)
     {
         long long dx, dy, d2;
         int ms;
-        dx = (long long)s_AgBld[i].x - (long long)cu.X;
-        dy = (long long)s_AgBld[i].y - (long long)cu.Y;
+        dx = (long long)s_AgTgt[i].x - (long long)cu.X;
+        dy = (long long)s_AgTgt[i].y - (long long)cu.Y;
         d2 = dx * dx + dy * dy;
         if (d2 > rr) continue;
         if (best && d2 >= bestD) continue;
-        ms = AG_UnitMission(u, s_AgBld[i].p);   /* 只读光标 = 与左键同判 */
+        ms = AG_UnitMission(u, s_AgTgt[i].p);   /* 只读光标 = 与左键同判 */
         if (ms < 0) continue;
-        best = s_AgBld[i].p;
+        best = s_AgTgt[i].p;
         bestD = d2;
-        bestId = s_AgBld[i].id;
+        bestId = s_AgTgt[i].id;
         bestMs = ms;
     }
     if (best) { *outId = bestId; *outMs = bestMs; }
@@ -433,10 +441,10 @@ static void AG_Scan(int fr)
 {
     void* cur = *(void**)ADDR_CURPLAYER;
     int i;
-    if (s_AgTrkN <= 0 || s_AgStable < 2) return;
+    if (s_AgTrkN <= 0) return;
     if (!cur || !IsPlausiblePtr(cur)) return;
     AG_BuildCands(cur);
-    if (s_AgBldN <= 0) return;
+    if (s_AgTgtN <= 0) return;
     for (i = 0; i < s_AgTrkN && g_AgPendN < AG_PEND_CAP; i++)
     {
         void* u = s_AgTrk[i].p;
@@ -517,8 +525,7 @@ void Aggressive_Draw(void* surf, int w, int h, int pitch)
     if (!g_Calibrated) return;
     if (!surf || !IsPlausiblePtr(surf)) return;
     if (w <= 0 || h <= 0 || pitch <= 0) return;
-    /* 首帧真正加载; 之后 PcxGet 命中引擎面表 (不为每帧读盘/重建路径)。
-     * 每帧现取是因为引擎缓存重载后 BSurface 指针会变, 一张图多个标记共用。 */
+    /* 每帧重取缓存图像: 引擎重载后 BSurface 指针可能变化。 */
     if (!PcxImage_Load(&img, "icon_aggressive.pcx", 2)) return;
     ox = g_AgOffX - img.width / 2;
     oy = g_AgOffY - img.height / 2;

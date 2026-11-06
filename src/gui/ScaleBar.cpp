@@ -10,6 +10,7 @@
 #include "ScaleBar.h"
 #include "PiP.h"
 #include "MOExperience.h"
+#include "Resample565.h"
 
 #define SB_SECTION "BottomBar"
 
@@ -85,8 +86,7 @@ static double Sb_ClampScale(double s, int aw, int ah)
 /* MAX 那档的 scale 由 Sb_CalcMaxScale() 现算, 表里留 0。*/
 static const double s_LevAll[SB_MAXLEV] =
     { 0.25, 1.0 / 3.0, 0.5, 1.0 / 1.5, 1.0, 1.25, 1.5, 2.0, 0.0 };
-static const double* s_LevScale = s_LevAll;
-static int    s_NLev = SB_MAXLEV;
+static const int s_NLev = SB_MAXLEV;
 static void Sb_SyncZoomed(void);
 static char s_LevLabel[SB_MAXLEV][SB_LABLEN];
 /* s_LevAll 里 scale==1.0 那档的下标。 */
@@ -158,8 +158,9 @@ static unsigned Sb_Fmt1(char* p, double v)
     return (unsigned)m;
 }
 
-/* ---------------- 初始化 ----------------
- * 1 = 完全不接管: 消息钩不调放大/刻度条, prepare 不跑 SB_Poll, 查格不折算。*/
+/* ---------------- 初始化 ---------------- */
+
+extern void ShpClip_Install(void);
 
 void SB_EnsureInit(void)
 {
@@ -183,11 +184,10 @@ void SB_EnsureInit(void)
     /* 图外底色 (视口比地图大时露出来的那一大片): 一个键, 0xRRGGBB。*/
     s_VoidRgb = GetPrivateProfileIntA(SB_SECTION, "Void", 0x202028, g_IniPath);
     if (s_VoidRgb < 0 || s_VoidRgb > 0xFFFFFF) s_VoidRgb = 0x202028;
-    s_NLev = SB_MAXLEV;
     {
         int i;
         for (i = 0; i < (int)s_NLev; i++)
-            if (s_LevScale[i] == 1.0) { s_LevOne = i; break; }
+            if (s_LevAll[i] == 1.0) { s_LevOne = i; break; }
     }
     s_Level = GetPrivateProfileIntA(SB_SECTION, "Level", s_LevOne, g_IniPath);
     if (s_Level < 0 || s_Level >= s_NLev) s_Level = s_LevOne;
@@ -195,6 +195,7 @@ void SB_EnsureInit(void)
     if (s_LimitFallback != 0 && s_LimitFallback < SB_LIMIT_MIN) s_LimitFallback = SB_LIMIT_MIN;
     Sb_SyncZoomed();
     if (!s_Enable) return;
+    ShpClip_Install();
     p = 0;
     p = AppendCStr(buf, p, "sbar: on level=", sizeof(buf));
     UtoA((unsigned)s_Level, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
@@ -240,7 +241,7 @@ static void Sb_InitLabels(void)
             d[0] = 'm'; d[1] = 'a'; d[2] = 'x'; d[3] = 0;
             continue;
         }
-        Sb_Fmt1(d, 1.0 / s_LevScale[i]);
+        Sb_Fmt1(d, 1.0 / s_LevAll[i]);
         while (d[j]) j++;
         d[j] = 'x';
         d[j + 1] = 0;
@@ -287,9 +288,9 @@ static double Sb_CalcMaxScale(void)
 /* 不查缓存的原始倍率。 */
 static double Sb_ScaleRaw(void)
 {
-    if (s_Level != SB_LEV_MAX) return s_LevScale[s_Level];
+    if (s_Level != SB_LEV_MAX) return s_LevAll[s_Level];
     if (!s_MaxOk) { s_MaxScale = Sb_CalcMaxScale(); s_MaxOk = (s_MaxScale > 0.0); }
-    return s_MaxOk ? s_MaxScale : s_LevScale[s_LevOne];
+    return s_MaxOk ? s_MaxScale : s_LevAll[s_LevOne];
 }
 
 /* ---------------- 档位查询 ----------------
@@ -410,6 +411,9 @@ static void Sb_ClipR(RectangleStruct* r, int W, int H)
 #define SB_COLMAP_MAX 16384
 static int* s_Col = 0;
 static int s_ColN = 0;
+static int s_ColKeyValid = 0;
+static unsigned s_ColXStep = 0;
+static int s_ColX0 = 0, s_ColW = 0;
 
 static int* Sb_ColMap(int n)
 {
@@ -419,6 +423,7 @@ static int* Sb_ColMap(int n)
     if (s_Col) VirtualFree(s_Col, 0, MEM_RELEASE);
     s_Col = 0;
     s_ColN = 0;
+    s_ColKeyValid = 0;
     p = VirtualAlloc(0, (size_t)n * sizeof(int), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!p) return 0;
     s_Col = (int*)p;
@@ -426,6 +431,8 @@ static int* Sb_ColMap(int n)
     return s_Col;
 }
 
+/* 调用方保证源与目标不重叠：放大读独立 scratch，缩小读独立离屏大面。
+ * 因此连续映射到相同源行时，可以复制刚生成的目标行。 */
 static long Sb_Resample(unsigned char* sb, int sp,
                         unsigned char* db, int dp, int iw, int ih,
                         int sx, int sy, int rw, int rh,
@@ -453,34 +460,40 @@ static long Sb_Resample(unsigned char* sb, int sp,
      * 与通用路逐位相同 (xstep 恰为 2<<16)，见 test/scalebar_resample_test.c。 */
     if (rw == dw * 2 && rh == dh * 2)
     {
-        int x;
         for (y = y0; y < y1; y++)
         {
             unsigned short* drow = (unsigned short*)(db + (size_t)(dy + y) * dp);
             const unsigned short* srow = (const unsigned short*)
                 (sb + (size_t)(sy + y * 2) * sp);
-            for (x = x0; x < x1; x++)
-                drow[dx + x] = srow[sx + x * 2];
+            R565_DownsampleRow2(srow + sx + x0 * 2, drow + dx + x0, w);
         }
         return (long)w * (long)(y1 - y0);
     }
-    /* 列映射每帧算一次，内层只剩两次访存。表按目标绝对列建 (起点 x0)。 */
+    /* 映射仅依赖步长、裁剪起列和输出宽度；源起列由采样行指针吸收。 */
     cm = Sb_ColMap(w);
-    if (cm)
+    if (cm && (!s_ColKeyValid || s_ColXStep != xstep || s_ColX0 != x0 || s_ColW != w))
     {
         acc = (unsigned)x0 * xstep;
         for (i = 0; i < w; i++) { cm[i] = (int)(acc >> 16); acc += xstep; }
+        s_ColXStep = xstep;
+        s_ColX0 = x0;
+        s_ColW = w;
+        s_ColKeyValid = 1;
     }
+    int previousSourceY = 0;
+    unsigned short* previousDstRow = 0;
     for (y = y0; y < y1; y++)
     {
         unsigned short* drow = (unsigned short*)(db + (size_t)(dy + y) * dp);
-        const unsigned short* srow = (const unsigned short*)
-            (sb + (size_t)(sy + (int)(((unsigned)y * ystep) >> 16)) * sp);
-        if (cm)
+        int sourceY = sy + (int)(((unsigned)y * ystep) >> 16);
+        const unsigned short* srow = (const unsigned short*)(sb + (size_t)sourceY * sp);
+        if (previousDstRow && sourceY == previousSourceY)
         {
-            unsigned short* p2 = drow + dx + x0;
-            const unsigned short* s2 = srow + sx;
-            for (i = 0; i < w; i++) p2[i] = s2[cm[i]];
+            R565_CopyRow(previousDstRow, drow + dx + x0, w);
+        }
+        else if (cm)
+        {
+            R565_MapRow(srow + sx, drow + dx + x0, cm, w);
         }
         else
         {
@@ -488,6 +501,8 @@ static long Sb_Resample(unsigned char* sb, int sp,
             for (x = x0; x < x1; x++)
                 drow[dx + x] = srow[sx + (int)(((unsigned)x * xstep) >> 16)];
         }
+        previousSourceY = sourceY;
+        previousDstRow = drow + dx + x0;
     }
     return (long)w * (long)(y1 - y0);
 }
@@ -857,6 +872,7 @@ static int SB_Loading(void)
 }
 /* Render 是否在栈上 (SwapIn 置 1，SwapOut/AfterMap 清 0)。 */
 static int s_InRender = 0;
+int SB_InRender(void) { return s_InRender; }
 static int s_RefWarned = 0;
 
 void SB_RenderSwapIn(void)
@@ -979,17 +995,6 @@ void SB_ShroudReport(void)
     p = AppendCStr(buf, p, "sbar: shroud guard fired x", sizeof(buf));
     UtoA((unsigned)s_ShroudHit, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
     LogLine(buf);
-}
-
-/* 崩溃处理调：追记大面指针 + 存活标志。只读指针，不解引用，崩溃时安全。 */
-
-/* 三趟地图画完立刻调：还原窗口面 + 铺图外 + 降采样。须早于引擎 UI。 */
-void SB_RenderAfterMap(void)
-{
-    /* Render 照原版跑, 但 s_InRender 必须清 (Render 后半仍在栈上)。*/
-    if (!s_RenderSwapped) { s_InRender = 0; return; }
-    SB_RenderSwapOut();
-    SB_AfterMapPresent();
 }
 
 /* 还原之后的呈现段: 铺图外 + 降采样 (缩小档)。与 SwapOut 拆开, 让"画进本帧
@@ -1387,8 +1392,7 @@ int SB_CompositeDemagnify(void)
                 a.X, a.Y, a.X + a.Width, a.Y + a.Height);
     GtUnlock(dst);
     GtUnlock(src);
-    /* 每帧作废 chrome 脏缓存：缩小档下底栏带有其它按帧刷新的来源，
-     * 只靠刻度条按需刷会留拖影（原因待查），先恢复每帧清。 */
+    /* 缩小档底栏包含按帧更新的覆盖层，须每帧重画 chrome，避免残留旧像素。 */
     *(unsigned*)(size_t)SB_CHROME_DIRTY_N = 0;
     return 1;
 }
@@ -1573,7 +1577,7 @@ int SB_ClampFix(Point2D* c)
     mnX = vw / 2 + ml;      mxX = mnX + mw - vw;
     mnY = vh / 2 + mt;      mxY = mnY + mh - vh;
     midX = cx;              midY = cy;
-    /* 退化状态翻转时打一条 (周期心跳已删: 值不变时全是重复行)。 */
+    /* 只在退化状态改变时记录钳位范围。 */
     {
         int deg = degX || degY;
         if (deg != s_wasDeg)
@@ -1854,7 +1858,7 @@ static void Sb_Place(void)
         UtoA((unsigned)s_WidgetH, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
         q = AppendCStr(buf, q, " win=", sizeof(buf));
         UtoA((unsigned)gw, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
-        AppendCh(buf, q, 'x', sizeof(buf));
+        q = AppendCh(buf, q, 'x', sizeof(buf));
         UtoA((unsigned)gh, g1); q = AppendCStr(buf, q, g1, sizeof(buf));
         LogLine(buf);
     }
@@ -1952,7 +1956,7 @@ void SB_SetEnabled(int enable)
 void SB_Poll(void)
 {
     int mx, my, down, lv0;
-    if (!s_Enable) return;
+    if (!s_Enable || s_InRender) return;
     Sb_InitLabels();
     /* 大面 + 缓冲须在本帧 Render 之前准备好。 */
     SB_PrepareSurface();
