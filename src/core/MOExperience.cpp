@@ -1705,7 +1705,8 @@ static int MOE_SurfBuf(unsigned surf, unsigned* base, unsigned* size)
 /* 模块表快照 (PEB Ldr 链表, 不用 psapi): 填 (base,size,name) 后返回个数。
  * 崩溃现场 GetModuleHandleExA 认不出的地址, 靠这张表判断"附近有没有模块"。 */
 #define MOE_MODMAX 128
-static int MOE_Modules(unsigned* bas, unsigned* szs, char (*nm)[24])
+#define MOE_MODNAME 64
+static int MOE_Modules(unsigned* bas, unsigned* szs, char (*nm)[MOE_MODNAME])
 {
     unsigned peb, ldr, head, cur;
     int n = 0, guard = 0;
@@ -1725,7 +1726,7 @@ static int MOE_Modules(unsigned* bas, unsigned* szs, char (*nm)[24])
         len = *(const unsigned*)(size_t)ns;
         bp = *(const unsigned*)(size_t)(ns + 4);
         cnt = len / 2;
-        if (cnt > 23) cnt = 23;
+        if (cnt > MOE_MODNAME - 1) cnt = MOE_MODNAME - 1;
         if (!MOE_Readable(bp, cnt * 2)) cnt = 0;
         for (k = 0; k < cnt; k++)
         {
@@ -1741,8 +1742,51 @@ static int MOE_Modules(unsigned* bas, unsigned* szs, char (*nm)[24])
 
 static unsigned s_CrBase[MOE_MODMAX];
 static unsigned s_CrSize[MOE_MODMAX];
-static char     s_CrName[MOE_MODMAX][24];
+static char     s_CrName[MOE_MODMAX][MOE_MODNAME];
 static int      s_CrN;
+
+/* 名字包含比对 (只认小写 needle; 读进来的模块名按 0x7F 掩码截断过)。
+ * 用子串而不是前缀, 这样任意变体命名都能命中。 */
+static int MOE_NameContainsCI(const char* s, const char* lower_needle)
+{
+    int i, j;
+    if (!lower_needle || !*lower_needle) return 1;
+    for (i = 0; s[i]; i++)
+    {
+        for (j = 0; lower_needle[j]; j++)
+        {
+            char c = s[i + j];
+            if (!c) return 0;
+            if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+            if (c != lower_needle[j]) break;
+        }
+        if (!lower_needle[j]) return 1;
+    }
+    return 0;
+}
+
+/* Phobos 的模块名随构建而变 (Phobos.dll / Phobos-build46.dll /
+ * 任意含 "phobos" 的变体), 所以查子串且不区分大小写。 */
+int MOE_PhobosLoaded(void)
+{
+    static int cached = -1;
+    static unsigned bas[MOE_MODMAX];
+    static unsigned szs[MOE_MODMAX];
+    static char nms[MOE_MODMAX][MOE_MODNAME];
+    int i, n;
+    if (cached >= 0) return cached;
+    n = MOE_Modules(bas, szs, nms);
+    cached = 0;
+    for (i = 0; i < n; i++)
+    {
+        if (MOE_NameContainsCI(nms[i], "phobos"))
+        {
+            cached = 1;
+            break;
+        }
+    }
+    return cached;
+}
 
 /* 栈回溯单项: 追加 " i:label+off" (label 含冒号后的空格, self/exe 传 " MOE"/" exe",
  * 第三方传模块文件名)。每行 6 项, 满了先收行再重起表头 "CRASH: stk"。
@@ -1927,7 +1971,9 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         mod = NULL;
         {
             unsigned ea = (unsigned)(size_t)r->ExceptionAddress;
-            readable = (ea >= 0x10000u && ea < 0x7FF00000u) ? 1 : 0;
+            /* 只做区间判断挡不住未提交的地址 (野函数指针常落在 0x61xxxxxx
+             * 这种空洞), 必须问 VirtualQuery 才能安全读指令字节。 */
+            readable = MOE_Readable(ea, 8u);
             if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
                 | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                 (LPCSTR)(size_t)ea, &mod) && mod)

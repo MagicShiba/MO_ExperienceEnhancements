@@ -50,6 +50,23 @@ static int s_Cnc = -1;               /* ddraw 是否 cnc-ddraw: -1=未判定 0=�
 static void* s_SysPeek = NULL;       /* user32!PeekMessageA 本体 (未被动过的槽) */
 static void HookPeek(void);
 
+/* cnc-ddraw 自己装了菜单限速才停手; 旧包装器没有这个导出, 仍由本模块限速。
+ * ddraw 一旦加载就不再变, 解析结果只做一次 (本函数在每帧路径上, 不进加载器锁)。 */
+static int CncOwnsMenuCap(void)
+{
+    typedef BOOL (WINAPI *MenuCapFn)(void);
+    static MenuCapFn query = NULL;
+    static int resolved = 0;
+    if (!resolved)
+    {
+        HMODULE h = GetModuleHandleA("ddraw.dll");
+        if (!h) return 0;              /* 还没加载, 下次再问 */
+        resolved = 1;
+        query = (MenuCapFn)(void*)GetProcAddress(h, "DDHasYuriMenuLimiter");
+    }
+    return query && query() ? 1 : 0;
+}
+
 static long long FC_Now(void)
 {
     LARGE_INTEGER t;
@@ -166,6 +183,15 @@ static int FC_EngineAlreadyPaced(void)
     return s_EnginePaced;
 }
 
+/* 停手时清干净节拍状态: 再开起来不能拿旧的截止时刻/帧周期估计。 */
+static void FC_ResetPace(void)
+{
+    s_Until = 0;
+    s_GateAt = 0;
+    s_FrameEst = 0;
+    s_EnginePaced = 0;
+}
+
 /* ---------------- 挂点 ----------------
  * isGate: 1 = 主循环门 (每帧一次), 0 = 队列空的 PeekMessage */
 static void FC_Cap(int isGate)
@@ -175,7 +201,11 @@ static void FC_Cap(int isGate)
     if (!s_Init) FrameCap_EnsureInit();
     if (s_MainTid && GetCurrentThreadId() != s_MainTid) return;
     if (s_Cnc != 0) HookPeek();      /* 被 cnc-ddraw 抢走就挂回来 (只是指针比较) */
-    if (!s_Enable) { s_Until = 0; return; }
+    if (!s_Enable || CncOwnsMenuCap())
+    {
+        FC_ResetPace();
+        return;
+    }
 
     mode = FC_Mode();
     if (mode == FC_MODE_NONE) { s_Until = 0; return; }
@@ -279,9 +309,7 @@ int FrameCap_Enabled(void)
 void FrameCap_SetEnabled(int on)
 {
     s_Enable = on ? 1 : 0;
-    s_Until = 0;
-    s_FrameEst = 0;      /* 重开时别用旧估计判"引擎在节流" */
-    s_EnginePaced = 0;
+    FC_ResetPace();
 }
 
 void FrameCap_SetActiveDlg(void* hwnd)

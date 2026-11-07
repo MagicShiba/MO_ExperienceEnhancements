@@ -14,7 +14,8 @@
  *   - 绘制走引擎 CC_Draw_Shape (0x4AED70) 到 DSurface::Temp (0x887314)
  * 不写任何模拟状态; 每个客户端画自己的放置幽灵, 联机安全。
  *
- * 与 Phobos 避让: 每帧检测 Phobos.dll, 已加载则完全不画, 避免双层预览。
+ * 与 Phobos 避让: 每帧检测 Phobos (任一名字含 "phobos" 的模块, 不区分大小写),
+ * 已加载则完全不画, 避免双层预览。
  *
  * 配置 [PlacementPreview]: Opacity=0/25/50/75/100 (默认 25, 100 = 不透明), 0 = 关闭。
  * 同一档同时也是展开预览虚影的浓度 (DeployPreview 通过 PlacementPreview_Opacity
@@ -23,6 +24,7 @@
 
 #include <windows.h>
 #include "GdiText.h"
+#include "MOExperience.h"
 #include "OrderUtil.h"
 #include "ScaleBar.h"
 #include "PlacementPreview.h"
@@ -506,8 +508,9 @@ static DWORD PP_DrawBody(void* regs)
     PP_EnsureInit();
     if (g_PpOpacity <= 0) return 0;
 
-    /* 避让 Phobos: 已加载则完全跳过 (不加载图像, 也不画)。 */
-    if (GetModuleHandleA("Phobos.dll") != NULL) return 0;
+    /* 避让 Phobos: 已加载则完全跳过 (不加载图像, 也不画)。
+     * MOE_PhobosLoaded 结果缓存, 每帧调用只读一个 int。 */
+    if (MOE_PhobosLoaded()) return 0;
 
     building = *(void**)(PP_ADDR_DISPLAY + PP_OFF_CUR_BUILDING);
     type = *(void**)(PP_ADDR_DISPLAY + PP_OFF_CUR_BUILDING_TYPE);
@@ -548,8 +551,8 @@ static DWORD PP_DrawBody(void* regs)
 }
 
 /* 导出入口 (Syringe 按名挂钩): 只做 Perf 记账。0x6D528A 在地图绘制路径上,
- * 每帧可能被调用多次, 这里用来确认它的固定开销 (内部 GetModuleHandleA 是
- * 加载器锁, 高频调用不便宜)。 */
+ * 每帧可能被调用多次, 这里用来确认它的固定开销 (Phobos 检测走缓存, 不再
+ * 每次进加载器锁)。 */
 extern "C" __declspec(dllexport) DWORD __cdecl PlacementPreview_DrawHook(void* regs)
 {
     long long tPf = Perf_Now();

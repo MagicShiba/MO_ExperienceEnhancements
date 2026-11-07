@@ -582,6 +582,24 @@
 #define ADDR_AUDIO_VOICE_REINIT 0x00406E41u  /* 设备重建的同一调用 */
 #define ADDR_AUDIO_CACHE_BUDGET 0x00403F33u  /* mov edx, 0x100000, 5字节 */
 
+/* ==================== 欢呼 (C 键 / EventClass::ALLCHEER) ==================== */
+
+/* AllToCheerCommandClass::Execute (0x730F30, void, 尾部 `add esp,0x70; ret`)。
+ * 钩 8 字节 (`mov eax,[0xA8B538]` + `sub esp,0x70`) 可整条重放, 无相对跳转。
+ * 0x730FDB 是同一函数尾部那条裸 `ret`, 栈未分配时跳它即干净返回。 */
+#define ADDR_CMD_CHEER_RET      0x00730FDBu
+/* Unsorted::MuteSWLaunches: 非 0 时原版 C 键直接返回 (静音不欢呼)。 */
+#define ADDR_MUTE_SWLAUNCHES    0x00A8B538u
+
+/* RulesClass::Instance (指针变量, YRpp RulesClass.h)。
+ * +0x1C8 = CheerSound (VocClass 下标, rules.ini 的 CheerSound=)。 */
+#define ADDR_RULES              0x008871E0u
+#define OFF_RULES_CHEERSOUND    0x1C8u
+
+/* TechnoClass::Cheer(bool Force) 虚表槽。基类 0x41BF90 是空实现, 只有
+ * InfantryClass 重写 (0x522C00 = 播 Sequence::Cheer); 收尾 `ret 4`。 */
+#define OFF_VT_CHEER            0x388u
+
 /* ==================== 事件 (EventClass) ==================== */
 
 #define EVT_SIZE                111u      /* EventClass 结构的字节数 */

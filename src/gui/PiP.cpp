@@ -166,6 +166,13 @@ static int PiP_Live(void)
     return !PiP_Off() && g_Show && g_RW > 0;
 }
 
+/* 窗内交互 (点击重映射/框选/坐标门) 的前提: 还要知道窗画在哪。
+ * 位置只由 PiP_DrawOnComposite 写, 所以首帧之前一律不接。 */
+static int PiP_LivePlaced(void)
+{
+    return PiP_Live() && g_PipW > 0;
+}
+
 /* 有效的 TacticalClass::Instance (0 = 还没有 / 已失效)。 */
 static void* PiP_Tac(void)
 {
@@ -753,14 +760,13 @@ static void PiP_WorldToScreen(const int* w, int* tx, int* ty)
     *ty = PiP_Div256(15 * (w[0] + w[1])) - MsgText_ZToScreen(w[2]);
 }
 
-/* 把目标钉到 (x,y) 之前先防出界。返回 1 = 位置真的变了 (调用方据此决定要不要补渲)。 */
-static int PiP_PinTo(int x, int y)
+/* 把目标钉到 (x,y), 先按小窗自己的视口防出界 (缩放档同款算法)。 */
+static void PiP_PinTo(int x, int y)
 {
     PiP_ClampScreen(&x, &y);
-    if (g_Pinned && x == g_PinX && y == g_PinY) return 0;
-    g_PinX = x; g_PinY = y;
+    g_PinX = x;
+    g_PinY = y;
     g_Pinned = 1;
-    return 1;
 }
 
 /* 按 8 方向 + 速度 (屏幕像素/帧) 推进小窗视野, 防出界钳死。 */
@@ -1158,7 +1164,7 @@ int PiP_ClickCoordsMode(int gx, int gy)
 {
     int lb, rb;
     PiP_EnsureInit();
-    if (!PiP_Live() || g_PipW <= 0) return 0;   /* 窗位置未知 = 还没画过 */
+    if (!PiP_LivePlaced()) return 0;
     lb = PiP_KeyDown(VK_LBUTTON);
     rb = PiP_KeyDown(VK_RBUTTON);
     /* 窗内左键框选的松开: 记录松手点, 帧末统一框选。先于窗内判定: 拖到窗外松手
@@ -1292,7 +1298,7 @@ static int PiP_SwapIn(void)
 int PiP_BeginClickMap(int gx, int gy, int* px, int* py)
 {
     int lx, ly;
-    if (!PiP_Live() || g_PipW <= 0) return 0;   /* 窗位置未知 = 还没画过 */
+    if (!PiP_LivePlaced()) return 0;
     lx = (gx - g_PipX) * g_ScaleNum;
     ly = (gy - g_PipY) * g_ScaleNum;
     if (lx < 0 || ly < 0 || lx >= g_RW || ly >= g_RH) return 0;
@@ -1328,7 +1334,7 @@ static void PiP_BoxSelect(int gx1, int gy1, int gx2, int gy2)
     Fn_MakeSel fn = (Fn_MakeSel)(size_t)ADDR_TAC_MAKESEL;
     int x1, y1, x2, y2, ob[4], nb[4], i;
 
-    if (!PiP_Live() || g_PipW <= 0) return;   /* 窗位置未知 = 还没画过 */
+    if (!PiP_LivePlaced()) return;
     x1 = (gx1 - g_PipX) * g_ScaleNum; y1 = (gy1 - g_PipY) * g_ScaleNum;
     x2 = (gx2 - g_PipX) * g_ScaleNum; y2 = (gy2 - g_PipY) * g_ScaleNum;
     PiP_Order2(&x1, &x2); PiP_Order2(&y1, &y2);

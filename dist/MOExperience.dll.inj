@@ -157,3 +157,6 @@
 0x406C2C = AudioCapacity_VoiceInit, 5
 0x406E41 = AudioCapacity_VoiceReinit, 5
 0x403F33 = AudioCapacity_Cache, 5
+; C 键只让选中单位欢呼 (单机): 挡在 AllToCheerCommandClass::Execute 入口,
+; 有选中时逐个调 TechnoClass::Cheer, 没选中回原版全体。见 src/misc/CheerSelect.cpp
+0x730F30 = CheerSelect_Hook, 8

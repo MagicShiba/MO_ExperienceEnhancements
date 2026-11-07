@@ -6,6 +6,12 @@
 /* 一次性初始化: 建日志路径 + 各模块首次载入配置。幂等, 各入口都先调它。 */
 void MOE_EnsureInit(void);
 
+/* 是否已装载 Phobos (模块名不固定: 只要名字含 "phobos" 即算, 不区分大小写,
+ * 允许 Phobos.dll / Phobos-build46.dll / 任意变体)。
+ * 比对 PEB 模块表, 结果缓存。Phobos 有硬编码引擎地址的地方,
+ * 与本模块的"整表换基址"类补丁互斥, 见 SelPoolCap.cpp。 */
+int MOE_PhobosLoaded(void);
+
 /* UI 层链路: 放大呈现后在 Primary 上重画一遍 (Composite 里那份已被盖掉)。
  * 返回 1 = 至少画了一层。
  * pMsgDrew (可空): 1 = 消息层本帧画出; 是否跳过原版只看 MsgText 是否接管。 */

@@ -12,7 +12,7 @@
  * 自动展开 ([DeployPreview] AutoDeploy=1): 选中含可展开单位 (UnitType+
  * 0x404 DeploysInto 非空) 的裸中键点按由本模块认领 (SmartOrder 让路)。
  * 只认自家车: 敌人/中立不可控, 盟友车也不替你展开 (单选盟友车时本模块不
- * 认领, 落到 SmartOrder 的盟友 3 格挪动规则)。
+ * 认领, 落到 SmartOrder 的盟友 2 格挪动规则)。
  * 单车框跟鼠标自由走; 多车点按按实际地基螺旋平铺 (块块判交不重叠),
  * 划线 (轨迹弧长 ≥5 格) 沿手绘轨迹弧长均分, Shift 锁横/竖轴排一排。
  * 混编其它单位按配额 (步兵3/格, 飞机/车辆1/格) 散开并避让房框外扩1格。
@@ -123,7 +123,7 @@ static int DP_FindFootprint(int* wOut, int* hOut)
         if (!o || !IsPlausiblePtr(o)) continue;
         if (OU_WhatAmI(o) != ABS_UNIT) continue;
         /* 只认自家车: 敌人/中立不可控, 盟友车也不替你展开 (它们被单选时
-         * 本模块不认领, 交给 SmartOrder 按盟友 3 格挪动规则处理)。 */
+         * 本模块不认领, 交给 SmartOrder 按盟友 2 格挪动规则处理)。 */
         if (OU_OrderSide(o) != 1) continue;
         tp = DP_TypeOf(o);
         if (!tp) continue;

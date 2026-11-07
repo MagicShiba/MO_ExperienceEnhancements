@@ -320,11 +320,10 @@ static void FA_Press(void)
     for (i = 0; i < selN && nu < FA_UNIT_CAP; i++)
     {
         void* o = items[i];
-        if (OU_IsUnit(o))
-        {
-            /* 敌我识别: 只派自家单位 (敌人/中立/盟友都不接模糊攻击令)。 */
-            if (OU_OrderSide(o) == 1) s_units[nu++] = o;
-        }
+        if (!OU_IsUnit(o)) continue;
+        /* 敌我识别: 只派自家单位 (敌人/中立/盟友都不接模糊攻击令)。 */
+        if (OU_OrderSide(o) != 1) continue;
+        s_units[nu++] = o;
     }
     if (nu <= 0) return;
     /* Owner 自校准 (双确认; 失败直接放弃, 绝不误击友军)。 */

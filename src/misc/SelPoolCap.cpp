@@ -6,6 +6,7 @@
 #include "EngineAddr.h"
 #include "GdiText.h"
 #include "OrderUtil.h"
+#include "MOExperience.h"
 #include "SelPoolCap.h"
 
 #define SC_N      4096u    /* 新容量 (原版 500) */
@@ -54,7 +55,6 @@ static const ScSite kScSites[] =
 static int g_ScInit = 0;
 static int g_ScDone = 0;
 static int g_ScOn = 0;      /* 补丁确实装上 (失败/放弃时保持 0, 容量仍按 500 算) */
-static char s_ScErr[40];    /* msg(<=16) + ' ' + "0x" + 8 位 hex + NUL */
 
 /* 新表放本模块 .bss: 不占文件体积, 地址在 DLL 映像内 (< 0x80000000),
  * 0x6DA576 那条移除登记用的是**有符号** `jl` 比表尾, 地址必须保持低位。 */
@@ -82,18 +82,14 @@ static int SC_Relock(void)
     return 1;
 }
 
+/* 日志形如 "selpool: opcode mismatch at 0x006D9E8E" (消息截到 24, 后面要留地址)。 */
 static void SC_LogAddr(const char* msg, unsigned addr)
 {
-    static const char hex[] = "0123456789ABCDEF";
-    char* p = s_ScErr;
-    int i;
-    while (*msg && p < s_ScErr + 16) *p++ = *msg++;
-    *p++ = ' ';
-    *p++ = '0';
-    *p++ = 'x';
-    for (i = 7; i >= 0; i--) *p++ = hex[(addr >> (i * 4)) & 0xF];
-    *p = 0;
-    OU_LogTag("selpool: ", s_ScErr);
+    char buf[48];
+    unsigned p = AppendCStr(buf, 0, msg, 24);
+    p = AppendCh(buf, p, ' ', sizeof(buf));
+    HtoA(addr, buf + p);            /* 自带 "0x" + 八位 hex + NUL */
+    OU_LogTag("selpool: ", buf);
 }
 
 /* 该 site 现在的立即数应该是多少 (旧值 / 新值)。 */
@@ -129,6 +125,17 @@ void SelPool_Poll(void)
         g_ScInit = 1;
         BuildPaths();
         GtEnsureLog();
+    }
+
+    /* Phobos 的 ExtSelection 把 Unsorted::TacticalSelectables (0xB0CEC8) 的
+     * 基址写死在代码里, 不经过引擎的登记点; 本模块把表搬到 s_ScBuf 后, Phobos
+     * 仍按旧表 + 新计数遍历, 读到的是已失效的旧条目 → 虚调用野指针崩溃。
+     * 两者只能留一个: 有 Phobos 时保持原表不搬 (容量 500)。 */
+    if (MOE_PhobosLoaded())
+    {
+        g_ScDone = 1;
+        OU_LogTag("selpool: ", "OFF (Phobos loaded: hardcoded TacticalSelectables)");
+        return;
     }
 
     if (*(int*)ADDR_FRAME < 60) return;   /* 等 exe 解包稳定 */

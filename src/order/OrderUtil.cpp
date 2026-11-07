@@ -750,8 +750,9 @@ int OU_HouseNeutral(void* h)
     return (*(unsigned char*)((char*)t + OFF_HTYPE_PASSIVE)) ? 1 : 0;
 }
 
-/* ---------------- 下令资格 (敌我识别) ----------------
- * Houses 数组成员校验: 只比指针, 不解引用候选值 (脏指针也不会崩)。 */
+/* ---------------- 下令资格 (敌我识别, 细则见 notes/智能中键.md) ---------------- */
+
+/* Houses 数组成员校验: 只比指针, 不解引用候选值 (脏指针也不会崩)。 */
 static int OU_HouseInArray(void* h)
 {
     void** items = *(void***)(size_t)ADDR_HOUSES_ITEMS;
@@ -815,26 +816,27 @@ static int OU_AllyDistOk(void* unit, int cx, int cy)
     return (dx <= OU_ALLY_MOVE_CELLS && dy <= OU_ALLY_MOVE_CELLS) ? 1 : 0;
 }
 
-/* 纯查询: 距离够 + 配额还有。 */
-int OU_OrderAt(void* unit, int cx, int cy)
+/* 下两道闸合判一次: 返回 OU_OrderSide 的值, 盟友没过闸按不可控 (0) 处理。 */
+static int OU_OrderGate(void* unit, int cx, int cy)
 {
     int side = OU_OrderSide(unit);
-    if (side == 1) return 1;
-    if (side != 2) return 0;
+    if (side != 2) return side;
     if (!OU_AllyDistOk(unit, cx, cy)) return 0;
-    return OU_AllyQuotaOk();
+    return OU_AllyQuotaOk() ? 2 : 0;
 }
 
-/* 真的下令那一刻调用: 放行就记一次配额。自家不占配额。 */
+/* 纯查询: 只看闸, 不消耗配额。 */
+int OU_OrderAt(void* unit, int cx, int cy)
+{
+    return OU_OrderGate(unit, cx, cy) != 0;
+}
+
+/* 真的下令那一刻调用: 盟友放行就记一次配额。 */
 int OU_OrderTake(void* unit, int cx, int cy)
 {
-    int side = OU_OrderSide(unit);
-    if (side == 1) return 1;
-    if (side != 2) return 0;
-    if (!OU_AllyDistOk(unit, cx, cy)) return 0;
-    if (!OU_AllyQuotaOk()) return 0;
-    OU_AllyQuotaUse();
-    return 1;
+    int side = OU_OrderGate(unit, cx, cy);
+    if (side == 2) OU_AllyQuotaUse();
+    return side != 0;
 }
 
 /* 单位 PlanningToken 上的节点数 (只读; token 不存在/野指针回 0)。 */
