@@ -27,6 +27,10 @@
 /* ---------------- 版式常量 ---------------- */
 #define UP_CELL_W   60          /* cameo 原生尺寸, 不缩放 */
 #define UP_CELL_H   48
+/* 血量条换色阈值 (百分数)。与 MO 的 rules `[General] ConditionYellow=67% /
+ * ConditionRed=35%` 同值: 引擎画血条/闪红用的就是这两个数。**改了 rules 就改这里**。 */
+#define UP_HP_YELLOW_PC 67
+#define UP_HP_RED_PC    35
 #define UP_CELL_GAP 1           /* 相邻图标之间的空隙, 让边框/悬停框不互相贴死 */
 /* 九宫格分割线 (源图 border_mental_n9_B.pcx 36x36 上的取值): 上 8 / 下 6 / 左右 7。
  * 目标内边距与分割线同值 → 四边都 1:1 贴, 框带不做重采样。 */
@@ -2117,8 +2121,10 @@ static void Up_DrawInfoCell(unsigned char* base, int pitch, int W, int H,
     level = Up_Level(e->obj);
     vet = *(float*)((char*)e->obj + OFF_TECH_VETERANCY);
 
-    /* 血量色: 与游戏同口径 (>=50% 绿即默认色, >=25% 黄, 否则红) */
-    if (pc >= 25) { r = 235; g = 210; b = 60; }
+    /* 血量色: 与引擎同口径 —— 阈值取 MO 的 rules `[General] ConditionYellow=67% /
+     * ConditionRed=35%` (>67 绿, >35 黄, 其余红)。rules 改了就同步这两个数。 */
+    if (pc > UP_HP_YELLOW_PC) { r = 60; g = 210; b = 60; }
+    else if (pc > UP_HP_RED_PC) { r = 235; g = 210; b = 60; }
     else { r = 230; g = 60; b = 60; }
     /* 经验条颜色即等级: 新兵蓝 / 老兵青 / 精英金 */
     if (level >= 2) { er = 255; eg = 200; eb = 80; }
@@ -2627,6 +2633,8 @@ extern "C" __declspec(dllexport) unsigned __cdecl UP_ClickGate(void* regs)
     (void)regs;
     UP_EnsureInit();
     if (!s_Enable || !s_Vis) return 0;
+    /* 自己做的屏→格换算一律放行 (门只看真实鼠标位置, 会误截换算)。 */
+    if (OU_ConvQuiet()) return 0;
     if (!GtMouseGameXY(&mx, &my)) return 0;
     if (!Up_HitPanel(mx, my))
     {

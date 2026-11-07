@@ -2577,6 +2577,8 @@ extern "C" __declspec(dllexport) unsigned __cdecl SWS_ClickGate(void* regs)
     (void)regs;
     SwsEnsureInit();
     if (!s_Enable || !s_Visible) return 0;
+    /* 自己做的屏→格换算一律放行 (门只看真实鼠标位置, 会误截换算)。 */
+    if (OU_ConvQuiet()) return 0;
     /* 当帧记下的按下止于侧栏 (跳过引擎 ProcessClickCoords, 不当打靶放置)。
      * 即时超武也吞 (靠 SpecialPlace 事件生效)。命中用屏上这一帧的图标矩形
      * (s_BoundsKnown = 缓存有可合成的一帧; 点击那帧的重扫只改数据不改布局)。 */

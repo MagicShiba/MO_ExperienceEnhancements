@@ -1932,6 +1932,8 @@ unsigned FM_RadarClickGate(void* regs)
 
     (void)regs;
     if (!g_Log) return 0;
+    /* 自己做的屏→格换算一律放行 (门只看真实鼠标位置, 会误截换算)。 */
+    if (OU_ConvQuiet()) return 0;
     lb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
     if (!lb) { s_LbPress = 0; return 0; }  /* 松开: 下一次按下重新允许处理 */
     if (s_LbPress) return 0;              /* 本次按下已处理过 (按住拖动不重复) */
@@ -2064,6 +2066,8 @@ extern "C" __declspec(dllexport) unsigned __cdecl FullMap_MapHoverGate(void*)
     int x, y;
     RectangleStruct top;
     if (!s_Enable || Fm_ModeBare()) return 0;
+    /* 自己做的屏→格换算一律放行 (门只看真实鼠标位置, 会误截换算)。 */
+    if (OU_ConvQuiet()) return 0;
     if (!GtMouseGameXY(&x, &y) || !FM_KeepTopRectScreen(&top)) return 0;
     if (x < top.X || x >= top.X + top.Width || y < top.Y || y >= top.Y + top.Height)
         return 0;

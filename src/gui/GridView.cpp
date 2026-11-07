@@ -220,7 +220,9 @@ static int GV_ProjCorner(void* tac, int gx, int gy, int z, int* sx, int* sy)
     return 1;
 }
 
-/* 屏上点 → 格 (OU_MouseCellPx 同式, 但允许栏带外推: 角点常落在图外)。 */
+/* 屏上点 → 格 (OU_MouseCellPx 同式, 但允许栏带外推: 角点常落在图外)。
+ * 换算期间置"静默"标志: 0x692300 上的点击门只看真实鼠标位置, 鼠标压在侧栏图标
+ * 或单位面板上会把整次换算截断 (见 OrderUtil.h 的 OU_ConvQuiet)。 */
 static int GV_ScreenToCell(int sx, int sy, int* cx, int* cy)
 {
     Point2D pt;
@@ -228,13 +230,16 @@ static int GV_ScreenToCell(int sx, int sy, int* cx, int* cy)
     CoordStruct crd;
     void* tgtObj = 0;
     unsigned char b5 = 0, b6 = 0;
+    int ok;
     center.X = center.Y = 0;
     crd.X = crd.Y = crd.Z = 0;
     pt.X = sx; pt.Y = sy;
     SB_MapPoint(&pt);   /* 物理→视口 (外推也算, 返回值只表是否在 A 内) */
-    if (!FN_CLICKCOORDS((void*)(size_t)ADDR_DISPLAY, &pt, &center, &crd,
-                        &tgtObj, &b5, &b6))
-        return 0;
+    OU_ConvQuietBegin();
+    ok = FN_CLICKCOORDS((void*)(size_t)ADDR_DISPLAY, &pt, &center, &crd,
+                        &tgtObj, &b5, &b6);
+    OU_ConvQuietEnd();
+    if (!ok) return 0;
     *cx = (int)center.X; *cy = (int)center.Y;
     return OU_CellValid(*cx, *cy);
 }

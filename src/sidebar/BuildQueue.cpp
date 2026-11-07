@@ -158,8 +158,9 @@ typedef struct
     void* type;
     unsigned naval;
     unsigned buildcat;
-    int flying; /* 已发单待模拟认领 (见喂单确认制) */
-    int fired;  /* 上次发单的逻辑帧 (缓存槽空时用它限重发) */
+    int flying; /* 已发单, 等待该产线的 CountTotal 增长 */
+    int fired;  /* 最近发送帧 (缓存槽空时限重发) */
+    int baseline; /* 最近一次发送前该类型的模拟总数 */
 } BQEntry;
 
 static int g_BQInit = 0;
@@ -347,7 +348,10 @@ static int BQ_ShiftDown(void)
 static void BQ_RemoveAt(int idx);
 static int BQ_ClearType(void* house, int heap);
 static int BQ_SimCount(void* house, void* type);
+static int BQ_VisibleCount(void* house, void* type);
 static int BQ_LimitOf(void* type);
+static int BQ_LocalTypeCount(void* house, void* type);
+static DWORD BQ_PeelOne(void* house, void* type);
 static int BQ_RoomLeft(void* house, void* type, int others);
 
 /* 本家本型本地数 (取消钩用, heap 匹配)。 */
@@ -364,22 +368,20 @@ static int BQ_LocalCount(void* house, int heap)
     return n;
 }
 
-/* 弹掉本家本型最后一个本地 (右键从队尾减, FIFO 剩下有序)。
- * 返回弹出后剩余数。 */
-static int BQ_PopLast(void* house, int heap)
+/* 弹掉本家本型最后一个本地 (右键从队尾减, FIFO 剩下有序)。 */
+static void BQ_PopLast(void* house, int heap)
 {
     int i;
-    if (!house) return 0;
+    if (!house) return;
     for (i = g_BQCount - 1; i >= 0; i--)
     {
         if (g_BQList[i].house == house &&
             BQ_HeapOf(g_BQList[i].type) == heap)
         {
             BQ_RemoveAt(i);
-            break;
+            return;
         }
     }
-    return BQ_LocalCount(house, heap);
 }
 
 static void BQ_RemoveAt(int idx)
@@ -399,8 +401,7 @@ static void* BQ_Resolve(void* house, unsigned naval, unsigned cat)
     return FN_GETPRIMARYFACTORY(house, ABS_BUILDINGTYPE, naval, cat);
 }
 
-/* 本家任一工厂正在造本型 (Object 类型对上)。认领判据: 不依赖缓存槽,
- * 槽空时同样可用。只读。 */
+/* 本家任一工厂正在造本型 (Object 类型对上)。只读。 */
 static int BQ_FacOnTypeAny(void* house, void* type)
 {
     void** items;
@@ -452,22 +453,6 @@ static int BQ_ProduceInTransit(void* house)
     /* EventClass::OutList 128 / DoList 128*128 (YRpp EventClass.h)。 */
     return BQ_QueuedProduce(ADDR_OUT_COUNT, EVT_CAP, house) ||
            BQ_QueuedProduce(0x008B41F8u, 128u * 128u, house);
-}
-
-/* 同一产线只允许队首待确认条目参与认领/重试。一个 Factory.Object
- * 只能消费一个本地订单, 未发送条目不能越过等待网络执行的队首。 */
-static int BQ_LineHasEarlier(int idx)
-{
-    const BQEntry* e = &g_BQList[idx];
-    int j;
-    for (j = 0; j < idx; j++)
-    {
-        const BQEntry* prev = &g_BQList[j];
-        if (prev->house == e->house && prev->naval == e->naval &&
-            prev->buildcat == e->buildcat)
-            return 1;
-    }
-    return 0;
 }
 
 /* 复刻一次点击下单 (PRODUCE 事件手工进 OutList, 见文件头)。
@@ -542,23 +527,20 @@ void BuildQueue_Poll(void)
     if (!g_BQHouse) g_BQHouse = cur;
     if (g_BQCount <= 0) return;
     fr = BQ_Frame();
+    if (BQ_ProduceInTransit(cur)) return;
     /* 确认制: 发单只 mark flying 不移除, 见模拟认领才移除; 执行拒收则条目
      * 留着, 重发窗口过后自动重试。 */
     for (i = 0; i < g_BQCount; i++)
     {
         BQEntry* e = &g_BQList[i];
         void* factory;
+        int baseline;
         if (e->house != cur) continue;
-        if (BQ_LineHasEarlier(i)) continue;
-        /* 在途时模拟尚未变化, 不能认领、重发或据短暂权限/限造状态丢单。
-         * 原生首单同样在检查范围内, 防止 Shift 附加单抢在首单执行前发出。 */
-        if (BQ_ProduceInTransit(cur)) continue;
-        /* 先确认再算余量: 在产计数已包含本单, 不能再把 flying 当作未下单扣一次。 */
-        if (e->flying && BQ_FacOnTypeAny(cur, e->type))
+        /* CountTotal 增长才确认当前在途单; 生产对象本身不是订单确认信号。 */
+        if (e->flying && BQ_SimCount(cur, e->type) > e->baseline)
         {
             BQ_RemoveAt(i);
-            i--;
-            continue;
+            break;
         }
         /* 限造余量不足的直接丢 (=原版"点不下"语义, 队列自愈)。 */
         if (BQ_LimitOf(e->type) &&
@@ -594,10 +576,13 @@ void BuildQueue_Poll(void)
         }
         /* 槽空也照发: 引擎 BeginProduction 会按需建厂并写回槽, 拦着就
          * 再也续不上。 */
+        baseline = BQ_SimCount(cur, e->type);
         BQ_MarkPending(cur, e->naval, e->buildcat);
         if (!BQ_FireProduce(cur, e->type)) continue;
         e->flying = 1;
         e->fired = fr;
+        e->baseline = baseline;
+        break; /* 每轮只发一单, 下一轮由标准事件队列确认后再继续。 */
     }
 }
 
@@ -615,6 +600,7 @@ static void BQ_PushN(void* house, void* type, unsigned naval, unsigned cat,
         g_BQList[g_BQCount].buildcat = cat;
         g_BQList[g_BQCount].flying = 0;
         g_BQList[g_BQCount].fired = 0;
+        g_BQList[g_BQCount].baseline = 0;
         g_BQCount++;
     }
 }
@@ -626,7 +612,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_QueueClick(void* regs)
 {
     unsigned abs;
     void* pType;
-    void* factory;
     void* house;
     int want;
     int free;
@@ -636,8 +621,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_QueueClick(void* regs)
 
     abs = BQ_Reg(regs, R_EBP);
     pType = (void*)BQ_Reg(regs, R_EDI);
-    factory = (void*)BQ_Reg(regs, R_ESI);
-    if (abs != ABS_BUILDINGTYPE || !pType || !factory) return 0;
+    if (abs != ABS_BUILDINGTYPE || !pType) return 0;
     if (BQ_WhatAmI(pType) != (int)ABS_BUILDINGTYPE) return 0;
     house = *(void**)ADDR_CURPLAYER;
     if (!house) return 0;
@@ -660,8 +644,9 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_QueueClick(void* regs)
 }
 
 /* 0x6AB6CE (10): 工厂闲时继续路径 (mov edx,[esp+0x24] + mov al,[edi+0xcce])。
- * 原版只会即时下单 1 个; Shift+左键则顺手记 4 个 (合计 5 个), 跑原指令让
- * 原版下单第 1 个。regs: EBP=abs, EDI=图标类型, ESI=工厂 (可空)。 */
+ * 首个 PRODUCE 尚在网络队列时, 普通/Shift 点击暂存本地并跳过重复原生下单；
+ * 无在途订单时仅 Shift 追加 4 个, 原生首单仍照常执行。regs: EBP=abs,
+ * EDI=图标类型, ESI=工厂 (可空)。 */
 extern "C" __declspec(dllexport) DWORD __cdecl BQ_FreeShift(void* regs)
 {
     unsigned abs;
@@ -669,6 +654,8 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_FreeShift(void* regs)
     void* house;
     int want;
     int free;
+    int pendingOrder;
+    int shift;
 
     BQ_EnsureInit();
     if (!g_BQEnable) return 0;
@@ -677,25 +664,34 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_FreeShift(void* regs)
     pType = (void*)BQ_Reg(regs, R_EDI);
     if (abs != ABS_BUILDINGTYPE || !pType) return 0;
     if (BQ_WhatAmI(pType) != (int)ABS_BUILDINGTYPE) return 0;
-    if (!BQ_ShiftDown()) return 0;
     house = *(void**)ADDR_CURPLAYER;
     if (!house) return 0;
-    /* ESI=工厂可空 (首次下单工厂未具现): 照记不误 */
-    want = 4;
+    shift = BQ_ShiftDown();
+    pendingOrder = BQ_ProduceInTransit(house);
+    if (!shift && !pendingOrder) return 0;
     free = BQ_CAP - g_BQCount;
     if (free <= 0) return 0;
-    if (want > free) want = free;
     if (!g_BQHouse) g_BQHouse = house;
     if (house != g_BQHouse) return 0;
-    /* 限造: 给原生即将下的 1 个留位, 余下只记余量内的条数。 */
+    /* 在途首单尚未更新工厂状态时，普通点击也必须保存在本地队列。 */
+    if (pendingOrder)
+        want = shift ? 5 : 1;
+    else
     {
-        int room = BQ_RoomLeft(house, pType, 1);
+        if (!shift) return 0;
+        want = 4; /* 原生首单另下, 本地只记剩余四个 */
+    }
+    if (want > free) want = free;
+    /* 已有在途首单时它已占建造上限; 否则给原生即将下的首单留位。 */
+    {
+        int room = BQ_RoomLeft(house, pType, pendingOrder ? 0 : 1);
         if (want > room) want = room;
     }
+    if (want <= 0) return pendingOrder ? TO_CLICK_EXIT : 0;
     BQ_PushN(house, pType,
              *(unsigned char*)((char*)pType + OFF_TT_NAVAL) ? 1u : 0u,
              *(unsigned*)(BQ_Reg(regs, R_ESP) + 0x24u), want);
-    return 0;
+    return pendingOrder ? TO_CLICK_EXIT : 0;
 }
 
 /* 0x6AB0C1 (6): 右键 state 检查 (jne 0x6AB18D, rel, 永远跳转)。
@@ -714,7 +710,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_PausePeel(void* regs)
     void* house;
     unsigned stateAddr;
     unsigned state;
-    int heap;
+    unsigned esp;
 
     BQ_EnsureInit();
     stateAddr = BQ_Reg(regs, R_EAX);
@@ -728,17 +724,25 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_PausePeel(void* regs)
     house = *(void**)ADDR_CURPLAYER;
     if (!house || house != g_BQHouse || g_BQCount <= 0)
         return TO_PAUSE_NATIVE;
-    heap = BQ_HeapOf(pType);
+    esp = BQ_Reg(regs, R_ESP);
+    if (*(unsigned char*)(esp + 0x13u) &&
+        BQ_LocalCount(house, BQ_HeapOf(pType)) > 0)
     {
-        unsigned esp = BQ_Reg(regs, R_ESP);
-        int bit = (*(unsigned char*)(esp + 0x13u)) ? 1 : 0;
-        if (bit && BQ_LocalCount(house, heap) > 0)
-        {
-            BQ_ClearType(house, heap);
-            return TO_CANCEL_BRANCH;
-        }
+        BQ_ClearType(house, BQ_HeapOf(pType));
+        return TO_CANCEL_BRANCH;
     }
     return TO_PAUSE_NATIVE;
+}
+
+static DWORD BQ_PeelOne(void* house, void* type)
+{
+    int heap = BQ_HeapOf(type);
+    if (BQ_LocalCount(house, heap) > 0)
+    {
+        BQ_PopLast(house, heap);
+        return TO_CANCEL_EXIT;
+    }
+    return BQ_SimCount(house, type) > 1 ? TO_CANCEL_EXIT : 0;
 }
 
 /* 0x6AB197 (8): 右键取消分支入口 (push eax + push ecx +
@@ -757,8 +761,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_CancelPeel(void* regs)
     unsigned abs;
     void* pType;
     void* house;
-    int heap;
-    int left;
+    unsigned esp;
 
     BQ_EnsureInit();
     if (!g_BQEnable) return 0;
@@ -768,36 +771,14 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_CancelPeel(void* regs)
     if (abs != ABS_BUILDINGTYPE || !pType) return 0;
     if (BQ_WhatAmI(pType) != (int)ABS_BUILDINGTYPE) return 0;
     house = *(void**)ADDR_CURPLAYER;
-    if (!house || g_BQCount <= 0) return 0;
-    if (house != g_BQHouse) return 0;
-    heap = BQ_HeapOf(pType);
+    if (!house || !g_BQCount || house != g_BQHouse) return 0;
+    esp = BQ_Reg(regs, R_ESP);
+    if (*(unsigned char*)(esp + 0x13u))
     {
-        /* Shift+右键到明取消分支: 清空本地后跑原生 (原生凭同
-         * 字节下 0x2E 清模拟; 空闲态右键才到这里)。c 记原生决策位。 */
-        unsigned esp = BQ_Reg(regs, R_ESP);
-        int bit = (*(unsigned char*)(esp + 0x13u)) ? 1 : 0;
-        if (bit)
-        {
-            BQ_ClearType(house, heap);
-            return 0;
-        }
-    }
-    left = BQ_LocalCount(house, heap);
-    if (left <= 0)
-    {
-        /* 本地无本型: 按总数 (本地+模拟) 决策。本地已 drain、模拟还抱着在产/在排
-         * 时放行原生=下发 ABANDON (IsQueued 为真则 0x10, Shift 常驻更是 0x2E
-         * AbandonAll), 在产进度作废。故总数>1 时直接退 (在产继续), 总数<=1
-         * (仅剩在产单个或全空) 才走原生。 */
-        int sim = BQ_SimCount(house, pType);
-        if (sim > 1)
-        {
-            return TO_CANCEL_EXIT;
-        }
+        BQ_ClearType(house, BQ_HeapOf(pType));
         return 0;
     }
-    left = BQ_PopLast(house, heap);
-    return TO_CANCEL_EXIT;
+    return BQ_PeelOne(house, pType);
 }
 
 /* 真分发 (反汇编定案, 右键点建筑图标):
@@ -828,38 +809,6 @@ static int BQ_ClearType(void* house, int heap)
     return n;
 }
 
-/* 暗路剥离: 本地有本型→弹尾跳原生出口; 本地空→模拟>1 拦下; 否则走原生。
- * Shift 方向由分发点处理。 */
-static DWORD BQ_DarkPeel(void* regs)
-{
-    unsigned abs;
-    void* pType;
-    void* house;
-    int heap;
-    int left;
-
-    abs = BQ_Reg(regs, R_EBP);
-    pType = (void*)BQ_Reg(regs, R_EDI);
-    if (abs != ABS_BUILDINGTYPE || !pType) return 0;
-    if (BQ_WhatAmI(pType) != (int)ABS_BUILDINGTYPE) return 0;
-    house = *(void**)ADDR_CURPLAYER;
-    if (!house || g_BQCount <= 0) return 0;
-    if (house != g_BQHouse) return 0;
-    heap = BQ_HeapOf(pType);
-    left = BQ_LocalCount(house, heap);
-    if (left <= 0)
-    {
-        int sim = BQ_SimCount(house, pType);
-        if (sim > 1)
-        {
-            return TO_CANCEL_EXIT;
-        }
-        return 0;
-    }
-    left = BQ_PopLast(house, heap);
-    return TO_CANCEL_EXIT;
-}
-
 /* 0x6AAE44 (6): 右键暗分发 (je 0x6AAFBD, rel, 永远跳转)。
  * 到此=右键+非空闲态 (在产未暂停已由上游 0x6AAE0D 分走暗暂停;
  * 此处为已暂停/空闲)。EDI=图标类型, EBP=abs,
@@ -874,7 +823,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_DarkDispatchPeel(
     void* house;
     unsigned esp;
     int shift;
-    int heap;
+    DWORD peel;
 
     BQ_EnsureInit();
     esp = BQ_Reg(regs, R_ESP);
@@ -890,30 +839,20 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_DarkDispatchPeel(
     house = *(void**)ADDR_CURPLAYER;
     if (!house || house != g_BQHouse)
         return (DWORD)(shift ? TO_DARK_ALL_NATIVE : TO_DARK_CANCEL_NATIVE);
-    heap = BQ_HeapOf(pType);
     if (shift)
     {
-        /* Shift+右键=取消全部 (用户定稿): 清空本家本型本地后跑
-         * 原生 (0x2E 清模拟, 在产亦清, 显示归零, 如 5→0/10→0)。
-         * 未暂停的到不了这里 (上游进了暗暂停块先暂停), 天然两步防误删:
-         * 松开 shift 点=减一, 按住 shift 点=清零。 */
-        BQ_ClearType(house, heap);
+        /* 原生清空模拟订单, 本地同型条目需同步清除。 */
+        BQ_ClearType(house, BQ_HeapOf(pType));
         return TO_DARK_ALL_NATIVE;
     }
-    {
-        DWORD r = BQ_DarkPeel(regs);
-        if (r) return r;
-    }
-    return TO_DARK_CANCEL_NATIVE;
+    peel = BQ_PeelOne(house, pType);
+    return peel ? peel : TO_DARK_CANCEL_NATIVE;
 }
 
 /* 0x6A9C6C (6): CountTotal 前工厂空检查 (test eax,eax +
  * mov [esp+0x18],eax, 无 rel)。EAX=GPF 工厂 (可空), [ESP+0x34]=图标类型。
- * 工厂非空→跑原指令; 工厂空 (建筑页没下过单槽位无工厂/绘制按 buildcat=0
- * 取槽而防御页在它槽, 连带被跳过) 且本地有本型→EAX/EBX=模拟全厂和+本地数
- * 后跳绘制块 (只画本地数会漏计在产的那 1 个, 防御页点 5 个
- * 显示 4); 工厂空且本地无→置 [esp+0x18]=0 后跳原生跳过处。
- * [esp+0x18] 在两目标之后无人读, 绘制跳跃无需处理它。 */
+ * 工厂非空→跑原指令; 工厂空时用全厂模拟数+本地待建数。唯一在产订单不画数,
+ * 唯一本地待建订单显示 1; 无计数时跳过原生绘制。 */
 extern "C" __declspec(dllexport) DWORD __cdecl BQ_DrawNullFac(void* regs)
 {
     unsigned esp;
@@ -921,7 +860,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_DrawNullFac(void* regs)
     void* cur;
     unsigned v;
     int n;
-    int i;
 
     BQ_EnsureInit();
     if (!g_BQEnable) return 0;
@@ -930,23 +868,19 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_DrawNullFac(void* regs)
     esp = BQ_Reg(regs, R_ESP);
     pType = *(void**)(esp + 0x34u);
     cur = *(void**)ADDR_CURPLAYER;
-    n = 0;
-    if (pType && cur)
-    {
-        for (i = 0; i < g_BQCount; i++)
-        {
-            if (g_BQList[i].house == cur && g_BQList[i].type == pType)
-                n++;
-        }
-    }
+    n = BQ_LocalTypeCount(cur, pType);
     if (n <= 0)
     {
         *(unsigned*)(esp + 0x18u) = 0u;
         return TO_DRAWSKIP;
     }
-    /* 工厂空不代表没在产 (槽位不对而已): 全厂求和补上, 与 ShowCount 同口径。 */
-    v = (unsigned)BQ_SimCount(cur, pType) + (unsigned)n;
-    if (!v) return 0;
+    /* 工厂空不代表没在产 (槽位不对而已): 用统一口径补全订单数。 */
+    v = (unsigned)BQ_VisibleCount(cur, pType);
+    if (v == 1u && BQ_FacOnTypeAny(cur, pType))
+    {
+        *(unsigned*)(esp + 0x18u) = 0u;
+        return TO_DRAWSKIP;
+    }
     *(unsigned*)((char*)regs + R_EAX) = v;
     *(unsigned*)((char*)regs + R_EBX) = v;
     return TO_DRAWNUM;
@@ -992,6 +926,41 @@ static int BQ_SimCount(void* house, void* type)
     return sim;
 }
 
+static int BQ_LocalTypeCount(void* house, void* type)
+{
+    int i;
+    int count = 0;
+    if (!house || !type) return 0;
+    for (i = 0; i < g_BQCount; i++)
+    {
+        if (g_BQList[i].house == house && g_BQList[i].type == type)
+            count++;
+    }
+    return count;
+}
+
+static int BQ_VisibleCount(void* house, void* type)
+{
+    int i;
+    int local;
+    int sim;
+    int reflected = 0;
+    if (!house || !type) return 0;
+    local = BQ_LocalTypeCount(house, type);
+    sim = BQ_SimCount(house, type);
+    for (i = 0; i < g_BQCount; i++)
+    {
+        BQEntry* e = &g_BQList[i];
+        if (e->house == house && e->type == type && e->flying &&
+            sim > e->baseline)
+        {
+            reflected++;
+            break;
+        }
+    }
+    return sim + local - reflected;
+}
+
 /* 本型的 rules.ini BuildLimit (0=不限, 正=总数上限, 负=历史上限)。 */
 static int BQ_LimitOf(void* type)
 {
@@ -1024,8 +993,8 @@ static int BQ_RoomLeft(void* house, void* type, int others)
 
 /* 0x6A9C86 (5): DrawStrip 的 CountTotal 取数点 (mov ebx,eax + cmp ebx,1)。
  * EAX 原生数只认单槽工厂, 跨页漏计, 故本地有排队或原生数为 0 时改用全厂
- * 求和 (sim+n) 后跳绘制块借用原版绘制; 其余 (单位/建筑页单个在产原生数>0)
- * 跑原指令零影响。[ESP+0x34]=图标类型 (调用前后 esp 无净变化)。 */
+ * 求和 (sim+n)。唯一在产订单不画数, 唯一本地待建订单显示 1。
+ * [ESP+0x34]=图标类型 (调用前后 esp 无净变化)。 */
 extern "C" __declspec(dllexport) DWORD __cdecl BQ_ShowCount(void* regs)
 {
     unsigned esp;
@@ -1033,8 +1002,6 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_ShowCount(void* regs)
     void* cur;
     unsigned v;
     int n;
-    int i;
-    int sim;
 
     BQ_EnsureInit();
     if (!g_BQEnable) return 0;
@@ -1045,16 +1012,11 @@ extern "C" __declspec(dllexport) DWORD __cdecl BQ_ShowCount(void* regs)
     if (BQ_WhatAmI(pType) != (int)ABS_BUILDINGTYPE) return 0;
     cur = *(void**)ADDR_CURPLAYER;
     if (!cur) return 0;
-    n = 0;
-    for (i = 0; i < g_BQCount; i++)
-    {
-        if (g_BQList[i].house == cur && g_BQList[i].type == pType)
-            n++;
-    }
+    n = BQ_LocalTypeCount(cur, pType);
     if (n <= 0 && BQ_Reg(regs, R_EAX)) return 0;
-    sim = BQ_SimCount(cur, pType);
-    v = (unsigned)sim + (unsigned)n;
+    v = (unsigned)BQ_VisibleCount(cur, pType);
     if (!v) return 0;
+    if (v == 1u && BQ_FacOnTypeAny(cur, pType)) return 0;
     *(unsigned*)((char*)regs + R_EAX) = v;
     *(unsigned*)((char*)regs + R_EBX) = v;
     return TO_DRAWNUM;

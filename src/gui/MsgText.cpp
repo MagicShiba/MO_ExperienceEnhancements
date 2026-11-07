@@ -1591,6 +1591,8 @@ extern "C" __declspec(dllexport) unsigned __cdecl MsgText_RadarClickGate(void* r
     if (!g_Cfg.Enable || !g_Cfg.HintShow || !g_Cfg.HintRadarClick ||
         !g_Cfg.HintRadarShow || g_ReHitN <= 0)
         return 0;
+    /* 自己做的屏→格换算一律放行 (门只看真实鼠标位置, 会误截换算)。 */
+    if (OU_ConvQuiet()) return 0;
     lb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0;
     if (!lb) { s_LbPress = 0; return 0; }   /* 松开: 下一次按下重新允许处理 */
     if (s_LbPress) return 0;                /* 本次按下已处理过 (按住拖动不重复) */

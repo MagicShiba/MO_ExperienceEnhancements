@@ -225,6 +225,16 @@ int OU_MouseCellZ(int* cx, int* cy, int* lz);
 int OU_MouseCellPx(int* cx, int* cy, int* px, int* py);
 /* 同上 + 点中对象 (智能下令用; tgtOut 可空, 无目标时写 0, 返回值仍是格有效性)。 */
 int OU_MouseCellTarget(int* cx, int* cy, void** tgtOut, int* px, int* py);
+/* ---------------- 屏→格换算的"静默"标志 ----------------
+ * ProcessClickCoords (0x692300) 上挂着几条点击/悬停门 (MsgText 0x69234B、
+ * UP 0x692361、FullMap 0x692406 / 0x692F3D、SWS 0x692419)。这些门只按**真实
+ * 鼠标位置**判定, 命中就把整次调用截到"平衡返回出口", 完全不区分调用方是不是
+ * 引擎在处理点击。所以拿任意屏点做换算的模块 (格网/箱子图标的视图格矩形) 一碰上
+ * 鼠标压在侧栏图标或单位面板上, 换算结果就整批作废 —— 表现为这些叠加层"整个消失"。
+ * 自己的换算必须夹一层 Begin/End: 置位期间所有门一律放行。 */
+void OU_ConvQuietBegin(void);
+void OU_ConvQuietEnd(void);
+int  OU_ConvQuiet(void);
 /* 光标自适应查询 (只读): 问选中单位 self 点 target 的光标,
  * 经 vtbl+0x74 调用, 与 DecideAction 内部同入口。失败回 -1。 */
 int OU_MouseOverObject(void* self, void* target);

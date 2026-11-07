@@ -477,6 +477,14 @@ int OU_CellTgt(int cx, int cy, unsigned char* rttiOut)
     return *(int*)(tb + 0);
 }
 
+/* ---------------- 屏→格换算的"静默"标志 ----------------
+ * 实现说明见 OrderUtil.h。计数式, 允许嵌套 (换算里再调换算)。 */
+static int s_ConvQuiet = 0;
+
+void OU_ConvQuietBegin(void) { s_ConvQuiet++; }
+void OU_ConvQuietEnd(void) { if (s_ConvQuiet > 0) s_ConvQuiet--; }
+int OU_ConvQuiet(void) { return s_ConvQuiet > 0; }
+
 /* 鼠标屏坐标 → 格 + 点中对象。filterTgt 非 0 时只透出单位/建筑类对象。 */
 static int OU_MouseCellInner(int* cx, int* cy, void** tgtOut, int* px, int* py,
                              int filterTgt, int* zOut)
