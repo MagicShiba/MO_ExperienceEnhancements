@@ -509,6 +509,8 @@ static int SA_Snapshot(void)
     {
         void* o = items[i];
         if (!OU_IsUnit(o)) continue;
+        /* 敌我识别: 只派自家单位 (敌人/中立/盟友都不接范围智能令)。 */
+        if (OU_OrderSide(o) != 1) continue;
         s_SnapUnits[nu] = o;
         s_SnapUids[nu] = OU_ObjId(o);
         s_SnapBusy[nu] = 0;

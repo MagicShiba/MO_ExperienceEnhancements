@@ -18,6 +18,8 @@
  * 目标显式, OutList 满 drip 跨帧续发; 发前验活, house 变化清空。
  * 落点无效则半径 5 环搜, 找不到丢弃该单位。
  * 分类: Aircraft 恒飞; 步兵/车辆 MZ==Fly(9), ST==Winged(4) 兜底。
+ * 敌我识别 (OU_OrderAt/OU_OrderTake): 敌人/中立永不接令; 盟友只接 2 格内
+ * 挪动 (占位挡路要推开) 且 60 秒最多 3 次, 任一不过静默丢弃, 预览线同规则不画。
  * 左键下令原样不动。
  *
  * 联机: 只发标准事件, 各端同一份原版代码执行。本地只读 + 标准事件入队,
@@ -156,6 +158,8 @@ static void SO_Press(void)
         void* o = items[i];
         int w = OU_WhatAmI(o);
         if (!OU_IsUnit(o)) continue;
+        /* 敌我识别: 敌人/中立不进快照 (引擎允许单选一个非己方单位)。 */
+        if (OU_OrderSide(o) == 0) continue;
         g_SoUnits[nu].unit = o;
         g_SoUnits[nu].id = OU_ObjId(o);
         g_SoUnits[nu].w = w;
@@ -440,6 +444,9 @@ static void SO_Queue(int ui, int cx, int cy)
     if (ui < 0 || ui >= g_SoCount) return;
     u = &g_SoUnits[ui];
     if (!SO_NearValid(cx, cy, &ox, &oy)) return;
+    /* 盟友只许 2 格内挪动且 60 秒 3 次, 任一不过静默丢弃: 不下令也不画线,
+     * 与最终结果一致 (预览/终判同一入口)。自家恒过, 不占配额。 */
+    if (!OU_OrderAt(u->unit, ox, oy)) return;
     /* 落点转换: 地面单位落点格上有建筑时, 按直接下令处理
      * (进驻/攻击/占领), 而不是走过去再转攻击。
      * 空军不管地面建筑; 护航目标同建筑的攻击保持移动。
@@ -468,7 +475,8 @@ static void SO_Queue(int ui, int cx, int cy)
                             OU_PrevPushObjs(s_SoPrevBuf, &s_SoPrevN, u->unit, slotObj);
                         return;
                     }
-                    if (g_SoObjCount < SO_PEND_CAP)
+                    if (g_SoObjCount < SO_PEND_CAP &&
+                        OU_OrderTake(u->unit, ox, oy))
                     {
                         g_SoObj[g_SoObjCount].unit = u->unit;
                         g_SoObj[g_SoObjCount].uid = u->id;
@@ -489,6 +497,7 @@ static void SO_Queue(int ui, int cx, int cy)
         return;
     }
     if (g_SoPendCount >= SO_PEND_CAP) return;
+    if (!OU_OrderTake(u->unit, ox, oy)) return;   /* 盟友在此记一次配额 */
     g_SoPend[g_SoPendCount].unit = u->unit;
     g_SoPend[g_SoPendCount].id = u->id;
     g_SoPend[g_SoPendCount].x = (short)ox;
@@ -637,6 +646,8 @@ static int SO_SmartPoint(int bx, int by, void* tgt)
             if (u->w != ABS_UNIT && u->w != ABS_AIRCRAFT && u->w != ABS_INFANTRY)
                 continue;
             if (!OU_PtrAlive(u->unit, u->id, g_SoIdxOk)) continue;
+            /* 盟友只许 2 格内 (目标格距单位); 超出按无操作。 */
+            if (!OU_OrderAt(u->unit, bx, by)) continue;
             act = OU_MouseOverObject(u->unit, tgt);
             if (act < 0) ms = -1;
             else ms = SO_MissionFor(u->w, tgtWhat, act);
@@ -660,6 +671,8 @@ static int SO_SmartPoint(int bx, int by, void* tgt)
         if (u->w != ABS_UNIT && u->w != ABS_AIRCRAFT && u->w != ABS_INFANTRY)
             continue;
         if (!OU_PtrAlive(u->unit, u->id, g_SoIdxOk)) continue;
+        /* 盟友只许 2 格内 (目标格距单位); 超出按无操作。 */
+        if (!OU_OrderAt(u->unit, bx, by)) continue;
         act = OU_MouseOverObject(u->unit, tgt);
         if (act < 0) ms = -1;
         else ms = SO_MissionFor(u->w, tgtWhat, act);
@@ -715,6 +728,7 @@ static int SO_SmartPoint(int bx, int by, void* tgt)
             continue;
         }
         if (g_SoObjCount >= SO_PEND_CAP) break;
+        if (!OU_OrderTake(g_SoUnits[i].unit, bx, by)) continue;  /* 盟友记配额 */
         g_SoObj[g_SoObjCount].unit = g_SoUnits[i].unit;
         g_SoObj[g_SoObjCount].uid = g_SoUnits[i].id;
         g_SoObj[g_SoObjCount].tgt = tgt;

@@ -126,6 +126,29 @@ int OU_IsUnit(void* p);
 int OU_IsTarget(void* p);
 /* 联机判定 (GameMode 3=LAN/4=Internet, 其它单机)。订单系统共用。 */
 int OU_IsMP(void);
+
+/* ---------------- 下令资格 (敌我识别, 全下单模块共用) ----------------
+ * 引擎允许单独选中一个非己方单位, 不过滤就会把敌人的车开走/展开。
+ * 规矩: 敌人与中立 (HouseType::MultiplayPassive) 一律不可控;
+ * 盟友只在"近距离挪一下"时放行 (占了位置挡路, 又没法跟 AI/队友沟通),
+ * 同时上两道闸, 防被当成免费遥控:
+ *   ① 目标格与单位当前格的切比雪夫距离 <= OU_ALLY_MOVE_CELLS (2);
+ *   ② 60 秒滚动窗口内最多 OU_ALLY_USE_MAX (3) 次, 用完自动失效。
+ * 任一不过都静默丢弃: 不下令, 预览也不画线 (判据同源, 见下)。
+ * 判据全只读: Owner 指针 (OFF_OWNER) + Houses 数组成员校验 + IsAlliedWith;
+ * 不解引用可疑指针, 联机安全。心控单位的 Owner 已被引擎改成控制方,
+ * 所以心控来的单位算自家 (与引擎判定一致)。 */
+#define OU_ALLY_MOVE_CELLS 2
+#define OU_ALLY_USE_MAX 3
+#define OU_ALLY_USE_WINDOW_MS 60000u
+/* 0=不可控 (敌人/中立/读不到) 1=自家 2=盟友 (受上面两道闸限制)。 */
+int OU_OrderSide(void* unit);
+/* 该单位现在能否被派到该格 (纯查询, 不消耗配额; 预览/门控用)。
+ * 自家恒 1; 盟友按格距 + 剩余配额; 敌人恒 0。 */
+int OU_OrderAt(void* unit, int cx, int cy);
+/* 同上, 但盟友真的下令时调用: 放行则记一次配额 (调用点必须在**已决定下令**
+ * 那一刻, 一次点击只调一次; 预览路径调 OU_OrderAt 不调这个)。 */
+int OU_OrderTake(void* unit, int cx, int cy);
 /* 标准事件入队: 单机直写 DoList (上限 16384), 联机走 OutList (满回 0)。 */
 int OU_Enqueue(char ev[EVT_SIZE]);
 /* 事件缓冲清零 (无 CRT, 不能 memset)。 */

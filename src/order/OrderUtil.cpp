@@ -750,6 +750,93 @@ int OU_HouseNeutral(void* h)
     return (*(unsigned char*)((char*)t + OFF_HTYPE_PASSIVE)) ? 1 : 0;
 }
 
+/* ---------------- 下令资格 (敌我识别) ----------------
+ * Houses 数组成员校验: 只比指针, 不解引用候选值 (脏指针也不会崩)。 */
+static int OU_HouseInArray(void* h)
+{
+    void** items = *(void***)(size_t)ADDR_HOUSES_ITEMS;
+    int cnt = *(int*)(size_t)ADDR_HOUSES_COUNT;
+    int i;
+    if (!items || !IsPlausiblePtr(items)) return 0;
+    if (cnt <= 0 || cnt > 64) return 0;
+    for (i = 0; i < cnt; i++) if (items[i] == h) return 1;
+    return 0;
+}
+
+/* IsAlliedWith 返回值只有 AL 有效, 函数指针须声明为 unsigned char。 */
+typedef unsigned char __attribute__((thiscall)) (*Fn_OuIsAllied)(void* self, void* other);
+
+int OU_OrderSide(void* unit)
+{
+    void* cur = *(void**)ADDR_CURPLAYER;
+    void* own;
+    if (!unit || !IsPlausiblePtr(unit)) return 0;
+    if (!cur || !IsPlausiblePtr(cur)) return 0;
+    own = *(void**)((char*)unit + OFF_OWNER);
+    if (own == cur) return 1;
+    if (!own || !IsPlausiblePtr(own) || !OU_HouseInArray(own)) return 0;
+    if (OU_HouseNeutral(own)) return 0;   /* 中立/旁观房: 不可控 */
+    if (((Fn_OuIsAllied)FN_HOUSE_ISALLIED)(cur, own)) return 2;
+    return 0;
+}
+
+/* 盟友配额: 60 秒滚动窗口最多 OU_ALLY_USE_MAX 次。
+ * 环形记最近 N 次的下令时刻, 满时最旧一条滑出窗口才放行 —— 也就是
+ * "任意 60 秒内不超过 3 次", 不是每分钟整点清零。 */
+static unsigned s_OuAllyAt[OU_ALLY_USE_MAX];
+static int s_OuAllyN = 0;      /* 已记录条数 (<= OU_ALLY_USE_MAX) */
+static int s_OuAllyHead = 0;   /* 下次写入位; 满时该位即最旧一条 */
+
+/* 只看不消费 (预览/门控用, 同一帧可问多次)。 */
+static int OU_AllyQuotaOk(void)
+{
+    if (s_OuAllyN < OU_ALLY_USE_MAX) return 1;
+    /* GetTickCount 回绕由无符号减法吃掉。 */
+    return (GetTickCount() - s_OuAllyAt[s_OuAllyHead] >= OU_ALLY_USE_WINDOW_MS) ? 1 : 0;
+}
+
+static void OU_AllyQuotaUse(void)
+{
+    s_OuAllyAt[s_OuAllyHead] = GetTickCount();
+    if (++s_OuAllyHead >= OU_ALLY_USE_MAX) s_OuAllyHead = 0;
+    if (s_OuAllyN < OU_ALLY_USE_MAX) s_OuAllyN++;
+}
+
+/* 距离闸: 目标格与单位当前格的切比雪夫距离 (对角按格算, 与引擎格距同口径)。 */
+static int OU_AllyDistOk(void* unit, int cx, int cy)
+{
+    CoordStruct cs;
+    int ux, uy, dx, dy;
+    if (!OU_GetCoords(unit, &cs)) return 0;
+    ux = cs.X / 256;
+    uy = cs.Y / 256;
+    dx = cx - ux; if (dx < 0) dx = -dx;
+    dy = cy - uy; if (dy < 0) dy = -dy;
+    return (dx <= OU_ALLY_MOVE_CELLS && dy <= OU_ALLY_MOVE_CELLS) ? 1 : 0;
+}
+
+/* 纯查询: 距离够 + 配额还有。 */
+int OU_OrderAt(void* unit, int cx, int cy)
+{
+    int side = OU_OrderSide(unit);
+    if (side == 1) return 1;
+    if (side != 2) return 0;
+    if (!OU_AllyDistOk(unit, cx, cy)) return 0;
+    return OU_AllyQuotaOk();
+}
+
+/* 真的下令那一刻调用: 放行就记一次配额。自家不占配额。 */
+int OU_OrderTake(void* unit, int cx, int cy)
+{
+    int side = OU_OrderSide(unit);
+    if (side == 1) return 1;
+    if (side != 2) return 0;
+    if (!OU_AllyDistOk(unit, cx, cy)) return 0;
+    if (!OU_AllyQuotaOk()) return 0;
+    OU_AllyQuotaUse();
+    return 1;
+}
+
 /* 单位 PlanningToken 上的节点数 (只读; token 不存在/野指针回 0)。 */
 int OU_TokenNodes(void* unit)
 {

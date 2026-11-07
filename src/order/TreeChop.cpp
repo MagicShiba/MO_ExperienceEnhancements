@@ -263,7 +263,10 @@ static void TC_Press(void)
     for (i = 0; i < selN && nu < TC_UNIT_CAP; i++)
     {
         void* o = items[i];
-        if (TC_IsChopper(o)) s_units[nu++] = o;
+        if (!TC_IsChopper(o)) continue;
+        /* 敌我识别: 只派自家单位 (敌人/中立/盟友都不接砍树令)。 */
+        if (OU_OrderSide(o) != 1) continue;
+        s_units[nu++] = o;
     }
     if (nu <= 0) { LogLine("tc: no choppers"); return; }
     if (!OU_MouseCell(&cx, &cy)) { LogLine("tc: off map"); return; }

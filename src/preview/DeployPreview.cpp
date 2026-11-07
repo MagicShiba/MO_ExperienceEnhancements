@@ -11,6 +11,8 @@
  *
  * 自动展开 ([DeployPreview] AutoDeploy=1): 选中含可展开单位 (UnitType+
  * 0x404 DeploysInto 非空) 的裸中键点按由本模块认领 (SmartOrder 让路)。
+ * 只认自家车: 敌人/中立不可控, 盟友车也不替你展开 (单选盟友车时本模块不
+ * 认领, 落到 SmartOrder 的盟友 3 格挪动规则)。
  * 单车框跟鼠标自由走; 多车点按按实际地基螺旋平铺 (块块判交不重叠),
  * 划线 (轨迹弧长 ≥5 格) 沿手绘轨迹弧长均分, Shift 锁横/竖轴排一排。
  * 混编其它单位按配额 (步兵3/格, 飞机/车辆1/格) 散开并避让房框外扩1格。
@@ -120,6 +122,9 @@ static int DP_FindFootprint(int* wOut, int* hOut)
         int w, h;
         if (!o || !IsPlausiblePtr(o)) continue;
         if (OU_WhatAmI(o) != ABS_UNIT) continue;
+        /* 只认自家车: 敌人/中立不可控, 盟友车也不替你展开 (它们被单选时
+         * 本模块不认领, 交给 SmartOrder 按盟友 3 格挪动规则处理)。 */
+        if (OU_OrderSide(o) != 1) continue;
         tp = DP_TypeOf(o);
         if (!tp) continue;
         bld = *(void**)((char*)tp + DP_OFF_DEPLOYSINTO);
@@ -665,6 +670,8 @@ static int DP_TryMoveHead(void)
     dstID = OU_CellTgt(e->dx, e->dy, &dstR);
     if (!OU_PtrAlive(e->unit, e->id, s_DpIdxOk)) goto drop;
     if (!OU_IsUnit(e->unit)) goto drop;
+    /* 快照后归属变了 (被心控/换边/漏洞捕捉) 就丢弃, 不给别人的车下令。 */
+    if (OU_OrderSide(e->unit) != 1) goto drop;
     if ((srcID = OU_ObjTgt(e->unit, &srcR)) < 0) goto drop;
     if (!DP_FireMove(houseIdx, srcID, srcR, dstID, dstR,
                       e->unit, e->id, s_DpIdxOk))
@@ -741,6 +748,8 @@ static void DP_ServiceDeps(void)
             continue;
         }
         if (!OU_PtrAlive(e->unit, e->id, s_DpIdxOk)) { DP_DepShiftDown(i); continue; }
+        /* 跟踪期间归属变了 (被心控/换边说拜拜) 就摘掉, 不替别人展开。 */
+        if (OU_OrderSide(e->unit) != 1) { DP_DepShiftDown(i); continue; }
         {
             int ux, uy;
             if (DP_UnitCell(e->unit, &ux, &uy) &&
@@ -796,6 +805,8 @@ static void DP_Snapshot(void)
         if (!o || !IsPlausiblePtr(o)) continue;
         w = OU_WhatAmI(o);
         if (w != ABS_UNIT && w != ABS_AIRCRAFT && w != ABS_INFANTRY) continue;
+        /* 敌我识别: 快照只收自家单位 (盟友也不替代展开, 见 DP_FindFootprint)。 */
+        if (OU_OrderSide(o) != 1) continue;
         for (ti = 0; ti < 8; ti++) tb[ti] = 0;
         if (!FN_TGT_OBJ(tb, o)) continue;
         if (firstId < 0) { firstId = *(int*)(tb + 0); firstU = o; }

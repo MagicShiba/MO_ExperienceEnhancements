@@ -76,10 +76,12 @@ static int g_PinX = 0, g_PinY = 0;
 static int g_LastMainX = 0, g_LastMainY = 0, g_HaveLastMain = 0;
 static int g_RadarSteal = 0;   /* 相机定位钩标记: 本帧有一次程序化相机跳转 */
 static int g_PipX = 0, g_PipY = 0, g_PipW = 0, g_PipH = 0;  /* 小窗物理游戏坐标 */
-/* 用户拖出来的落点 (屏幕绝对坐标), -1 = 还没放过 (按右上角默认落点算)。
+/* 用户拖出来的落点 (屏幕绝对坐标)。s_HaveWant=0 = 还没放过 (按右上角默认落点算)。
+ * 不能用负坐标当"没放过"的哨兵: 拖到画面左缘/顶边时落点本来就会是负数,
+ * 那样会被当成没放过而弹回右上角。s_Want 始终存已钳进视口的值。
  * 存绝对值而非"相对视口右上角的偏移": 侧栏一收/一放视口右边界就变 (1752 <-> 1920),
  * 跟着锚会把窗整个甩到新边界上 —— 只留小地图时正好盖住小地图。 */
-static int s_WantX = -1, s_WantY = -1;
+static int s_WantX = 0, s_WantY = 0, s_HaveWant = 0;
 static int g_Drag = 0, g_DragGX = 0, g_DragGY = 0;
 static int g_Pan = 0;                     /* 窗内右键拖动中 (含按下但还没过阈值) */
 static int g_PanBaseX = 0, g_PanBaseY = 0;/* 右键拖动期间被钉住的主相机位置 */
@@ -97,7 +99,8 @@ static int g_Frame = 0;        /* 本工程帧号: 相机钩与帧末判定共�
 static int g_PendingUnfocus = 0;/* 本帧按下点在小窗外(且非小地图) → 帧末失焦 */
 static int g_RawCX = 0, g_RawCY = 0;   /* 小地图点击的原始(未钳制)格 */
 static int g_RawAt = -1000;    /* 最近一次拿到原始格的帧号 */
-static int g_CamWX = 0, g_CamWY = 0, g_CamWZ = 0, g_CamW = 0; /* 本帧程序化相机跳转的精确世界坐标 */
+static int g_CamPos[3];        /* 本帧程序化相机跳转的精确世界坐标 x/y/z */
+static int g_CamW = 0;         /* g_CamPos 是否有效 */
 static unsigned g_AutoSeq = 0; /* 已跟随的雷达事件序号 */
 static int g_AutoSeen = 0;     /* g_AutoSeq 是否有意义 (开窗/开按钮后先跳一次最新事件) */
 static int g_LastRtX = 0x7fffffff, g_LastRtY = 0x7fffffff;  /* 上次成功渲染的目标，与可选物件表同源 */
@@ -110,7 +113,7 @@ static void* g_FolObj = 0;     /* 目标 ObjectClass* (跨帧持有, 每帧验�
 static int   g_FolId = 0;      /* 目标 Fetch_ID (验活用) */
 static int   g_FolIdxOk = 0;   /* Fetch_ID 索引自检通过 (否则只靠字节判据) */
 
-/* 定义在后面 (需要 PiP_IsGameCode / PiP_ClampScreen 等), 这里先声明给前面的调用点。 */
+/* 定义在后面 (需要 PiP_PinTo / PiP_IsGameCode 等), 这里先声明给前面的调用点。 */
 static void PiP_FollowClear(const char* why);
 static void PiP_FollowTick(void);
 
@@ -120,8 +123,8 @@ static int g_BtnPos[4][2] = { { 8, 155 }, { 25, 158 }, { 0, 160 }, { 0, 168 } };
 #define PIP_BTN_W     20
 #define PIP_BTN_H     20
 #define PIP_ICON_PAD  3      /* 移动图标到小窗右上角的内边距 */
-#define PIP_ICON_W    13     /* 窗内按钮尺寸 */
-#define PIP_ICON_H    13
+#define PIP_ICON_W    14     /* 窗内按钮尺寸 (= 位图尺寸, 见 kIconBits) */
+#define PIP_ICON_H    14
 #define PIP_ICON_GAP  2      /* 窗内按钮间距 (从右到左: 移动 / 自动跟随 / 操作) */
 #define PIP_ICON_N    3
 
@@ -154,6 +157,14 @@ static int g_ScratchOk = 0;
 
 /* 模块没开 / 离屏面刚失败 (小窗一律不动作; AfterMap 的重试路径自己判)。 */
 static int PiP_Off(void) { return !g_Enable || g_Fail; }
+
+/* 小窗此刻能渲染/绘制吗: 模块开 + 窗开 + 离屏面尺寸有效。
+ * 不判 g_PipW: 那是 PiP_DrawOnComposite 算出来的**输出** (blit 成功后才写),
+ * 拿它当入口判据会死锁 —— 窗还没画过就没有位置, 没位置就永远不画。 */
+static int PiP_Live(void)
+{
+    return !PiP_Off() && g_Show && g_RW > 0;
+}
 
 /* 有效的 TacticalClass::Instance (0 = 还没有 / 已失效)。 */
 static void* PiP_Tac(void)
@@ -453,7 +464,7 @@ static void PiP_Toggle(void)
     }
     g_Show = 1;
     g_Focus = g_Drag = g_Pan = g_PendingUnfocus = g_HasContent = 0;
-    s_WantX = -1; s_WantY = -1;    /* 落回默认右上角 */
+    s_HaveWant = 0;                /* 落回默认右上角 */
     g_Pinned = 0;                  /* 目标 = 当前主相机中心 (渲染时取) */
     g_SurfJustBuilt = 0;
     g_ForceDue = 4;                /* 首帧地形/缓存可能未就绪, 连续补渲 */
@@ -562,10 +573,6 @@ static void PiP_CacheXfer(int* v, int put)
     }
 }
 
-/* 缓存副本里的视口宽高 (主相机钉位用, 与引擎 0x6D6070 读的同一对)。 */
-static int PiP_CacheW(void) { return *(int*)(size_t)(ADDR_VIEWCACHE + 8); }
-static int PiP_CacheH(void) { return *(int*)(size_t)(ADDR_VIEWCACHE + 12); }
-
 static void PiP_CamSnapshot(PiP_CamSave* s, void* tac)
 {
     int i;
@@ -584,11 +591,11 @@ static void PiP_CamRestore(const PiP_CamSave* s)
     for (i = 0; i < PIP_CAM_N; i++) *(int*)((char*)s->tac + kCamOff[i]) = s->v[i];
 }
 
-/* 视口 / 缓存改成离屏面的 (0,0,w,h)。 */
-static void PiP_CamSetView(int w, int h)
+/* 视口 / 缓存改成离屏面的 (0,0,RW,RH)。 */
+static void PiP_CamSetView(void)
 {
-    int cache[4] = { 0, 0, w, h };
-    RectangleStruct vb = { 0, 0, w, h };
+    int cache[4] = { 0, 0, g_RW, g_RH };
+    RectangleStruct vb = { 0, 0, g_RW, g_RH };
     *(RectangleStruct*)(size_t)ADDR_VIEWBOUNDS = vb;
     PiP_CacheXfer(cache, 1);
 }
@@ -603,10 +610,21 @@ static void PiP_CamSetTarget(void* tac, int x, int y, int w, int h)
         *(int*)((char*)tac + kCamOff[i]) = (i < 4) ? (i & 1 ? oy : ox) : (i & 1 ? y : x);
 }
 
-/* 清零缩放档相关标记 (离屏渲染必须从"无缩放"开始)。 */
+/* 清零缩放档相关标记 (离屏渲染必须从"无缩放"开始)。按字节写: 这两个标记相邻,
+ * 各自只有 1 字节, 按 int 写会顺手改掉后面的字段。 */
 static void PiP_CamZeroZoom(void* tac)
 {
-    *(int*)((char*)tac + OFF_TAC_F7C) = *(int*)((char*)tac + OFF_TAC_F7D) = 0;
+    ((unsigned char*)tac)[OFF_TAC_F7C] = 0;
+    ((unsigned char*)tac)[OFF_TAC_F7D] = 0;
+}
+
+/* 换上小窗摄像机: 视口/缓存改成离屏面尺寸, 中心钉到 (tx,ty), 清缩放标记。
+ * 离屏渲染与点击重映射共用 (两者都要求"画面和可选物件表出自同一套相机")。 */
+static void PiP_CamEnter(void* tac, int tx, int ty)
+{
+    PiP_CamSetView();
+    PiP_CamSetTarget(tac, tx, ty, g_RW, g_RH);
+    PiP_CamZeroZoom(tac);
 }
 
 /* ---------------- 离屏渲染期间要换掉的全局面 / 缓冲槽 ---------------- */
@@ -627,7 +645,6 @@ static int PiP_RenderCamera(int tx, int ty)
 {
     void* tac = PiP_Tac();
     Fn_Render fn = (Fn_Render)(size_t)ADDR_TAC_RENDER;
-    int RW = g_RW, RH = g_RH;
     PiP_CamSave cam;
     void *s_surf[PIP_S_N], *pip_surf[PIP_S_N];
     int s_dirtycnt, s_fr, sel_n, vis_n, i;
@@ -649,9 +666,7 @@ static int PiP_RenderCamera(int tx, int ty)
     s_fr = *(int*)(size_t)ADDR_FULLREDRAW;
 
     /* 摆 PiP 摄像机 */
-    PiP_CamSetView(RW, RH);
-    PiP_CamSetTarget(tac, tx, ty, RW, RH);
-    PiP_CamZeroZoom(tac);
+    PiP_CamEnter(tac, tx, ty);
 
     /* 面 / 缓冲: 地形画进 g_Map, 合成与物件画进 g_Comp。Composite 也指过去,
      * 兜住个别 UI 覆盖层直接拿 Composite 当目标的写法 (反正随后原样还原)。 */
@@ -730,14 +745,29 @@ static void PiP_CellToScreen(int cx, int cy, int* tx, int* ty)
           MsgText_ZToScreen(MsgText_CellZ((short)cx, (short)cy));
 }
 
+/* 世界坐标 (ObjectClass::Location 那套 256 倍定点) → 小窗摄像机屏幕坐标。
+ * 与引擎 0x6D6070 同式 (含 256 向零取整)。跟随目标与脚本镜头共用这一份。 */
+static void PiP_WorldToScreen(const int* w, int* tx, int* ty)
+{
+    *tx = PiP_Div256(30 * (w[0] - w[1]));
+    *ty = PiP_Div256(15 * (w[0] + w[1])) - MsgText_ZToScreen(w[2]);
+}
+
+/* 把目标钉到 (x,y) 之前先防出界。返回 1 = 位置真的变了 (调用方据此决定要不要补渲)。 */
+static int PiP_PinTo(int x, int y)
+{
+    PiP_ClampScreen(&x, &y);
+    if (g_Pinned && x == g_PinX && y == g_PinY) return 0;
+    g_PinX = x; g_PinY = y;
+    g_Pinned = 1;
+    return 1;
+}
+
 /* 按 8 方向 + 速度 (屏幕像素/帧) 推进小窗视野, 防出界钳死。 */
 static void PiP_PanStep(int dx, int dy, int speed)
 {
-    int tx = g_PinX + dx * speed * g_ScaleNum;
-    int ty = g_PinY + dy * speed * g_ScaleNum;
-    PiP_ClampScreen(&tx, &ty);
-    if (tx == g_PinX && ty == g_PinY) return;
-    g_PinX = tx; g_PinY = ty; g_Pinned = 1;
+    PiP_PinTo(g_PinX + dx * speed * g_ScaleNum,
+              g_PinY + dy * speed * g_ScaleNum);
 }
 
 /* 按位移矢量推进小窗视野: 8 方向量化, 速度 = 距离 * PanRate / 6 (越远越快),
@@ -756,10 +786,12 @@ static void PiP_PanBy(int ox, int oy)
     PiP_PanStep(sx, sy, speed);
 }
 
-/* 把主摄像机钉到屏幕坐标 (x,y) 为中心, 并同步派生字段 (整幅重画可选)。 */
+/* 把主摄像机钉到屏幕坐标 (x,y) 为中心, 并同步派生字段 (整幅重画可选)。
+ * 视口宽高取缓存副本里那一对 (与引擎 0x6D6070 读的同源)。 */
 static void PiP_PinMainCam(void* tac, int x, int y, int fullRedraw)
 {
-    PiP_CamSetTarget(tac, x, y, PiP_CacheW(), PiP_CacheH());
+    const int* c = (const int*)(size_t)ADDR_VIEWCACHE;   /* X, Y, W, H */
+    PiP_CamSetTarget(tac, x, y, c[2], c[3]);
     if (fullRedraw) *(int*)(size_t)ADDR_FULLREDRAW = 1;
 }
 
@@ -770,7 +802,7 @@ static void PiP_ResetTransient(void)
     g_RadarSteal = 0;
     g_Pan = 0;
     s_RbHeld = 0;
-    g_CamW = g_CamWZ = 0;
+    g_CamW = 0;
 }
 
 /* 地图视口矩形; 0 = 还没有视口 / 正在切分辨率。 */
@@ -778,6 +810,55 @@ static int PiP_ViewRect(RectangleStruct* a)
 {
     FM_GetViewRects(a, 0);
     return a->Width >= 128 && a->Height >= 96;
+}
+
+/* 小窗当前显示尺寸。离屏面还没建好时退回配置值, 免得用 0 宽高算落点。 */
+static void PiP_WinSize(int* w, int* h)
+{
+    int ok = (g_RW > 0 && g_RH > 0);
+    *w = ok ? g_RW / g_ScaleNum : g_DispW;
+    *h = ok ? g_RH / g_ScaleNum : g_DispH;
+}
+
+/* 把落点整块塞进地图视口 (屏幕绝对坐标)。返回 1 = 被钳过。 */
+static int PiP_ClampWin(const RectangleStruct* a, int dW, int dH, int* px, int* py)
+{
+    int x = *px, y = *py;
+
+    if (x < a->X) x = a->X;
+    if (y < a->Y) y = a->Y;
+    if (x + dW > a->X + a->Width) x = a->X + a->Width - dW;
+    if (y + dH > a->Y + a->Height) y = a->Y + a->Height - dH;
+    if (x < a->X) x = a->X;        /* 窗比视口还宽/高: 钉在左/上缘 */
+    if (y < a->Y) y = a->Y;
+    if (x == *px && y == *py) return 0;
+    *px = x; *py = y;
+    return 1;
+}
+
+/* 侧栏只留顶部那一块 (资金条/小地图/两个按钮) 时, 视口已铺到屏幕右缘, 那一块
+ * 却仍压在画面上 —— 小窗压上去就盖住小地图, 而且点进去先被 FM_RadarHit 吃掉。
+ * 相交就整体左移到块的左侧。全隐藏档该块不存在 (返回 0), 右上角可随便放。
+ * 只改这一次的显示位置: 不写回落点, 否则侧栏一收一放窗会停在被推开的地方。 */
+static void PiP_AvoidTopBlock(const RectangleStruct* a, int dW, int dH, int* px, int* py)
+{
+    RectangleStruct blk;
+    if (!FM_KeepTopRectScreen(&blk)) return;
+    if (*px >= blk.X + blk.Width || *px + dW <= blk.X) return;
+    if (*py >= blk.Y + blk.Height || *py + dH <= blk.Y) return;
+    *px = blk.X - dW;
+    if (*px < a->X) *px = a->X;
+}
+
+/* 最终落点 = 视口钳制 + 顶部块避让。返回 1 = 位置被改过 (撞边或被推开):
+ * 拖动时据此重锚抓取点 (见 PiP_PollMouse), 否则撞边后落点会越跑越远,
+ * 鼠标离开边缘时窗得先"空跑"完这段距离才动。 */
+static int PiP_WinPlace(const RectangleStruct* a, int dW, int dH, int* px, int* py)
+{
+    int ox = *px, oy = *py;
+    PiP_ClampWin(a, dW, dH, px, py);
+    PiP_AvoidTopBlock(a, dW, dH, px, py);
+    return (*px != ox || *py != oy) ? 1 : 0;
 }
 
 /* 主渲染入口 (RenderEntry 钩) 调, 在主视图渲染前改相机:
@@ -790,7 +871,7 @@ void PiP_PreRender(void)
 
     PiP_EnsureInit();
     tac = PiP_Tac();
-    if (PiP_Off() || g_PipW <= 0 || !GtGameFocused() || !tac)
+    if (!PiP_Live() || !GtGameFocused() || !tac)
     {
         PiP_ResetTransient();
         return;
@@ -799,12 +880,12 @@ void PiP_PreRender(void)
     cy = *(int*)((char*)tac + OFF_TAC_CURY);
 
     rbNow = PiP_KeyDown(VK_RBUTTON);
-    if (g_Show && rbNow && GtMouseGameXY(&mx, &my))
+    if (rbNow && GtMouseGameXY(&mx, &my))
         rmbIn = PiP_InWindow(mx, my);
 
     /* 拖动只在"按下边沿落在小窗内"时开始, 由 PiP_PollMouse 在松开时结束
      * (s_RbHeld 就是上一帧的右键, 因为本函数跑在 PiP_PollMouse 之前)。 */
-    if (g_Show && rmbIn && !g_Pan && !s_RbHeld)   /* 按下沿: 记住主相机原位 */
+    if (rmbIn && !g_Pan && !s_RbHeld)   /* 按下沿: 记住主相机原位 */
     {
         g_Pan = 1;
         g_PanBaseX = g_HaveLastMain ? g_LastMainX : cx;
@@ -822,25 +903,18 @@ void PiP_PreRender(void)
         /* 小地图点击 / 雷达事件点击都会重定小窗视野 = 用户要看别处, 跟随让路
          * (否则下一帧就被拉回目标, 点了等于没点)。 */
         PiP_FollowClear("pip: follow OFF (radar)");
-        /* 有本帧小地图原始格 => 换成小窗摄像机屏幕坐标, 再按小窗自己的视口尺寸
-         * 走"缩放档同款"防出界钳制。 */
+        /* 有本帧小地图原始格 => 换成小窗摄像机屏幕坐标 (PiP_PinTo 再按小窗
+         * 自己的视口尺寸防出界)。 */
         if (g_RawAt >= 0 && g_Frame - g_RawAt <= 1)
-        {
             PiP_CellToScreen(g_RawCX, g_RawCY, &tx, &ty);
-            PiP_ClampScreen(&tx, &ty);
-        }
+        /* 非小地图的程序化跳转 (雷达文本点击/脚本镜头): 用入口收到的精确世界坐标,
+         * 不被主视野的边距钳制。 */
         else if (g_CamW)
-        {
-            /* 非小地图的程序化跳转 (雷达文本点击/脚本镜头): 用入口收到的精确世界坐标,
-             * 不被主视野的边距钳制。换算与 0x6D6070 同式 (含 256 取整)。 */
-            tx = PiP_Div256(30 * (g_CamWX - g_CamWY));
-            ty = PiP_Div256(15 * (g_CamWX + g_CamWY)) - MsgText_ZToScreen(g_CamWZ);
-            PiP_ClampScreen(&tx, &ty);
-        }
-        g_PinX = tx; g_PinY = ty; g_Pinned = 1;
+            PiP_WorldToScreen(g_CamPos, &tx, &ty);
+        PiP_PinTo(tx, ty);
         PiP_PinMainCam(tac, g_LastMainX, g_LastMainY, 1);
     }
-    g_RadarSteal = g_CamW = g_CamWZ = 0;
+    g_RadarSteal = g_CamW = 0;
     g_LastMainX = *(int*)((char*)tac + OFF_TAC_CURX);
     g_LastMainY = *(int*)((char*)tac + OFF_TAC_CURY);
     g_HaveLastMain = 1;
@@ -852,10 +926,10 @@ void PiP_OnCameraSet(const int* world)
     g_RadarSteal = 1;
     if (world && IsPlausiblePtr((void*)world))
     {
-        g_CamWX = world[0]; g_CamWY = world[1]; g_CamWZ = world[2];
+        g_CamPos[0] = world[0]; g_CamPos[1] = world[1]; g_CamPos[2] = world[2];
         g_CamW = 1;
     }
-    else g_CamW = g_CamWZ = 0;
+    else g_CamW = 0;
 }
 
 /* 小地图点击的原始格 (钳制前) 观测入口 (0x653D92 钩)。只存值。 */
@@ -880,22 +954,23 @@ static int PiP_IsGameCode(const void* p)
     return v >= PIP_GAME_TEXT_LO && v < PIP_GAME_TEXT_HI;
 }
 
-/* 虚表形状: 虚表在 exe rdata 内, 且 WhatAmI(+0x2C) / GetCoords(+0x48) 是引擎代码。
- * 跟随目标与点击重映射共用这一道 (比 IsPlausiblePtr 严, 堆里随便一个数过不了)。 */
-static int PiP_VtOK(const void* o)
+/* 取虚表指针; 0 = 这不像引擎物件 (指针不可信, 或虚表不在 exe rdata 内)。
+ * 具体查哪几个槽由调用方定: 跟随要 WhatAmI/GetCoords, 点击链路还要 +0x88。 */
+static const void* const* PiP_VtOf(const void* o)
 {
     const void* const* vt;
     if (!o || !IsPlausiblePtr(o)) return 0;
     vt = *(const void* const* const*)o;
     if (!vt || (size_t)vt < PIP_GAME_RDATA_LO || (size_t)vt >= PIP_GAME_RDATA_HI)
         return 0;
-    return (PiP_IsGameCode(vt[0x2C / 4]) && PiP_IsGameCode(vt[0x48 / 4])) ? 1 : 0;
+    return vt;
 }
 
 /* 还活着吗: 虚表形状 + IsAlive + 非 InLimbo。不进 Fetch_ID 索引。 */
 static int PiP_ObjUsable(const void* o)
 {
-    if (!PiP_VtOK(o)) return 0;
+    const void* const* vt = PiP_VtOf(o);
+    if (!vt || !PiP_IsGameCode(vt[0x2C / 4]) || !PiP_IsGameCode(vt[0x48 / 4])) return 0;
     if (!((const unsigned char*)o)[OFF_ISALIVE]) return 0;   /* 已死 (尸体/正在移除) */
     if (((const unsigned char*)o)[OFF_INLIMBO]) return 0;    /* 进工厂/运输/已离场 */
     return 1;
@@ -977,11 +1052,9 @@ int PiP_FollowCommand(void)
     return 1;
 }
 
-/* 每帧推进 (PiP_AfterMap 里调): 目标 Location → 小窗摄像机屏幕坐标 → 防出界。
- * 换算与引擎 0x6D6070 同式 (含 256 取整), 与 PiP_PreRender 里那份一致。 */
+/* 每帧推进 (PiP_AfterMap 里调): 目标 Location → 小窗摄像机屏幕坐标 → 防出界。 */
 static void PiP_FollowTick(void)
 {
-    int* loc;
     int x, y;
     if (!g_FolOn) return;
     if (!g_Show || !PiP_FolUsable(g_FolObj))
@@ -989,19 +1062,15 @@ static void PiP_FollowTick(void)
         PiP_FollowClear("pip: follow OFF (target gone)");
         return;
     }
-    loc = (int*)((char*)g_FolObj + OFF_OBJ_LOCATION);
-    x = PiP_Div256(30 * (loc[0] - loc[1]));
-    y = PiP_Div256(15 * (loc[0] + loc[1])) - MsgText_ZToScreen(loc[2]);
-    PiP_ClampScreen(&x, &y);
-    g_PinX = x; g_PinY = y;
-    g_Pinned = 1;
+    PiP_WorldToScreen((int*)((char*)g_FolObj + OFF_OBJ_LOCATION), &x, &y);
+    PiP_PinTo(x, y);
 }
 
 /* ---------------- 降采样贴窗 ---------------- */
 
-/* 窗内图标为 14x14 位图：低 14 位是本体，高 14 位是黑影，bit0 为最左列。
- * 同一像素同时置位时本体优先。 */
-static const unsigned kIconBits[PIP_ICON_N][14] = {
+/* 窗内图标为 PIP_ICON_W x PIP_ICON_H 位图：低 PIP_ICON_W 位是本体，高 PIP_ICON_W 位是
+ * 黑影，bit0 为最左列。同一像素同时置位时本体优先。 */
+static const unsigned kIconBits[PIP_ICON_N][PIP_ICON_H] = {
     { 0x00000040u, 0x000000E0u, 0x01800040u, 0x00800040u,   /* 0 移动: 十字 + 四箭头 */
       0x00800040u, 0x00800842u, 0x00001FFFu, 0x37BC0842u,
       0x10840040u, 0x00800040u, 0x00800040u, 0x000000E0u,
@@ -1026,8 +1095,8 @@ static void PiP_DrawIcon(unsigned short* db, int dp, int cw, int ch,
                                                                      : kIconOn[slot];
     const unsigned* row = kIconBits[slot];
     int x, y;
-    for (y = 0; y < 14; y++, row++)
-        for (x = 0; x < 14; x++)
+    for (y = 0; y < PIP_ICON_H; y++, row++)
+        for (x = 0; x < PIP_ICON_W; x++)
             if (*row & (1u << x)) PiP_PxPut(db, dp, cw, ch, bx + x, by + y, c);
             else if ((*row >> 16) & (1u << x)) PiP_PxPut(db, dp, cw, ch, bx + x, by + y, 0);
 }
@@ -1089,7 +1158,7 @@ int PiP_ClickCoordsMode(int gx, int gy)
 {
     int lb, rb;
     PiP_EnsureInit();
-    if (PiP_Off() || !g_Show || g_PipW <= 0 || g_PipH <= 0) return 0;
+    if (!PiP_Live() || g_PipW <= 0) return 0;   /* 窗位置未知 = 还没画过 */
     lb = PiP_KeyDown(VK_LBUTTON);
     rb = PiP_KeyDown(VK_RBUTTON);
     /* 窗内左键框选的松开: 记录松手点, 帧末统一框选。先于窗内判定: 拖到窗外松手
@@ -1176,11 +1245,8 @@ static int g_ClkSelCount = 0;
 
 static int PiP_SelEntryUsable(const unsigned char* e)
 {
-    void* obj = *(void**)e;
-    void** vt;
-    if (!PiP_VtOK(obj)) return 0;
-    vt = *(void***)obj;
-    return PiP_IsGameCode(vt[0x88 / 4]) ? 1 : 0;   /* 点击链路要调的这一槽 */
+    const void* const* vt = PiP_VtOf(*(void**)e);
+    return (vt && PiP_IsGameCode(vt[0x88 / 4])) ? 1 : 0;   /* 点击链路要调的这一槽 */
 }
 
 /* 装上小窗的相机与可选物件表 (点击重映射和框选共用), 成功后必须成对还原。 */
@@ -1189,16 +1255,14 @@ static int PiP_SwapIn(void)
     void* tac;
     int srcN, i;
 
-    if (PiP_Off() || !g_Show || g_RW <= 0 || !g_HasContent || g_CamSwapped) return 0;
+    if (!PiP_Live() || !g_HasContent || g_CamSwapped) return 0;
     tac = PiP_Tac();
     if (!tac) return 0;
 
     PiP_CamSnapshot(&g_CamSave, tac);
-    PiP_CamSetView(g_RW, g_RH);
     /* 用"上次真正渲染"的目标 (g_LastRtX/Y), 不用可能已被右键拖动改过的 g_PinX/Y:
      * 可选物件表就是那次渲染产出的, 两者必须来自同一帧。 */
-    PiP_CamSetTarget(tac, g_LastRtX, g_LastRtY, g_RW, g_RH);
-    PiP_CamZeroZoom(tac);
+    PiP_CamEnter(tac, g_LastRtX, g_LastRtY);
 
     /* 装上小窗上一次渲染产出的可选物件表 (物件屏坐标 = 小窗视口坐标)。
      * ProcessClickCoords 用这张表在点击点附近找物件; 不换表就只会按主视图的位置
@@ -1228,7 +1292,7 @@ static int PiP_SwapIn(void)
 int PiP_BeginClickMap(int gx, int gy, int* px, int* py)
 {
     int lx, ly;
-    if (PiP_Off() || !g_Show || g_PipW <= 0 || g_RW <= 0) return 0;
+    if (!PiP_Live() || g_PipW <= 0) return 0;   /* 窗位置未知 = 还没画过 */
     lx = (gx - g_PipX) * g_ScaleNum;
     ly = (gy - g_PipY) * g_ScaleNum;
     if (lx < 0 || ly < 0 || lx >= g_RW || ly >= g_RH) return 0;
@@ -1264,7 +1328,7 @@ static void PiP_BoxSelect(int gx1, int gy1, int gx2, int gy2)
     Fn_MakeSel fn = (Fn_MakeSel)(size_t)ADDR_TAC_MAKESEL;
     int x1, y1, x2, y2, ob[4], nb[4], i;
 
-    if (PiP_Off() || !g_Show || g_RW <= 0 || g_RH <= 0 || g_PipW <= 0) return;
+    if (!PiP_Live() || g_PipW <= 0) return;   /* 窗位置未知 = 还没画过 */
     x1 = (gx1 - g_PipX) * g_ScaleNum; y1 = (gy1 - g_PipY) * g_ScaleNum;
     x2 = (gx2 - g_PipX) * g_ScaleNum; y2 = (gy2 - g_PipY) * g_ScaleNum;
     PiP_Order2(&x1, &x2); PiP_Order2(&y1, &y2);
@@ -1323,14 +1387,11 @@ static void PiP_PollMouse(void)
         }
         else if (icon == 2)
         {
-            g_AutoJump = !g_AutoJump;
-            g_AutoSeen = 0;              /* 开启时立即跳到当前最新事件 */
-            LogLine(g_AutoJump ? "pip: auto-jump ON" : "pip: auto-jump OFF");
+            PiP_SetAutoJump(!g_AutoJump);   /* 与设置页同一个入口 (日志/重跳都在里面) */
         }
         else if (icon == 3)
         {
-            g_Operate = !g_Operate;
-            LogLine(g_Operate ? "pip: operate ON" : "pip: operate OFF");
+            PiP_SetOperate(!g_Operate);
         }
         else if (inRect)
         {
@@ -1372,8 +1433,19 @@ static void PiP_PollMouse(void)
 
     if (g_Drag)                          /* 拖动小窗 (移动图标) */
     {
-        s_WantX = mx - g_DragGX;
-        s_WantY = my - g_DragGY;
+        RectangleStruct ta;
+        int dW, dH, x, y;
+        x = mx - g_DragGX;
+        y = my - g_DragGY;
+        PiP_WinSize(&dW, &dH);
+        /* 当场钳进视口, 撞边就把抓取点重锚到窗上 —— 存下的落点永远是窗真正所在
+         * 的位置, 既不会因为越界值把窗弹回默认点, 也不会出现回拖时的死区。 */
+        if (PiP_ViewRect(&ta) && PiP_WinPlace(&ta, dW, dH, &x, &y))
+        {
+            g_DragGX = mx - x;
+            g_DragGY = my - y;
+        }
+        s_WantX = x; s_WantY = y; s_HaveWant = 1;
         if (!lb) g_Drag = 0;
     }
 
@@ -1445,8 +1517,7 @@ void PiP_AfterMap(void)
             /* 跳新事件 = 用户要看别处, 小窗跟随让路。 */
             PiP_FollowClear("pip: follow OFF (auto-jump)");
             PiP_CellToScreen(acx, acy, &tx, &ty);
-            PiP_ClampScreen(&tx, &ty);
-            g_PinX = tx; g_PinY = ty; g_Pinned = 1;
+            PiP_PinTo(tx, ty);
             g_AutoSeq = aseq; g_AutoSeen = 1;
             due = 1;
         }
@@ -1465,13 +1536,8 @@ void PiP_AfterMap(void)
         /* 目标**固定不变**: 开窗首帧取"打开时的主视图中心"(屏幕坐标), 之后只由
          * 聚焦后的小地图点击 / 窗内右键拖动改写。绝不跟随主视图移动。 */
         if (!g_Pinned)
-        {
-            tx = *(int*)((char*)tac + OFF_TAC_CURX);
-            ty = *(int*)((char*)tac + OFF_TAC_CURY);
-            PiP_ClampScreen(&tx, &ty);
-            g_PinX = tx; g_PinY = ty;
-            g_Pinned = 1;
-        }
+            PiP_PinTo(*(int*)((char*)tac + OFF_TAC_CURX),
+                      *(int*)((char*)tac + OFF_TAC_CURY));
         tx = g_PinX; ty = g_PinY;
         g_LastFrame = fr;
         if (PiP_RenderCamera(tx, ty))
@@ -1493,30 +1559,20 @@ done:
 }
 
 /* 小窗在地图区里的物理位置: 用记下来的绝对落点 (没放过就取右上角默认点),
- * 钳进地图区, 再避让侧栏顶部那一块。 */
+ * 钳进地图区后再避让侧栏顶部块。钳过的值写回落点 —— 视口/分辨率变了之后
+ * 存下的越界值就地修正, 不会拖回默认点。避让只影响显示, 不写回。 */
 static void PiP_PipPos(const RectangleStruct* a, int dW, int dH, int* X, int* Y)
 {
-    RectangleStruct blk;
-    int x, y;
-    if (s_WantX < 0 || s_WantY < 0)
+    int x = s_WantX, y = s_WantY;
+    if (!s_HaveWant)                 /* 还没放过: 落到右上角默认点 */
     {
-        s_WantX = a->X + a->Width - dW - g_PadX;
-        s_WantY = a->Y + g_PadY;
+        x = a->X + a->Width - dW - g_PadX;
+        y = a->Y + g_PadY;
+        s_HaveWant = 1;
     }
-    x = s_WantX; y = s_WantY;
-    x = x < a->X ? a->X : x; y = y < a->Y ? a->Y : y;
-    if (x + dW > a->X + a->Width) x = a->X + a->Width - dW;
-    if (y + dH > a->Y + a->Height) y = a->Y + a->Height - dH;
-    /* 侧栏只留顶部那一块 (资金条/小地图/两个按钮) 时, 视口已铺到屏幕右缘, 那一块
-     * 却仍压在画面上 —— 小窗压上去就盖住小地图, 而且点进去先被 FM_RadarHit 吃掉。
-     * 相交就整体左移到块的左侧。全隐藏档该块不存在 (返回 0), 右上角可随便放。*/
-    if (FM_KeepTopRectScreen(&blk) &&
-        x < blk.X + blk.Width && x + dW > blk.X &&
-        y < blk.Y + blk.Height && y + dH > blk.Y)
-    {
-        x = blk.X - dW;
-        if (x < a->X) x = a->X;
-    }
+    PiP_ClampWin(a, dW, dH, &x, &y);
+    s_WantX = x; s_WantY = y;
+    PiP_AvoidTopBlock(a, dW, dH, &x, &y);
     *X = x; *Y = y;
 }
 
@@ -1554,13 +1610,12 @@ void PiP_DrawOnComposite(void* surf)
     int dW, dH, X, Y;
 
     PiP_EnsureInit();
-    if (PiP_Off() || !g_Show || !g_HasContent || g_RW <= 0) return;
+    if (!PiP_Live() || !g_HasContent) return;
     if (!PiP_ViewRect(&a)) return;
     comp = surf;
     if (!comp || !IsPlausiblePtr(comp)) comp = *(void**)ADDR_SURF_COMPOSITE;
     if (!comp || !IsPlausiblePtr(comp)) return;
-    dW = g_RW / g_ScaleNum;
-    dH = g_RH / g_ScaleNum;
+    PiP_WinSize(&dW, &dH);
     PiP_PipPos(&a, dW, dH, &X, &Y);
     if (!PiP_Blit(comp, X, Y, dW, dH)) return;
     /* 记下小窗的物理游戏坐标 (点击门 / 移动图标 / 右键拖动判定用)。 */

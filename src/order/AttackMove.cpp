@@ -134,6 +134,8 @@ static void AM_Press(void)
     {
         void* o = items[i];
         if (!OU_IsUnit(o)) continue;
+        /* 敌我识别: 只派自家单位 (敌人/中立/盟友都不接攻击移动令)。 */
+        if (OU_OrderSide(o) != 1) continue;
         s_units[nu] = o;
         s_uids[nu] = OU_ObjId(o);
         nu++;

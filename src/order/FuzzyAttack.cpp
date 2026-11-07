@@ -261,7 +261,12 @@ static void FA_Preview(void)
     items = *(void***)ADDR_SELOBJ_ITEMS;
     if (selN <= 0 || !items || !IsPlausiblePtr(items)) { s_FaPrevN = 0; return; }
     for (i = 0; i < selN && nu < FA_UNIT_CAP; i++)
-        if (OU_IsUnit(items[i])) s_pu[nu++] = items[i];
+    {
+        /* 敌我识别: 只派自家单位 (敌人/中立/盟友都不接模糊攻击令)。 */
+        if (!OU_IsUnit(items[i])) continue;
+        if (OU_OrderSide(items[i]) != 1) continue;
+        s_pu[nu++] = items[i];
+    }
     if (nu <= 0) { s_FaPrevN = 0; return; }
     if (!OU_CalOwner(s_pu[0], nu > 1 ? s_pu[1] : 0, cur, &g_FaOwnerOff))
     { s_FaPrevN = 0; return; }
@@ -315,7 +320,11 @@ static void FA_Press(void)
     for (i = 0; i < selN && nu < FA_UNIT_CAP; i++)
     {
         void* o = items[i];
-        if (OU_IsUnit(o)) s_units[nu++] = o;
+        if (OU_IsUnit(o))
+        {
+            /* 敌我识别: 只派自家单位 (敌人/中立/盟友都不接模糊攻击令)。 */
+            if (OU_OrderSide(o) == 1) s_units[nu++] = o;
+        }
     }
     if (nu <= 0) return;
     /* Owner 自校准 (双确认; 失败直接放弃, 绝不误击友军)。 */

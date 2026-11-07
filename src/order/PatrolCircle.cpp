@@ -570,7 +570,10 @@ static void PC_TriggerAt(int ax, int ay, int bx, int by)
     for (i = 0; i < selN && nu < PC_CLOSE_CAP; i++)
     {
         void* o = items[i];
-        if (PC_IsFoot(o)) s_units[nu++] = o;
+        if (!PC_IsFoot(o)) continue;
+        /* 敌我识别: 只派自家单位 (敌人/中立/盟友都不接巡逻令)。 */
+        if (OU_OrderSide(o) != 1) continue;
+        s_units[nu++] = o;
     }
     if (nu <= 0) { PC_Trace("pc: no foot selected", selN, 0, 0); return; }
 
