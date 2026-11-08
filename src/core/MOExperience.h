@@ -36,6 +36,8 @@ enum
 extern volatile unsigned g_MoePhase;
 void MOE_SetPhase(unsigned id);
 const char* MOE_PhaseName(unsigned id);
+/* 阶段历史 (最近 8 次, back=0 最新, 时刻为 GetTickCount 毫秒)。 */
+int MOE_PhaseHist(int back, unsigned* id, unsigned* at);
 
 /* UpdatePrimarySurface (0x4F4780) 前置跳板 (naked): 只保栈形平衡, 顺便打阶段标记。*/
 void MOExperience_UpdateEntry(void);

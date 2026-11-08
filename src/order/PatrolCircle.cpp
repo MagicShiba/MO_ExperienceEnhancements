@@ -753,8 +753,6 @@ void PatrolCircle_Poll(void)
             }
             else PC_Trace("pc: off map", 0, 0, 0);
         }
-        else
-            PC_Trace("pc: need Z", 0, 0, 0);
     }
     else if (!trigDown && g_PcPrevTrig && g_PcArmed)
     {

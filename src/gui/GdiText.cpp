@@ -192,12 +192,27 @@ int GtMouseGameXY(int* x, int* y)
     return 1;
 }
 
+/* 崩前日志环 (说明在 GdiText.h)。 */
+char g_GtTrail[GT_TRAIL_N][GT_TRAIL_LEN];
+volatile unsigned g_GtTrailSeq = 0;
+volatile int g_GtTrailFreeze = 0;
+
 void LogLine(const char* body)
 {
     char buf[LOG_LINE_MAX];
     unsigned n = 0;
     DWORD written = 0;
     const char* p;
+    /* 环先记 (g_Log 没打开时也要留), 冻结后一条不记, 否则崩溃处理打出来的
+     * CRASH 行会把真正的前因冲掉。 */
+    if (body && *body && !g_GtTrailFreeze)
+    {
+        char* d = g_GtTrail[g_GtTrailSeq % GT_TRAIL_N];
+        unsigned k = 0;
+        for (; body[k] && k < GT_TRAIL_LEN - 1; k++) d[k] = body[k];
+        d[k] = 0;
+        g_GtTrailSeq = g_GtTrailSeq + 1;
+    }
     if (!g_Log) return;
     for (p = body; *p && n < LOG_LINE_MAX - 3; p++) buf[n++] = *p;
     buf[n++] = 13; buf[n++] = 10;

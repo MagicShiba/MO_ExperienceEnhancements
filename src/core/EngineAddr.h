@@ -23,6 +23,13 @@
 #define ADDR_SESSION            0xA8B238u
 #define ADDR_GAMEMODE           0xA8B238u   /* 旧名, 同址 */
 
+/* 主循环的四面"退出对局"旗: 任一非 0 就收场 (0x55D059 那组比较)。
+ * 写入点与落旗链条见 notes/观战.md §8。 */
+#define ADDR_END_EXIT           0x8B41C0u   /* 退出程序 (关窗) */
+#define ADDR_END_QUIT           0xA83D48u   /* 退出对局回菜单 (ESC) */
+#define ADDR_END_LOSE           0xA83D49u   /* 本机玩家出局 (无结算) */
+#define ADDR_END_SCORE          0xA8ECD0u   /* 对局结束 -> 弹结算 */
+
 /* Game::IsActive (bool, YRpp Unsorted.h)。 */
 #define ADDR_ISACTIVE           0xA8E9A0u
 
@@ -52,9 +59,22 @@
 #define OFF_HOUSE_INDEX         0x30u     /* HouseClass::ArrayIndex */
 #define OFF_HOUSE_TYPE          0x34u     /* HouseClass::Type -> HouseTypeClass* */
 #define OFF_IS_HUMAN            0x1ECu    /* HouseClass::IsHumanPlayer */
+/* 四个结局面板标志, 都在 HouseClass 里, 连着排 (见 notes/观战.md §8)。
+ * AcceptDefeat 只按这四个挑房写; HouseClass::Update 在"借来的时间"用完后
+ * 才把 IsWinner/IsLoser 折算成全局的 [0xA83D49]/[0xA8ECD0]。 */
+#define OFF_DEFEATED            0x1F5u    /* HouseClass::Defeated */
+#define OFF_GAME_OVER           0x1F6u    /* HouseClass::IsGameOver (FlagToDie 落) */
+#define OFF_IS_WINNER           0x1F7u    /* HouseClass::IsWinner (Flag_To_Win 落) */
+#define OFF_IS_LOSER            0x1F8u    /* HouseClass::IsLoser  (Flag_To_Lose 落) */
 /* HouseClass::Money: 0x705DF3 (Available_Money) 与 0x4F9950 (GiveMoney)
  * 均通过 [ecx+0x30C] 访问。 */
 #define OFF_HOUSE_MONEY         0x30Cu
+
+/* HouseClass::PlanningPaths[12] - WaypointPathClass* 数组。
+ * 0x5023B0 GetPlanningWaypointAt 按 CellStruct 遍历它, 空槽 new(0x40) 现建。
+ * 崩溃取证用: 整表没初始化 与 只有一格被写坏 是两种完全不同的病因。 */
+#define OFF_HOUSE_PLANPATHS     0x210u
+#define HOUSE_PLANPATH_N        12
 
 /* HouseTypeClass::MultiplayPassive - 中立方为 1。 */
 #define OFF_HTYPE_PASSIVE       0x1A6u

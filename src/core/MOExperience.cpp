@@ -132,6 +132,83 @@ static void MOE_LogHost(void)
     LogLine(buf);
 }
 
+/* ---------------- 轮转时保留崩溃现场 ----------------
+ * 崩溃记录只写 MOExperience.log 这一个文件。轮转按体积截断, 但那段现场是"这次
+ * 为什么崩"的唯一证据, 截掉就没有第二份了 —— 截断前先把它抄出来, 截断后原样写到
+ * 新日志开头。
+ *
+ * 要全文扫, 不能只看末尾: 崩溃之后往往还有别的会话在往同一个文件里写 (这次崩完
+ * 文件还没到 MaxKB, 下次启动不会轮转), 块早就被推到中段去了。 */
+#define GT_CRASH_MARK   "CRASH: ===="
+#define GT_CRASH_NAMELEN 11u
+#define GT_CRASH_KEEP   16384u   /* 一段现场只有几 KB; 超过这个量就没抄全 */
+#define GT_SCAN_WIN     8192u
+#define GT_SCAN_OVER    16u      /* 相邻窗口重叠: 标记跨窗口边界也能命中 */
+
+/* s 是否正好以块首标记开头。 */
+static int GtCrashMarkAt(const char* s)
+{
+    unsigned k;
+    for (k = 0; k < GT_CRASH_NAMELEN; k++)
+        if (s[k] != GT_CRASH_MARK[k]) return 0;
+    return 1;
+}
+
+/* 认一整行: 崩溃块里每行都以 "CRASH:" 或 "MOE:" 开头, 之外的第一个行首就是块尾
+ * (崩溃后进程不会再写日志, 后面必然已是别的会话)。 */
+static int GtCrashLine(const char* s, unsigned n)
+{
+    if (n >= 6 && s[0] == 'C' && s[1] == 'R' && s[2] == 'A' && s[3] == 'S' &&
+        s[4] == 'H' && s[5] == ':') return 1;
+    if (n >= 4 && s[0] == 'M' && s[1] == 'O' && s[2] == 'E' && s[3] == ':') return 1;
+    return 0;
+}
+
+/* 取日志里最后一个崩溃块 (返回字节数, 0=没有)。块首必须落在行首: 崩溃处理把它
+ * 写成整段的第一行, 认错行等于抄出一堆无关文本。 */
+static unsigned GtKeepCrash(char* out, unsigned cap)
+{
+    static char win[GT_SCAN_WIN];
+    HANDLE h;
+    unsigned base = 0, mark = 0, n = 0;
+    h = CreateFileA(g_LogPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    for (;;)
+    {
+        DWORD got = 0, i;
+        SetFilePointer(h, (LONG)base, NULL, FILE_BEGIN);
+        if (!ReadFile(h, win, GT_SCAN_WIN, &got, NULL) || got == 0) break;
+        /* 上界用 < : 标记从 i+1 起算, 必须整段落在 got 之内。 */
+        for (i = 0; i + GT_CRASH_NAMELEN < got; i++)
+            if (win[i] == 10 && GtCrashMarkAt(win + i + 1)) mark = base + i + 1;
+        if (got < GT_SCAN_WIN) break;
+        base += GT_SCAN_WIN - GT_SCAN_OVER;
+    }
+    if (mark)
+    {
+        DWORD got = 0;
+        SetFilePointer(h, (LONG)mark, NULL, FILE_BEGIN);
+        if (ReadFile(h, out, cap, &got, NULL)) n = got;
+        /* 末尾可能停在半行上: 退到最后一个换行 (含), 免得新日志以半句开头。 */
+        while (n > 0 && out[n - 1] != 10) n--;
+        /* 只留崩溃块本身, 后面的会话内容不跟着搬。 */
+        {
+            unsigned i = 0;
+            while (i < n)
+            {
+                unsigned j = i, len;
+                while (j < n && out[j] != 10) j++;
+                len = j - i;
+                if (!GtCrashLine(out + i, len)) { n = i; break; }
+                i = j + 1;
+            }
+        }
+    }
+    CloseHandle(h);
+    return n;
+}
+
 /* 日志打开 + 启动轮转 ([Log] MaxKB, 默认 500, <=0 不限)。
  * 幂等, 每进程只执行一次。超限先截断 (占着也能清), 不行再删, 都不行就续写。 */
 #define MOE_LOG_MAXKB_DEF 500
@@ -140,6 +217,8 @@ static void MOE_LogHost(void)
 void GtEnsureLog(void)
 {
     WIN32_FILE_ATTRIBUTE_DATA fa;
+    static char keep[GT_CRASH_KEEP];
+    unsigned keepN = 0;
     int maxKB, rotated = 0;
     unsigned limit;
     if (g_Log) return;
@@ -151,16 +230,21 @@ void GtEnsureLog(void)
         if ((unsigned)maxKB > MOE_LOG_MAXKB_MAX) maxKB = (int)MOE_LOG_MAXKB_MAX;
         limit = (unsigned)maxKB * 1024u;
     }
-    if (limit > 0 &&
+    /* 只有游戏宿主轮转: Syringe 进程与 gamemd 几乎同时进 DllMain, 两边都截断会把
+     * 对方刚写回的现场抹掉 (见 GtKeepCrash)。非游戏宿主只按需创建/追写。 */
+    if (limit > 0 && MOE_HostIsGame() &&
         GetFileAttributesExA(g_LogPath, GetFileExInfoStandard, &fa) &&
         !(fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
         (fa.nFileSizeHigh > 0 || fa.nFileSizeLow > limit))
     {
-        HANDLE h = CreateFileA(g_LogPath, GENERIC_WRITE,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-                               TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        HANDLE h;
+        keepN = GtKeepCrash(keep, sizeof(keep));   /* 截断前先抄走现场 */
+        h = CreateFileA(g_LogPath, GENERIC_WRITE,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                        TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); rotated = 1; }
         else if (DeleteFileA(g_LogPath)) rotated = 1;
+        else keepN = 0;   /* 没截掉, 现场本来就在文件里 */
     }
     g_Log = CreateFileA(g_LogPath, FILE_APPEND_DATA,
                         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
@@ -174,11 +258,25 @@ void GtEnsureLog(void)
         q = AppendCStr(rb, q, n1, sizeof(rb));
         AppendCStr(rb, q, "KB)", sizeof(rb));
         LogLine(rb);
+        if (keepN)
+        {
+            DWORD w = 0;
+            SetFilePointer(g_Log, 0, NULL, FILE_END);
+            WriteFile(g_Log, keep, keepN, &w, NULL);
+        }
     }
 }
 
 /* 崩溃定位: 各入口写阶段 id, 崩溃处理打阶段名 + 栈快照 (见 .h)。 */
 volatile unsigned g_MoePhase = MP_NONE;
+
+/* 阶段历史环: 最近 8 次 (id, 时刻), 崩溃时倒着打出来并标出距崩溃的毫秒。
+ * 单看 g_MoePhase 没有意义 —— 它在帧末被清, 崩在没标注的地方时只剩残值。
+ * 时刻用 GetTickCount (ms): 崩溃现场不能再调引擎时钟。 */
+#define MP_HIST 8
+static volatile unsigned s_PhaseId[MP_HIST];
+static volatile unsigned s_PhaseAt[MP_HIST];
+static volatile unsigned s_PhaseSeq;
 
 static const char* const k_PhaseName[] =
 {
@@ -193,9 +291,28 @@ const char* MOE_PhaseName(unsigned id)
     return k_PhaseName[id];
 }
 
-void MOE_SetPhase(unsigned id) { g_MoePhase = id; }
+void MOE_SetPhase(unsigned id)
+{
+    unsigned k;
+    g_MoePhase = id;
+    if (id == MP_NONE) return;   /* 清标记不进历史: 否则每帧一条 "-" 把真历史冲光 */
+    k = s_PhaseSeq % MP_HIST;
+    s_PhaseAt[k] = (unsigned)GetTickCount();
+    s_PhaseId[k] = id;           /* id 最后写: 序号前进即代表这一格已成对写好 */
+    s_PhaseSeq = s_PhaseSeq + 1;
+}
 
-
+/* 取第 back 条历史 (back=0 最新)。写过返回 1, 还没写过返回 0; *at 为 ms 时刻。 */
+int MOE_PhaseHist(int back, unsigned* id, unsigned* at)
+{
+    unsigned seq = s_PhaseSeq;
+    unsigned idx;
+    if (back < 0 || (unsigned)back >= seq || (unsigned)back >= MP_HIST) return 0;
+    idx = (seq - 1u - (unsigned)back) % MP_HIST;
+    if (id) *id = s_PhaseId[idx];
+    if (at) *at = s_PhaseAt[idx];
+    return 1;
+}
 
 void MOE_EnsureInit(void)
 {
@@ -245,25 +362,27 @@ static void StatTick(unsigned frame, int kind)
     else if (kind == 4) g_StLock++;
     else g_StSurf++;
     if (frame - g_StLastFrame < 1800) return;
+    g_StLastFrame = frame;
+    /* 只在真发生回退时记一行: 全 0 = 矢量渲染一路正常, 没有信息量。 */
+    if (g_StEmpty | g_StGdi | g_StDims | g_StLock | g_StSurf)
     {
         char b1[16], b2[16], b3[16], b4[16], b5[16], buf[256];
         unsigned p = 0;
-        g_StLastFrame = frame;
-    p = AppendCStr(buf, p, "stat: vec=", sizeof(buf));
-    p += UtoA(g_StVec, buf + p);
-    p = AppendCStr(buf, p, " empty=", sizeof(buf));
-    UtoA(g_StEmpty, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-    p = AppendCStr(buf, p, " gdi=", sizeof(buf));
-    UtoA(g_StGdi, b2); p = AppendCStr(buf, p, b2, sizeof(buf));
-    p = AppendCStr(buf, p, " dims=", sizeof(buf));
-    UtoA(g_StDims, b3); p = AppendCStr(buf, p, b3, sizeof(buf));
-    p = AppendCStr(buf, p, " lock=", sizeof(buf));
-    UtoA(g_StLock, b4); p = AppendCStr(buf, p, b4, sizeof(buf));
-    p = AppendCStr(buf, p, " surf=", sizeof(buf));
-    UtoA(g_StSurf, b5); p = AppendCStr(buf, p, b5, sizeof(buf));
-    LogLine(buf);
-    g_StVec = g_StEmpty = g_StGdi = g_StDims = g_StLock = g_StSurf = 0;
+        p = AppendCStr(buf, p, "stat: vec=", sizeof(buf));
+        p += UtoA(g_StVec, buf + p);
+        p = AppendCStr(buf, p, " empty=", sizeof(buf));
+        UtoA(g_StEmpty, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " gdi=", sizeof(buf));
+        UtoA(g_StGdi, b2); p = AppendCStr(buf, p, b2, sizeof(buf));
+        p = AppendCStr(buf, p, " dims=", sizeof(buf));
+        UtoA(g_StDims, b3); p = AppendCStr(buf, p, b3, sizeof(buf));
+        p = AppendCStr(buf, p, " lock=", sizeof(buf));
+        UtoA(g_StLock, b4); p = AppendCStr(buf, p, b4, sizeof(buf));
+        p = AppendCStr(buf, p, " surf=", sizeof(buf));
+        UtoA(g_StSurf, b5); p = AppendCStr(buf, p, b5, sizeof(buf));
+        LogLine(buf);
     }
+    g_StVec = g_StEmpty = g_StGdi = g_StDims = g_StLock = g_StSurf = 0;
 }
 
 /* 每循环 prepare 裸钩 (首 5B 一条指令, 跳板拷 5B 跳回 0x4F42F5)。
@@ -1557,6 +1676,9 @@ extern "C" __declspec(dllexport) DWORD __cdecl MOExperience_MessageDrawHook(void
     DWORD rc = MsgDrawBody(regs);
     Perf_Add(PF_MSG, tPf);
     Perf_Frame();
+    /* 帧末清标记: 崩在"我们没标注的地方"时 phase 就该是 "-", 而不是上一帧
+     * 某个渲染阶段的残值。历史环不受影响 (MP_NONE 不入环)。 */
+    MOE_SetPhase(MP_NONE);
     return rc;
 }
 
@@ -1788,10 +1910,29 @@ int MOE_PhobosLoaded(void)
     return cached;
 }
 
+/* 值 v 落在哪个模块里: 返回模块名, *off = 模块内偏移。不在任何模块里返回
+ * NULL (野地址/堆指针)。栈回溯、对象虚表归属共用这一处判定。 */
+static const char* MOE_ModOf(unsigned v, unsigned* off)
+{
+    int k;
+    if (v < 0x10000u) return NULL;
+    for (k = 0; k < s_CrN; k++)
+    {
+        if (v - s_CrBase[k] < s_CrSize[k])
+        {
+            if (off) *off = v - s_CrBase[k];
+            return s_CrName[k];
+        }
+    }
+    return NULL;
+}
+
 /* 栈回溯单项: 追加 " i:label+off" (label 含冒号后的空格, self/exe 传 " MOE"/" exe",
  * 第三方传模块文件名)。每行 6 项, 满了先收行再重起表头 "CRASH: stk"。
- * col/n 跨项累计, 由调用方持句柄传入。 */
-static void StkOne(char* buf, unsigned* p, int* col, int* n,
+ * col/n 跨项累计, 由调用方持句柄传入。
+ * cap 必须是调用方缓冲区的真实大小: buf 在这一层是指针, sizeof(buf) 恒为 4,
+ * 传错了 AppendCStr 会静默截断成 3 个字符。 */
+static void StkOne(char* buf, unsigned cap, unsigned* p, int* col, int* n,
                    unsigned i, const char* label, unsigned off)
 {
     char b1[16];
@@ -1799,17 +1940,92 @@ static void StkOne(char* buf, unsigned* p, int* col, int* n,
     {
         LogLine(buf);
         *p = 0;
-        *p = AppendCStr(buf, *p, "CRASH: stk", sizeof(buf));
+        *p = AppendCStr(buf, *p, "CRASH: stk", cap);
         *col = 0;
     }
-    *p = AppendCh(buf, *p, ' ', sizeof(buf));
-    UtoA(i, b1); *p = AppendCStr(buf, *p, b1, sizeof(buf));
-    *p = AppendCh(buf, *p, ':', sizeof(buf));
-    *p = AppendCStr(buf, *p, label, sizeof(buf));
-    *p = AppendCh(buf, *p, '+', sizeof(buf));
-    MOE_Hex(b1, off); *p = AppendCStr(buf, *p, b1, sizeof(buf));
+    *p = AppendCh(buf, *p, ' ', cap);
+    UtoA(i, b1); *p = AppendCStr(buf, *p, b1, cap);
+    *p = AppendCh(buf, *p, ':', cap);
+    *p = AppendCStr(buf, *p, label, cap);
+    *p = AppendCh(buf, *p, '+', cap);
+    MOE_Hex(b1, off); *p = AppendCStr(buf, *p, b1, cap);
     (*col)++;
     (*n)++;
+}
+
+/* 内存块类型 (img/map/priv), 崩溃日志里两处归属判定共用。 */
+static const char* MOE_MemType(const MEMORY_BASIC_INFORMATION* mb)
+{
+    if (mb->Type == MEM_IMAGE) return "img";
+    if (mb->Type == MEM_MAPPED) return "map";
+    if (mb->Type == MEM_PRIVATE) return "priv";
+    return "?";
+}
+
+/* 把一个"可能是对象指针"的寄存器打出来: 虚表归属 + 头 0x20 字节。
+ *   vt 落在模块里  → 活对象的布局还能对 (看哪个字段变垃圾)
+ *   vt 不像代码/未对齐 → 这块已被回收复用 (读到的是别人的数据) */
+static void CrObj(char* buf, unsigned cap, const char* tag, unsigned ptr)
+{
+    char b1[16];
+    unsigned p = 0, vt = 0, off = 0, k;
+    const char* mn;
+    /* 只处理像用户态地址的值: -5 这种"被当成对象指针的计数"打了也是噪声。 */
+    if (!ptr || ptr < 0x10000u || ptr >= 0x80000000u) return;
+    p = AppendCStr(buf, p, "CRASH: obj ", cap);
+    p = AppendCStr(buf, p, tag, cap);
+    p = AppendCh(buf, p, '=', cap);
+    MOE_Hex(b1, ptr); p = AppendCStr(buf, p, b1, cap);
+    if (ptr & 3u)
+    {
+        /* 未对齐一定不是堆对象: 直接说明, 别去解引用 (会二次异常)。 */
+        p = AppendCStr(buf, p, " unaligned", cap);
+        LogLine(buf);
+        return;
+    }
+    if (!MOE_Readable(ptr, 4))
+    {
+        p = AppendCStr(buf, p, " unreadable", cap);
+        LogLine(buf);
+        return;
+    }
+    vt = *(const unsigned*)(size_t)ptr;
+    p = AppendCStr(buf, p, " vt=", cap);
+    MOE_Hex(b1, vt); p = AppendCStr(buf, p, b1, cap);
+    mn = MOE_ModOf(vt, &off);
+    if (mn)
+    {
+        p = AppendCh(buf, p, ' ', cap);
+        p = AppendCStr(buf, p, mn, cap);
+        p = AppendCh(buf, p, '+', cap);
+        MOE_Hex(b1, off); p = AppendCStr(buf, p, b1, cap);
+    }
+    else p = AppendCStr(buf, p, " vt-nomod", cap);
+    {
+        MEMORY_BASIC_INFORMATION mb;
+        if (VirtualQuery((LPCVOID)(size_t)ptr, &mb, sizeof(mb)))
+        {
+            p = AppendCStr(buf, p, " ty=", cap);
+            p = AppendCStr(buf, p, MOE_MemType(&mb), cap);
+            p = AppendCStr(buf, p, " alloc=", cap);
+            MOE_Hex(b1, (unsigned)(size_t)mb.AllocationBase);
+            p = AppendCStr(buf, p, b1, cap);
+        }
+    }
+    LogLine(buf);
+    /* 头 8 个 dword 单独一行, 方便和 YRpp 布局逐字段对。 */
+    p = 0;
+    p = AppendCStr(buf, p, "CRASH:   hdr ", cap);
+    p = AppendCStr(buf, p, tag, cap);
+    for (k = 0; k < 8; k++)
+    {
+        unsigned w;
+        if (!MOE_Readable(ptr + k * 4, 4)) break;
+        w = *(const unsigned*)(size_t)(ptr + k * 4);
+        p = AppendCh(buf, p, ' ', cap);
+        MOE_Hex(b1, w); p = AppendCStr(buf, p, b1, cap);
+    }
+    LogLine(buf);
 }
 
 static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
@@ -1835,25 +2051,54 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
     if (InterlockedCompareExchange(&g_CrashBusy, 1, 0) != 0)
         return EXCEPTION_CONTINUE_SEARCH;
 
+    /* 先把"崩前日志环"冻住: 下面自己写的 CRASH 行也会进环, 不冻就把前因冲掉了。 */
+    g_GtTrailFreeze = 1;
     GtEnsureLog();
+    /* 模块表先建好: 栈回溯、虚表归属、EIP 归属都查这张表。 */
+    s_CrN = MOE_Modules(s_CrBase, s_CrSize, s_CrName);
     code = (const unsigned char*)r->ExceptionAddress;
     if (g_Log)
     {
+        /* 块首: 版本 + 进程 + 帧号 + 运行时长。轮转时靠这一行的标记认出整段现场
+         * (GtKeepCrash), 所以它必须是本段第一行。 */
+        p = 0;
+        p = AppendCStr(buf, p, GT_CRASH_MARK, sizeof(buf));
+        p = AppendCh(buf, p, ' ', sizeof(buf));
+        p = AppendCStr(buf, p, MOE_VERSION, sizeof(buf));
+        p = AppendCStr(buf, p, " pid=", sizeof(buf));
+        UtoA((unsigned)GetCurrentProcessId(), b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " fr=", sizeof(buf));
+        UtoA(*(const unsigned*)(size_t)ADDR_FRAME, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " up=", sizeof(buf));
+        UtoA((unsigned)GetTickCount(), b1); p = AppendCStr(buf, p, b1, sizeof(buf));
+        p = AppendCStr(buf, p, " ====", sizeof(buf));
+        LogLine(buf);
+        /* 崩前 12 行日志 (最老 -> 最新), 冻结时的快照。 */
+        {
+            int k;
+            for (k = 0; k < GT_TRAIL_N; k++)
+            {
+                unsigned idx = (g_GtTrailSeq + (unsigned)k) % GT_TRAIL_N;
+                if (!g_GtTrail[idx][0]) continue;
+                p = 0;
+                p = AppendCStr(buf, p, "CRASH: pre ", sizeof(buf));
+                p = AppendCStr(buf, p, g_GtTrail[idx], sizeof(buf));
+                LogLine(buf);
+            }
+        }
+        p = 0;
         p = AppendCStr(buf, p, "CRASH: code=", sizeof(buf));
         UtoA((unsigned)r->ExceptionCode, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " addr=", sizeof(buf));
         UtoA((unsigned)(size_t)r->ExceptionAddress, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " tid=", sizeof(buf));
         UtoA((unsigned)GetCurrentThreadId(), b1); p = AppendCStr(buf, p, b1, sizeof(buf));
-        /* 访问类型由 ExceptionInformation[0] 表示: 0=读、1=写、8=执行。 */
-        p = AppendCStr(buf, p,
-            (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
-             r->NumberParameters >= 1 && r->ExceptionInformation[0] == 1)
-                ? " (write)" : " (read)", sizeof(buf));
-        p = AppendCStr(buf, p, " fault=", sizeof(buf));
-        UtoA(r->NumberParameters ? (unsigned)(size_t)r->ExceptionInformation[0] : 0u, b1);
-        p = AppendCStr(buf, p, b1, sizeof(buf));
-        /* 出错的数据地址 (读/写目标, fault= 只是读写标志别再误读)。 */
+        /* 访问类型 (只有访问违例有): ExceptionInformation[0] 0=读 1=写 8=执行。 */
+        if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 1)
+            p = AppendCStr(buf, p,
+                r->ExceptionInformation[0] == 1 ? " (write)"
+              : (r->ExceptionInformation[0] == 8 ? " (exec)" : " (read)"), sizeof(buf));
+        /* 出错的数据地址 (读/写的目标, 不是"读写标志")。 */
         if (r->NumberParameters >= 2)
         {
             p = AppendCStr(buf, p, " tgt=", sizeof(buf));
@@ -1885,19 +2130,41 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         UtoA(*(const unsigned*)(size_t)ADDR_FRAME, b1); p = AppendCStr(buf, p, b1, sizeof(buf));
         LogLine(buf);
 
-        /* 阶段名 + 两个栈窗口 (esp / ebp, ebp 窗是返回地址所在)。 */
+        /* 阶段: 当前值 + 最近 8 次历史 (@后是距崩溃的毫秒), 见 MOE_SetPhase。 */
         p = 0;
         p = AppendCStr(buf, p, "MOE: phase=", sizeof(buf));
         p = AppendCStr(buf, p, MOE_PhaseName(g_MoePhase), sizeof(buf));
-        p = AppendCStr(buf, p, " stk=", sizeof(buf));
+        p = AppendCStr(buf, p, " hist", sizeof(buf));
+        {
+            unsigned now = (unsigned)GetTickCount();
+            int k;
+            for (k = 0; k < MP_HIST; k++)
+            {
+                unsigned id = 0, at = 0;
+                if (!MOE_PhaseHist(k, &id, &at)) break;
+                p = AppendCh(buf, p, ' ', sizeof(buf));
+                p = AppendCStr(buf, p, MOE_PhaseName(id), sizeof(buf));
+                p = AppendCh(buf, p, '@', sizeof(buf));
+                UtoA((now >= at) ? (now - at) : 0u, b1);
+                p = AppendCStr(buf, p, b1, sizeof(buf));
+            }
+        }
+        LogLine(buf);
+        /* esp 起 24 个 dword 原样 (符号化的链在下面 CRASH: ebp / CRASH: stk)。 */
+        p = 0;
+        p = AppendCStr(buf, p, "MOE: esp=", sizeof(buf));
         p = MOE_DumpWords(buf, p, (unsigned)(size_t)ep->ContextRecord->Esp, 24,
                              sizeof(buf));
         LogLine(buf);
-        p = 0;
-        p = AppendCStr(buf, p, "MOE: bfp=", sizeof(buf));
-        p = MOE_DumpWords(buf, p, (unsigned)(size_t)ep->ContextRecord->Ebp, 24,
-                             sizeof(buf));
-        LogLine(buf);
+
+        /* 寄存器当对象指针看: 虚表归属 + 头 0x20 字节。分辨"对象已被回收"
+         * (vt 不是代码段/未对齐) 还是"只有一个字段被写坏"。 */
+        CrObj(buf, sizeof(buf), "eax", (unsigned)(size_t)ep->ContextRecord->Eax);
+        CrObj(buf, sizeof(buf), "ebx", (unsigned)(size_t)ep->ContextRecord->Ebx);
+        CrObj(buf, sizeof(buf), "ecx", (unsigned)(size_t)ep->ContextRecord->Ecx);
+        CrObj(buf, sizeof(buf), "edx", (unsigned)(size_t)ep->ContextRecord->Edx);
+        CrObj(buf, sizeof(buf), "esi", (unsigned)(size_t)ep->ContextRecord->Esi);
+        CrObj(buf, sizeof(buf), "edi", (unsigned)(size_t)ep->ContextRecord->Edi);
 
         /* 面快照 (只读 5 个引擎全局 + 我们 4 个面的指针整数, 零解引用):
          * 判断崩溃现场的面是不是我们的 (泄漏残留/退休面/野面)。 */
@@ -1909,7 +2176,7 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         UtoA(*(const unsigned*)(size_t)ADDR_SURF_ALT, b1);
         p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " cur=", sizeof(buf));
-        UtoA(*(const unsigned*)(size_t)0x00887314u, b1);
+        UtoA(*(const unsigned*)(size_t)ADDR_SURF_TEMP, b1);
         p = AppendCStr(buf, p, b1, sizeof(buf));
         p = AppendCStr(buf, p, " comp=", sizeof(buf));
         UtoA(*(const unsigned*)(size_t)ADDR_SURF_COMPOSITE, b1);
@@ -1966,6 +2233,43 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
             LogLine(buf);
         }
 
+        /* 引擎状态 + 规划路径表 (HouseClass::PlanningPaths[12])。
+         * 0x5023B0 GetPlanningWaypointAt 遍历这张表, 缺槽就 new(0x40)。
+         * 12 个槽全打出来: 分清"整表没初始化"还是"只坏了一格", 不用翻存档。 */
+        {
+            unsigned house = *(const unsigned*)(size_t)ADDR_CURPLAYER;
+            p = 0;
+            p = AppendCStr(buf, p, "MOE: eng mode=", sizeof(buf));
+            UtoA(*(const unsigned*)(size_t)ADDR_GAMEMODE, b1);
+            p = AppendCStr(buf, p, b1, sizeof(buf));
+            p = AppendCStr(buf, p, " scen=", sizeof(buf));
+            MOE_Hex(b1, *(const unsigned*)(size_t)ADDR_SCENARIO);
+            p = AppendCStr(buf, p, b1, sizeof(buf));
+            p = AppendCStr(buf, p, " plan=", sizeof(buf));
+            MOE_Hex(b1, *(const unsigned*)(size_t)ADDR_PLANMODE);
+            p = AppendCStr(buf, p, b1, sizeof(buf));
+            p = AppendCStr(buf, p, " house=", sizeof(buf));
+            MOE_Hex(b1, house);
+            p = AppendCStr(buf, p, b1, sizeof(buf));
+            LogLine(buf);
+
+            if (house && house < 0x7FF00000u && !(house & 3u) &&
+                MOE_Readable(house + OFF_HOUSE_PLANPATHS, HOUSE_PLANPATH_N * 4u))
+            {
+                p = 0;
+                p = AppendCStr(buf, p, "MOE: ppath", sizeof(buf));
+                for (i = 0; i < HOUSE_PLANPATH_N; i++)
+                {
+                    unsigned v = *(const unsigned*)(size_t)(house + OFF_HOUSE_PLANPATHS + i * 4u);
+                    p = AppendCh(buf, p, ' ', sizeof(buf));
+                    MOE_Hex(b1, v);
+                    p = AppendCStr(buf, p, b1, sizeof(buf));
+                    if (v && (v & 3u)) p = AppendCh(buf, p, '!', sizeof(buf));  /* != 对齐值 */
+                }
+                LogLine(buf);
+            }
+        }
+
         /* 故障点所在模块 + 前后 8 字节 (野跳转时读字节会二次异常, 先判可读)。 */
         name[0] = 0;
         mod = NULL;
@@ -2002,9 +2306,11 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
         }
         LogLine(buf);
 
-        /* 模块表快照 + EIP 归属 (栈回溯也用它)。野跳转时报最近的模块,
-         * 能区分"落在某个模块旁边的私有块"与"真的飞到荒野"。 */
-        s_CrN = MOE_Modules(s_CrBase, s_CrSize, s_CrName);
+        /* EIP 归属 (模块表已在处理入口建好)。mod= 那一行已经给出模块与偏移时这里
+         * 只剩重复, 只在认不出模块 (野跳转 / 手工映射的映像) 时才补:
+         *   eipin   模块表里认得出, 但 GetModuleHandleExA 不认 (自建映像)
+         *   eip near 谁都不在, 报最近的模块与间隙 */
+        if (!mod)
         {
             unsigned ea = (unsigned)(size_t)r->ExceptionAddress;
             unsigned bestGap = 0xFFFFFFFFu;
@@ -2049,12 +2355,8 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
             unsigned ea = (unsigned)(size_t)r->ExceptionAddress;
             if (VirtualQuery((LPCVOID)(size_t)ea, &mb, sizeof(mb)))
             {
-                const char* ty = "?";
                 const char* pr = "?";
                 unsigned ab = (unsigned)(size_t)mb.AllocationBase;
-                if (mb.Type == MEM_IMAGE) ty = "img";
-                else if (mb.Type == MEM_MAPPED) ty = "map";
-                else if (mb.Type == MEM_PRIVATE) ty = "priv";
                 switch (mb.Protect & 0xFFu)
                 {
                 case PAGE_NOACCESS: pr = "no"; break;
@@ -2069,7 +2371,7 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
                 }
                 p = 0;
                 p = AppendCStr(buf, p, "CRASH: eipmem ty=", sizeof(buf));
-                p = AppendCStr(buf, p, ty, sizeof(buf));
+                p = AppendCStr(buf, p, MOE_MemType(&mb), sizeof(buf));
                 p = AppendCStr(buf, p, " pr=", sizeof(buf));
                 p = AppendCStr(buf, p, pr, sizeof(buf));
                 p = AppendCStr(buf, p, " alloc=", sizeof(buf));
@@ -2100,21 +2402,18 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
             else LogLine("CRASH: eipmem VirtualQuery failed");
         }
 
-        /* 栈回溯: 栈上落在本 DLL / 游戏 exe 里的字按 模块+偏移 记下来。
-         * 崩溃点落在第三方代码或野地址时, 只有这条链能指出是谁调进来的。 */
+        /* 栈回溯, 两条链都留:
+         *   ebp  精确帧 (每个帧的 [ebp+4] 就是返回地址);
+         *   stk  原始扫描 (ESP 起 0x800 字节里落在模块内的字)。
+         * ebp 被覆盖成野值时只有原始扫描能给出线索, 反之原始扫描会混进数据,
+         * 所以两条并排写, 由读的人互相校正。 */
         {
             HMODULE self = GetModuleHandleA("MOExperience.dll");
             HMODULE exe = GetModuleHandleA(NULL);
-            unsigned selfSz = 0, exeSz = 0;
             unsigned sp = (unsigned)(size_t)ep->ContextRecord->Esp;
+            unsigned fp = (unsigned)(size_t)ep->ContextRecord->Ebp;
             int n = 0, col = 0;
 
-            if (self)
-                selfSz = ((const IMAGE_NT_HEADERS*)((const char*)self
-                    + ((const IMAGE_DOS_HEADER*)self)->e_lfanew))->OptionalHeader.SizeOfImage;
-            if (exe)
-                exeSz = ((const IMAGE_NT_HEADERS*)((const char*)exe
-                    + ((const IMAGE_DOS_HEADER*)exe)->e_lfanew))->OptionalHeader.SizeOfImage;
             p = 0;
             p = AppendCStr(buf, p, "CRASH: mods exe=", sizeof(buf));
             MOE_Hex(b1, (unsigned)(size_t)exe); p = AppendCStr(buf, p, b1, sizeof(buf));
@@ -2128,32 +2427,62 @@ static LONG CALLBACK Moe_CrashFilter(EXCEPTION_POINTERS* ep)
             p = AppendCStr(buf, p, b1, sizeof(buf));
             LogLine(buf);
 
+            /* ebp 链: 只认可信帧 —— 4 对齐、落在 [sp, sp+0x4000)、整帧可读、
+             * 返回地址落进某个模块、逐帧单调升高。一条不满足就停, 栈被覆盖后
+             * 硬走下去只会给出假帧。 */
+            p = 0;
+            p = AppendCStr(buf, p, "CRASH: ebp", sizeof(buf));
+            if ((fp & 3u) || fp < sp || fp - sp > 0x4000u || !MOE_Readable(fp, 8))
+            {
+                p = AppendCStr(buf, p, " <invalid", sizeof(buf));
+                MOE_Hex(b1, fp); p = AppendCStr(buf, p, b1, sizeof(buf));
+                p = AppendCh(buf, p, '>', sizeof(buf));
+                LogLine(buf);
+            }
+            else
+            {
+                unsigned prev = sp;
+                int k;
+                for (k = 0; k < 6; k++)   /* 6 = 一行的容量, 别触发中途收行 */
+                {
+                    unsigned ret, off = 0, next;
+                    const char* mn;
+                    if (fp <= prev || !MOE_Readable(fp, 8)) break;
+                    ret = *(const unsigned*)(size_t)(fp + 4);
+                    mn = MOE_ModOf(ret, &off);
+                    if (!mn) break;
+                    StkOne(buf, sizeof(buf), &p, &col, &n, fp - sp, mn, off);
+                    next = *(const unsigned*)(size_t)fp;
+                    prev = fp;
+                    fp = next;
+                }
+                if (col) LogLine(buf);
+                else LogLine("CRASH: ebp <no frame>");
+            }
+
+            /* 原始扫描: 只扫已提交的那一段 (esp 贴着栈顶时直接扫满 0x800 会撞
+             * 保护页, 二次异常一进来进程就没了, 现场全丢)。 */
             p = 0;
             p = AppendCStr(buf, p, "CRASH: stk", sizeof(buf));
-            for (i = 0; i < 0x800 && n < 18; i += 4)
+            col = 0; n = 0;
             {
-                unsigned v = *(const unsigned*)(size_t)(sp + i);
-                unsigned base = 0;
-                const char* tag = NULL;
-                int k;
-                if (v < 0x10000u) continue;
-                if (self && v - (unsigned)(size_t)self < selfSz)
-                { tag = " MOE"; base = (unsigned)(size_t)self; }
-                else if (exe && v - (unsigned)(size_t)exe < exeSz)
-                { tag = " exe"; base = (unsigned)(size_t)exe; }
-                else
+                MEMORY_BASIC_INFORMATION mb;
+                unsigned lim = sp + 0x800u;
+                if (VirtualQuery((LPCVOID)(size_t)sp, &mb, sizeof(mb)))
                 {
-                    for (k = 0; k < s_CrN; k++)
-                    {
-                        if (v - s_CrBase[k] < s_CrSize[k])
-                        {
-                            StkOne(buf, &p, &col, &n, i, s_CrName[k], v - s_CrBase[k]);
-                            break;
-                        }
-                    }
-                    continue;
+                    unsigned e = (unsigned)((size_t)mb.BaseAddress + mb.RegionSize);
+                    if (e > sp && e < lim) lim = e;
                 }
-                StkOne(buf, &p, &col, &n, i, tag, v - base);
+                for (i = 0; i + 4u <= lim - sp && n < 24; i += 4)
+                {
+                    unsigned v = *(const unsigned*)(size_t)(sp + i);
+                    unsigned off = 0;
+                    const char* mn;
+                    if (v < 0x10000u) continue;
+                    mn = MOE_ModOf(v, &off);
+                    if (!mn) continue;
+                    StkOne(buf, sizeof(buf), &p, &col, &n, i, mn, off);
+                }
             }
             if (col) LogLine(buf);
         }

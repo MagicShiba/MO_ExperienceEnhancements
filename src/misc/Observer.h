@@ -1,5 +1,5 @@
-/* Observer.h - 多观战修复 + 观战面板排序，实现见 Observer.cpp。
- * 只写本机 CurrentPlayer 与纯 UI 面板名单，不碰模拟字段。
+/* Observer.h - 多观战修复 + 观战面板排序 + 读档后身份重建，实现见 Observer.cpp。
+ * 只写本机 CurrentPlayer、单机下的 Observer 与纯 UI 面板名单，不碰模拟字段。
  */
 #pragma once
 

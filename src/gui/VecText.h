@@ -54,7 +54,11 @@ void VecText_RestoreOptions(void);
  * VecText.cpp 只做高层级隐藏+收集 (不管内容细节, 不逐行绘制);
  * SWPanel.cpp 的超武面板每帧从此表取新鲜行整块重绘 (同一 DLL, 直接共享)。
  * kind: 0=名, 1=计时器。tick=GetTickCount, 400ms 未刷新即过期。 */
-#define SWCAP_MAX 32
+/* 容量按**行**算: 一行 = 名一条 + 计时器一条。原版列表能堆到满屏 (实测 30 行
+ * 以上, 78 超武的大剧本更多), 按条目定小容量等于给行数设天花板 —— 触顶后
+ * 多出来的行会整条消失 (既不画也不回落原版)。 */
+#define SWROW_MAX 192     /* 行数上限 (名+计时一组) */
+#define SWCAP_MAX (SWROW_MAX * 2)
 #define SW_FRESH_MS 150   /* 收集行保鲜 (毫秒): 收集时不并入更新的行, 防引擎碎片冲掉正文 */
 /* 面板取用时的过期上限。**不能等于 SW_FRESH_MS**: 侧栏隐藏那几帧可能收不到行,
  * 早退会让 VecSimpleEntry 的 inband 放行 -> 原版列表画出来。宁可短暂沿用上次

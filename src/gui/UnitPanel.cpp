@@ -1167,6 +1167,22 @@ static int Up_IsEnemy(void* o)
     return own != me;
 }
 
+/* 本机是否观战者。观战不参与对局, 敌方单位的弹药同样是可见信息。
+ * 判据要扫出生点表, 而图标格每帧调很多次, 所以按帧缓存。 */
+static int Up_LocalSpectator(void)
+{
+    static unsigned s_f = 0xFFFFFFFFu;
+    static int s_v = 0;
+    unsigned f = *(unsigned*)(size_t)ADDR_FRAME;
+
+    if (f != s_f)
+    {
+        s_f = f;
+        s_v = Observer_LocalIsSpectator();
+    }
+    return s_v;
+}
+
 static void Up_BuildList(void)
 {
     void** items = *(void***)(size_t)(ADDR_CUR_OBJECTS + OFF_VEC_ITEMS);
@@ -2071,23 +2087,25 @@ static void Up_DrawIconCell(unsigned char* base, int pitch, int W, int H,
                             int x, int y, const UpEnt* e)
 {
     unsigned short* cameo;
-    int enemy, ammoMax, ammo, level, wrap;
+    int full, ammoMax, ammo, level, wrap;
 
     Up_DrawCellBg(base, pitch, W, H, x, y);
     if (!e || !e->type || !e->obj) return;
     cameo = Up_Cameo(e->type);
     if (cameo) Up_BlitIcon(base, pitch, W, H, x, y, cameo);   /* 没有 cameo 就只留底与角标 */
-    enemy = Up_IsEnemy(e->obj);
+    /* full: 这个单位的小信息全列。本家/盟友恒列; 敌方只有观战列 —— 观战不参与对局,
+     * 地图上本来就画着它的等级和余弹, 面板跟上即可。 */
+    full = Up_IsEnemy(e->obj) ? Up_LocalSpectator() : 1;
     ammoMax = Up_AmmoMax(e->type);
     ammo = Up_Ammo(e->obj);
     level = Up_Level(e->obj);
     wrap = Up_PipWrap(e->type);
 
-    /* 等级 (仅我方): 图标左上, 一级 ︿ / 二级 星星 */
-    if (!enemy && level > 0) Up_Rank(base, pitch, W, H, x + 2, y + 1, level);
+    /* 等级: 图标左上, 一级 ︿ / 二级 星星 (与画面上的单位标记一致) */
+    if (full && level > 0) Up_Rank(base, pitch, W, H, x + 2, y + 1, level);
 
-    /* 弹药 (仅我方): 名字上方的小方块阵 */
-    if (!enemy && ammoMax > 0 && ammo >= 0)
+    /* 弹药: 名字上方的小方块阵 */
+    if (full && ammoMax > 0 && ammo >= 0)
         Up_AmmoPips(base, pitch, W, H, x, y, ammo, ammoMax, wrap);
 
     /* 数量 (组): 右上角, 资金那套字体 */
@@ -2100,7 +2118,7 @@ static void Up_DrawIconCell(unsigned char* base, int pitch, int W, int H,
 static void Up_DrawInfoCell(unsigned char* base, int pitch, int W, int H,
                             int x, int y, const UpEnt* e)
 {
-    int hp, mx, pc, enemy, level, adv;
+    int hp, mx, pc, full, level, adv;
     float vet;
     wchar_t t[24];
     int n;
@@ -2117,12 +2135,13 @@ static void Up_DrawInfoCell(unsigned char* base, int pitch, int W, int H,
     if (hp < 0) hp = 0;
     if (hp > mx) hp = mx;
     pc = hp * 100 / mx;
-    enemy = Up_IsEnemy(e->obj);
+    full = Up_IsEnemy(e->obj) ? Up_LocalSpectator() : 1;
     level = Up_Level(e->obj);
     vet = *(float*)((char*)e->obj + OFF_TECH_VETERANCY);
 
-    /* 血量色: 与引擎同口径 —— 阈值取 MO 的 rules `[General] ConditionYellow=67% /
-     * ConditionRed=35%` (>67 绿, >35 黄, 其余红)。rules 改了就同步这两个数。 */
+    /* 血量色: 只看当前血量比例, 不分敌我 —— 与引擎同口径, 阈值取 MO 的 rules
+     * `[General] ConditionYellow=67% / ConditionRed=35%` (>67 绿, >35 黄, 其余红)。
+     * rules 改了就同步这两个数。 */
     if (pc > UP_HP_YELLOW_PC) { r = 60; g = 210; b = 60; }
     else if (pc > UP_HP_RED_PC) { r = 235; g = 210; b = 60; }
     else { r = 230; g = 60; b = 60; }
@@ -2134,10 +2153,10 @@ static void Up_DrawInfoCell(unsigned char* base, int pitch, int W, int H,
      * 再不行就由下面的守卫丢掉经验文本, 条照画, 绝不越出格子。 */
     if (bar1 + adv + bar2 + adv > UP_CELL_H) { bar1 = 4; bar2 = 3; }
 
-    if (enemy)
-        by = y + (UP_CELL_H - (bar1 + adv)) / 2;      /* 敌方: 只有条 + 血量, 竖向居中 */
-    else
+    if (full)
         by = y + (UP_CELL_H - (bar1 + adv + bar2 + adv)) / 2;
+    else
+        by = y + (UP_CELL_H - (bar1 + adv)) / 2;      /* 敌方(非观战): 只有条 + 血量, 竖向居中 */
     if (by < y + 1) by = y + 1;
 
     /* 四行从上到下紧排 (文本自带行距, 不再额外留空): 条 / 血量 / 条 / 经验 */
@@ -2150,7 +2169,7 @@ static void Up_DrawInfoCell(unsigned char* base, int pitch, int W, int H,
     /* 4 位以上的血量 "2000/2000" 会超格宽: 放不下就只留当前值 (比例看条) */
     if (RenderLine(t, n) > UP_CELL_W - 4) n = Up_Num(t, 24, hp);
     Up_Text(base, pitch, W, H, 0, ty, t, n, 235, 235, 235, 1, x + 2, UP_CELL_W - 4);
-    if (enemy) return;   /* 敌方: 只显示图标 + 血量 */
+    if (!full) return;   /* 敌方(非观战): 只显示图标 + 血量 */
 
     /* 经验: 当前等级内的进度 (精英 = MAX) */
     {

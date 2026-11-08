@@ -37,10 +37,18 @@ typedef struct {
 static SWPanelCfg g_SW;
 static wchar_t g_SWFace[FONT_FACE_MAX];
 static int g_InitDone = 0;
-/* 几何诊断 (只在变化时打一行): 排查名/计时两列错位看这个 */
-static int s_LastAnchor = -1, s_LastRightEdge = -1, s_LastMapRight = -1;
-static int s_LastRows = -1;   /* 行数也进触发条件: 条目变少要能看出来 */
+/* 锚点丢失只记一次 (拿不到 g_MapRight 时贴左缘)。 */
 static int s_AnchorLost = 0;
+/* 字面指纹: 换字体后内容没变也得重建层 (hash 里混一份)。 */
+static unsigned s_FaceHash = 0;
+
+static unsigned SWFaceHash(const wchar_t* s)
+{
+    unsigned h = 2166136261u;
+    int i;
+    for (i = 0; s && s[i] && i < FONT_FACE_MAX; i++) { h ^= (unsigned)s[i]; h *= 16777619u; }
+    return h;
+}
 
 void SWPanel_EnsureInit(void)
 {
@@ -98,6 +106,7 @@ void SWPanel_EnsureInit(void)
 
     /* 字体解析放日志打开之后, 解析结果才能记入日志 */
     ResolveFontFace(g_SW.FontFace, "sw", g_SWFace, L"Microsoft YaHei");
+    s_FaceHash = SWFaceHash(g_SWFace);
     p = 0;
     p = AppendCStr(buf, p, "config: SWPanel en=", sizeof(buf));
     p += UtoA((unsigned)g_SW.Enable, buf + p);
@@ -180,6 +189,7 @@ void SWPanel_SetFace(const wchar_t* face)
                         sizeof(g_SW.FontFace), NULL, NULL);
     g_SW.FontFace[sizeof(g_SW.FontFace) - 1] = 0;
     ResolveFontFace(g_SW.FontFace, "sw", g_SWFace, L"Microsoft YaHei");
+    s_FaceHash = SWFaceHash(g_SWFace);
 }
 
 void SWPanel_SaveOptions(void)
@@ -196,6 +206,7 @@ void SWPanel_RestoreOptions(void)
     g_SW = s_SavedSw;
     g_SWPanelOn = g_SW.Enable;
     ResolveFontFace(g_SW.FontFace, "sw", g_SWFace, L"Microsoft YaHei");
+    s_FaceHash = SWFaceHash(g_SWFace);
 }
 
 static int SWLen(const wchar_t* s)
@@ -503,6 +514,7 @@ static unsigned SWPcHash(int n, const int* ys, const int* ni, const int* ti,
     SWMIX(g_SW.Gap); SWMIX(g_SW.RightMargin); SWMIX(g_SW.BottomMargin);
     SWMIX(g_SW.Shadow); SWMIX(g_SW.ShadowDX); SWMIX(g_SW.ShadowDY);
     SWMIX(g_SW.ShadowOpacity); SWMIX(g_SW.ShadowSize); SWMIX(g_SW.Bold);
+    SWMIX(s_FaceHash);
     for (i = 0; i < n; i++)
     {
         SWMIX(ys[i]);
@@ -522,42 +534,89 @@ static unsigned SWPcHash(int n, const int* ys, const int* ni, const int* ti,
     return h;
 }
 
+/* ================= 行几何 =================
+ * 行数可能超过一屏高 (78 超武的大剧本 + 多人)，所以布局是一条降级链:
+ *   行距 (经典式先吃 PadY) → 分栏 → 丢最早的几行
+ * 列从左到右 = 引擎打印顺序 (先出现的行在左列顶部)，首列顶部留空槽让整块底对齐。
+ * 绘制/底板/贴层都只读这套几何, 不许各自再算一遍。 */
+#define SW_TOP_SAFE 32   /* 收集门只认 y>=32, 布局上沿守同一条线, 否则最上一行画进顶栏 */
+#define SW_COL_GAP  12   /* 相邻两列内容右缘的间距 */
+#define SW_MAX_COLS 4
+
+/* 本列实际行数: 行按 seq 填 [excess, excess+shown), 只有最左列可能不满。 */
+static int SWColRows(int col, int excess, int shown, int perCol)
+{
+    int lo = col * perCol;
+    int hi = lo + perCol;
+    int a = (excess > lo) ? excess : lo;
+    int b = (excess + shown < hi) ? (excess + shown) : hi;
+    return (b > a) ? (b - a) : 0;
+}
+
+/* 第 k 行: 所在列的右缘 + 槽顶 (画面坐标)。seq 一定落在 [0, cols*perCol) 内,
+ * 越界不算: 调用方只传 shown 范围内的 k。 */
+static void SWRowGeom(int k, int k0, int excess, int cols, int perCol, int colW,
+                      int rightEdge, int top, int unit, int* outR, int* outY)
+{
+    int seq = excess + (k - k0);
+    int col = seq / perCol;
+    int slot = seq - col * perCol;
+    *outR = rightEdge - (cols - 1 - col) * colW;
+    *outY = top + slot * unit;
+}
+
+/* 经典式单行黑条左缘: 名右对齐到名栏; 没有名的行以计时器左缘为准。
+ * 两栏都空的行 (只剩空串条目) 返回右缘 = 零宽条, 不画。 */
+static int SWBarLeft(int k, int cr, const int* ws, const int* wt,
+                     int maxTW, int hasTimer)
+{
+    int contentRight, nameEnd, nx, b;
+    if (ws[k] <= 0 && wt[k] <= 0) return cr;
+    contentRight = cr - g_SW.PadX;
+    nameEnd = contentRight - (hasTimer ? maxTW + g_SW.Gap : 0);
+    nx = (ws[k] > 0) ? nameEnd - ws[k] : contentRight - wt[k];
+    b = nx - g_SW.PadX;
+    return b < 0 ? 0 : b;
+}
+
 /* 主入口: 收集 → (命中?) 贴层 : 重量宽/布局/重建层 → 贴层
  * Classic=0: 右下锚定单个半透明底, 名左计时器右。
  * Classic=1: 原版式 (右对齐 + 逐行贴合黑条 + 名回引擎原位)。 */
 int SWPanel_Draw(void* surf, int bitLineH, int surfW, int surfH, int surfPitch)
 {
-    int ys[SWCAP_MAX], ni[SWCAP_MAX], ti[SWCAP_MAX];
-    int ws[SWCAP_MAX], wt[SWCAP_MAX];
+    int ys[SWROW_MAX], ni[SWROW_MAX], ti[SWROW_MAX];
+    int ws[SWROW_MAX], wt[SWROW_MAX];
     int n = 0, i, j, k;
     unsigned now;
     int fontPx, adv, maxNW = 0, maxTW = 0, hasTimer = 0;
-    int panelW = 0, panelH = 0, px = 0, py = 0;
-    int rightEdge = 0, contentRight = 0, nameEndCol = 0;
-    int step = 0, top = 0, anchor;
+    int panelW, rightEdge = 0;
+    int unit = 0, top = 0, anchor;
+    int cols = 1, perCol = 1, slotN = 0, shown = 0, k0 = 0, excess = 0, slotTop = 0;
+    int colW = 0, maxCols = 1;
     int lw, lh, lx, ly;
     unsigned alpha, hh;
     long long tA = 0;
 
     if (!g_SWPanelOn) { s_PcValid = 0; return 0; }
     now = GetTickCount();
-    for (i = 0; i < g_SWCapN && i < SWCAP_MAX; i++)
+    for (i = 0; i < g_SWCapN; i++)
     {
         SWCapRow* c = &g_SWCap[i];
         /* ★ 过期只用来剔"陈旧碎片", 不能让它把整块面板判没: 某一帧没收到 (切模式
          * 那几帧) 早退会让**原版列表**趁虚画出来 (inband 放行)。故放宽到
          * 1000ms: 宁可短暂显示上一次的内容, 也不能让面板凭空消失。*/
         if (now - c->tick > (unsigned)SW_STALE_MS) continue;
-        for (j = 0; j < n; j++) if (ys[j] == c->y) break;
-        if (j >= n)
+        /* 倒着找: 引擎按行连续打印, 同一 y 的条目就在刚处理过的那几个里。 */
+        for (j = n - 1; j >= 0; j--) if (ys[j] == c->y) break;
+        if (j < 0)
         {
-            if (n >= SWCAP_MAX) break;
+            if (n >= SWROW_MAX) break;
+            j = n;
             ys[n] = c->y; ni[n] = -1; ti[n] = -1; n++;
         }
         if (c->kind == 0) ni[j] = i;
         else ti[j] = i;
     }
-    if (n > SWCAP_MAX) n = SWCAP_MAX;
     if (n <= 0) { s_PcValid = 0; return 0; }
     for (i = 1; i < n; i++)   /* 按 y 排序 (插入, 行数小): 只定上下顺序 */
     {
@@ -620,60 +679,53 @@ int SWPanel_Draw(void* surf, int bitLineH, int surfW, int surfH, int surfPitch)
     }
     rightEdge = anchor - g_SW.RightMargin;
     if (rightEdge < 0) rightEdge = 0;
-    if (anchor != s_LastAnchor || rightEdge != s_LastRightEdge
-        || g_MapRight != s_LastMapRight || n != s_LastRows)
+    panelW = g_SW.PadX * 2 + maxNW + (hasTimer ? g_SW.Gap + maxTW : 0);
+
+    /* ---- 行距 → 分栏 → 丢行 (降级链, 见文件内 SW_TOP_SAFE 一节) ----
+     * unit = 一个槽的行高: 经典式含上下 PadY (条要首尾相接), 统一面板只到字高。 */
     {
-        char b1[16], buf[192];
-        unsigned q = 0;
-        s_LastAnchor = anchor; s_LastRightEdge = rightEdge;
-        s_LastMapRight = g_MapRight; s_LastRows = n;
-        q = AppendCStr(buf, q, "swpanel: geom mapRight=", sizeof(buf));
-        UtoA((unsigned)g_MapRight, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        q = AppendCStr(buf, q, " anchor=", sizeof(buf));
-        UtoA((unsigned)anchor, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        q = AppendCStr(buf, q, " rightEdge=", sizeof(buf));
-        UtoA((unsigned)rightEdge, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        q = AppendCStr(buf, q, " rows=", sizeof(buf));
-        UtoA((unsigned)n, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-        LogLine(buf);
+        int availH = surfH - g_SW.BottomMargin - SW_TOP_SAFE;
+        if (availH < 1) availH = 1;
+        unit = g_SW.Classic ? (adv + g_SW.PadY * 2) : adv;
+        if (unit < 1) unit = 1;
+        perCol = availH / unit;
+        if (g_SW.Classic && perCol < n && unit > adv)  /* 一级: 先吃行内上下留白 */
+        {
+            unit = adv;
+            perCol = availH / unit;
+        }
+        if (perCol < 1) perCol = 1;
+        cols = (n + perCol - 1) / perCol;
+        colW = panelW + SW_COL_GAP;
+        maxCols = rightEdge / colW;
+        if (maxCols < 1) maxCols = 1;
+        if (maxCols > SW_MAX_COLS) maxCols = SW_MAX_COLS;
+        if (cols > maxCols) cols = maxCols;
+        slotN = cols * perCol;
+        k0 = (n > slotN) ? (n - slotN) : 0;   /* 真放不下才丢, 丢的是最早的行 */
+        shown = n - k0;
+        excess = slotN - shown;
+        top = surfH - g_SW.BottomMargin - perCol * unit;
+        if (!g_SW.Classic) top -= g_SW.PadY;
+        if (top < SW_TOP_SAFE) top = SW_TOP_SAFE;
     }
-    contentRight = rightEdge - g_SW.PadX;
-    nameEndCol = contentRight - (hasTimer ? maxTW + g_SW.Gap : 0);
-    /* 经典行距 (字高+上下 PadY): 条无缝衔接, 底部锚定守界 (引擎 y 只定顺序) */
-    step = adv + g_SW.PadY * 2;
-    if (step < 1) step = 1;
-    top = surfH - g_SW.BottomMargin - n * step;
-    if (top < 0) top = 0;
     alpha = (unsigned)(g_SW.Opacity > 0 ? g_SW.Opacity * 255 / 100 : 0);
 
-    /* ---- 包围盒 → 层 ---- */
-    if (g_SW.Classic)
+    /* ---- 包围盒 → 层 ----
+     * 纵向只取**用到的槽**: 行数少时 perCol 远大于 n, 按整列算会把层撑到整屏高
+     * (多出来的透明带每帧白扫一遍)。首列顶部的空槽 (excess) 不算进来。 */
+    lx = rightEdge;
+    for (k = k0; k < k0 + shown; k++)
     {
-        /* 原版式: 逐行贴合黑条 (条按本行宽度贴到右缘, 四面各留 Pad,
-         * 上下行条首尾相接不重叠; 字永不出条)。 */
-        int x0 = rightEdge;
-        for (k = 0; k < n; k++)
-        {
-            int bx0, nx;
-            if (ws[k] <= 0 && wt[k] <= 0) continue;
-            nx = (ws[k] > 0) ? nameEndCol - ws[k] : contentRight - wt[k];
-            bx0 = nx - g_SW.PadX;
-            if (bx0 < 0) bx0 = 0;
-            if (bx0 < x0) x0 = bx0;
-        }
-        lx = x0; ly = top;
-        lw = rightEdge - x0; lh = n * step;
+        int cr, ry, b;
+        SWRowGeom(k, k0, excess, cols, perCol, colW, rightEdge, top, unit, &cr, &ry);
+        b = g_SW.Classic ? SWBarLeft(k, cr, ws, wt, maxTW, hasTimer) : cr - panelW;
+        if (b < lx) lx = b;
     }
-    else
-    {
-        panelW = g_SW.PadX * 2 + maxNW + (hasTimer ? g_SW.Gap + maxTW : 0);
-        panelH = g_SW.PadY * 2 + n * adv;
-        px = anchor - g_SW.RightMargin - panelW;
-        py = surfH - g_SW.BottomMargin - panelH;
-        if (px < 0) px = 0;
-        if (py < 0) py = 0;
-        lx = px; ly = py; lw = panelW; lh = panelH;
-    }
+    slotTop = (cols > 1) ? 0 : excess;   /* 多列时右列顶到 0, 只首列有空槽 */
+    ly = top + slotTop * unit - (g_SW.Classic ? 0 : g_SW.PadY);
+    lw = rightEdge - lx;
+    lh = (perCol - slotTop) * unit + (g_SW.Classic ? 0 : g_SW.PadY * 2);
     if (lw < 1 || lh < 1) { s_PcValid = 0; return 0; }
     s_PcX = lx - PC_PAD;
     s_PcY = ly - PC_PAD;
@@ -689,62 +741,56 @@ int SWPanel_Draw(void* surf, int bitLineH, int surfW, int surfH, int surfPitch)
     {
         if (g_SW.Classic)
         {
-            for (k = 0; k < n; k++)
+            for (k = k0; k < k0 + shown; k++)
             {
-                int bx0, nx, bw;
-                if (ws[k] <= 0 && wt[k] <= 0) continue;
-                nx = (ws[k] > 0) ? nameEndCol - ws[k] : contentRight - wt[k];
-                bx0 = nx - g_SW.PadX;
-                if (bx0 < 0) bx0 = 0;
-                bw = rightEdge - bx0;
-                if (bw > 0) PcFill(PC_PAD + bx0 - lx, PC_PAD + k * step, bw, step, alpha);
+                int cr, ry, b, bw;
+                SWRowGeom(k, k0, excess, cols, perCol, colW, rightEdge, top, unit, &cr, &ry);
+                b = SWBarLeft(k, cr, ws, wt, maxTW, hasTimer);
+                bw = cr - b;
+                if (bw > 0) PcFill(PC_PAD + b - lx, PC_PAD + ry - ly, bw, unit, alpha);
             }
         }
         else
-            PcFill(PC_PAD, PC_PAD, panelW, panelH, alpha);
+        {
+            /* 统一面板: 每列一块, 底对齐 (只有最左列可能短) */
+            for (i = 0; i < cols; i++)
+            {
+                int cnt = SWColRows(i, excess, shown, perCol);
+                int cr = rightEdge - (cols - 1 - i) * colW;
+                int py;
+                if (cnt <= 0) continue;
+                py = top + (perCol - cnt) * unit - g_SW.PadY;
+                PcFill(PC_PAD + cr - panelW - lx, PC_PAD + py - ly, panelW,
+                       cnt * unit + g_SW.PadY * 2, alpha);
+            }
+        }
     }
 
     /* 文字 */
     if (!g_Calibrated) Calibrate();
-    if (g_SW.Classic)
+    for (k = k0; k < k0 + shown; k++)
     {
-        for (k = 0; k < n; k++)
+        int cr, ry, ty, contentRight, nameEnd, tx;
+        ColorStruct fg;
+        SWRowGeom(k, k0, excess, cols, perCol, colW, rightEdge, top, unit, &cr, &ry);
+        /* 经典式字在条内居中 (unit - adv)/2 = PadY; 降级到 unit=adv 时自然为 0 */
+        ty = ry + (g_SW.Classic ? ((unit - adv) / 2) : 0);
+        contentRight = cr - g_SW.PadX;
+        nameEnd = contentRight - (hasTimer ? maxTW + g_SW.Gap : 0);
+        if (ni[k] >= 0 && ws[k] > 0)
         {
-            int ry = PC_PAD + g_SW.PadY + k * step;
-            ColorStruct fg;
-            if (ni[k] >= 0 && ws[k] > 0)
-            {
-                SWRowColor(g_SWCap[ni[k]].fore, 0x07FF, &fg);
-                SWStampPart(PC_PAD + nameEndCol - ws[k] - lx, ry, g_SWCap[ni[k]].s,
-                            adv, fg.R, fg.G, fg.B);
-            }
-            if (ti[k] >= 0 && wt[k] > 0)
-            {
-                SWRowColor(g_SWCap[ti[k]].fore, 0xFFFF, &fg);
-                SWStampPart(PC_PAD + contentRight - wt[k] - lx, ry, g_SWCap[ti[k]].s,
-                            adv, fg.R, fg.G, fg.B);
-            }
+            SWRowColor(g_SWCap[ni[k]].fore, 0x07FF, &fg);
+            tx = g_SW.Classic ? (nameEnd - ws[k]) : (cr - panelW + g_SW.PadX);
+            SWStampPart(PC_PAD + tx - lx, PC_PAD + ty - ly, g_SWCap[ni[k]].s,
+                        adv, fg.R, fg.G, fg.B);
         }
-    }
-    else
-    {
-        for (k = 0; k < n; k++)
+        if (ti[k] >= 0 && wt[k] > 0)
         {
-            int ry = PC_PAD + g_SW.PadY + k * adv, tx;
-            ColorStruct fg;
-            if (ni[k] >= 0 && ws[k] > 0)
-            {
-                SWRowColor(g_SWCap[ni[k]].fore, 0x07FF, &fg);
-                SWStampPart(PC_PAD + g_SW.PadX, ry, g_SWCap[ni[k]].s,
-                            adv, fg.R, fg.G, fg.B);
-            }
-            if (ti[k] >= 0 && wt[k] > 0)
-            {
-                SWRowColor(g_SWCap[ti[k]].fore, 0xFFFF, &fg);
-                tx = PC_PAD + panelW - g_SW.PadX - wt[k];
-                if (tx < PC_PAD + g_SW.PadX) tx = PC_PAD + g_SW.PadX;
-                SWStampPart(tx, ry, g_SWCap[ti[k]].s, adv, fg.R, fg.G, fg.B);
-            }
+            SWRowColor(g_SWCap[ti[k]].fore, 0xFFFF, &fg);
+            tx = contentRight - wt[k];
+            if (tx < cr - panelW + g_SW.PadX) tx = cr - panelW + g_SW.PadX;
+            SWStampPart(PC_PAD + tx - lx, PC_PAD + ty - ly, g_SWCap[ti[k]].s,
+                        adv, fg.R, fg.G, fg.B);
         }
     }
     s_PcHash = hh;

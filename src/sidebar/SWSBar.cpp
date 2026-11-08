@@ -2063,20 +2063,18 @@ static int SwsDedupRestore(void)
 /* 把目标态落到防御页上 (幂等)。返回 1 = 确实动过。
  * 已在隐藏态也照跑一遍: 新冒进防御页的 cameo 靠复查搬走 (移除幂等, 代价一遍扫描)。
  * 不用 AddCameo 入口钩挡新增 (超武 cameo 不走那条路)。 */
-/* 一行诊断: 防御页的容器条数 vs 页签 CameoCount。两者必须相等 ——
- * 页签布局按 CameoCount 算, 容器按 Items 画, 一旦不等就会出现"cameo 明明加
- * 回去了、格子里什么都没有"。只在状态翻转时打 (搬出/搬回/关侧栏)。 */
-static void SwsLogDefenseCnt(const char* tag)
+/* 防御页当前的容器条数 (-1 = 容器没定位)。与页签 CameoCount 必须相等 —— 页签
+ * 布局按 CameoCount 算, 容器按 Items 画, 一旦不等就会出现"cameo 明明加回去了、
+ * 格子里什么都没有"。
+ * 关闭态 (Enable=0) 不走去重那条路, s_TabCam 可能还没定位, 这里补一次。 */
+static int SwsDefenseCameoCount(void)
 {
-    int c = -1, sc;
-    /* 关闭态 (Enable=0) 不走去重那条路, s_TabCam 可能还没定位 —— 这里补一次,
-     * 否则诊断行恒打 cameo=-1 看不出容器与页签计数的关系。 */
     if (!SwsTabCameoOk()) SwsAresFindTabCameos();
-    if (SwsTabCameoOk())
-        c = *(int*)(s_TabCam + (unsigned)TAB_DEFENSE * DVEC_SIZE + DVEC_OFF_COUNT);
-    sc = SwsStripCameoCount(TAB_DEFENSE);
-    LogV(tag, " cameo=", c, " strip=", sc, NULL);
+    if (!SwsTabCameoOk()) return -1;
+    return *(int*)(s_TabCam + (unsigned)TAB_DEFENSE * DVEC_SIZE + DVEC_OFF_COUNT);
 }
+
+static int s_DdWaitLogged = 0;   /* "等扫描"那条诊断已记过 (进入该状态时记一次) */
 
 static int SwsDedupSync(void)
 {
@@ -2084,6 +2082,7 @@ static int SwsDedupSync(void)
     SwsEnsureInit();
     if (!s_Enable)
     {
+        s_DdWaitLogged = 0;   /* 关掉再打开时重新记一次"等扫描" */
         /* 总开关关掉了 = 不再去重: 原版"防御与支援"页必须回到原样。
          * 判据**不能只看 s_Removed** —— 过滤会**存进存档**: 在去重态下存档,
          * 读档后防御页本身就是空的, 这一局我们一条都没搬过 (实测
@@ -2100,8 +2099,9 @@ static int SwsDedupSync(void)
                 s_RestoreDone = 1;
                 s_Removed = 0;
                 s_DedupDone = 0;      /* 再打开时要重新搬一次 */
-                LogV("sws: dd restore on disable", " n=", a, NULL);
-                SwsLogDefenseCnt("sws: dd off");
+                LogV("sws: dd restore on disable", " n=", a,
+                     " cameo=", SwsDefenseCameoCount(),
+                     " strip=", SwsStripCameoCount(TAB_DEFENSE), NULL);
             }
             s_DedupDirty = 0;
             return 0;
@@ -2128,16 +2128,16 @@ static int SwsDedupSync(void)
      * dirty 留给下一次扫描。 */
     if (want && s_ItemN <= 0)
     {
-        static int s_WaitAge = 0;
-        if (s_WaitAge <= 0)
+        /* 这一等可能是整局 (侧栏条一直没建起来, 例如全图视角): 只在进入时记一次。 */
+        if (!s_DdWaitLogged)
         {
             LogLine("sws: dd wait scan");
-            s_WaitAge = 600;      /* 600 帧 (~10s) 再记一次 */
+            s_DdWaitLogged = 1;
         }
-        s_WaitAge--;
         s_DedupDirty = 1;
         return 0;
     }
+    s_DdWaitLogged = 0;   /* 走出来了, 下次再等重新记一次 */
     r = want ? SwsDedupRemove() : SwsDedupRestore();
     if (r < 0)
     {
@@ -2161,10 +2161,9 @@ static int SwsDedupSync(void)
     else s_Removed = 0;
     /* 真动了东西 / 目标态翻转才记一行 (复查不刷屏)。 */
     if (r > 0 || want != s_DedupDone)
-    {
-        LogV("sws: dd", want ? " hide n=" : " show n=", r, NULL);
-        SwsLogDefenseCnt(want ? "sws: dd hide" : "sws: dd show");
-    }
+        LogV(want ? "sws: dd hide" : "sws: dd show", " n=", r,
+             " cameo=", SwsDefenseCameoCount(),
+             " strip=", SwsStripCameoCount(TAB_DEFENSE), NULL);
     s_DedupDone = want;
     s_DedupDirty = 0;
     return r;

@@ -160,3 +160,5 @@
 ; C 键只让选中单位欢呼 (单机): 挡在 AllToCheerCommandClass::Execute 入口,
 ; 有选中时逐个调 TechnoClass::Cheer, 没选中回原版全体。见 src/misc/CheerSelect.cpp
 0x730F30 = CheerSelect_Hook, 8
+; 战败评估段入口: 观战者不落胜/负旗, 否则任何 AI 出局都会让对局结束
+0x4FC3E6 = Observer_DefeatEvalHook, 6

@@ -40,6 +40,18 @@ void BuildPaths(void);
 const char* GtGameDir(void);
 void GtEnsureLog(void);   /* 定义在 MOExperience.cpp; 幂等: 建路径+打开日志, 失败则 g_Log=NULL */
 void LogLine(const char* body);
+
+/* ---------------- 崩前日志环 ----------------
+ * LogLine 顺手把每行前 GT_TRAIL_LEN-1 字节记进环; 崩溃处理在写第一个字节之前
+ * 把它冻住并整段倒出来。目的: 崩溃单上直接有"最后在做什么", 不用再拿引擎
+ * debug.log 按时间戳交叉比对 (两个进程的时间轴对不上)。
+ * 崩溃现场本身也只写 MOExperience.log 一个文件: 启动轮转 (见 GtEnsureLog) 会把
+ * 末尾那段现场搬到新日志开头, 不另开文件。 */
+#define GT_TRAIL_N 12
+#define GT_TRAIL_LEN 56
+extern char g_GtTrail[GT_TRAIL_N][GT_TRAIL_LEN];
+extern volatile unsigned g_GtTrailSeq;
+extern volatile int g_GtTrailFreeze;
 /* ---------------- 鼠标游戏坐标 (WWMouse 原始客户区坐标, 供 PatrolCircle 等输入模块用), 返回 1=有效 */
 int GtMouseGameXY(int* x, int* y);
 

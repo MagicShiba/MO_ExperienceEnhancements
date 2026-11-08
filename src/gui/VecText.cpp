@@ -70,7 +70,6 @@ typedef struct {
     int CreditDY;   /* 顶栏数字垂直偏移 (负=上移) */
     int MenuTake;   /* 1=菜单按钮整体替换 */
     int DigitTrack; /* 数字字距微调 (只影响 0-9) */
-    int TipBox;     /* 1=电力提示定制盒 */
     int BriefLine;  /* 简报行距百分比 */
     int BriefOwn;   /* 1=简报正文自绘, 0=交回引擎 */
     int BriefTrack; /* 简报字距 */
@@ -525,24 +524,19 @@ static void VecSWStore(int kind, const wchar_t* s, int n, int fore, int x,
         if (g_SWCap[i].y == y && g_SWCap[i].kind == kind) { idx = i; break; }
     if (idx < 0)
     {
-        if (g_SWCapN < SWCAP_MAX)
-        {
-            idx = g_SWCapN++;
-            r = &g_SWCap[idx];
-            r->x = x; r->y = y;
-            r->fore = -1;
-        }
+        if (g_SWCapN < SWCAP_MAX) idx = g_SWCapN++;
         else
         {
-            /* 满了踢最旧一行。 */
+            /* 满了踢最旧一条 (tick 最旧 = 最近没被引擎重画过的行)。SWROW_MAX 按行
+             * 给了余量, 正常到不了这里。 */
             int old = 0;
             for (i = 1; i < g_SWCapN; i++)
                 if (g_SWCap[i].tick < g_SWCap[old].tick) old = i;
             idx = old;
-            r = &g_SWCap[idx];
-            r->x = x; r->y = y;
-            r->fore = -1;
         }
+        r = &g_SWCap[idx];
+        r->x = x; r->y = y;
+        r->fore = -1;
     }
     else
     {
@@ -561,7 +555,6 @@ static void VecSWStore(int kind, const wchar_t* s, int n, int fore, int x,
     }
     for (i = 0; i < n; i++) r->s[i] = s[i];
     r->s[n] = 0;
-    r->s[63] = 0;
     r->kind = kind;
     if (fore >= 0) r->fore = fore;
     else if (r->fore < 0) r->fore = (kind == 0) ? 0x07FF : 0xFFFF;
@@ -596,13 +589,6 @@ static int VecSWCapture(void* surf, int kind, const wchar_t* s, int x, int y)
         if (x < lo || x > hi || y < 32 || y > sh) return 0;
     }
     while (s[n] && n < 63) n++;
-    if (g_SWCapN >= SWCAP_MAX && n > 0)
-    {
-        int i, found = 0;
-        for (i = 0; i < g_SWCapN; i++)
-            if (g_SWCap[i].y == y && g_SWCap[i].kind == kind) { found = 1; break; }
-        if (!found) return 1;
-    }
     VecSWStore(kind, s, n, -1, x, y, 1);
     return n > 0 ? 1 : 0;
 }
@@ -863,42 +849,20 @@ int __fastcall VecDrawTextEntry(void* t, void* e,
     return r;
 }
 
-/* 上一帧电力提示 Print 落笔 x (Simple 入口的 x 自校验用) */
-static int g_LastTipX = -1;
-/* 当帧提示串宽 (Blit 首字画盒用, 0=跳过) */
-static int g_TipTot = 0;
-static int g_TipOw = 0;
-/* 当帧提示落笔 */
-static int g_TipY = -9999;
-/* 当帧提示首字是否已扫描 */
-static int g_BlitTipSeen = 0;
-/* 提示边框色粘存 (采不到时沿用, 不回落)。 */
-static unsigned g_TipBcCache = 0;
-static int g_TipBcOK = 0;
-/* 宽度表: ring + 常驻 sticky, 全串比对。键含字体/maxW。 */
+/* 宽度表: ring, 全串比对。键含字体/maxW (换任何一个即失效)。 */
 #define DIMCACHE_N 64
 typedef struct {
     const wchar_t* ptr;
     unsigned w0;
-    int n, ow, nw;
+    int n, nw;
     void* t;            /* BitFont: 换字体对象即失效 */
     void* idata;
-    int maxW;           /* 换折行上限即失效 (ow/nw 都跟它有关) */
+    int maxW;           /* 换折行上限即失效 (nw 跟它有关) */
     int oh;             /* 原版总高 */
     int ok;             /* r (原版返回值) */
 } DimCE;
 static DimCE g_DimC[DIMCACHE_N];
 static int g_DimCPos = 0;
-/* 防冲 sticky: 主表被冲后仍能命中。 */
-#define STICKY_N 16
-typedef struct {
-    int used;
-    unsigned w0;
-    int n, ow, nw;
-    wchar_t tx[64];
-} StkCE;
-static StkCE g_StkC[STICKY_N];
-static int g_StkRR = 0;
 
 /* FPS 钉住: Simple_ 收到的计数器串, Render 尾固定位 1x 重画 (见 VecFpsPinEntry)。 */
 #define FPS_PX 16
@@ -908,33 +872,6 @@ static wchar_t s_FpsBuf[FPS_MAXCH + 1];
 static int s_FpsN = 0;
 static int s_FpsHave = 0;
 void* g_FpsPinTramp = NULL;
-
-/* 全串宽度查表, 找不到返回 0。 */
-static int VecDimLookup(const wchar_t* s, int len)
-{
-    int ci, si, k;
-    if (!s || len <= 0) return 0;
-    for (ci = 0; ci < DIMCACHE_N; ci++)
-    {
-        DimCE* e = &g_DimC[ci];
-        if (!e->ptr || e->w0 != ((unsigned)s[0] & 0xFFFFu) || e->n != len)
-            continue;
-        if (!IsPlausiblePtr((void*)e->ptr)) continue;
-        for (k = 0; k < len; k++)
-            if (e->ptr[k] != s[k]) break;
-        if (k == len) return e->nw;
-    }
-    for (si = 0; si < STICKY_N; si++)
-    {
-        StkCE* st = &g_StkC[si];
-        if (!st->used || st->w0 != ((unsigned)s[0] & 0xFFFFu) || st->n != len)
-            continue;
-        for (k = 0; k < len; k++)
-            if (st->tx[k] != s[k]) break;
-        if (k == len) return st->nw;
-    }
-    return 0;
-}
 
 /* 放行给引擎原版那一段单独计时 (区分"我们做的活"与"引擎本来就要做的活")。 */
 static int __fastcall VecCallOrigPrint(void* t, int a1, int a2, int a3, int a4,
@@ -969,141 +906,9 @@ int __fastcall VecPrintEntry(void* t, void* e,
 static int __fastcall VecPrintBody(void* t, void* e,
     int a1, int a2, int a3, int a4, int a5, int a6, int a7)
 {
-    unsigned caller = (unsigned)__builtin_return_address(0);
     int r;
     if (g_ScoreScreen)
         return VecCallOrigPrint(t, a1, a2, a3, a4, a5, a6, a7);
-    /* 只认世界悬浮 Print, 排除菜单/列表同字串。 */
-    {
-        const wchar_t* ps = (const wchar_t*)a3;
-        if (caller == 0x004A5FF2u && ps && IsPlausiblePtr((void*)ps) &&
-            (((unsigned)ps[0] & 0xFFFFu) == 0x7535u))
-        {
-            int tl = 0, ci;
-            g_LastTipX = a4;
-            g_TipY = a5;
-            g_BlitTipSeen = 0;
-            /* 取本串宽度, 查不到为 0。 */
-            g_TipTot = 0;
-            g_TipOw = 0;
-            while (tl < 64 && ps[tl]) tl++;
-            /* 全串比对。 */
-            for (ci = 0; ci < DIMCACHE_N; ci++)
-            {
-                DimCE* e = &g_DimC[ci];
-                int k, same;
-                if (!e->ptr ||
-                    e->w0 != ((unsigned)ps[0] & 0xFFFFu) ||
-                    e->n != tl)
-                    continue;
-                if (!IsPlausiblePtr((void*)e->ptr)) continue;
-                same = 1;
-                for (k = 0; k < tl; k++)
-                {
-                    if (e->ptr[k] != ps[k]) { same = 0; break; }
-                }
-                if (same)
-                {
-                    int si, done = 0;
-                    g_TipTot = e->nw; g_TipOw = e->ow;
-                    /* 写透 sticky。 */
-                    for (si = 0; si < STICKY_N; si++)
-                    {
-                        StkCE* s = &g_StkC[si];
-                        if (s->used && s->w0 == e->w0 && s->n == tl)
-                        {
-                            s->nw = e->nw; s->ow = e->ow;
-                            for (k = 0; k < tl; k++) s->tx[k] = ps[k];
-                            s->tx[tl] = 0;
-                            done = 1;
-                            break;
-                        }
-                    }
-                    if (!done)
-                    {
-                        StkCE* s = &g_StkC[g_StkRR % STICKY_N];
-                        g_StkRR++;
-                        s->used = 1; s->w0 = e->w0; s->n = tl;
-                        s->nw = e->nw; s->ow = e->ow;
-                        for (k = 0; k < tl; k++) s->tx[k] = ps[k];
-                        s->tx[tl] = 0;
-                    }
-                    break;
-                }
-            }
-            /* 主表 miss 回 sticky。 */
-            if (g_TipTot == 0 && tl >= 10 && tl < 64)
-            {
-                int si;
-                for (si = 0; si < STICKY_N; si++)
-                {
-                    StkCE* s = &g_StkC[si];
-                    int k2, same2;
-                    if (!s->used ||
-                        s->w0 != ((unsigned)ps[0] & 0xFFFFu) ||
-                        s->n != tl)
-                        continue;
-                    same2 = 1;
-                    for (k2 = 0; k2 < tl; k2++)
-                    {
-                        if (s->tx[k2] != ps[k2]) { same2 = 0; break; }
-                    }
-                    if (same2) { g_TipTot = s->nw; g_TipOw = s->ow; break; }
-                }
-            }
-        }
-    }
-    /* 子串回退: 引擎只传可见子串时按 sticky 全文匹配, 估盒宽。 */
-    {
-        const wchar_t* qs = (const wchar_t*)a3;
-        int ql = 0;
-        if (qs && IsPlausiblePtr((void*)qs) &&
-            caller == 0x004A5FF2u &&
-            (g_TipTot == 0 || ((unsigned)qs[0] & 0xFFFFu) != 0x7535u) &&
-            g_TipY > -9000 && a5 >= g_TipY - 24 && a5 <= g_TipY + 24 &&
-            a4 >= g_LastTipX - 64 && a4 <= g_LastTipX + 400)
-        {
-            int si;
-            while (ql < 64 && qs[ql]) ql++;
-            if (ql >= 4 && ql < 64)
-            {
-                for (si = 0; si < STICKY_N; si++)
-                {
-                    StkCE* s = &g_StkC[si];
-                    int kk;
-                    if (!s->used || s->n < ql) continue;
-                    for (kk = 0; kk + ql <= s->n; kk++)
-                    {
-                        int m2, ok = 1;
-                        for (m2 = 0; m2 < ql; m2++)
-                        {
-                            if (s->tx[kk + m2] != qs[m2])
-                            {
-                                ok = 0;
-                                break;
-                            }
-                        }
-                        if (!ok) continue;
-                        {
-                            /* 子串宽优先用表, 没有按平均估。 */
-                            int ew = VecDimLookup(qs, ql);
-                            int t2 = (ew > 0) ? ew : (s->nw - kk * s->nw / s->n);
-                            int o2 = s->ow - kk * s->ow / s->n;
-                            if (o2 < 40) o2 = t2;
-                            if (t2 >= 40)
-                            {
-                                g_TipTot = t2; g_TipOw = o2;
-                                g_LastTipX = a4; g_TipY = a5;
-                                g_BlitTipSeen = 0;
-                            }
-                        }
-                        break;
-                    }
-                    if (g_TipTot != 0) break;
-                }
-            }
-        }
-    }
     /* 超武列表: 只收冒号计时器。CJK 名串不在此收 (与提示不可区分)。 */
     if (a4 >= 1300 && a5 >= 32)
     {
@@ -1285,14 +1090,14 @@ static DimCE* DimFind(const void* t, const void* idata, const wchar_t* s,
 
 /* 存一条。 */
 static void DimStore(const void* t, const void* idata, const wchar_t* s,
-                     int n, int maxW, int ow, int oh, int nw, int ok)
+                     int n, int maxW, int oh, int nw, int ok)
 {
     DimCE* d;
     if (n <= 0) return;
     d = &g_DimC[g_DimCPos % DIMCACHE_N];
     g_DimCPos++;
     d->ptr = s; d->w0 = (unsigned)s[0] & 0xFFFFu;
-    d->n = n; d->ow = ow; d->nw = nw;
+    d->n = n; d->nw = nw;
     d->t = (void*)t; d->idata = (void*)idata;
     d->maxW = maxW; d->oh = oh; d->ok = ok;
 }
@@ -1418,7 +1223,7 @@ static int __fastcall VecGetDimBody(void* t, void* e, const wchar_t* s,
                 }
             }
             *w = tot; if (h) *h = oh;
-            DimStore(t, idata, s, i, maxW, ow, oh, tot, r);
+            DimStore(t, idata, s, i, maxW, oh, tot, r);
             g_GDDepth--;
             return r;
         }
@@ -1455,7 +1260,7 @@ static int __fastcall VecGetDimBody(void* t, void* e, const wchar_t* s,
                 if (mx > ow + 6 && mx <= maxW)
                 {
                     *w = mx; if (h) *h = oh;
-                    DimStore(t, idata, s, m, maxW, ow, oh, mx, r);
+                    DimStore(t, idata, s, m, maxW, oh, mx, r);
                     g_GDDepth--;
                     return r;
                 }
@@ -1477,7 +1282,7 @@ static int __fastcall VecGetDimBody(void* t, void* e, const wchar_t* s,
     }
     if (i >= 256) goto fwd;
     *w = tot; if (h) *h = oh;
-    DimStore(t, idata, s, i, maxW, ow, oh, tot, r);
+    DimStore(t, idata, s, i, maxW, oh, tot, r);
     g_GDDepth--;
     return r;
 fwd:
@@ -2076,8 +1881,7 @@ static int __fastcall VecText_BlitBody(void* t, void* edxUnused, int wch, int x,
     if (!t || !IsPlausiblePtr(t) || wc == 9)
         return g_OrigBlit(t, NULL, wch, x, y, color);
     if (g_PfOn) { g_PfGlyph++; PfTick(); }
-    /* 坐标归一 (脏高位清掉, 见 VecNormC): 以下 inTip 跨度
-     * 与 VecRender 全用真坐标。 */
+    /* 坐标归一 (脏高位清掉, 见 VecNormC): 之后一律用真坐标。 */
     x = VecNormC(x);
     y = VecNormC(y);
     eff = (color == -1) ? (int)(*(unsigned short*)((char*)t + 0x24)) : color;
@@ -2112,97 +1916,6 @@ static int __fastcall VecText_BlitBody(void* t, void* edxUnused, int wch, int x,
             return x + adv;
         g_BriefState = 2;   /* 不可用: 这一字照原版画, 后面也不抑制 */
     }
-    int tx = x;
-    int inTip = (g_LastTipX >= 0 && g_TipTot > 0 &&
-                 tx >= g_LastTipX - g_TipTot - 16 &&
-                 tx <= g_LastTipX + g_TipTot + 8 &&
-                 y >= g_TipY - 8 && y <= g_TipY + 8);
-    {
-        /* 位置门 (颜色盲): 本 Print 的首个 Blit 落在当帧提示跨度内 (inTip)。
-         * 边缘出屏字会被引擎跳过 (不调 Blit), 首 Blit 未必是串首, 所以按跨度
-         * [tipx-tot-16, tipx+tot+8] 认, 不按原点 ±8。
-         * seen 守卫: 每批只进一次 —— 串内后续字的 tx 天然递增, 按"漂移"重画会
-         * 让盒跟着字走、越走越偏。Print→Blits 单线程同步, 不存在跨 Print 陈旧。 */
-        if (!g_BlitTipSeen && inTip && t && IsPlausiblePtr(t))
-        {
-            unsigned short* bb = *(unsigned short**)((char*)t + 0x0C);
-            int pp = *(int*)((char*)t + 0x10);
-            g_BlitTipSeen = 1;
-            /* 出界修复 (TipBox): 引擎窄盒 [cx-63,cx+62] 已在, 这里补两侧条带
-             * (纹理保留, 同 tone 无缝)、采样顶行红画新边框, 字随后画上。
-             * 坐标全在已扫描安全区内; 世界每帧重画, 无残留。TipBox=0 关闭。 */
-            if (g_VT.TipBox && g_TipTot >= 50 && g_TipTot <= 400 &&
-                bb && IsPlausiblePtr((void*)bb) &&
-                pp >= 64 && pp <= 4096)
-            {
-/* 盒锚点取 max(Print 落笔, 首 Blit x):
-                  * 首字出屏被跳过时首 Blit 偏右 (前面几个字已在屏外),
-                  * 跟 Blit x 左沿才与可见字对齐, 右沿仍用 Print 真右沿
-                  * (tipx+tot, 不多占); 取 min 会把盒钉在旧落笔、字溢出右沿。
-                  * cx (引擎窄盒中心) 仍按 Print 版式取, 与裁剪无关。 */
-                int anchor = (tx > g_LastTipX) ? tx : g_LastTipX;
-                int cx = g_LastTipX + g_TipTot / 2;
-                int oldHW = (g_TipOw > 0 ? g_TipOw : 118) / 2 + 4;
-                int oldL = cx - oldHW, oldR = cx + oldHW - 1;
-                int newL = anchor - 4, newR = g_LastTipX + g_TipTot + 4;
-                int yT = y - 2, yB = y + 18;
-                int xx, yy;
-                /* 边缘钳制: 只画屏内部分。oldL/oldR 随 ow 自适应
-                 * (118->±63 实测; 长串按 ow+8 估, 截图校准)。 */
-                int L0 = newL < 0 ? 0 : newL;
-                int R0 = newR >= pp ? pp - 1 : newR;
-                int cL = oldL < L0 ? L0 : oldL;
-                int cR = oldR > R0 ? R0 : oldR;
-                /* 真裁剪 (无模式切换): 盒与字永远同宽同锚
-                 * ([anchor-4, tipx+tot+4]), 作为一个整体进出屏幕;
-                 * 出屏侧不画边框。Print:Simple_ 是 1:1, 无额外绘制。 */
-                if (L0 <= R0 && yT >= 0 && yB <= 4096)
-                {
-                    unsigned bc = 0xF800u;
-                    unsigned bestR = 0;
-                    /* 边框色沿用顶行采样 (引擎窄盒顶边=玩家色);
-                     * 出界后顶行剩下全黑、采不到 (bestR==0) 就用粘存。 */
-                    for (xx = cL; xx <= cR; xx++)
-                    {
-                        unsigned c = bb[yT * pp + xx];
-                        unsigned R = (c >> 11) & 31u;
-                        if (R > bestR)
-                        {
-                            bestR = R; bc = c;
-                        }
-                    }
-                    if (bestR > 0)
-                    {
-                        g_TipBcCache = bc; g_TipBcOK = 1;
-                    }
-                    else if (g_TipBcOK) bc = g_TipBcCache;
-                    /* 底一律填不透黑 (图 1 定案): 出界后映射填充会漏出
-                     * 引擎半透明底 (图 2 的病); 实色填充与边框同范围,
-                     * 字随后画上, 不盖字。 */
-                    for (yy = yT + 1; yy <= yB - 1; yy++)
-                    {
-                        for (xx = L0; xx <= R0; xx++)
-                            bb[yy * pp + xx] = 0;
-                    }
-                    for (xx = L0; xx <= R0; xx++)
-                    {
-                        bb[yT * pp + xx] = (unsigned short)bc;
-                        bb[yB * pp + xx] = (unsigned short)bc;
-                    }
-                    /* 竖边框只画屏内段: 出屏侧顶着屏沿画会造出一条
-                     * 本不存在的假边框 (左对齐即此), 直接跳过。 */
-                    for (yy = yT + 1; yy <= yB - 1; yy++)
-                    {
-                        if (newL >= 0)
-                            bb[yy * pp + L0] = (unsigned short)bc;
-                        if (newR < pp)
-                            bb[yy * pp + R0] = (unsigned short)bc;
-                    }
-                }
-            }
-        }
-    }
-    int ox = x;
     if (g_MenuDepth > 0)
     {
         /* 菜单整行自有版式: 首 Blit 建全串字形、算总宽、矩形内居中起笔,
@@ -2282,7 +1995,7 @@ static int __fastcall VecText_BlitBody(void* t, void* edxUnused, int wch, int x,
                 adv = (adv * g_VT.FontPx + g_FontOrigH / 2) / g_FontOrigH;
                 if (adv < 1) adv = 1;
             }
-            r = VecRender(t, wc, adv, h, (inTip ? tx : x), y, eff,
+            r = VecRender(t, wc, adv, h, x, y, eff,
                           px, (cred ? g_VT.CreditDY : 0));
             /* VecRender 失败时记一行 (字/坐标/失败点 why), 上限 8。 */
             if (r == VC_FAIL)
@@ -2290,13 +2003,13 @@ static int __fastcall VecText_BlitBody(void* t, void* edxUnused, int wch, int x,
                 static int nF = 0;
                 if (nF++ < 8)
                     LogV("vfb:", "# wch=", (unsigned)wc & 0xFFFFu, " x=",
-                         tx + 2000, " y=", y, " adv=", adv, " why=",
+                         x + 2000, " y=", y, " adv=", adv, " why=",
                          g_VecWhy, NULL);
             }
-            if (r != VC_FAIL) return r;   /* x == ox (本函数内 x 只读)。 */
+            if (r != VC_FAIL) return r;
         }
     }
-    return g_OrigBlit(t, NULL, wch, ox, y, color);
+    return g_OrigBlit(t, NULL, wch, x, y, color);
 }
 
 /* 导出给钩子安装点的入口 (名字被 VecText_Install 的 JMP 钩引用): 只做 Perf 记账,
@@ -2376,7 +2089,6 @@ void VecText_EnsureInit(void)
         { "CreditDY",   &g_VT.CreditDY,   0,  -8, 8    },
         { "MenuTake",   &g_VT.MenuTake,   1,   0, 1    },
         { "DigitTrack", &g_VT.DigitTrack, 0,  -8, 8    },
-        { "TipBox",     &g_VT.TipBox,     1,   0, 1    },
         { "BriefLine",  &g_VT.BriefLine,  130, 0, 300  },
         { "BriefOwn",   &g_VT.BriefOwn,   1,   0, 1    },
         { "BriefTrack", &g_VT.BriefTrack, 2,   0, 12   },

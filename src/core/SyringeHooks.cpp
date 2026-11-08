@@ -109,6 +109,10 @@ static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(
     SYHOOK(0x403F33u, 5u, "AudioCapacity_Cache"),
     /* C 键只让选中单位欢呼 (单机), 见 CheerSelect.cpp 与 notes/欢呼.md。 */
     SYHOOK(0x730F30u, 8u, "CheerSelect_Hook"),
+    /* 战败评估段入口 (AcceptDefeat 里的 MPlayer_Defeated): 观战者跳过胜/负旗,
+     * 否则任何 AI 出局都会给观战房落 Flag_To_Lose, 90 帧后对局结束。
+     * 见 Observer.cpp 与 notes/观战.md §8。 */
+    SYHOOK(0x4FC3E6u, 6u, "Observer_DefeatEvalHook"),
 };
 
 /* ---------------- Syringe 握手 ---------------- */
