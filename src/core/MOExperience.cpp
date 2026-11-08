@@ -1927,6 +1927,14 @@ static const char* MOE_ModOf(unsigned v, unsigned* off)
     return NULL;
 }
 
+/* 值是否落在任一已装载模块的映像内 (模块表首次调用建一次; 崩溃过滤器里也会建)。
+ * 判对象虚表用: Ares 的虚表钩子会把它复制进 Ares.dll, 只判 exe 会全判野指针。 */
+int MOE_InAnyModule(unsigned v)
+{
+    if (!s_CrN) s_CrN = MOE_Modules(s_CrBase, s_CrSize, s_CrName);
+    return MOE_ModOf(v, NULL) ? 1 : 0;
+}
+
 /* 栈回溯单项: 追加 " i:label+off" (label 含冒号后的空格, self/exe 传 " MOE"/" exe",
  * 第三方传模块文件名)。每行 6 项, 满了先收行再重起表头 "CRASH: stk"。
  * col/n 跨项累计, 由调用方持句柄传入。

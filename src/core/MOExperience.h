@@ -12,6 +12,10 @@ void MOE_EnsureInit(void);
  * 与本模块的"整表换基址"类补丁互斥, 见 SelPoolCap.cpp。 */
 int MOE_PhobosLoaded(void);
 
+/* 值是否落在任一已装载模块的映像内 (exe 与 DLL 都算)。判对象虚表用: Ares 的
+ * 虚表钩子会把它复制进 Ares.dll, 只判 exe 会把这类对象全判成野指针。 */
+int MOE_InAnyModule(unsigned v);
+
 /* UI 层链路: 放大呈现后在 Primary 上重画一遍 (Composite 里那份已被盖掉)。
  * 返回 1 = 至少画了一层。
  * pMsgDrew (可空): 1 = 消息层本帧画出; 是否跳过原版只看 MsgText 是否接管。 */

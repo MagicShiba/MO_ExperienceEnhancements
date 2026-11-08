@@ -277,8 +277,9 @@ void GtUnpack16(unsigned short px, unsigned char* r, unsigned char* g,
 
 /* 槽: 0=战役框 1=提示框 2=全局文本主字号 3=超武面板/底电 4=聊天输入
  * 5=超武充能% 6=超武悬停名 7=缩放刻度 8=全局文本顶栏字号 9=FPS钉住
- * 10=ESC标题 11=ESC正文 12=左下选中面板 13=左下选中面板的数量角标。一槽一字号。 */
-#define GDI_SLOTS 14
+ * 10=ESC标题 11=ESC正文 12=左下选中面板 13=左下选中面板的数量角标
+ * 14=左下选中面板的悬停提示。一槽一字号。 */
+#define GDI_SLOTS 15
 
 typedef struct {
     HDC dc;

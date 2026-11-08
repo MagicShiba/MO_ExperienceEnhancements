@@ -39,7 +39,8 @@ static const PcxDef s_Defs[] = {
     { "btn_small_window.pcx", ICONRES_BTN_WINDOW },
     { "border_mental_n9.pcx", ICONRES_BORDER_N9 },
     { "border_mental_n9_B.pcx", ICONRES_BORDER_N9B },
-    { "icon_crate_type.pcx", ICONRES_CRATE_TYPE }
+    { "icon_crate_type.pcx", ICONRES_CRATE_TYPE },
+    { "icon_unit_up_type.pcx", ICONRES_UNITUP_TYPE }
 };
 #define PCX_RES_N ((int)(sizeof(s_Defs) / sizeof(s_Defs[0])))
 

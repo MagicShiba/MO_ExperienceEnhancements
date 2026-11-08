@@ -24,6 +24,7 @@
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "OrderThrottle.h"
+#include "MOExperience.h"
 
 #define OT_SECTION "Features"
 
@@ -123,11 +124,12 @@ static int   g_OtHookStateMega = 0;
 static int   g_OtHookStateStop = 0;
 static volatile int g_OtRet = 0;    /* 裸壳跨 popal 传返回值 */
 
-/* 对象指针须再验虚表落 exe 内 (IsPlausiblePtr 只判范围对齐)。 */
+/* 对象指针须再验虚表 (IsPlausiblePtr 只判范围对齐)。虚表可能被 Ares 搬进
+ * Ares.dll, 所以判"落在任一模块内", 不只认 exe。 */
 static int OT_IsObj(void* p)
 {
     if (!p || !IsPlausiblePtr(p)) return 0;
-    return OU_InExe((unsigned)(size_t)*(void***)p);
+    return MOE_InAnyModule((unsigned)(size_t)*(void***)p);
 }
 
 static int OT_ObjLive(void* p)

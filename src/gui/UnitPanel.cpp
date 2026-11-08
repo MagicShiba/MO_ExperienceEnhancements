@@ -9,6 +9,7 @@
  */
 
 #include <windows.h>
+#include <string.h>
 #include "EngineAddr.h"
 #include "Favorite.h"
 #include "FullMap.h"
@@ -67,6 +68,48 @@
 #define UP_GDI_SLOT 12          /* GdiText 槽: 左下选中面板 */
 #define UP_BADGE_SLOT 13        /* GdiText 槽: 数量角标 (资金/顶栏资源那套字体与字号) */
 
+/* 详情行: 图标表 icon_unit_up_type.pcx 是 60x32, 表里 4 列 x 2 排 15x15
+ * (两排的起始 y 是 0 / 16), 但**屏幕上排成一行** (面板只有 60x2 宽, 单排刚好
+ * 塞得下 8 个, 两排会白占 15px 高度)。
+ * 前 4 个 = 升级 (老兵/精英) 后得到的能力: 火力 / 生命 / 速度 / 自愈;
+ * 后 4 个 = 箱子给的加成: 火力 / 护甲 / 速度 / 隐形。 */
+#define UP_DET_CELL    15
+#define UP_DET_N       8         /* 一行 8 个 (表里 4x2, 屏幕上并成一行) */
+#define UP_DET_TOP     2         /* 与上面格子之间 */
+/* 8*15=120, 格区宽 60*2+1=121, 只有 1px 富余, 所以不留缝。 */
+#define UP_DET_BLOCK_W (UP_DET_N * UP_DET_CELL)
+#define UP_DET_BLOCK_H UP_DET_CELL
+#define UP_DET_H       (UP_DET_TOP + UP_DET_BLOCK_H)
+/* 表内的列数与第二排起始 y (只影响取图, 与屏幕排布无关) */
+#define UP_SH_COLS     4
+#define UP_SH_ROWY     16
+#define UP_SH_W        60
+#define UP_SH_H        32
+
+/* 悬停提示框 (样式同超武侧栏的悬停名: 半透明黑底 + 主题色 1px 边 + 白字)。
+ * 字号/字体跟随 [VecText] (与侧栏那份提示一致), 单独占一个 GDI 槽,
+ * 免得与面板正文 (FontPx) 互相拆了重建。
+ * 行距按**墨迹**排 (见 Up_InkMetrics), 不按字体 cell —— cell 含 ~6px leading,
+ * 按它排行会空出一大块 (与保存截图那里的列表同一个做法)。 */
+#define UP_TIP_PAD     4         /* 左右内边距 */
+#define UP_TIP_VPAD    3
+#define UP_TIP_GAP     4         /* 与面板之间的空隙 */
+#define UP_TIP_LINE_CAP 40
+#define UP_TIP_LINES   7         /* 数值行上限 (生命/速度/护甲/自愈 只占 4 条) */
+#define UP_TIP_LINE_GAP 3        /* 行间空隙 (墨迹之外) */
+#define UP_TIP_COL_GAP 6         /* 标签 / 原值 / 加成 三列之间的空隙 */
+#define UP_TIP_NAME_GAP 3        /* 名字下那条分隔线占的高度 */
+#define UP_TIP_NAME_CAP 40
+#define UP_TIP_SLOT    14        /* GdiText 槽: 面板悬停提示 (字号走 [VecText]) */
+#define UP_TIP_ACCENT_R 165
+#define UP_TIP_ACCENT_G 211
+#define UP_TIP_ACCENT_B 255
+
+/* 护甲基础档: 与 rules [ArmorTypes] 链末端的名字一一对应, 下标即 UpStat.armor。
+ * MO 的单位写的是 `Armor=flak_t1` 这类别名, 别名本身没有意义, 要沿
+ * `[ArmorTypes]` 的 `别名=基础名` 走到底再显示。 */
+#define UP_ARMOR_N     12
+
 /* 按钮下标 (自下而上)。收藏槽 0..FAV_SLOT_MAX-1 对应 UP_BTN_FAV1 + 槽号。 */
 #define UP_BTN_FOLD 0
 #define UP_BTN_MODE 1
@@ -85,6 +128,22 @@ typedef struct {
     unsigned short* pix;
 } UpCap;
 
+/* 一个单位的能力快照 (面板常驻详情行与提示框各存一份 —— 两者指向的单位未必
+ * 是同一个: 多选里的某一格、车下载员都是提示框自己那份)。
+ * 数值一律用"毫"整数存 (×1000), 免得浮点跨帧漂。 */
+typedef struct {
+    int ok;
+    unsigned char own[UP_DET_N];    /* 每个图标是否已拥有 (1=彩色 / 0=灰) */
+    int pctHp, pctSpeed;            /* 加成百分比, 0 = 没有加成 */
+    int hpCur, hpMax;               /* 当前血量 / 本型满血 (都是原值) */
+    int hpBoost;                    /* 折算满血: 满血 × 老兵护甲 × 箱子护甲 */
+    int spdBase;                    /* 原速度: rules Speed (毫) */
+    int spdMilli;                   /* 加成后速度: 原速度 × 倍率 (毫) */
+    int shMilli;                    /* 自愈: 每秒回多少 (毫 HP/游戏秒), 0 = 没有 */
+    int armor;                      /* 护甲基础档 (k_ArmorId 的下标), 0 = 没读到 */
+    wchar_t name[UP_TIP_NAME_CAP];  /* 类型显示名 (UIName), 空则不打标题行 */
+} UpStat;
+
 /* ---------------- 配置 / 状态 ---------------- */
 
 static int s_Init = 0;
@@ -92,6 +151,8 @@ static int s_Enable = 1;
 static int s_Margin = 0;
 static int s_FontPx = 11;
 static int s_Collapsed = 0;
+static int s_Detail = 0;         /* 详情态 (右键折叠键切换): 单选时面板底部多一行能力图标 */
+static int s_DetRow = 0;         /* 本帧详情行是否真的画 (详情态 + 单选 + 能看全部信息) */
 static int s_BtnFold = 1;        /* 左栏: 折叠键 */
 static int s_BtnWasd = 1;        /* 左栏: 键盘移动 (WASD) 切换键 */
 static int s_BtnFav = 1;         /* 左栏: 收藏槽按钮 */
@@ -126,9 +187,15 @@ static int   s_PickN = 0;
 static void* s_PickHost = NULL;
 static int Up_PickHas(void* o);          /* 定义在输入段, 绘制段要用 */
 static void Up_KmClear(void);            /* 定义在键盘段, 设置接口要用 */
+static void Up_KmStop(void);             /* 同上 */
+static int Up_InfoFull(void* o);         /* 定义在快照段, 排版段要用 */
+static int Up_DetailTarget(void);        /* 同上 */
 /* 悬停 */
 static int s_HoverCell = -1;
 static int s_HoverBtn = -1;
+static UpStat s_Det;            /* 面板常驻详情行 (单选的 s_List[0]) */
+static UpStat s_Tip;            /* 提示框 (鼠标下那个单位) */
+static void* s_TipObj = NULL;   /* s_Tip 对应的对象 (判断图标要不要画进提示框) */
 
 /* 键盘移动 (UP_BTN_MODE): 每个单位记一个"上次下令的目标格"作锚点。
  * 连按/按住时从锚点往前推, 不按当前格反复下同一个点; 松开一段时间后锚点作废。
@@ -210,10 +277,26 @@ static int s_CapN = 0;
 typedef int (__attribute__((thiscall)) *Fn_WhatAmI)(void*);
 typedef int (__attribute__((thiscall)) *Fn_Select)(void*);
 typedef void (__fastcall *Fn_UnselectAll)(void);
+/* CCINIClass 的读接口 (见 EngineAddr.h 的 FN_INI_READ*)。bool 返回值只在 AL,
+ * 声明成 int 会读到高 24 位垃圾, 所以 ReadBool 走 unsigned char。 */
+typedef int (__attribute__((thiscall)) *Fn_IniReadStr)(void* ini, const char* sec,
+                                                       const char* key, const char* def,
+                                                       char* buf, unsigned size);
+typedef unsigned char (__attribute__((thiscall)) *Fn_IniReadBool)(void* ini, const char* sec,
+                                                                  const char* key, int def);
 
 /* ---------------- 小工具 ---------------- */
 
 static int Up_Min(int a, int b) { return a < b ? a : b; }
+
+/* 对象的虚表指针; 不可信回 NULL。 */
+static void** Up_VT(void* o)
+{
+    void** vt;
+    if (!o || !IsPlausiblePtr(o)) return NULL;
+    vt = *(void***)o;
+    return (vt && IsPlausiblePtr(vt)) ? vt : NULL;
+}
 
 static void Up_Fill(unsigned char* base, int pitch, int W, int H,
                     int x, int y, int w, int h,
@@ -230,6 +313,17 @@ static void Up_Fill(unsigned char* base, int pitch, int W, int H,
         unsigned short* row = (unsigned short*)(base + (y + j) * pitch) + x;
         for (i = 0; i < w; i++) row[i] = Blend16(row[i], r, g, b, (unsigned)a);
     }
+}
+
+/* 1px 描边 (四边各一条) */
+static void Up_Edge(unsigned char* base, int pitch, int W, int H,
+                    int x, int y, int w, int h,
+                    unsigned r, unsigned g, unsigned b, int a)
+{
+    Up_Fill(base, pitch, W, H, x, y, w, 1, r, g, b, a);
+    Up_Fill(base, pitch, W, H, x, y + h - 1, w, 1, r, g, b, a);
+    Up_Fill(base, pitch, W, H, x, y, 1, h, r, g, b, a);
+    Up_Fill(base, pitch, W, H, x + w - 1, y, 1, h, r, g, b, a);
 }
 
 /* 一行文本。align: 0=左 1=中 2=右 (以 boxX/boxW 为基准)。 */
@@ -361,8 +455,6 @@ void UP_EnsureInit(void)
     s_BtnFold = GetPrivateProfileIntA(UP_SECTION, "BtnFold", 1, g_IniPath) ? 1 : 0;
     s_BtnWasd = GetPrivateProfileIntA(UP_SECTION, "BtnWasd", 1, g_IniPath) ? 1 : 0;
     s_BtnFav = GetPrivateProfileIntA(UP_SECTION, "BtnFav", 1, g_IniPath) ? 1 : 0;
-    /* 折叠键关掉就没法展开, 记着的折叠态一律作废 */
-    if (!s_BtnFold) s_Collapsed = 0;
     s_ActionLines = GetPrivateProfileIntA(UP_SECTION, "ActionLines", 0, g_IniPath) ? 1 : 0;
     if (s_Margin < 0) s_Margin = 0;
     if (s_Margin > 200) s_Margin = 200;
@@ -388,6 +480,20 @@ void UP_EnsureInit(void)
     LogLine(buf);
 }
 
+/* ---------------- 运行态开关 ----------------
+ * 面板关掉 / 不在对局时一律走这里收尾: 隐藏、关掉键盘移动 (连同标志与锚点)、
+ * 丢掉挂起的点击与提示框。菜单开着时主循环停着, 键盘门可能还带着"有可动单位"
+ * 的状态继续吞 W/A/S/D, 所以关掉要当场收, 不能等下一次 Poll。 */
+static void Up_ResetRuntime(void)
+{
+    s_Vis = 0;
+    Up_KmStop();
+    s_HoverCell = -1;
+    s_Tip.ok = 0;
+    s_Pend = 0;
+    s_PendRb = 0;
+}
+
 /* ---------------- 设置页接口 ---------------- */
 
 int UP_Enabled(void)
@@ -400,17 +506,7 @@ void UP_SetEnabled(int on)
 {
     UP_EnsureInit();
     s_Enable = on ? 1 : 0;
-    if (!s_Enable)
-    {
-        /* 关掉就当场收尾: 不等下一次 Poll (菜单开着时主循环停着, 键盘门
-         * 可能还带着"有可动单位"的状态继续吞 W/A/S/D)。 */
-        s_Vis = 0;
-        s_KeyMove = 0;
-        s_KeyMoveSel = 0;
-        Up_KmClear();
-        s_Pend = 0;
-        s_PendRb = 0;
-    }
+    if (!s_Enable) Up_ResetRuntime();
     LogLine(s_Enable ? "up: enable on" : "up: enable off");
 }
 
@@ -428,10 +524,9 @@ void UP_SetBtnShown(int which, int on)
     if (which == 0) s_BtnFold = on ? 1 : 0;
     else if (which == 1) s_BtnWasd = on ? 1 : 0;
     else s_BtnFav = on ? 1 : 0;
-    /* 关掉折叠键就展开 (否则折叠态再也点不开); 关掉 WASD 键要同时收掉模式,
-     * 否则键还在被吞、界面上却没有任何指示。 */
-    if (!s_BtnFold) s_Collapsed = 0;
-    if (!s_BtnWasd && s_KeyMove) { s_KeyMove = 0; s_KeyMoveSel = 0; Up_KmClear(); }
+    /* 关掉 WASD 键要同时收掉模式, 否则键还在被吞、界面上却没有任何指示。
+     * (折叠键关掉时作废折叠态由 Up_Layout 每帧保证) */
+    if (!s_BtnWasd && s_KeyMove) Up_KmStop();
     if (g_Log)
     {
         char buf[64];
@@ -451,15 +546,20 @@ static void Up_Layout(void)
      * 与 MsgText/CCToolTip 同一批问题 —— 锚定一律用 A。 */
     RectangleStruct va;
     int vx, vy, vh;
-    int i, by;
+    int i, by, favN;
     FM_GetViewRects(&va, 0);
     vx = va.X; vy = va.Y; vh = va.Height;
     /* 九宫格只包格子; 按钮列在框外左侧, 整块贴视口左下角。
-     * 上/下内边距不对称 (8/6): 框带上方留宽一点压住标题感, 下方留给页码块。 */
+     * 上/下内边距不对称 (8/6): 框带上方留宽一点压住标题感, 下方留给页码块。
+     * 详情行在格子下方, 整块面板往上长 (底边仍钉在视口底)。 */
+    s_DetRow = (s_Detail && !s_Collapsed && Up_DetailTarget()) ? 1 : 0;
     s_Pw = UP_PAD_L + UP_PAD_R + s_Cols * UP_CELL_W + (s_Cols - 1) * UP_CELL_GAP;
     s_Ph = UP_PAD_T + UP_PAD_B + s_Rows * UP_CELL_H + (s_Rows - 1) * UP_CELL_GAP;
-    /* 按钮列可以整列关掉 (三组都关): 那时面板贴回左下角, 不再给按钮留宽度。 */
-    s_HasBtnCol = (s_BtnFold || s_BtnWasd || (s_BtnFav && Fav_RevealCount() > 0)) ? 1 : 0;
+    if (s_DetRow) s_Ph += UP_DET_H;
+    /* 按钮列可以整列关掉 (三组都关): 那时面板贴回左下角, 不再给按钮留宽度。
+     * 收藏槽只露出用过的几个 ([Favorite] 关掉时 Fav_RevealCount() 回 0)。 */
+    favN = s_BtnFav ? Fav_RevealCount() : 0;
+    s_HasBtnCol = (s_BtnFold || s_BtnWasd || favN > 0) ? 1 : 0;
     s_Px = vx + s_Margin + (s_HasBtnCol ? UP_BTN_W + UP_GAP : 0);
     s_Py = vy + vh - s_Margin - s_Ph;
     if (s_Py < vy) s_Py = vy;
@@ -467,18 +567,13 @@ static void Up_Layout(void)
     s_Gx = s_Px + UP_PAD_L;
     s_Gy = s_Py + UP_PAD_T;
     /* 按钮列自下而上排; 底边钉在视口底 (== 框底), 不随面板格数浮动。
-     * 折叠键 / WASD 键各受一个开关管, 收藏槽按用过的槽逐个露出 ([Favorite]
-     * 关掉时 Fav_RevealCount() 回 0)。s_BtnId 把"第几个位置"映射到逻辑按钮,
+     * 折叠键 / WASD 键各受一个开关管。s_BtnId 把"第几个位置"映射到逻辑按钮,
      * 关掉的那组直接不占位。 */
     s_BtnN = 0;
     if (s_BtnFold) s_BtnId[s_BtnN++] = UP_BTN_FOLD;
     if (s_BtnWasd) s_BtnId[s_BtnN++] = UP_BTN_MODE;
-    if (s_BtnFav)
-    {
-        int k, n = Fav_RevealCount();
-        for (k = 0; k < n && s_BtnN < UP_BTN_MAX; k++)
-            s_BtnId[s_BtnN++] = UP_BTN_FAV1 + k;
-    }
+    for (i = 0; i < favN && s_BtnN < UP_BTN_MAX; i++)
+        s_BtnId[s_BtnN++] = UP_BTN_FAV1 + i;
     by = vy + vh - s_Margin;
     for (i = 0; i < s_BtnN; i++)
     {
@@ -490,7 +585,8 @@ static void Up_Layout(void)
     s_Cbx = vx + s_Margin;
     s_Cby = vy + vh - s_Margin - UP_BTN_H;
     if (s_Cby < vy) s_Cby = vy;
-    /* 折叠键被关掉时不允许停在折叠态 (否则永远展开不回来) */
+    /* 折叠键被关掉时不允许停在折叠态 (否则永远展开不回来)。这里是唯一的执行点:
+     * Poll 与 Draw 都先排版, 命中/绘制看到的一定是这个值。 */
     if (!s_BtnFold) s_Collapsed = 0;
 }
 
@@ -572,6 +668,13 @@ static void Up_KmOff(void)
     Up_KmClear();
 }
 
+/* 关掉模式本身 (折叠 / 面板关掉 / 关掉 WASD 键), 连同上面那套收尾。 */
+static void Up_KmStop(void)
+{
+    s_KeyMove = 0;
+    Up_KmOff();
+}
+
 static void Up_KmReset(void)
 {
     Up_KmClear();
@@ -599,7 +702,7 @@ static void Up_KmMatchEnter(void)
             s_KeyMove = 1;
             Up_KmReset();
         }
-        for (i = 0; i < 0x2C && buf[i]; i++) s_KmMap[i] = buf[i];
+        for (i = 0; i < OU_SCEN_NAME_MAX - 1 && buf[i]; i++) s_KmMap[i] = buf[i];
         s_KmMap[i] = 0;
     }
     else s_KmMap[0] = 0;
@@ -695,15 +798,6 @@ typedef void* (__attribute__((thiscall)) *Fn_UpThreat)(void* self, int threat,
                                                        CoordStruct* from, int onlyEnemy);
 typedef void  (__attribute__((thiscall)) *Fn_UpSetTarget)(void* self, void* target);
 
-/* 对象的虚表指针; 不可信回 NULL。 */
-static void** Up_KmVT(void* o)
-{
-    void** vt;
-    if (!o || !IsPlausiblePtr(o)) return NULL;
-    vt = *(void***)o;
-    return (vt && IsPlausiblePtr(vt)) ? vt : NULL;
-}
-
 /* 单位身上最远的武器射程 (leptons); 0 = 没有武器。 */
 static int Up_KmMaxRange(void* unit)
 {
@@ -711,7 +805,7 @@ static int Up_KmMaxRange(void* unit)
     Fn_UpGetWeapon gw;
     int i, best = 0;
 
-    vt = Up_KmVT(unit);
+    vt = Up_VT(unit);
     if (!vt) return 0;
     gw = (Fn_UpGetWeapon)vt[OFF_VT_GETWEAPON / 4];
     if (!gw || !IsPlausiblePtr((const void*)gw)) return 0;
@@ -775,7 +869,7 @@ static void* Up_KmBestTarget(void* unit)
     void* t;
     CoordStruct c;
 
-    vt = Up_KmVT(unit);
+    vt = Up_VT(unit);
     if (!vt) return NULL;
     f = (Fn_UpThreat)vt[OFF_VT_GREATEST_THREAT / 4];
     if (!f) return NULL;
@@ -885,12 +979,26 @@ static void Up_KmDropStale(void* unit, int uid, int frame)
     if (Up_KmKeepable(unit, tar)) return;
     alt = Up_KmBestTarget(unit);
     if (alt == tar) return;
-    vt = Up_KmVT(unit);
+    vt = Up_VT(unit);
     if (!vt) return;
     f = (Fn_UpSetTarget)vt[OFF_VT_SETTARGET / 4];
     if (!f) return;
     a->lastDrop = frame;
     f(unit, alt);
+}
+
+/* 把待确认方向真正发出去 (组合窗口到期, 或全松时补发)。发完清 pending,
+ * 并把方向记成"上一次真正下令的方向"。 */
+static void Up_KmFlushPend(int house, void** eu, int* ei, int en,
+                           int dx, int dy, int frame, int anchor)
+{
+    int i;
+    for (i = 0; i < en; i++)
+        Up_KmIssue(house, eu[i], ei[i], dx, dy, frame, anchor, 1, 1);
+    s_KeyDirX = dx;
+    s_KeyDirY = dy;
+    s_KeyPendActive = 0;
+    s_KeyPendAnchor = 0;
 }
 
 /* UP_Poll 每循环调一次。键态每帧都采; 只有模式开 + 有可动单位时才真的下令。 */
@@ -906,7 +1014,7 @@ static void Up_KeyMovePoll(void)
     unsigned now;
 
     s_KmMp = OU_IsMP();
-    if (!s_Vis) { s_KeyMove = 0; Up_KmOff(); return; }
+    if (!s_Vis) { Up_KmStop(); return; }
     if (!s_KeyMove) { Up_KmOff(); return; }
 
     cur = *(void**)ADDR_CURPLAYER;
@@ -974,15 +1082,8 @@ static void Up_KeyMovePoll(void)
     {
         /* 松手: 组合窗口里还没发出的那一下必须补发, 否则快速点按会丢输入。 */
         if (s_KeyPendActive)
-        {
-            for (i = 0; i < en; i++)
-                Up_KmIssue(house, eu[i], ei[i],
-                           s_KeyPendX, s_KeyPendY, frame, s_KeyPendAnchor, 1, 1);
-            s_KeyDirX = s_KeyPendX;
-            s_KeyDirY = s_KeyPendY;
-            s_KeyPendActive = 0;
-            s_KeyPendAnchor = 0;
-        }
+            Up_KmFlushPend(house, eu, ei, en, s_KeyPendX, s_KeyPendY, frame,
+                           s_KeyPendAnchor);
         Up_KmPrune();
         return;
     }
@@ -1037,12 +1138,7 @@ static void Up_KeyMovePoll(void)
              * 不等于 pend)。方向相对 pend 变了就按点按处理, 从当前格起。 */
             int ax = s_KeyPendAnchor;
             if (dx != s_KeyPendX || dy != s_KeyPendY) ax = 0;
-            for (i = 0; i < en; i++)
-                Up_KmIssue(house, eu[i], ei[i], dx, dy, frame, ax, 1, 1);
-            s_KeyDirX = dx;
-            s_KeyDirY = dy;
-            s_KeyPendActive = 0;
-            s_KeyPendAnchor = 0;
+            Up_KmFlushPend(house, eu, ei, en, dx, dy, frame, ax);
         }
         Up_KmPrune();
         return;
@@ -1121,11 +1217,9 @@ static void Up_KeyMovePoll(void)
 
 static int Up_WhatAmI(void* o)
 {
-    void** vt;
+    void** vt = Up_VT(o);
     Fn_WhatAmI f;
-    if (!o || !IsPlausiblePtr(o)) return -1;
-    vt = *(void***)o;
-    if (!vt || !IsPlausiblePtr(vt)) return -1;
+    if (!vt) return -1;
     f = (Fn_WhatAmI)vt[OFF_VT_WHATAMI / 4];
     if (!f) return -1;
     return f(o);
@@ -1159,12 +1253,16 @@ static int Up_Level(void* o)
     if (v >= 1.0f) return 1;
     return 0;
 }
+/* HouseClass::IsAlliedWith(HouseClass const*) 0x4F9A50, 返回值只在 AL。同盟含
+ * 自己, 所以"本家 + 盟友"一次判完 —— 这两类都能看细节, 敌方不行。 */
+typedef unsigned char (__attribute__((thiscall)) *Fn_Up_IsAllied)(void* self, void* other);
+
 static int Up_IsEnemy(void* o)
 {
     void* own = *(void**)((char*)o + OFF_OWNER);
     void* me = *(void**)(size_t)ADDR_CURPLAYER;
-    if (!own || !me) return 0;
-    return own != me;
+    if (!own || !me || !IsPlausiblePtr(own)) return 0;
+    return ((Fn_Up_IsAllied)(void*)FN_HOUSE_ISALLIED)(me, own) ? 0 : 1;
 }
 
 /* 本机是否观战者。观战不参与对局, 敌方单位的弹药同样是可见信息。
@@ -1181,6 +1279,22 @@ static int Up_LocalSpectator(void)
         s_v = Observer_LocalIsSpectator();
     }
     return s_v;
+}
+
+/* 这个单位的小信息能不能全列 (血量文本 / 经验 / 弹药 / 等级 / 能力)。
+ * 本家与盟友恒列; 敌方只有观战列 —— 观战不参与对局, 地图上本来就画着它的
+ * 等级和余弹, 面板跟上即可。 */
+static int Up_InfoFull(void* o)
+{
+    return Up_IsEnemy(o) ? Up_LocalSpectator() : 1;
+}
+
+/* 详情行与提示框的共同前提: 单选, 且这个单位的小信息能全列。
+ * 排版 (要不要给详情行留高) 与取值 (要算哪 8 个图标) 都只认这一处。 */
+static int Up_DetailTarget(void)
+{
+    return (s_ListN == 1 && s_List[0].obj && s_List[0].type &&
+            Up_InfoFull(s_List[0].obj)) ? 1 : 0;
 }
 
 static void Up_BuildList(void)
@@ -1249,14 +1363,12 @@ static void Up_SortByAmmo(UpEnt* a, int n)
 }
 
 /* ---------------- NoManualUnload (Ares 的 TechnoType 键) ----------------
- * 有些单位的"特殊功能"就是载员本体 (猎杀者的弹头、磁电束、鹦鹉螺的鱼雷、
- * 清道夫的抓取), rules 里用 `NoManualUnload=yes` 关掉引擎的手动卸载。
- * 这类载员不是可下车的乘客, 面板一律不列 —— 列出来就是个点了也没反应的格子,
- * 还会让人以为能把功能部件卸下来。
+ * 有些单位的"特殊功能"就是载员本体 (猎杀者的弹头、磁电束、鹦鹉螺的鱼雷),
+ * rules 里用 `NoManualUnload=yes` 关掉引擎的手动卸载。这类载员不是可下车的
+ * 乘客, 面板一律不列 —— 列出来就是点了也没反应的格子。
  *
- * 读法: INI_Rules (ADDR_INI_RULES 里存 CCINIClass*) + ReadBool, 节名用类型
- * 自己的 ID (持久指针, 绕开 INIClass 的节名指针缓存)。按 type 缓存; 换图/重开
- * 会换 INI_Rules 指针, 那时整组作废重查。 */
+ * 读法: INI_Rules + ReadBool, 节名用类型自己的 ID (持久指针, 绕开 INIClass
+ * 的节名指针缓存)。按 type 缓存; 换图/重开会换 INI_Rules 指针, 那时整组作废。 */
 #define UP_NMU_CAP 64
 typedef struct { void* type; int val; } UpNmu;
 static UpNmu s_Nmu[UP_NMU_CAP];
@@ -1266,8 +1378,6 @@ static int   s_NmuProbe = 0;      /* 本世代是否已记过一条诊断 */
 
 static int Up_NoManualUnload(void* type)
 {
-    typedef unsigned char (__attribute__((thiscall)) *Fn_ReadBool)(void* ini, const char* sec,
-                                                                 const char* key, int def);
     void* ini = *(void**)ADDR_INI_RULES;
     const char* id;
     int i, v;
@@ -1279,7 +1389,7 @@ static int Up_NoManualUnload(void* type)
 
     id = (const char*)((char*)type + OFF_TYPE_ID);
     if (MemReadableBytes(id, 0x18) < 0x18 || !id[0]) return 0;
-    v = ((Fn_ReadBool)(void*)FN_INI_READBOOL)(ini, id, "NoManualUnload", 0) ? 1 : 0;
+    v = ((Fn_IniReadBool)(void*)FN_INI_READBOOL)(ini, id, "NoManualUnload", 0) ? 1 : 0;
 
     if (s_NmuN < UP_NMU_CAP)
     {
@@ -1293,8 +1403,8 @@ static int Up_NoManualUnload(void* type)
         s_Nmu[0].val = v;
     }
 
-    /* 诊断: 每个 rules 时代第一条 (不论真假) 记下来 —— ini 指针为 0 或读不出值
-     * 都能一眼看出来; 之后只有真值才记, 免得日志被普通单位刷满。 */
+    /* 日志: 每个 rules 时代第一条 (不论真假) 必记 —— ini 指针为 0 或读不出值都
+     * 能一眼看出来; 之后只记真值, 免得被普通单位刷满。 */
     if (g_Log && (!s_NmuProbe || v))
     {
         char buf[112];
@@ -1322,7 +1432,7 @@ static int Up_PaxVisible(void* o)
     void* me;
     void* own;
 
-    if (Observer_LocalIsSpectator()) return 1;
+    if (Up_LocalSpectator()) return 1;
     me = *(void**)ADDR_CURPLAYER;
     if (!me) return 1;
     own = *(void**)((char*)o + OFF_OWNER);
@@ -1557,11 +1667,782 @@ static void Up_Refresh(void)
 static unsigned short* Up_Cameo(void* type);
 static unsigned short* Up_CapFind(void* type);
 
+/* ---------------- 详情行 / 提示框: 升级 / 箱子能力 ----------------
+ * 右键折叠键在「普通 / 详情」两态间切; 详情态且**单选**时面板底部多一行图标
+ * (一行 8 个 15x15, 来源 icon_unit_up_type.pcx 的 4x2 表, 屏幕上并成一行):
+ *   前 4 个 = 升级 (老兵/精英) 给的: 火力 / 生命 / 速度 / 自愈;
+ *   后 4 个 = 箱子给的: 火力 / 护甲 / 速度 / 隐形。
+ * 拥有的按原色画, 没拿到的压成暗灰。
+ * 面板上没有那行常驻图标时 (多选 / 载员 / 详情态没开), 同一张图跟着提示框走。
+ *
+ * 数值来源分两处, 不能混:
+ *   · 升级倍率**不存在单位身上**: 引擎每次用 HasAbility + rules 现算
+ *     (同 Phobos TechnoExt::GetCurrentFirepowerMultiplier), 照抄那条式子;
+ *   · 箱子倍率存在单位身上 (OFF_TECH_*_MULT / OFF_FOOT_SPEED_MULT), 直接乘字段。
+ * rules 的数值一律从 INI_Rules 现读 (地图内嵌 ini 能改写 [General]/[Powerups],
+ * 读磁盘上的 rulesmo.ini 会错), 按 INI 指针缓存。 */
+
+typedef unsigned char (__attribute__((thiscall)) *Fn_Up_HasAbil)(void* self, int ab);
+
+static unsigned short s_DetSheet[UP_SH_W * UP_SH_H];
+static unsigned short s_DetKey;      /* 表的透明色 (PCX 左上角那个像素) */
+static int s_DetOK = 0;
+
+/* rules 里与这套加成有关的那几个数 (倍率一律 ×1000 存整数) */
+typedef struct {
+    void* ini;
+    int  ok;
+    int  vetCombat, vetArmor, vetSpeed;       /* [General] VeteranCombat/Armor/Speed */
+    int  crateFire, crateArmor, crateSpeed;   /* [Powerups] 第 4 段倍率 */
+    /* 引擎原生自愈 (Phobos 的 GainSelfHeal 光环): 每 Frames 帧回 Amount×层数 点。
+     * MO 的 rules 是 Infantry/Unit 各 100 帧、Amount 20/10, 即每层步兵 3 HP/秒、
+     * 载具 1.5 HP/秒 (1 游戏秒 = 15 帧)。
+     * RepairRate 是 Ares 那套 (SelfHealing=) 的缺省周期: 类型没写 SelfHealing.Rate
+     * 时用它, `frames = Rate×900`。 */
+    int  shInfFrames, shInfAmt, shUnitFrames, shUnitAmt;
+    int  repairRate;                          /* [General] RepairRate (毫) */
+} UpRules;
+static UpRules s_Rules;
+
+/* 图标表读进本地缓冲 (引擎的 PCX 面不保证跨帧有效)。只在 Poll 里调 ——
+ * PCX 装载会动引擎面池; 尺寸不对就 1s 重试一次。 */
+static void Up_LoadDetSheet(void)
+{
+    static unsigned s_Try = 0;
+    PcxImage img;
+    if (s_DetOK) return;
+    if (s_Try && (unsigned)(GetTickCount() - s_Try) < 1000u) return;
+    s_Try = GetTickCount();
+    if (!PcxImage_Load(&img, "icon_unit_up_type.pcx", 2)) return;
+    if (img.width != UP_SH_W || img.height != UP_SH_H)
+    {
+        if (g_Log) LogLine("up: det sheet bad size");
+        return;
+    }
+    memcpy(s_DetSheet, img.px, sizeof(s_DetSheet));
+    s_DetKey = img.key;                  /* 表自带的透明色 (左上角那个像素) */
+    s_DetOK = 1;
+    if (g_Log) LogLine("up: det sheet ok");
+}
+
+/* 详情行 (图标块) 的左上角: 贴格子下方, 水平居中。宽高就是 UP_DET_BLOCK_W/H。 */
+static void Up_DetRect(int* px, int* py)
+{
+    int gw = s_Cols * UP_CELL_W + (s_Cols - 1) * UP_CELL_GAP;
+    int gh = s_Rows * UP_CELL_H + (s_Rows - 1) * UP_CELL_GAP;
+    *px = s_Gx + (gw - UP_DET_BLOCK_W) / 2;
+    *py = s_Gy + gh + UP_DET_TOP;
+}
+
+/* 一个图标。表里自带透明色 (PCX 左上角那个像素, 引擎装载时记成 key), 压到
+ * 面板上时跳过它 —— 不再按亮度猜背景。on=0 时按亮度降成暗灰 (没拿到这个能力)。 */
+static void Up_BlitDet(unsigned char* base, int pitch, int W, int H,
+                       int dx, int dy, int cell, int on)
+{
+    int cy = (cell / UP_SH_COLS) ? UP_SH_ROWY : 0;
+    int cx = (cell % UP_SH_COLS) * UP_DET_CELL;
+    const unsigned short* src = s_DetSheet + cy * UP_SH_W + cx;
+    int y, x;
+
+    for (y = 0; y < UP_DET_CELL; y++)
+    {
+        int sy = dy + y;
+        const unsigned short* srow;
+        unsigned short* drow;
+        if (sy < 0 || sy >= H) continue;
+        srow = src + y * UP_SH_W;
+        drow = (unsigned short*)(base + sy * pitch);
+        for (x = 0; x < UP_DET_CELL; x++)
+        {
+            int sx = dx + x;
+            unsigned v = srow[x];
+            if (sx < 0 || sx >= W) continue;
+            if (v == s_DetKey) continue;               /* 透明 */
+            if (!on)
+            {
+                unsigned r = (v >> 11) & 0x1Fu;
+                unsigned g = (v >> 5) & 0x3Fu;
+                unsigned b = v & 0x1Fu;
+                /* 5/6/5 亮度 (权 77/151/28 是 8bit 的那套, 按位宽折算), 再压成暗灰。 */
+                unsigned l = (r * 77u * 8u + g * 151u * 4u + b * 28u * 8u) >> 8;
+                l = l * 45u / 100u;
+                v = ((l >> 3) << 11) | ((l >> 2) << 5) | (l >> 3);
+            }
+            drow[sx] = (unsigned short)v;
+        }
+    }
+}
+
+/* 面板常驻详情行 (单选的 s_List[0])。提示框那份用 Up_BlitDet 直接画在框里。 */
+static void Up_DrawDetail(unsigned char* base, int pitch, int W, int H)
+{
+    int x, y, i;
+    if (!s_DetOK || !s_Det.ok) return;
+    Up_DetRect(&x, &y);
+    for (i = 0; i < UP_DET_N; i++)
+        Up_BlitDet(base, pitch, W, H, x + i * UP_DET_CELL, y, i, s_Det.own[i]);
+}
+
+/* "1.25" -> 1250, "100" -> 100000。小数只吃前 3 位, 倍率与帧数都够用。 */
+static int Up_ParseMilli(const char* s)
+{
+    int v = 0, frac = 0, fd = 0, neg = 0;
+    if (!s) return 0;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '-') { neg = 1; s++; }
+    else if (*s == '+') s++;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    v *= 1000;
+    if (*s == '.')
+    {
+        s++;
+        while (*s >= '0' && *s <= '9' && fd < 3) { frac = frac * 10 + (*s - '0'); s++; fd++; }
+        while (fd < 3) { frac *= 10; fd++; }
+        v += frac;
+    }
+    return neg ? -v : v;
+}
+
+/* 读一条 ini 串。⚠ 节名必须是**字符串字面量** (持久且每个节不同地址):
+ * INIClass 按指针缓存上次查的节, 传栈上数组会把别人的缓存顶掉。 */
+static int Up_RulesStr(void* ini, const char* sec, const char* key, const char* def,
+                       char* out, int cap)
+{
+    out[0] = 0;
+    if (!ini || !IsPlausiblePtr(ini)) return 0;
+    ((Fn_IniReadStr)(void*)FN_INI_READSTRING)(ini, sec, key, def, out, (unsigned)cap);
+    return out[0] ? 1 : 0;
+}
+
+static int Up_RulesNum(void* ini, const char* sec, const char* key, const char* def)
+{
+    char b[64];
+    if (!Up_RulesStr(ini, sec, key, def, b, (int)sizeof(b))) return Up_ParseMilli(def);
+    return Up_ParseMilli(b);
+}
+
+/* [Powerups] 的一段是 `名字=权重,图,能否在水上,倍率` (最后一段可能没有)。 */
+static int Up_PowerupMult(void* ini, const char* key)
+{
+    char b[128];
+    int i = 0, c = 0;
+    if (!Up_RulesStr(ini, "Powerups", key, "", b, (int)sizeof(b))) return 1000;
+    while (b[i] && c < 3) { if (b[i] == ',') c++; i++; }
+    if (c < 3) return 1000;
+    return Up_ParseMilli(b + i);
+}
+
+static void Up_RulesPoll(void)
+{
+    void* ini = *(void**)ADDR_INI_RULES;
+    if (s_Rules.ok && s_Rules.ini == ini) return;
+    s_Rules.ok = 0;
+    s_Rules.ini = ini;
+    if (!ini || !IsPlausiblePtr(ini)) return;
+    s_Rules.vetCombat = Up_RulesNum(ini, "General", "VeteranCombat", "1.0");
+    s_Rules.vetArmor = Up_RulesNum(ini, "General", "VeteranArmor", "1.0");
+    s_Rules.vetSpeed = Up_RulesNum(ini, "General", "VeteranSpeed", "1.0");
+    /* 引擎原生自愈: 这几个是整数帧数/点数, 走原值 (Up_ParseMilli 会 ×1000) */
+    s_Rules.shInfFrames  = Up_RulesNum(ini, "General", "SelfHealInfantryFrames", "100") / 1000;
+    s_Rules.shInfAmt     = Up_RulesNum(ini, "General", "SelfHealInfantryAmount", "20") / 1000;
+    s_Rules.shUnitFrames = Up_RulesNum(ini, "General", "SelfHealUnitFrames", "100") / 1000;
+    s_Rules.shUnitAmt    = Up_RulesNum(ini, "General", "SelfHealUnitAmount", "10") / 1000;
+    s_Rules.repairRate   = Up_RulesNum(ini, "General", "RepairRate", "0.03");
+    s_Rules.crateFire = Up_PowerupMult(ini, "Firepower");
+    s_Rules.crateArmor = Up_PowerupMult(ini, "Armor");
+    s_Rules.crateSpeed = Up_PowerupMult(ini, "Speed");
+    s_Rules.ok = 1;
+    if (g_Log)
+    {
+        char buf[240];
+        unsigned q = 0;
+        q = AppendCStr(buf, q, "up: rules vet=", sizeof(buf));
+        q += UtoA((unsigned)s_Rules.vetCombat, buf + q); q = AppendCh(buf, q, '/', sizeof(buf));
+        q += UtoA((unsigned)s_Rules.vetArmor, buf + q); q = AppendCh(buf, q, '/', sizeof(buf));
+        q += UtoA((unsigned)s_Rules.vetSpeed, buf + q);
+        q = AppendCStr(buf, q, " crate=", sizeof(buf));
+        q += UtoA((unsigned)s_Rules.crateFire, buf + q); q = AppendCh(buf, q, '/', sizeof(buf));
+        q += UtoA((unsigned)s_Rules.crateArmor, buf + q); q = AppendCh(buf, q, '/', sizeof(buf));
+        q += UtoA((unsigned)s_Rules.crateSpeed, buf + q);
+        q = AppendCStr(buf, q, " heal=", sizeof(buf));
+        q += UtoA((unsigned)s_Rules.shInfFrames, buf + q); q = AppendCh(buf, q, '/', sizeof(buf));
+        q += UtoA((unsigned)s_Rules.shInfAmt, buf + q); q = AppendCh(buf, q, '/', sizeof(buf));
+        q += UtoA((unsigned)s_Rules.shUnitFrames, buf + q); q = AppendCh(buf, q, '/', sizeof(buf));
+        q += UtoA((unsigned)s_Rules.shUnitAmt, buf + q);
+        q = AppendCStr(buf, q, " rr=", sizeof(buf));
+        q += UtoA((unsigned)s_Rules.repairRate, buf + q);
+        LogLine(buf);
+    }
+}
+
+/* 类型侧的几个数:
+ *   Cloakable= —— 类型本来就隐形, 走 ini (类型偏移没有直接旁证);
+ *   OFF_TYPE_SELFHEAL / OFF_TYPE_ORGANIC —— 直接读引擎装载 ini 时写好的字节,
+ *     比再解析一遍 ini 快, 也不会跟 Ares 的 Promotable 之类脱节;
+ *   SelfHealing.Rate / .Amount —— Ares 扩展, 写了就按 Ares 的节奏算 (没写 Rate
+ *     时 Ares 用 [General] RepairRate 兜底, Amount 兜底 1 点)。**别**把
+ *     [General] SelfHealInfantry/UnitFrames 当成 Ares 的周期, 那是 Phobos 的
+ *     GainSelfHeal 光环用的。
+ * 节名 = 类型自己的 ID (持久指针), 按 type 缓存; 换图/重开会换 INI_Rules
+ * 指针, 那时整组作废。 */
+#define UP_TB_CAP 48
+typedef struct {
+    void* type;
+    unsigned char cloak, selfHeal, organic;
+    int   aresRate;                 /* SelfHealing.Rate (毫), 0 = 没写 */
+    int   aresAmt;                  /* SelfHealing.Amount (HP), 0 = 没写 */
+    int   speedMilli;               /* rules 的 Speed (毫), 0 = 没读到 */
+    int   armor;                    /* 护甲基础档 (k_ArmorId 下标), 0 = 没读到 */
+} UpTb;
+
+/* 护甲: 单位写的 `Armor=` 多是别名 (MO 里 flak_t1 / r_light / arch ...), 别名本身
+ * 没有意义, 沿 `[ArmorTypes]` 的 `别名=基础名` 走到底再显示; 走不通就当没读到。
+ * 节名用字面量 "ArmorTypes" (持久且与类型节不同地址, 不踩 INIClass 的节指针缓存)。 */
+static const char* const k_ArmorId[UP_ARMOR_N] = {
+    "", "none", "flak", "plate", "light", "medium", "heavy",
+    "wood", "steel", "concrete", "special_1", "special_2"
+};
+static const wchar_t* const k_ArmorName[UP_ARMOR_N] = {
+    L"",
+    L"无防护",                     /* 无甲 */
+    L"防弹衣",                     /* 布甲 */
+    L"重盔甲",                     /* 钢板 */
+    L"轻甲",                     /* 轻甲 */
+    L"中甲",                     /* 中甲 */
+    L"重甲",                     /* 重甲 */
+    L"木甲",                     /* 木甲 */
+    L"钢甲",                     /* 钢甲 */
+    L"混凝土",               /* 混凝土 */
+    L"特制1",                    /* 特殊1 */
+    L"特制2"                     /* 特殊2 */
+};
+
+static int Up_ArmorKind(void* ini, const char* typeId)
+{
+    char cur[32], next[64];
+    int i, depth;
+
+    if (!Up_RulesStr(ini, typeId, "Armor", "", cur, (int)sizeof(cur))) return 0;
+    for (depth = 0; depth < 4; depth++)
+    {
+        int n = lstrlenA(cur);              /* 别写成 while(cur[n])n++: GCC 会换成 strlen */
+        while (n > 0 && (cur[n - 1] == ' ' || cur[n - 1] == '\t')) cur[--n] = 0;
+        if (!cur[0]) return 0;
+        for (i = 1; i < UP_ARMOR_N; i++)
+            if (!lstrcmpiA(cur, k_ArmorId[i])) return i;
+        if (!Up_RulesStr(ini, "ArmorTypes", cur, "", next, (int)sizeof(next))) return 0;
+        lstrcpynA(cur, next, (int)sizeof(cur));
+    }
+    return 0;
+}
+
+static UpTb s_Tb[UP_TB_CAP];
+static int s_TbN = 0;
+static void* s_TbIni = NULL;
+
+static const UpTb* Up_TypeInfo(void* type)
+{
+    void* ini = *(void**)ADDR_INI_RULES;
+    const char* id;
+    UpTb* e;
+    char b[64];
+    int i;
+
+    if (!type || !IsPlausiblePtr(type)) return NULL;
+    if (ini != s_TbIni) { s_TbIni = ini; s_TbN = 0; }
+    for (i = 0; i < s_TbN; i++) if (s_Tb[i].type == type) return &s_Tb[i];
+    if (!ini || !IsPlausiblePtr(ini)) return NULL;
+    id = (const char*)((char*)type + OFF_TYPE_ID);
+    if (MemReadableBytes(id, 0x18) < 0x18 || !id[0]) return NULL;
+
+    if (s_TbN >= UP_TB_CAP) s_TbN = 0;          /* 满了从头覆盖 */
+    e = &s_Tb[s_TbN];
+    e->type = type;
+    e->cloak = ((Fn_IniReadBool)(void*)FN_INI_READBOOL)(ini, id, "Cloakable", 0) ? 1 : 0;
+    e->selfHeal = ((unsigned char*)type)[OFF_TYPE_SELFHEAL] ? 1 : 0;
+    e->organic  = ((unsigned char*)type)[OFF_TYPE_ORGANIC] ? 1 : 0;
+    /* Ares 扩展: 写了 Rate 才按 Ares 的节奏算 (毫 / HP), 没写就 0 = 用引擎那套。 */
+    e->aresRate = Up_RulesStr(ini, id, "SelfHealing.Rate", "", b, (int)sizeof(b))
+                  ? Up_ParseMilli(b) : 0;
+    if (e->aresRate < 0 || e->aresRate > 100000) e->aresRate = 0;
+    e->aresAmt = Up_RulesStr(ini, id, "SelfHealing.Amount", "", b, (int)sizeof(b))
+                 ? Up_ParseMilli(b) / 1000 : 0;
+    if (e->aresAmt < 0 || e->aresAmt > 100000) e->aresAmt = 0;
+    /* 基准速度 (逻辑值, leptons/帧): 提示框那行"实际速度"就是它乘倍率 */
+    e->speedMilli = Up_ParseMilli(Up_RulesStr(ini, id, "Speed", "0", b, (int)sizeof(b))
+                                  ? b : "0");
+    if (e->speedMilli < 0 || e->speedMilli > 100000) e->speedMilli = 0;
+    e->armor = Up_ArmorKind(ini, id);
+    s_TbN++;
+    return e;
+}
+
+/* 类型的显示名 (UIName)。引擎在 AbsType 的装载里已经把 CSF 键解析好存在
+ * `type+0x60` (0x410960: `mov [esi+0x60], eax`, eax = LoadString(type+0x3D)),
+ * 这里只读缓存, 不去调 CSF (那要猜调用约定, 还有缺键分支)。 */
+static void Up_TypeName(void* type, wchar_t* out, int cap)
+{
+    const wchar_t* nm;
+    int i;
+
+    if (!out || cap <= 0) return;
+    out[0] = 0;
+    if (!type || !IsPlausiblePtr(type)) return;
+    nm = *(const wchar_t**)((char*)type + OFF_TYPE_UINAME);
+    if (!nm || !IsPlausiblePtr((void*)nm)) return;
+    for (i = 0; i < cap - 1 && nm[i]; i++)
+        out[i] = (nm[i] == L'\n' || nm[i] == L'\r') ? L' ' : nm[i];
+    out[i] = 0;
+}
+
+static int Up_HasAbility(void* o, int ab)
+{
+    return ((Fn_Up_HasAbil)(void*)FN_TECH_HASABILITY)(o, ab) ? 1 : 0;
+}
+
+/* 对象上的倍率字段; 取到垃圾值 (0 / 天文数字) 当 1.0。 */
+static double Up_Mult(void* o, unsigned off)
+{
+    double d = *(double*)((char*)o + off);
+    if (!(d > 0.0) || d > 100.0) return 1.0;
+    return d;
+}
+
+/* (倍率 - 1) * 100, 四舍五入到整数; 低于 1 的一律算 0 (没有加成)。 */
+static int Up_MultPct(int milli, double crate)
+{
+    double m = (double)milli / 1000.0 * crate;
+    int pc;
+    if (m <= 1.0) return 0;
+    pc = (int)((m - 1.0) * 100.0 + 0.5);
+    if (pc > 999) pc = 999;
+    return pc;
+}
+
+/* Ares 的 SelfHealing.Rate 是"多少游戏秒回一次"的倒数口径: 周期 =
+ * `max((int)(Rate×900), 1)` 帧 (Ares TechnoExt::GetSelfHealAmount 原文是
+ * static_cast<int>, 截断; 引擎原版此处 ftol 也是截断)。 */
+static int Up_RatePeriod(int rateMilli)
+{
+    int period;
+    if (rateMilli <= 0) return 0;
+    period = rateMilli * 9 / 10;                /* ×900/1000 */
+    return period < 1 ? 1 : period;
+}
+
+/* 自愈速率: 每 period 帧回 step 点 HP, 折算成毫 HP / 游戏秒 (1 秒 = 15 帧)。 */
+static int Up_HealMilli(int step, int period)
+{
+    if (step <= 0 || period <= 0) return 0;
+    return (int)((long long)step * 15 * 1000 / period);
+}
+
+/* 占领来的全场光环: 科技医院 / 科技机械厂**不需要单位进去**, 占领即对己方
+ * 全体步兵 / 载具生效 (rules 里 [CATHOSP]/[CAFHOSP] 只有 `InfantryGainSelfHeal=1`,
+ * [CAMACH] 只有 `UnitsGainSelfHeal=1`, 三者都**没有** Hospital=/UnitRepair=)。
+ *
+ * 层数不用自己数: 引擎在建筑放下时就把类型的值累加进 House 的这两个 int,
+ * 拆掉时减回去。读所有者 House 即可 —— 不用遍历建筑表, 也不会漏掉"建在迷雾里"
+ * 或别人替我们造的那种情况。只读, 联机安全。 */
+static int Up_GainHealLayers(void* owner, int infantry)
+{
+    int n;
+    if (!owner || !IsPlausiblePtr(owner)) return 0;
+    n = *(int*)((char*)owner +
+                (infantry ? OFF_HOUSE_INFSELFHEAL : OFF_HOUSE_UNITSELFHEAL));
+    if (n < 0 || n > 999) return 0;             /* 越界当地址读错 */
+    return n;
+}
+
+/* 一个单位的能力快照: 8 个图标该亮哪几个 + 提示框那几行数。
+ * 返回 0 = 这个对象取不到这些信息 (类型不对), 调用方据此不画行/不打框。 */
+static int Up_StatBuild(void* o, void* type, UpStat* st)
+{
+    void* owner;
+    const UpTb* ti;
+    int am, i, aresHeal, gainLayers, hasFire, hasStrong, hasFast, baseMilli, organic;
+    double fm, amm, sm;
+
+    for (i = 0; i < UP_DET_N; i++) st->own[i] = 0;
+    st->ok = 0;
+    if (!o || !type) return 0;
+    am = Up_WhatAmI(o);
+    if (am != ABS_UNIT && am != ABS_INFANTRY && am != ABS_AIRCRAFT &&
+        am != ABS_BUILDING) return 0;
+    Up_RulesPoll();
+    ti = Up_TypeInfo(type);
+
+    hasFire = Up_HasAbility(o, ABIL_FIREPOWER);
+    hasStrong = Up_HasAbility(o, ABIL_STRONGER);
+    hasFast = Up_HasAbility(o, ABIL_FASTER);
+    fm = Up_Mult(o, OFF_TECH_FIREPOWER_MULT);
+    amm = Up_Mult(o, OFF_TECH_ARMOR_MULT);
+    sm = (am == ABS_BUILDING) ? 1.0 : Up_Mult(o, OFF_FOOT_SPEED_MULT);
+    /* 自愈的三个来源, 前两个是 Ares 口径 (同一个开关), 第三个是 Phobos 的光环:
+     *   ① 类型自带 SelfHealing= (类型字节 0xD14);
+     *   ② 老兵/精英带的 SelfHeal 能力 (HasAbility 9);
+     *   ③ 占领科技医院(步兵/有机载具) / 科技机械厂(载具) 后 House 上的层数。 */
+    owner = *(void**)((char*)o + OFF_OWNER);
+    organic = (am == ABS_INFANTRY) || (am == ABS_UNIT && ti && ti->organic);
+    gainLayers = 0;
+    /* Phobos 只给步兵与载具发这个光环, 飞机/建筑按 NoHeal 处理。 */
+    if (am == ABS_INFANTRY || am == ABS_UNIT)
+        gainLayers = Up_GainHealLayers(owner, organic);
+    aresHeal = (Up_HasAbility(o, ABIL_SELFHEAL) || (ti && ti->selfHeal)) ? 1 : 0;
+    st->own[3] = (unsigned char)((aresHeal || gainLayers > 0) ? 1 : 0);
+
+    st->own[0] = (unsigned char)hasFire;
+    st->own[1] = (unsigned char)hasStrong;
+    st->own[2] = (unsigned char)hasFast;
+    st->own[4] = (unsigned char)(fm > 1.0005);
+    st->own[5] = (unsigned char)(amm > 1.0005);
+    st->own[6] = (unsigned char)(sm > 1.0005);
+    /* 隐形箱子只写单位的 Cloakable; 类型本来就隐形的单位不算拿到箱子 */
+    st->own[7] = (unsigned char)((*(unsigned char*)((char*)o + OFF_TECH_CLOAKABLE) &&
+                                  !(ti && ti->cloak)) ? 1 : 0);
+
+    Up_TypeName(type, st->name, UP_TIP_NAME_CAP);
+    st->armor = ti ? ti->armor : 0;
+
+    st->pctHp = Up_MultPct(hasStrong ? s_Rules.vetArmor : 1000, amm);
+    st->pctSpeed = (am == ABS_BUILDING) ? 0
+                   : Up_MultPct(hasFast ? s_Rules.vetSpeed : 1000, sm);
+    /* 生命: 当前 / 本型满血 (都是原值; 加成后的一行由提示框并排给出) */
+    st->hpCur = Up_Hp(o);
+    if (st->hpCur < 0) st->hpCur = 0;
+    st->hpMax = *(int*)((char*)type + OFF_TYPE_STRENGTH);
+    if (st->hpMax <= 0) st->hpMax = st->hpCur;
+    /* 折算满血 = 满血 × 老兵护甲 × 箱子护甲 (两者都是"少掉血", 等效加血) */
+    st->hpBoost = 0;
+    if (st->hpMax > 0 && st->hpMax < 100000)
+        st->hpBoost = (int)((double)st->hpMax *
+                            (hasStrong ? (double)s_Rules.vetArmor / 1000.0 : 1.0) *
+                            amm + 0.5);
+    /* 速度: rules 的 Speed 是原值, 乘上老兵/箱子倍率才是实际速度 (建筑不算) */
+    st->spdBase = 0;
+    st->spdMilli = 0;
+    baseMilli = ti ? ti->speedMilli : 0;
+    if (am != ABS_BUILDING && baseMilli > 0)
+    {
+        st->spdBase = baseMilli;
+        st->spdMilli = (int)((double)baseMilli *
+                             (hasFast ? (double)s_Rules.vetSpeed / 1000.0 : 1.0) *
+                             sm + 0.5);
+    }
+    /* 自愈数值 —— 只算单位自己的恢复, 不掺外部维修, 两条路**相加**:
+     *   · Ares (SelfHealing= / SelfHeal 能力): 周期 = max(Rate×900,1) 帧,
+     *     Rate 没写就用 [General] RepairRate, Amount 没写算 1 点;
+     *   · Phobos 光环: 每 SelfHealInfantry/UnitFrames 帧回 Amount×层数 点
+     *     (MO: 100 帧 → 步兵每层 3 HP/秒、载具每层 1.5 HP/秒)。
+     * 有间隔也按折算后的"每秒多少 HP"显示。没自愈就是 0 (那一行不打)。 */
+    st->shMilli = 0;
+    if (st->own[3])
+    {
+        if (aresHeal)
+        {
+            int rate = (ti && ti->aresRate > 0) ? ti->aresRate : s_Rules.repairRate;
+            int amt = (ti && ti->aresAmt > 0) ? ti->aresAmt : 1;
+            st->shMilli += Up_HealMilli(amt, Up_RatePeriod(rate));
+        }
+        if (gainLayers > 0)
+        {
+            int frames = organic ? s_Rules.shInfFrames : s_Rules.shUnitFrames;
+            int amt = (organic ? s_Rules.shInfAmt : s_Rules.shUnitAmt) * gainLayers;
+            st->shMilli += Up_HealMilli(amt, frames);
+        }
+    }
+    /* 数值变了才打一行 (低频): 核对层数有没有进 House 就靠它。 */
+    if (g_Log)
+    {
+        static int lastMilli = -1, lastGain = -1, lastAres = -1;
+        if (st->shMilli != lastMilli || gainLayers != lastGain || aresHeal != lastAres)
+        {
+            char buf[128];
+            unsigned q = 0;
+            lastMilli = st->shMilli; lastGain = gainLayers; lastAres = aresHeal;
+            q = AppendCStr(buf, q, "up: heal ares=", sizeof(buf));
+            q += UtoA((unsigned)aresHeal, buf + q);
+            q = AppendCStr(buf, q, " gain=", sizeof(buf));
+            q += UtoA((unsigned)gainLayers, buf + q);
+            q = AppendCStr(buf, q, " milli=", sizeof(buf));
+            q += UtoA((unsigned)st->shMilli, buf + q);
+            LogLine(buf);
+        }
+    }
+    st->ok = 1;
+    return 1;
+}
+
+/* 面板常驻详情行: 单选的 s_List[0] (s_DetRow 已经判过单体/信息可见)。 */
+static void Up_DetPoll(void)
+{
+    s_Det.ok = 0;
+    if (!s_DetRow) return;
+    s_Det.ok = Up_StatBuild(s_List[0].obj, s_List[0].type, &s_Det);
+}
+
+/* 提示框: 鼠标落在面板上就出。目标 = 鼠标下那一格的单位 (多选里的一格 /
+ * 车下载员), 落在面板主体但没压到有单位的格子时回到单选的那个;
+ * 敌方 (非观战) 一律不显示。 */
+static void Up_TipPoll(int mx, int my)
+{
+    void* o = NULL;
+    void* t = NULL;
+    int cell;
+
+    s_Tip.ok = 0;
+    s_TipObj = NULL;
+    if (s_Collapsed || !Up_HitPanel(mx, my)) return;
+    cell = Up_HitCell(mx, my);
+    if (cell >= 0 && cell < s_Cols * s_Rows)
+    {
+        const UpEnt* e = &s_Cell[cell];
+        if (e->obj && e->type && e->count > 0) { o = e->obj; t = e->type; }
+    }
+    if (!o)
+    {
+        /* 按钮列与框外空白不算"面板上" */
+        if (!Up_PtIn(mx, my, s_Px, s_Py, s_Pw, s_Ph)) return;
+        if (!Up_DetailTarget()) return;
+        o = s_List[0].obj;
+        t = s_List[0].type;
+    }
+    if (!Up_InfoFull(o)) return;         /* 敌方 (非观战) 不给看 */
+    if (Up_StatBuild(o, t, &s_Tip)) s_TipObj = o;
+}
+
+/* ---- 悬停提示框 ---- */
+
+/* 毫数写文本: 整数值直接写整数 (3000 → "3"), 否则一位小数 (1500 → "1.5",
+ * 555 → "0.6"); ≥10 的一律取整, 免得 "12.3" 这种没意义的精度。 */
+static int Up_AppMilli(wchar_t* d, int cap, int milli)
+{
+    int t, n;
+    if (milli >= 10000 || milli % 1000 == 0)
+        return Up_Num(d, cap - 1, (milli + 500) / 1000);
+    t = (milli + 50) / 100;                      /* 十分位 */
+    n = Up_Num(d, cap - 3, t / 10);
+    d[n++] = L'.';
+    d[n++] = (wchar_t)(L'0' + (t % 10));
+    d[n] = 0;
+    return n;
+}
+
+/* "+40% (175)" —— 加成百分比 + 括号里的加成后数值 (没有加成一个字符都不写)。
+ * 右列所有行都从 '+' 起排, 所以这一列天然对齐。 */
+static int Up_PctBoost(wchar_t* d, int cap, int pct, int after, int afterMilli)
+{
+    int n = 0;
+    if (pct <= 0 || after <= 0 || cap < 12) return 0;
+    d[n++] = L'+';
+    n += Up_Num(d + n, cap - n - 2, pct);
+    d[n++] = L'%';
+    d[n++] = L' ';
+    d[n++] = L'(';
+    n += afterMilli ? Up_AppMilli(d + n, cap - n - 2, after)
+                    : Up_Num(d + n, cap - n - 2, after);
+    d[n++] = L')';
+    d[n] = 0;
+    return n;
+}
+
+/* "0.6/秒" (速率 = 每游戏秒回多少 HP; 只在有自愈时调用)。 */
+static int Up_HealValue(wchar_t* d, int cap, int milli)
+{
+    int n;
+    if (milli < 100)                             /* 不到 0.1 */
+    {
+        d[0] = L'<';
+        d[1] = L'0';
+        d[2] = L'.';
+        d[3] = L'1';
+        n = 4;
+    }
+    else
+    {
+        n = Up_AppMilli(d, cap - 3, milli);
+    }
+    d[n++] = L'/';
+    d[n++] = 0x79D2;                             /* 秒 */
+    d[n] = 0;
+    return n;
+}
+
+/* 墨迹上下界 (同字号只量一次)。行距按墨迹 + 空隙排, 不按字体 cell —— cell 含
+ * ~6px leading, 按它排行会空出一大块 (与保存截图那里的列表同一个做法)。 */
+static int Up_InkMetrics(int px, int* top, int* h)
+{
+    static const wchar_t k_probe[] = { 0x56FD, 'G', 'g', 0 };   /* 国 G g */
+    static int s_px = 0, s_top = 0, s_h = 0;
+    int w, T, B;
+
+    if (s_h > 0 && s_px == px) { *top = s_top; *h = s_h; return 1; }
+    if (!GdiEnsure(px, VecText_Bold(), UP_TIP_SLOT, VecText_FontFace())) return 0;
+    w = RenderLine(k_probe, 3);
+    if (w <= 0) return 0;
+    Up_InkTB(w, &T, &B);
+    if (B <= T) return 0;
+    s_px = px; s_top = T; s_h = B - T + 1;
+    *top = s_top; *h = s_h;
+    return 1;
+}
+
+/* 提示框画在面板右侧 (放不下改左侧), 底边与面板对齐 —— **不跟鼠标走**:
+ * 逐像素跟随会让整块每帧重画, 位置也会晃。宽高按内容自适应。
+ * 行: 单位名 / 分隔线 / (8 个能力图标) / 生命 / 速度 / 护甲 / 自愈。
+ * 数值行分三列: 标签 | 原值 | 加成 —— 右列一律从 '+' 起排, 所以两行的加号
+ * 是对齐的; 右列 = 百分比 + 括号里的加成后数值, 没有加成时整列留空。
+ * 没有数据的那行整行不画 (不占位、不写 "—")。第一行是单位全名 (格子下那行
+ * 名字受 cameo 尺寸限制会被截, 有的单位没图标)。 */
+static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
+{
+    static const wchar_t k_life[]  = { 0x751F, 0x547D, 0 };   /* 生命 */
+    static const wchar_t k_spd[]   = { 0x901F, 0x5EA6, 0 };   /* 速度 */
+    static const wchar_t k_armor[] = { 0x62A4, 0x7532, 0 };   /* 护甲 */
+    static const wchar_t k_heal[]  = { 0x81EA, 0x6108, 0 };   /* 自愈 */
+    const UpStat* st = &s_Tip;
+    const wchar_t* lab[UP_TIP_LINES];
+    wchar_t left[UP_TIP_LINES][UP_TIP_LINE_CAP];
+    wchar_t right[UP_TIP_LINES][UP_TIP_LINE_CAP];
+    int leftN[UP_TIP_LINES], rightN[UP_TIP_LINES];
+    int nl = 0, i, px, inkTop, inkH, lineH;
+    int labW = 0, leftW = 0, leftAll = 0, rightW = 0, anyRight = 0, iconH = 0;
+    int nameN = 0, nameW = 0;
+    int total, maxw, bw, bh, bx, by, y, xL = 0, xR = 0;
+
+    if (!st->ok) return;
+    /* 字号/字体与侧栏那份悬停提示同源 ([VecText]), 单独一个槽互不打扰。 */
+    px = VecText_FontPx();
+    if (px <= 0) px = 18;
+    if (!GdiEnsure(px, VecText_Bold(), UP_TIP_SLOT, VecText_FontFace())) return;
+    if (!Up_InkMetrics(px, &inkTop, &inkH)) return;
+    lineH = inkH + UP_TIP_LINE_GAP;
+
+    if (st->name[0])
+    {
+        nameN = lstrlenW(st->name);
+        nameW = RenderLine(st->name, nameN);
+    }
+    /* 图标行: 面板上已经有同一单位的常驻图标时就跳过, 不重复画 */
+    if (s_DetOK && !(s_DetRow && s_TipObj == s_List[0].obj))
+        iconH = (UP_DET_CELL > lineH) ? UP_DET_CELL : lineH;
+    /* 生命: 左列是原值 (当前/本型满血, 满血时不写 "/满血"), 右列是护甲加成 */
+    if (st->hpMax > 0)
+    {
+        lab[nl] = k_life;
+        leftN[nl] = (st->hpCur < st->hpMax)
+                    ? Up_NumPair(left[nl], UP_TIP_LINE_CAP, st->hpCur, st->hpMax)
+                    : Up_Num(left[nl], UP_TIP_LINE_CAP, st->hpMax);
+        rightN[nl] = Up_PctBoost(right[nl], UP_TIP_LINE_CAP,
+                                 st->pctHp, st->hpBoost, 0);
+        nl++;
+    }
+    /* 速度: 左列是 rules 的 Speed, 右列是乘过倍率的实际速度 (建筑没有这一行) */
+    if (st->spdBase > 0)
+    {
+        lab[nl] = k_spd;
+        leftN[nl] = Up_AppMilli(left[nl], UP_TIP_LINE_CAP, st->spdBase);
+        rightN[nl] = Up_PctBoost(right[nl], UP_TIP_LINE_CAP,
+                                 st->pctSpeed, st->spdMilli, 1);
+        nl++;
+    }
+    if (st->armor > 0 && st->armor < UP_ARMOR_N)
+    {
+        lab[nl] = k_armor;
+        lstrcpynW(left[nl], k_ArmorName[st->armor], UP_TIP_LINE_CAP);
+        leftN[nl] = lstrlenW(left[nl]);
+        rightN[nl] = 0;
+        nl++;
+    }
+    if (st->shMilli > 0)
+    {
+        lab[nl] = k_heal;
+        leftN[nl] = Up_HealValue(left[nl], UP_TIP_LINE_CAP, st->shMilli);
+        rightN[nl] = 0;
+        nl++;
+    }
+    if (!nl) return;
+
+    for (i = 0; i < nl; i++)
+    {
+        int w;
+        w = RenderLine(lab[i], 2);
+        if (w > labW) labW = w;
+        w = RenderLine(left[i], leftN[i]);
+        if (w > leftAll) leftAll = w;
+        if (rightN[i])
+        {
+            if (w > leftW) leftW = w;
+            anyRight = 1;
+            w = RenderLine(right[i], rightN[i]);
+            if (w > rightW) rightW = w;
+        }
+    }
+    /* 宽: 内边距 + 标签列 + 原值列 (+ 空档 + 加成列); 图标行/名字更宽就按它们。
+     * 右列的位置按"有加成的那几行"的原值宽定, 免得被更宽的护甲/自愈推远。 */
+    maxw = labW + UP_TIP_COL_GAP + leftAll;
+    if (anyRight && labW + 2 * UP_TIP_COL_GAP + leftW + rightW > maxw)
+        maxw = labW + 2 * UP_TIP_COL_GAP + leftW + rightW;
+    if (nameW > maxw) maxw = nameW;
+    if (iconH > 0 && UP_DET_BLOCK_W > maxw) maxw = UP_DET_BLOCK_W;
+    if (maxw <= 0) return;
+    total = nl * lineH + iconH;
+    if (nameW > 0) total += lineH + UP_TIP_NAME_GAP;
+    bw = maxw + UP_TIP_PAD * 2;
+    bh = total + UP_TIP_VPAD * 2;
+    bx = s_Px + s_Pw + UP_TIP_GAP;
+    if (bx + bw > W - 2) bx = s_Px - bw - UP_TIP_GAP;
+    if (bx < 2) bx = 2;
+    if (bx + bw > W - 2) bw = W - 2 - bx;
+    by = s_Py + s_Ph - bh;
+    if (by < 2) by = 2;
+    if (bw < 16) return;
+    Up_Fill(base, pitch, W, H, bx, by, bw, bh, 0, 0, 0, 150);
+    Up_Edge(base, pitch, W, H, bx, by, bw, bh,
+            UP_TIP_ACCENT_R, UP_TIP_ACCENT_G, UP_TIP_ACCENT_B, 200);
+
+    y = by + UP_TIP_VPAD;
+    if (nameW > 0)
+    {
+        Up_Text(base, pitch, W, H, bx + UP_TIP_PAD,
+                y + (lineH - inkH) / 2 - inkTop, st->name, nameN,
+                255, 255, 255, 0, 0, 0);
+        y += lineH;
+        /* 名字下的分隔线 (半透明白), 让标题和数值分层 */
+        Up_Fill(base, pitch, W, H, bx + 1, y, bw - 2, 1, 255, 255, 255, 45);
+        y += UP_TIP_NAME_GAP;
+    }
+    if (iconH > 0)
+    {
+        int ix = bx + (bw - UP_DET_BLOCK_W) / 2;
+        int iy = y + (iconH - UP_DET_CELL) / 2;
+        int k;
+        for (k = 0; k < UP_DET_N; k++)
+            Up_BlitDet(base, pitch, W, H, ix + k * UP_DET_CELL, iy, k, st->own[k]);
+        y += iconH;
+    }
+    xL = bx + UP_TIP_PAD + labW + UP_TIP_COL_GAP;
+    xR = xL + leftW + UP_TIP_COL_GAP;
+    for (i = 0; i < nl; i++)
+    {
+        int ty = y + (lineH - inkH) / 2 - inkTop;
+        Up_Text(base, pitch, W, H, bx + UP_TIP_PAD, ty, lab[i], 2,
+                255, 255, 255, 0, 0, 0);
+        Up_Text(base, pitch, W, H, xL, ty, left[i], leftN[i],
+                255, 255, 255, 0, 0, 0);
+        if (rightN[i])
+            Up_Text(base, pitch, W, H, xR, ty, right[i], rightN[i],
+                    255, 255, 255, 0, 0, 0);
+        y += lineH;
+    }
+}
+
 /* 备齐当前页的图标: PCX 装载/ SHP 现渲都动引擎, 必须在扫描期做。 */
 static void Up_PrepareIcons(void)
 {
     int i;
-    if (s_Collapsed) return;
+    if (s_Collapsed || !s_ListN) return;
+    Up_LoadDetSheet();                    /* 详情行与提示框都可能要这一行图标 */
     for (i = 0; i < UP_CELLN; i++)
     {
         const UpEnt* e = &s_Cell[i];
@@ -1592,20 +2473,15 @@ static unsigned short* Up_CapFind(void* type)
 /* 图标文件名: 先问 art ini 的 `CameoPCX=` (Ares 键, MO 的单位图标都在这), 没有再
  * 退回类型自己的 `Cameo=` 字段。返回 1 = 拿到 .pcx 名。
  * ⚠ 节名必须传类型对象里的持久字符串 (ImageFile / ID): INIClass 按**指针**缓存上一次
- * 查的节, 传栈上数组会让所有类型都命中第一次的缓存 (详见 EngineAddr.h 的 ADDR_INI_ART)。
- * secOut 只回带节名给日志看, 不参与查询。 */
-static int Up_CameoPcxName(void* type, char* out, int cap, char* secOut, int secCap)
+ * 查的节, 传栈上数组会让所有类型都命中第一次的缓存 (详见 EngineAddr.h 的 ADDR_INI_ART)。 */
+static int Up_CameoPcxName(void* type, char* out, int cap)
 {
-    typedef int (__attribute__((thiscall)) *Fn_ReadStr)(void* ini, const char* sec,
-                                                        const char* key, const char* def,
-                                                        char* buf, unsigned size);
     const char* img = (const char*)((char*)type + OFF_TYPE_IMAGEFILE);
     const char* id = (const char*)((char*)type + OFF_TYPE_ID);
     const char* use;
     int n, i;
 
     out[0] = 0;
-    if (secOut && secCap > 0) secOut[0] = 0;
     /* img/id 各自判可读再选: 任一边不可读都不能解引用, 两边都不可读才放弃。 */
     if (MemReadableBytes(img, 0x19) >= 0x19 && img[0])
         use = img;
@@ -1614,16 +2490,10 @@ static int Up_CameoPcxName(void* type, char* out, int cap, char* secOut, int sec
         if (MemReadableBytes(id, 0x18) < 0x18 || !id[0]) return 0;
         use = id;
     }
-    if (secOut)
-    {
-        int k;
-        for (k = 0; k + 1 < secCap && use[k]; k++) secOut[k] = use[k];
-        secOut[k] = 0;
-    }
 
     if (IsPlausiblePtr((void*)ADDR_INI_ART))
-        ((Fn_ReadStr)(void*)FN_INI_READSTRING)((void*)ADDR_INI_ART, use, "CameoPCX",
-                                              "", out, (unsigned)cap);
+        ((Fn_IniReadStr)(void*)FN_INI_READSTRING)((void*)ADDR_INI_ART, use, "CameoPCX",
+                                                  "", out, (unsigned)cap);
     if (!out[0])
     {
         /* 类型自带的 Cameo= (可能是 .pcx, 也可能空) */
@@ -1652,7 +2522,6 @@ static unsigned short* Up_Cameo(void* type)
 {
     unsigned short* px;
     char name[64];
-    char sec[32];
     void* shp;
 
     if (!type || !IsPlausiblePtr(type)) return NULL;
@@ -1660,8 +2529,7 @@ static unsigned short* Up_Cameo(void* type)
     if (px) return px;
 
     name[0] = 0;
-    sec[0] = 0;
-    if (Up_CameoPcxName(type, name, (int)sizeof(name), sec, (int)sizeof(sec)))
+    if (Up_CameoPcxName(type, name, (int)sizeof(name)))
         px = IconSnap_Pcx(name, UP_ICON_W, UP_ICON_H, NULL, NULL);
     if (!px)
     {
@@ -1958,15 +2826,10 @@ static void Up_Tri(unsigned char* base, int pitch, int W, int H,
 static void Up_BtnBg(unsigned char* base, int pitch, int W, int H,
                      int x, int y, int hot, int active)
 {
-    unsigned char br, bg2, bb;
     if (!hot && !active) return;
     Up_Fill(base, pitch, W, H, x, y, UP_BTN_W, UP_BTN_H, 22, 22, 26, 200);
-    if (active) { br = 240; bg2 = 200; bb = 80; }
-    else { br = 210; bg2 = 210; bb = 225; }
-    Up_Fill(base, pitch, W, H, x, y, UP_BTN_W, 1, br, bg2, bb, 235);
-    Up_Fill(base, pitch, W, H, x, y + UP_BTN_H - 1, UP_BTN_W, 1, br, bg2, bb, 235);
-    Up_Fill(base, pitch, W, H, x, y, 1, UP_BTN_H, br, bg2, bb, 235);
-    Up_Fill(base, pitch, W, H, x + UP_BTN_W - 1, y, 1, UP_BTN_H, br, bg2, bb, 235);
+    if (active) Up_Edge(base, pitch, W, H, x, y, UP_BTN_W, UP_BTN_H, 240, 200, 80, 235);
+    else Up_Edge(base, pitch, W, H, x, y, UP_BTN_W, UP_BTN_H, 210, 210, 225, 235);
 }
 
 /* ---------------- 绘制: 格子 ---------------- */
@@ -1983,18 +2846,13 @@ static void Up_DrawCellBg(unsigned char* base, int pitch, int W, int H,
 static void Up_CellFrame(unsigned char* base, int pitch, int W, int H,
                          int x, int y, int hot)
 {
-    unsigned char r = 255, g = 205, b = 60;
     int k;
     if (!hot) return;
     for (k = 0; k < 2; k++)
     {
-        int xx = x + k, yy = y + k;
         int ww = UP_CELL_W - k * 2, hh = UP_CELL_H - k * 2;
         if (ww <= 0 || hh <= 0) break;
-        Up_Fill(base, pitch, W, H, xx, yy, ww, 1, r, g, b, 255);
-        Up_Fill(base, pitch, W, H, xx, yy + hh - 1, ww, 1, r, g, b, 255);
-        Up_Fill(base, pitch, W, H, xx, yy, 1, hh, r, g, b, 255);
-        Up_Fill(base, pitch, W, H, xx + ww - 1, yy, 1, hh, r, g, b, 255);
+        Up_Edge(base, pitch, W, H, x + k, y + k, ww, hh, 255, 205, 60, 255);
     }
 }
 
@@ -2093,9 +2951,7 @@ static void Up_DrawIconCell(unsigned char* base, int pitch, int W, int H,
     if (!e || !e->type || !e->obj) return;
     cameo = Up_Cameo(e->type);
     if (cameo) Up_BlitIcon(base, pitch, W, H, x, y, cameo);   /* 没有 cameo 就只留底与角标 */
-    /* full: 这个单位的小信息全列。本家/盟友恒列; 敌方只有观战列 —— 观战不参与对局,
-     * 地图上本来就画着它的等级和余弹, 面板跟上即可。 */
-    full = Up_IsEnemy(e->obj) ? Up_LocalSpectator() : 1;
+    full = Up_InfoFull(e->obj);
     ammoMax = Up_AmmoMax(e->type);
     ammo = Up_Ammo(e->obj);
     level = Up_Level(e->obj);
@@ -2135,7 +2991,7 @@ static void Up_DrawInfoCell(unsigned char* base, int pitch, int W, int H,
     if (hp < 0) hp = 0;
     if (hp > mx) hp = mx;
     pc = hp * 100 / mx;
-    full = Up_IsEnemy(e->obj) ? Up_LocalSpectator() : 1;
+    full = Up_InfoFull(e->obj);
     level = Up_Level(e->obj);
     vet = *(float*)((char*)e->obj + OFF_TECH_VETERANCY);
 
@@ -2313,6 +3169,8 @@ int UP_Draw(void)
                     (SU_PlanHasPax(e->obj) || (sh && Up_PickHas(e->obj)))) pick = 1;
                 Up_CellFrame(base, pitch, w, h, cx, cy, hot || pick);
             }
+            /* 详情行: 图标块在格子下方 (面板已按 UP_DET_H 加高) */
+            if (s_DetRow) Up_DrawDetail(base, pitch, w, h);
             /* 第二遍: 只补 9px 外框带 —— 它是最外一层, 不能被图标盖住,
              * 而它的内底又不许盖图标, 所以只能拆成两遍贴。 */
             if (s_BorderOK) Up_BlitBg(base, pitch, w, h, s_Px, s_Py, 1);
@@ -2335,6 +3193,8 @@ int UP_Draw(void)
                     Up_Fill(base, pitch, w, h, dx, dy, bw, bh, 150, 150, 160, 235);
             }
         }
+        /* 提示框压在最上层 (面板 + 页码都画完了) */
+        if (s_Tip.ok) Up_DrawTip(base, pitch, w, h);
     }
     GtUnlock(surf);
 
@@ -2437,7 +3297,7 @@ static void Up_ClickAt(int mx, int my)
         s_HoverCell = -1;
         s_PendRb = 0;
         /* 折叠后看不到模式指示, 必须关掉; 否则 WASD 被吞却没有任何提示。 */
-        if (s_Collapsed) { s_KeyMove = 0; s_KeyMoveSel = 0; Up_KmClear(); }
+        if (s_Collapsed) Up_KmStop();
         LogLine(s_Collapsed ? "up: collapsed" : "up: expanded");
         return;
     }
@@ -2518,10 +3378,19 @@ static void Up_ClickAt(int mx, int my)
     }
 }
 
-/* 右键落在星星按钮上: 切换指示箭头类型 (贴边 / 中心同心圆)。 */
+/* 右键落在折叠键上: 切「普通 / 详情」两态 (详情态单选时面板底部多一行能力图标)。
+ * 落在星星按钮上: 切换指示箭头类型 (贴边 / 中心同心圆)。 */
 static void Up_RightClickAt(int mx, int my)
 {
-    if (Up_HitBtn(mx, my) >= UP_BTN_FAV1) Fav_ToggleArrowMode();
+    int btn = Up_HitBtn(mx, my);
+    if (btn == UP_BTN_FOLD)
+    {
+        s_Detail = s_Detail ? 0 : 1;
+        s_Tip.ok = 0;
+        LogLine(s_Detail ? "up: detail on" : "up: detail off");
+        return;
+    }
+    if (btn >= UP_BTN_FAV1) Fav_ToggleArrowMode();
 }
 
 static void UP_NoteClick(int mx, int my, int left, int right)
@@ -2574,29 +3443,15 @@ void UP_Poll(void)
     Fav_Poll();
     /* 1=强制开启引擎自带的单位行动线 (右键移动时那条); 0=不改游戏内设置。 */
     if (s_ActionLines) *(volatile unsigned char*)(size_t)(ADDR_GAMEOPT + OFF_GO_ACTIONLINES) = 1;
-    if (!s_Enable)
-    {
-        s_Vis = 0;
-        s_KeyMove = 0;
-        s_KeyMoveSel = 0;
-        Up_KmClear();
-        return;
-    }
+    if (!s_Enable) return;
     s_Vis = (*(volatile unsigned char*)(size_t)ADDR_SCEN_STARTED) ? 1 : 0;
     Up_KmMatchEdge(s_Vis, *(int*)ADDR_FRAME);
-    if (!s_Vis)
-    {
-        s_Pend = 0;
-        s_PendRb = 0;
-        s_KeyMove = 0;
-        s_KeyMoveSel = 0;
-        Up_KmClear();
-        return;
-    }
+    if (!s_Vis) { Up_ResetRuntime(); return; }
     /* 先刷模型再排版: 格数决定面板宽高, 反过来会让几何滞后一帧 */
     Up_Refresh();
     Up_Layout();
     Up_PrepareIcons();
+    Up_DetPoll();
     /* 多选名单: 换了容器/换了版式就整组清掉 (载员指针会被引擎复用) */
     Up_PickPrune();
     /* 有 shift 名单时按 Z 就直接认下, 之后的地图点击都算名单的路径点。
@@ -2638,9 +3493,18 @@ void UP_Poll(void)
     /* 模式刚在本帧被点开/关掉时也走这里: 开的那一拍会立即更新可动单位数。 */
     Up_KeyMovePoll();
 
-    if (!GtMouseGameXY(&mx, &my)) { s_HoverCell = -1; s_HoverBtn = -1; return; }
+    if (!GtMouseGameXY(&mx, &my))
+    {
+        s_HoverCell = -1;
+        s_HoverBtn = -1;
+        s_Tip.ok = 0;
+        return;
+    }
     s_HoverBtn = Up_HitBtn(mx, my);
     s_HoverCell = (s_HoverBtn >= 0) ? -1 : Up_HitCell(mx, my);
+    /* 提示框: 鼠标在面板上就出, 目标跟着鼠标下那一格走 (多选的一格 / 载员),
+     * 面板主体但没压到有单位的格子时回到单选的那个。 */
+    Up_TipPoll(mx, my);
 }
 
 /* ---------------- 点击门 (Syringe 0x692361, 6B) ---------------- */
@@ -2668,6 +3532,30 @@ extern "C" __declspec(dllexport) unsigned __cdecl UP_ClickGate(void* regs)
     if (lb || rb) UP_NoteClick(mx, my, lb, rb);
     /* 落在面板上就不许引擎再拿它当地图点击 (否则会取消选择/下令)。 */
     return (unsigned)ADDR_CLICKGATE_SKIP;
+}
+
+/* ---------------- 引擎悬停提示压掉 (Syringe 0x478E30, 7B) ----------------
+ * CCToolTip::Draw2 入口 (vtable 0x7A72D4 那一项; 里面的 FillRect 点就是
+ * ToolTip.cpp 钩的 0x478FDC)。鼠标落在本面板上时整块不画 —— 面板压在视口上,
+ * 引擎照样认为鼠标在地图上, 会画出"未探索的区域"/地形名, 压在我们的提示框上。
+ * 抢的 7 字节 = `mov edx,[esp+4]` + `sub esp,0x2c` 两条完整指令 (无 rel),
+ * 放行时原样重放; 压掉时跳到 0x478E0C 那条裸 `ret 4` (同函数族的收尾, 两侧
+ * 都没有 push 要平衡) —— 不能跳自己的尾段, 那里会 pop 尚未压入的寄存器。 */
+
+int UP_CursorOnPanel(void)
+{
+    int mx = -1, my = -1;
+    UP_EnsureInit();
+    if (!s_Enable || !s_Vis) return 0;
+    if (!GtMouseGameXY(&mx, &my)) return 0;
+    return Up_HitPanel(mx, my);
+}
+
+extern "C" __declspec(dllexport) unsigned __cdecl UP_TipGate(void* regs)
+{
+    if (!UP_CursorOnPanel()) return 0;
+    if (regs) *(DWORD*)((char*)regs + REG_OFF_EAX) = 0;
+    return 0x478E0Cu;
 }
 
 /* ---------------- 键盘门 (Syringe 0x55DEE0, 5B) ----------------

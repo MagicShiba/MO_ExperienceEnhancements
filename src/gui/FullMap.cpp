@@ -2060,7 +2060,10 @@ void FM_SetHideState(int state)
 /* 地图悬停先于侧栏输入执行。顶部 UI 不能先按背后的地图更新一次光标,
  * 否则 RadarClass::Action 随后切回 miniMap=true, 每循环都会重置动画计时器。
  * 原生雷达通过 SetCursor(0x5BDA80) / UpdateCursor(0x5BDC80) 选择 MiniFrame;
- * 这里只阻止穿透, 不重跑可能包含下令的 RadarClass::Action。 */
+ * 这里只阻止穿透, 不重跑可能包含下令的 RadarClass::Action。
+ * 钩点取 0x692F43 (jne 之后的 mov ecx,[WWMouse], 6B 无 rel), 让 0x692F3D
+ * 那条 UserInputLocked 的 jne 保持原样: 过场期间引擎靠它跳过整轮鼠标输入,
+ * 边缘卷屏也一并停住。 */
 extern "C" __declspec(dllexport) unsigned __cdecl FullMap_MapHoverGate(void*)
 {
     int x, y;

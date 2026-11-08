@@ -227,7 +227,7 @@ int OU_MouseCellPx(int* cx, int* cy, int* px, int* py);
 int OU_MouseCellTarget(int* cx, int* cy, void** tgtOut, int* px, int* py);
 /* ---------------- 屏→格换算的"静默"标志 ----------------
  * ProcessClickCoords (0x692300) 上挂着几条点击/悬停门 (MsgText 0x69234B、
- * UP 0x692361、FullMap 0x692406 / 0x692F3D、SWS 0x692419)。这些门只按**真实
+ * UP 0x692361、FullMap 0x692406 / 0x692F43、SWS 0x692419)。这些门只按**真实
  * 鼠标位置**判定, 命中就把整次调用截到"平衡返回出口", 完全不区分调用方是不是
  * 引擎在处理点击。所以拿任意屏点做换算的模块 (格网/箱子图标的视图格矩形) 一碰上
  * 鼠标压在侧栏图标或单位面板上, 换算结果就整批作废 —— 表现为这些叠加层"整个消失"。

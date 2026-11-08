@@ -33,6 +33,8 @@
 0x478FDC = ToolTip_Clamp, 5
 ; 字形 advance 修正 (0x4346C0 查表头5B 无rel, PUA 回图标步长, 见 ToolTip.cpp)
 0x4346C0 = ToolTip_AdvFix, 5
+; 鼠标落在左下选中面板上时压掉引擎自己的悬停提示 (CCToolTip::Draw2 入口两条完整指令 7B, 见 UnitPanel.cpp)
+0x478E30 = UP_TipGate, 7
 ; 超武侧栏点击吞没 (DisplayClass::ProcessClickCoords 内, Phobos SkipOnNewButtons 同点;
 ; 落栏内跳 0x6925FC 防误下单, 余者跑原版, 见 SWSBar.cpp)
 0x692419 = SWS_ClickGate, 7
@@ -45,7 +47,9 @@
 ; 落点雷达矩形内就自己调引擎原生 RadarClass::Action 跳转并跳 0x6925FC 吞掉,
 ; 见 src/gui/FullMap.cpp 的"小地图点击: 自己接手 + 吞掉穿透"
 0x692406 = FullMap_RadarClickGate, 6
-0x692F3D = FullMap_MapHoverGate, 6
+; 悬停门落在 0x692F43 (mov ecx,[WWMouse]); 前面 0x692F3D 的 jne 是引擎
+; UserInputLocked 出口 (过场跳 0x693053), 必须留给引擎原样执行。
+0x692F43 = FullMap_MapHoverGate, 6
 0x653865 = FullMap_RadarHoverGate, 6
 0x6D06D2 = FullMap_TopHoverGate, 5
 

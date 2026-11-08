@@ -19,6 +19,7 @@
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "NoApproach.h"
+#include "MOExperience.h"
 
 #define NA_SECTION "Features"
 
@@ -53,11 +54,12 @@ static void NA_EnsureInit(void)
     LogLine(buf);
 }
 
-/* 对象指针须再验虚表落 exe 内 (IsPlausiblePtr 只判范围对齐)。 */
+/* 对象指针须再验虚表 (IsPlausiblePtr 只判范围对齐)。虚表可能被 Ares 搬进
+ * Ares.dll, 所以判"落在任一模块内", 不只认 exe。 */
 static int NA_IsObj(void* p)
 {
     if (!p || !IsPlausiblePtr(p)) return 0;
-    return OU_InExe((unsigned)(size_t)*(void***)p);
+    return MOE_InAnyModule((unsigned)(size_t)*(void***)p);
 }
 
 /* 设置页运行期读写。 */

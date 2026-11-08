@@ -27,8 +27,9 @@
  *      热键钩点 0x536FA0 偷的 mov ecx,imm32 里那个 E8 只是立即数的一个字节。
  *   2) bool 返回值只保证在 AL: 引擎里出现 xor al,al / mov al,x 的函数, 指针类型
  *      必须是 unsigned char (RA_CanRepair 如此), 声明 int 会读到高 24 位垃圾。
- *   3) IsPlausiblePtr 只判 [64K,2G)+4 对齐, 不能当前置解引用或调虚表: 判对象看
- *      虚表是否在 exe 映像内 (RA_IsObj), 判函数看目标是否在 exe 内 (OU_InExe)。
+ *   3) IsPlausiblePtr 只判 [64K,2G)+4 对齐, 不能当前置解引用或调虚表: 判对象/
+ *      判虚调用一律走 MOE_InAnyModule (exe 本身就是模块, Ares 又会把虚表搬进
+ *      自己的 DLL)。只认 exe 会把这类对象全判成野指针。
  *
  * 每帧路径上不许 GetPrivateProfileIntA: 配置在 RA_EnsureInit 读一次; 0x4F42F0
  * 一帧跑上百次, 故 Poll 内自门控帧号; 钩子里只读键态/置标志, 全图扫描挪到 Poll。
@@ -39,6 +40,7 @@
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "RepairAll.h"
+#include "MOExperience.h"
 
 #define RA_SECTION "RepairAll"
 
@@ -63,8 +65,8 @@ typedef int __attribute__((thiscall)) (*Fn_GetMission)(void* self);
 
 #define RA_QCAP    512u  /* 待发队列上限 */
 #define RA_BATCH   24    /* 每逻辑帧最多入队事件数 (OutList 容量 128 要留余量) */
-#define RA_SCAN_CAP 256  /* Owner 值校验抽样上限 */
 #define RA_DBL_SLOP 12   /* 双击两点容差 (游戏像素) */
+#define RA_PEND_MAX 30   /* 手动触发撞上瞬态门时的重试帧数 (≈0.5~1 秒) */
 
 /* ---------------- 配置 ---------------- */
 
@@ -109,8 +111,6 @@ static void RA_EnsureInit(void)
     g_RaInterval = RA_Clamp(RA_INI("Interval", 30), 5, 600);
     g_RaBatch    = RA_Clamp(RA_INI("Batch", RA_BATCH), 1, 96);
     g_RaDbl      = RA_INI("DoubleClick", 1) ? 1 : 0;
-    /* 用**墙钟毫秒**而不是逻辑帧: 逻辑帧 = 游戏速度, GameSpeed=0 (不限速) 或高
-     * 帧率时"12 帧"只有几十毫秒, 人的双击落不进去。 */
     g_RaDblMs    = RA_Clamp(RA_INI("DblMs", 400), 100, 1500);
     RA_LoadRepairKey();
     p = AppendCStr(buf, p, "repairall: mode=", sizeof(buf));
@@ -134,19 +134,21 @@ static int RA_On(void)
     return g_RaMode != 0;
 }
 
+/* 对象与虚调用校验: 首字段 (vptr) / 槽值必须是代码址。exe 本身也是模块, 所以
+ * "落在任一模块内"就够; Ares 的虚表钩子把虚表复制进 Ares.dll 也算。 */
 static int RA_IsObj(void* p)
 {
-    return (p && IsPlausiblePtr(p) && OU_InExe((unsigned)(size_t)*(void***)p)) ? 1 : 0;
+    return (p && IsPlausiblePtr(p) && MOE_InAnyModule((unsigned)(size_t)*(void***)p)) ? 1 : 0;
 }
 
-/* 取虚表 slot 处指向 exe 内的函数; 不是对象 / 槽值不像函数 -> 0。
+/* 取虚表 slot 处的函数; 不是对象 / 槽值不像函数 -> 0。
  * 三个引擎询问 (WhatAmI / CanRepair / Mission) 共用这一道把关。 */
 static void* RA_VFn(void* b, unsigned slot)
 {
     void* fn;
     if (!RA_IsObj(b)) return 0;
     fn = (*(void***)b)[slot / 4];
-    return OU_InExe((unsigned)(size_t)fn) ? fn : 0;
+    return MOE_InAnyModule((unsigned)(size_t)fn) ? fn : 0;
 }
 
 static int RA_WhatAmI(void* b)
@@ -178,46 +180,9 @@ static int RA_MissionBusy(void* b)
     return (m == MISSION_CONSTRUCTION || m == MISSION_SELLING) ? 1 : 0;
 }
 
-/* ---------------- Owner 偏移值校验 (只比值, 不解引用候选字段) ---------------- */
-
-/* 指针是否落在 HouseClass::Array 内, 且 Money 像话。 */
-static int RA_IsHouse(void* p)
-{
-    void** items;
-    int n, i, money;
-    if (!p) return 1;                     /* 空 Owner 放过 (未放置的中立) */
-    if (!IsPlausiblePtr(p)) return 0;
-    items = ARR_ITEMS(ADDR_HOUSE_ARR);
-    n = ARR_COUNT(ADDR_HOUSE_ARR);
-    if (!items || !IsPlausiblePtr(items) || n <= 0 || n > 64) return 0;
-    for (i = 0; i < n; i++)
-    {
-        if (items[i] != p) continue;
-        money = *(int*)((char*)p + OFF_HOUSE_MONEY);
-        return (money >= 0 && money <= 10000000) ? 1 : 0;
-    }
-    return 0;
-}
-
-/* TechnoClass::Owner 必须是 HouseClass::Array 的成员, 且本家自己的建筑能命中。
- * 偏移一旦不对必然有建筑取不到 HouseClass, 整轮直接放弃 —— 宁可不修, 也绝不
- * 修到别人家。 */
-static int RA_OwnerOk(void** items, int count, void* cur)
-{
-    int i, n, mine = 0;
-    n = (count > RA_SCAN_CAP) ? RA_SCAN_CAP : count;
-    if (n <= 0) return 0;
-    for (i = 0; i < n; i++)
-    {
-        void* b = items[i];
-        void* own;
-        if (!RA_IsObj(b)) return 0;
-        own = *(void**)((char*)b + OFF_OWNER);
-        if (!RA_IsHouse(own)) return 0;
-        if (own == cur) mine = 1;
-    }
-    return mine;
-}
+/* 归属只认一条: TechnoClass::Owner **指针相等**于 [0xA83D4C], 在 RA_StillWorth
+ * 里逐栋比。指针相等就足以保证"绝不修到别人家", 且不依赖 HouseClass::Array 的
+ * 地址/布局 (那张表在 Ares 环境里地址/条数都对不上)。 */
 
 /* ---------------- 待发队列 (环形, 逻辑帧滴发) ---------------- */
 
@@ -229,8 +194,16 @@ static int   s_RaIdxOk = 0;     /* Fetch_ID 索引自检通过 (OU_PtrAlive 才�
 
 static void RA_Push(void* b, int id)
 {
-    int w;
+    int i, w;
     if (s_RaQN >= (int)RA_QCAP) return;
+    /* 同一栋楼只留一条: Repair 事件处理是 SetRepairState(-1) 的**翻转**, 两条
+     * 连着执行时第二条会把刚点亮的维修关回去。 */
+    for (i = 0; i < s_RaQN; i++)
+    {
+        w = s_RaQHead + i;
+        if (w >= (int)RA_QCAP) w -= (int)RA_QCAP;
+        if (s_RaQPtr[w] == b) return;
+    }
     w = s_RaQHead + s_RaQN;
     if (w >= (int)RA_QCAP) w -= (int)RA_QCAP;
     s_RaQPtr[w] = b;
@@ -307,19 +280,22 @@ static int RA_TryQueue(void* b, void* cur)
     return 1;
 }
 
-/* 扫全图建筑。数组没稳定 / Owner 校验没过 / 队列堵了就什么都不做。 */
-static void RA_Scan(void)
+/* 扫全图建筑。回 NULL = 扫完了 (哪怕一栋都没入队); 回非空 = 这一帧因为**瞬态**
+ * 原因没扫, 原因字符串拿去写放弃日志, 并让手动触发下一帧重试。
+ * 没有"Owner 前置校验"这道门: 归属在 RA_StillWorth 里逐栋比指针, 一栋不合就跳过,
+ * 不需要先证明整张表可信。 */
+static const char* RA_Scan(void)
 {
     void** items;
     void* cur;
     int count, i, added = 0;
-    if (s_RaStable < 2 || s_RaQN >= (int)RA_QCAP) return;
+    if (s_RaStable < 2) return "stable";
+    if (s_RaQN >= (int)RA_QCAP) return "qfull";
     items = ARR_ITEMS(ADDR_BLD_ARR);
     count = ARR_COUNT(ADDR_BLD_ARR);
-    if (items != s_RaPrevItems || count != s_RaPrevCount) return;
+    if (items != s_RaPrevItems || count != s_RaPrevCount) return "moving";
     cur = *(void**)ADDR_CURPLAYER;
-    if (!cur || !IsPlausiblePtr(cur)) return;
-    if (!RA_OwnerOk(items, count, cur)) return;
+    if (!cur || !IsPlausiblePtr(cur)) return "noplayer";
     for (i = 0; i < count; i++)
     {
         if (s_RaQN >= (int)RA_QCAP) break;
@@ -333,6 +309,7 @@ static void RA_Scan(void)
         s_RaIdxOk = (base && IsPlausiblePtr(base) && cnt > 0 && cnt <= 200000 &&
                      OU_PtrAliveRaw(s_RaQPtr[s_RaQHead], s_RaQId[s_RaQHead])) ? 1 : 0;
     }
+    return 0;
 }
 
 static int RA_Fire(int houseIdx, void* b)
@@ -370,13 +347,16 @@ static void RA_Drain(void)
 /* ---------------- 两个触发钩子 (见 dist/MOExperience.dll.inj) ---------------- */
 
 static int s_RaPending = 0;     /* 钩子/Poll 只置这个标志, 扫描挪到 Poll 里做 */
+static int s_RaPendAge = 0;     /* 手动触发已重试几帧 (撞瞬态门用, 见 RA_PEND_MAX) */
 static int s_RaKeyFresh = 0;    /* 维修快捷键在上次"按下"之后被松开过 */
 static int s_RaCtrlPrev = 0;    /* Ctrl+维修键边沿 (引擎不派发, 由 Poll 轮询) */
 
-static unsigned s_RaDblMs = 0;  /* 上一次按下的 GetTickCount, 配合 s_RaDblSet */
-static int s_RaDblSet = 0;
-static int s_RaDblX = 0;
-static int s_RaDblY = 0;
+/* 双击判定状态。图标与快捷键**各存一份**: 共用一份时两边会串味 —— 先单击图标
+ * 再按一下维修键, 快捷键那边不比点位就当成双击 (多修一次); 反过来按完键立刻
+ * 双击图标, 图标那第一下会被当成"上一次"的延续 (少修一次)。 */
+typedef struct { unsigned ms; int set, x, y; } RaDblState;
+static RaDblState s_RaDblBtn;
+static RaDblState s_RaDblKey;
 
 /* ---------------- 设置页运行期读写 ----------------
  * Mode 只在 EnsureInit 读一次 ini, 所以这里直接改内存值; 关掉时把待发队列清空 ——
@@ -399,6 +379,7 @@ void RepairAll_SetMode(int mode)
     s_RaQHead = 0;
     s_RaQN = 0;
     s_RaPending = 0;
+    s_RaPendAge = 0;
     p = AppendCStr(buf, p, "repairall: mode=", sizeof(buf));
     p = AppendInt(buf, p, sizeof(buf), g_RaMode);
     (void)p;
@@ -410,29 +391,29 @@ void RepairAll_SetMode(int mode)
  * 图标那边再比点位 (GtMouseGameXY, 侧栏区域同样有效), 快捷键那边靠"两下之间
  * 松开过"来排除按住不放的自动重复。命中后清状态, 免得第三下又算一次;
  * 超窗或点位差太远就当两次独立单击 —— 顺带挡掉"维修->卖->维修"这种快速三连。 */
-static int RA_DblHit(int checkPos)
+static int RA_DblHit(RaDblState* st, int checkPos)
 {
     unsigned now = GetTickCount(), d;
     int mx = 0, my = 0, dx, dy;
-    if (checkPos && !GtMouseGameXY(&mx, &my)) { s_RaDblSet = 0; return 0; }
-    if (s_RaDblSet)
+    if (checkPos && !GtMouseGameXY(&mx, &my)) { st->set = 0; return 0; }
+    if (st->set)
     {
-        d = now - s_RaDblMs;              /* 无符号相减, 回绕安全 */
-        dx = mx - s_RaDblX;
-        dy = my - s_RaDblY;
+        d = now - st->ms;                 /* 无符号相减, 回绕安全 */
+        dx = mx - st->x;
+        dy = my - st->y;
         if (dx < 0) dx = -dx;
         if (dy < 0) dy = -dy;
         if (d >= 1 && d <= (unsigned)g_RaDblMs &&
             (!checkPos || (dx <= RA_DBL_SLOP && dy <= RA_DBL_SLOP)))
         {
-            s_RaDblSet = 0;
+            st->set = 0;
             return 1;
         }
     }
-    s_RaDblMs = now;
-    s_RaDblSet = 1;
-    s_RaDblX = mx;
-    s_RaDblY = my;
+    st->ms = now;
+    st->set = 1;
+    st->x = mx;
+    st->y = my;
     return 0;
 }
 
@@ -448,11 +429,11 @@ static unsigned RA_Trigger(int fromButton)
     if (!RA_On()) return 0;
     if (g_RaDbl)
     {
-        if (fromButton) dbl = RA_DblHit(1);
-        else if (s_RaKeyFresh) { s_RaKeyFresh = 0; dbl = RA_DblHit(0); }
+        if (fromButton) dbl = RA_DblHit(&s_RaDblBtn, 1);
+        else if (s_RaKeyFresh) { s_RaKeyFresh = 0; dbl = RA_DblHit(&s_RaDblKey, 0); }
     }
     if (!dbl && OU_KeyDown(VK_CONTROL)) dbl = 1;
-    if (dbl) s_RaPending = 1;
+    if (dbl) { s_RaPending = 1; s_RaPendAge = 0; }
     return (unsigned)dbl;
 }
 
@@ -472,6 +453,29 @@ extern "C" __declspec(dllexport) unsigned __cdecl RepairAll_Button(void* regs)
 
 static int s_RaLastFrame = -1;
 static int s_RaLastScan = -100000;
+static int s_RaFrame = -1;      /* 上一帧号, 用来认"帧号倒退" */
+
+/* 新开一局 / 读档: 引擎每局把 0xA8ED84 写 0 (判据同 UnitPanel)。三件事必须复位:
+ *   1) 队列里的指针属于上一局, 留着就是野指针 (RA_Drain 会解引用/调虚表);
+ *   2) s_RaLastScan 留着会让 Mode=2 的间隔判据 (fr - 上次) 恒为负, 自动修不再触发;
+ *   3) 数组稳定门与双击状态都是上一局的采样。 */
+static void RA_NewGame(void)
+{
+    s_RaQHead = 0;
+    s_RaQN = 0;
+    s_RaIdxOk = 0;
+    s_RaPending = 0;
+    s_RaPendAge = 0;
+    s_RaKeyFresh = 0;
+    s_RaCtrlPrev = 0;
+    s_RaDblBtn.set = 0;
+    s_RaDblKey.set = 0;
+    s_RaPrevItems = NULL;
+    s_RaPrevCount = 0;
+    s_RaStable = 0;
+    s_RaLastScan = -100000;
+    s_RaLastFrame = -1;
+}
 
 /* 聊天输入中不响应: 引擎此时不派发命令热键, 而 Ctrl+维修键是 Poll 自己补的,
  * 不加这道门会在聊天框里打 Ctrl+K 就触发全修。MessageListClass::IsEdit=+0x19。 */
@@ -482,7 +486,8 @@ static int RA_ChatTyping(void)
 
 void RepairAll_Poll(void)
 {
-    int fr, scan, repairDown, ctrl;
+    int fr, manual, autoDue, repairDown, ctrl;
+    const char* bail;
     if (!RA_On()) return;
     /* 键态每循环都采: 不能放在下面帧门之后 —— 卡帧时一帧只采一次, 快按会漏。 */
     repairDown = OU_KeyDown((unsigned)g_RaRepairVk);
@@ -491,16 +496,37 @@ void RepairAll_Poll(void)
      * 先查键态再查焦点/聊天框: 每帧约 142 次调用, 常态下省掉窗口查询。 */
     ctrl = (repairDown && OU_KeyDown(VK_CONTROL) &&
             GtGameFocused() && !RA_ChatTyping()) ? 1 : 0;
-    if (ctrl && !s_RaCtrlPrev) s_RaPending = 1;
+    if (ctrl && !s_RaCtrlPrev) { s_RaPending = 1; s_RaPendAge = 0; }
     s_RaCtrlPrev = ctrl;
-    /* 0x4F42F0 一帧跑 ~142 次 (SWSBar 实测), 必须自门控帧号。 */
     fr = *(int*)ADDR_FRAME;
+    if (s_RaFrame >= 0 && fr < s_RaFrame) RA_NewGame();
+    s_RaFrame = fr;
+    /* 0x4F42F0 一帧跑 ~142 次 (SWSBar 实测), 必须自门控帧号。 */
     if (fr == s_RaLastFrame) return;
     s_RaLastFrame = fr;
     RA_Observe();
     RA_Drain();
     /* 手动触发这一帧必须有结果, 别等下一个 Interval。 */
-    scan = s_RaPending || (g_RaMode == 2 && (s_RaLastScan < 0 || fr - s_RaLastScan >= g_RaInterval));
-    s_RaPending = 0;
-    if (scan) { s_RaLastScan = fr; RA_Scan(); }
+    manual = s_RaPending;
+    autoDue = (g_RaMode == 2) && (s_RaLastScan < 0 || fr - s_RaLastScan >= g_RaInterval);
+    if (!manual && !autoDue) return;
+    s_RaLastScan = fr;
+    bail = RA_Scan();
+    if (!bail) { s_RaPending = 0; s_RaPendAge = 0; return; }
+    /* 瞬态没过门: 每帧重试, 攒够 RA_PEND_MAX 帧才认输 —— 手动点击不该因为
+     * "那一帧建筑数组正好在变"就整次作废。只在认输时记一行。 */
+    if (!manual) return;
+    if (++s_RaPendAge >= RA_PEND_MAX)
+    {
+        char buf[40];
+        unsigned p = 0;
+        s_RaPendAge = 0;
+        s_RaPending = 0;
+        p = AppendCStr(buf, p, "scan give up: ", sizeof(buf));
+        p = AppendCStr(buf, p, bail, sizeof(buf));
+        (void)p;
+        OU_LogTag("repairall: ", buf);
+        return;
+    }
+    s_RaPending = 1;
 }

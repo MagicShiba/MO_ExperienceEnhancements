@@ -166,6 +166,46 @@ static int AG_UnitMission(void* u, void* t)
     return (ms == MISSION_MOVE) ? -1 : ms;
 }
 
+/* 类型指针: ObjectClass::GetType 虚表槽 0x84 (引擎 0x69256B 同入口)。 */
+typedef void* __attribute__((thiscall)) (*Fn_GetType)(void* self);
+typedef void* __attribute__((thiscall)) (*Fn_GetCellAtCoords)(void* disp, const CoordStruct* crd);
+typedef unsigned char __attribute__((thiscall)) (*Fn_CellSensors)(void* cell, int houseIdx);
+
+#define VT_GETTYPE (0x84u / 4u)
+
+/* 这个目标"鼠标点得到"吗 —— 复刻引擎命中判定 (0x6DA380 像素命中 /
+ * 0x692300 点击后处理)。判据顺序照抄: +0x41A 置位的对象放行; 否则隐形
+ * (CloakState==Cloaked) 要求本家隐形探测器覆盖它所在格; InvisibleInGame
+ * 类型一律点不到。看不见的目标光标落不上去, 攻击令也会被引擎自己清掉
+ * (0x414D79), 单位只会发呆。全程只读。 */
+static int AG_Clickable(void* p, void* cur, const CoordStruct* c)
+{
+    void** vt;
+    Fn_GetType getType;
+    void* type;
+    void* cell;
+    int idx;
+    if (!p || !c) return 0;
+    if (*(unsigned char*)((char*)p + OFF_TECH_HITEXEMPT)) return 1;
+    if (*(int*)((char*)p + OFF_TECH_CLOAKSTATE) == CLOAKSTATE_CLOAKED)
+    {
+        if (!cur || !IsPlausiblePtr(cur)) return 1;   /* 查不到本家就退回原判定 */
+        idx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
+        if (idx < 0 || idx >= CELL_SENSORS_MAXHOUSE) return 1;   /* 索引异常不误杀 */
+        cell = ((Fn_GetCellAtCoords)(void*)FN_GETCELLATCOORDS)((void*)ADDR_DISPLAY, c);
+        if (!cell || !IsPlausiblePtr(cell)) return 1;
+        if (!((Fn_CellSensors)(void*)FN_CELL_SENSORS)(cell, idx)) return 0;
+    }
+    vt = *(void***)p;
+    if (!vt || !IsPlausiblePtr(vt)) return 1;
+    getType = (Fn_GetType)vt[VT_GETTYPE];
+    if (!getType || !IsPlausiblePtr((const void*)getType)) return 1;
+    type = getType(p);
+    if (type && IsPlausiblePtr(type) &&
+        *(unsigned char*)((char*)type + OFF_TYPE_INVISIBLE)) return 0;
+    return 1;
+}
+
 /* ---------------- 标记集合 (本机 UI 状态) ---------------- */
 
 #define AG_TRK_CAP 1024
@@ -320,6 +360,7 @@ static void AG_CollectArr(int k, void* cur)
         if (!own || !IsPlausiblePtr(own) || own == cur) continue;   /* 敌/中立 */
         if (g_AgNeutMode == 1 && OU_HouseNeutral(own)) continue;   /* 忽略中立 */
         if (!OU_GetCoords(p, &c)) continue;
+        if (!AG_Clickable(p, cur, &c)) continue;   /* 光标点不到的不当候选 */
         s_AgTgt[s_AgTgtN].p = p;
         s_AgTgt[s_AgTgtN].id = AG_FetchId(p, 0);
         s_AgTgt[s_AgTgtN].x = c.X;
@@ -417,6 +458,12 @@ static void AG_Drain(void)
         if (!AG_Alive(e->unit, e->uid)) { AG_ShiftDown(); continue; }
         if (!OU_IsUnit(e->unit)) { AG_ShiftDown(); continue; }
         if (!OU_PtrAlive(e->foe, e->fid, s_AgIdxOk)) { AG_ShiftDown(); continue; }
+        /* 目标在被挑中后隐形了 (或探测器没了): 光标已经点不到, 发了也只会被引擎清目标。 */
+        {
+            CoordStruct fc;
+            if (!OU_GetCoords(e->foe, &fc) || !AG_Clickable(e->foe, cur, &fc))
+            { AG_ShiftDown(); continue; }
+        }
         /* 发令前重算订单 (只读光标复核): 状态变了 (打不着/改占领) 就丢, 不猜着下单。 */
         if (AG_UnitMission(e->unit, e->foe) != e->mission)
         { AG_ShiftDown(); continue; }
