@@ -12,6 +12,7 @@
 #define SC_N      4096u    /* 新容量 (原版 500) */
 #define SC_ENT    12u      /* {Object*, X, Y} */
 #define SC_SITES  (sizeof(kScSites) / sizeof(kScSites[0]))
+#define SC_SECTION "Features"
 
 /* fld 的两个特殊值: 直接写常量 / 写新表尾 */
 #define SC_F_CAP  0xFFFFFFF0u
@@ -125,6 +126,13 @@ void SelPool_Poll(void)
         g_ScInit = 1;
         BuildPaths();
         GtEnsureLog();
+        /* 0xB0CEC8 被 Phobos 硬编码; 搬表后可能导致崩溃，有Phobos自动禁用，1.7版自动装车插件会进行查询决定 */
+        if (!GetPrivateProfileIntA(SC_SECTION, "SelPoolCap", 0, g_IniPath))
+        {
+            g_ScDone = 1;
+            OU_LogTag("selpool: ", "OFF (disabled by ini)");
+            return;
+        }
     }
 
     /* Phobos 的 ExtSelection 把 Unsorted::TacticalSelectables (0xB0CEC8) 的
@@ -203,4 +211,13 @@ unsigned SelPool_Capacity(void)
 unsigned char* SelPool_Base(void)
 {
     return g_ScOn ? s_ScBuf : (unsigned char*)(size_t)ADDR_TACTICAL_SELARR;
+}
+
+/* 外部插件只在扩容补丁已安装后读取 MOE 的候选表。 */
+extern "C" __declspec(dllexport) int __cdecl MOE_QuerySelPool(unsigned* base, unsigned* capacity)
+{
+    if (!g_ScOn) return 0;
+    if (base) *base = (unsigned)(size_t)s_ScBuf;
+    if (capacity) *capacity = SC_N;
+    return 1;
 }

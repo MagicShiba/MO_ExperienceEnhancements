@@ -53,7 +53,7 @@
 目前不打算合并。
 
 ## 使用说明
-将 `MOExperience.dll`、`MOExperience.ini` 与 `MOExperienceResources` 文件夹放在游戏根目录内（`MOExperienceResources` 仅存放语言 ini，图标已打包进 DLL）。
+将 `MOExperience.dll`、`MOExperience.ini` 与 `MOExperienceResources` 文件夹放在游戏根目录内。
 
 ### 功能配置
 游戏内按下ESC键，即可显示扩展的设置菜单（这并非全部）。  
