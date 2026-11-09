@@ -35,8 +35,6 @@
 /* 自有提示串字数 (引擎那份只有 0x42, 换指针后归我们用)。 */
 #define TT_BUF_N 160
 
-#define REG_OFF_ESP 0x14
-
 #define ADDR_TOOLTIP_BUF 0xB07BC4u
 
 #define TO_TT_EXIT 0x006A93DEu

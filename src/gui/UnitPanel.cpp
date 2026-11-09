@@ -72,7 +72,8 @@
  * (两排的起始 y 是 0 / 16), 但**屏幕上排成一行** (面板只有 60x2 宽, 单排刚好
  * 塞得下 8 个, 两排会白占 15px 高度)。
  * 前 4 个 = 升级 (老兵/精英) 后得到的能力: 火力 / 生命 / 速度 / 自愈;
- * 后 4 个 = 箱子给的加成: 火力 / 护甲 / 速度 / 隐形。 */
+ * 后 4 个 = **吃过箱子** (箱子拾取分支写回的那几个字段): 火力 / 护甲 / 速度 / 隐形。
+ * 建筑不可能吃箱子, 所以建筑这 4 个恒为灰。 */
 #define UP_DET_CELL    15
 #define UP_DET_N       8         /* 一行 8 个 (表里 4x2, 屏幕上并成一行) */
 #define UP_DET_TOP     2         /* 与上面格子之间 */
@@ -95,7 +96,7 @@
 #define UP_TIP_VPAD    3
 #define UP_TIP_GAP     4         /* 与面板之间的空隙 */
 #define UP_TIP_LINE_CAP 40
-#define UP_TIP_LINES   7         /* 数值行上限 (生命/速度/护甲/自愈 只占 4 条) */
+#define UP_TIP_LINES   7         /* 数值行上限 (火力/生命/速度/护甲/自愈 只占 5 条) */
 #define UP_TIP_LINE_GAP 3        /* 行间空隙 (墨迹之外) */
 #define UP_TIP_COL_GAP 6         /* 标签 / 原值 / 加成 三列之间的空隙 */
 #define UP_TIP_NAME_GAP 3        /* 名字下那条分隔线占的高度 */
@@ -134,7 +135,7 @@ typedef struct {
 typedef struct {
     int ok;
     unsigned char own[UP_DET_N];    /* 每个图标是否已拥有 (1=彩色 / 0=灰) */
-    int pctHp, pctSpeed;            /* 加成百分比, 0 = 没有加成 */
+    int pctFire, pctHp, pctSpeed;   /* 加成百分比, 正 = 加成, 负 = 削弱, 0 = 没有 */
     int hpCur, hpMax;               /* 当前血量 / 本型满血 (都是原值) */
     int hpBoost;                    /* 折算满血: 满血 × 老兵护甲 × 箱子护甲 */
     int spdBase;                    /* 原速度: rules Speed (毫) */
@@ -1671,14 +1672,17 @@ static unsigned short* Up_CapFind(void* type);
  * 右键折叠键在「普通 / 详情」两态间切; 详情态且**单选**时面板底部多一行图标
  * (一行 8 个 15x15, 来源 icon_unit_up_type.pcx 的 4x2 表, 屏幕上并成一行):
  *   前 4 个 = 升级 (老兵/精英) 给的: 火力 / 生命 / 速度 / 自愈;
- *   后 4 个 = 箱子给的: 火力 / 护甲 / 速度 / 隐形。
+ *   后 4 个 = 箱子给的: 火力 / 护甲 / 速度 / 隐形 (建筑不亮, 见 Up_StatBuild)。
  * 拥有的按原色画, 没拿到的压成暗灰。
  * 面板上没有那行常驻图标时 (多选 / 载员 / 详情态没开), 同一张图跟着提示框走。
  *
  * 数值来源分两处, 不能混:
  *   · 升级倍率**不存在单位身上**: 引擎每次用 HasAbility + rules 现算
  *     (同 Phobos TechnoExt::GetCurrentFirepowerMultiplier), 照抄那条式子;
- *   · 箱子倍率存在单位身上 (OFF_TECH_*_MULT / OFF_FOOT_SPEED_MULT), 直接乘字段。
+ *   · 对象身上的倍率字段 (OFF_TECH_*_MULT / OFF_FOOT_SPEED_MULT) = **箱子 × AE**
+ *     (Ares RecalculateStats 把自家记的 Crate_* 乘上 AttachEffect 再写回),
+ *     直接乘字段就是实际倍率; 想单独知道"吃过箱子"只能另找依据 (面板里那 4 个
+ *     图标只对单位亮, 且分不出 AE —— 分不出就不去猜)。
  * rules 的数值一律从 INI_Rules 现读 (地图内嵌 ini 能改写 [General]/[Powerups],
  * 读磁盘上的 rulesmo.ini 会错), 按 INI 指针缓存。 */
 
@@ -1693,7 +1697,6 @@ typedef struct {
     void* ini;
     int  ok;
     int  vetCombat, vetArmor, vetSpeed;       /* [General] VeteranCombat/Armor/Speed */
-    int  crateFire, crateArmor, crateSpeed;   /* [Powerups] 第 4 段倍率 */
     /* 引擎原生自愈 (Phobos 的 GainSelfHeal 光环): 每 Frames 帧回 Amount×层数 点。
      * MO 的 rules 是 Infantry/Unit 各 100 帧、Amount 20/10, 即每层步兵 3 HP/秒、
      * 载具 1.5 HP/秒 (1 游戏秒 = 15 帧)。
@@ -1773,14 +1776,22 @@ static void Up_BlitDet(unsigned char* base, int pitch, int W, int H,
     }
 }
 
-/* 面板常驻详情行 (单选的 s_List[0])。提示框那份用 Up_BlitDet 直接画在框里。 */
+/* 8 个图标一行，详情行与提示框共用。 */
+static void Up_DrawIconRow(unsigned char* base, int pitch, int W, int H,
+                           int x, int y, const unsigned char* own)
+{
+    int i;
+    for (i = 0; i < UP_DET_N; i++)
+        Up_BlitDet(base, pitch, W, H, x + i * UP_DET_CELL, y, i, own[i]);
+}
+
+/* 面板常驻详情行 (单选的 s_List[0])。 */
 static void Up_DrawDetail(unsigned char* base, int pitch, int W, int H)
 {
-    int x, y, i;
+    int x, y;
     if (!s_DetOK || !s_Det.ok) return;
     Up_DetRect(&x, &y);
-    for (i = 0; i < UP_DET_N; i++)
-        Up_BlitDet(base, pitch, W, H, x + i * UP_DET_CELL, y, i, s_Det.own[i]);
+    Up_DrawIconRow(base, pitch, W, H, x, y, s_Det.own);
 }
 
 /* "1.25" -> 1250, "100" -> 100000。小数只吃前 3 位, 倍率与帧数都够用。 */
@@ -1821,17 +1832,6 @@ static int Up_RulesNum(void* ini, const char* sec, const char* key, const char* 
     return Up_ParseMilli(b);
 }
 
-/* [Powerups] 的一段是 `名字=权重,图,能否在水上,倍率` (最后一段可能没有)。 */
-static int Up_PowerupMult(void* ini, const char* key)
-{
-    char b[128];
-    int i = 0, c = 0;
-    if (!Up_RulesStr(ini, "Powerups", key, "", b, (int)sizeof(b))) return 1000;
-    while (b[i] && c < 3) { if (b[i] == ',') c++; i++; }
-    if (c < 3) return 1000;
-    return Up_ParseMilli(b + i);
-}
-
 static void Up_RulesPoll(void)
 {
     void* ini = *(void**)ADDR_INI_RULES;
@@ -1848,9 +1848,6 @@ static void Up_RulesPoll(void)
     s_Rules.shUnitFrames = Up_RulesNum(ini, "General", "SelfHealUnitFrames", "100") / 1000;
     s_Rules.shUnitAmt    = Up_RulesNum(ini, "General", "SelfHealUnitAmount", "10") / 1000;
     s_Rules.repairRate   = Up_RulesNum(ini, "General", "RepairRate", "0.03");
-    s_Rules.crateFire = Up_PowerupMult(ini, "Firepower");
-    s_Rules.crateArmor = Up_PowerupMult(ini, "Armor");
-    s_Rules.crateSpeed = Up_PowerupMult(ini, "Speed");
     s_Rules.ok = 1;
     if (g_Log)
     {
@@ -1860,10 +1857,6 @@ static void Up_RulesPoll(void)
         q += UtoA((unsigned)s_Rules.vetCombat, buf + q); q = AppendCh(buf, q, '/', sizeof(buf));
         q += UtoA((unsigned)s_Rules.vetArmor, buf + q); q = AppendCh(buf, q, '/', sizeof(buf));
         q += UtoA((unsigned)s_Rules.vetSpeed, buf + q);
-        q = AppendCStr(buf, q, " crate=", sizeof(buf));
-        q += UtoA((unsigned)s_Rules.crateFire, buf + q); q = AppendCh(buf, q, '/', sizeof(buf));
-        q += UtoA((unsigned)s_Rules.crateArmor, buf + q); q = AppendCh(buf, q, '/', sizeof(buf));
-        q += UtoA((unsigned)s_Rules.crateSpeed, buf + q);
         q = AppendCStr(buf, q, " heal=", sizeof(buf));
         q += UtoA((unsigned)s_Rules.shInfFrames, buf + q); q = AppendCh(buf, q, '/', sizeof(buf));
         q += UtoA((unsigned)s_Rules.shInfAmt, buf + q); q = AppendCh(buf, q, '/', sizeof(buf));
@@ -2000,22 +1993,29 @@ static int Up_HasAbility(void* o, int ab)
     return ((Fn_Up_HasAbil)(void*)FN_TECH_HASABILITY)(o, ab) ? 1 : 0;
 }
 
-/* 对象上的倍率字段; 取到垃圾值 (0 / 天文数字) 当 1.0。 */
+/* 对象上的倍率字段; 取到垃圾值 (负数 / 天文数字) 当 1.0。
+ * 0 是合法值: MO 的 AE 用 `SpeedMultiplier=0` / `FirepowerMultiplier=0` 做
+ * "定住/无火力", 这时必须照原样返回, 否则面板上看不出这个状态。 */
 static double Up_Mult(void* o, unsigned off)
 {
     double d = *(double*)((char*)o + off);
-    if (!(d > 0.0) || d > 100.0) return 1.0;
+    if (!(d >= 0.0) || d > 100.0) return 1.0;
     return d;
 }
 
-/* (倍率 - 1) * 100, 四舍五入到整数; 低于 1 的一律算 0 (没有加成)。 */
+/* (倍率 - 1) × 100, 四舍五入到整数。**带符号**: MO 的 AE 里速度多是减速
+ * (0.2 / 0.5 / 0.75), 护甲也有 0.05 / 0.8 这种"变脆"的, 只显示正加成会让
+ * 这些状态在面板上完全看不出来 (左列永远只有 rules 的原值)。 */
 static int Up_MultPct(int milli, double crate)
 {
     double m = (double)milli / 1000.0 * crate;
     int pc;
-    if (m <= 1.0) return 0;
-    pc = (int)((m - 1.0) * 100.0 + 0.5);
+    if (m > 999.0) m = 999.0;
+    if (m > 1.0) pc = (int)((m - 1.0) * 100.0 + 0.5);
+    else if (m < 1.0) pc = -(int)((1.0 - m) * 100.0 + 0.5);
+    else return 0;
     if (pc > 999) pc = 999;
+    if (pc < -999) pc = -999;
     return pc;
 }
 
@@ -2060,7 +2060,7 @@ static int Up_StatBuild(void* o, void* type, UpStat* st)
 {
     void* owner;
     const UpTb* ti;
-    int am, i, aresHeal, gainLayers, hasFire, hasStrong, hasFast, baseMilli, organic;
+    int am, notBld, i, aresHeal, gainLayers, hasFire, hasStrong, hasFast, baseMilli, organic;
     double fm, amm, sm;
 
     for (i = 0; i < UP_DET_N; i++) st->own[i] = 0;
@@ -2069,6 +2069,7 @@ static int Up_StatBuild(void* o, void* type, UpStat* st)
     am = Up_WhatAmI(o);
     if (am != ABS_UNIT && am != ABS_INFANTRY && am != ABS_AIRCRAFT &&
         am != ABS_BUILDING) return 0;
+    notBld = (am != ABS_BUILDING);
     Up_RulesPoll();
     ti = Up_TypeInfo(type);
 
@@ -2077,7 +2078,7 @@ static int Up_StatBuild(void* o, void* type, UpStat* st)
     hasFast = Up_HasAbility(o, ABIL_FASTER);
     fm = Up_Mult(o, OFF_TECH_FIREPOWER_MULT);
     amm = Up_Mult(o, OFF_TECH_ARMOR_MULT);
-    sm = (am == ABS_BUILDING) ? 1.0 : Up_Mult(o, OFF_FOOT_SPEED_MULT);
+    sm = notBld ? Up_Mult(o, OFF_FOOT_SPEED_MULT) : 1.0;
     /* 自愈的三个来源, 前两个是 Ares 口径 (同一个开关), 第三个是 Phobos 的光环:
      *   ① 类型自带 SelfHealing= (类型字节 0xD14);
      *   ② 老兵/精英带的 SelfHeal 能力 (HasAbility 9);
@@ -2094,19 +2095,28 @@ static int Up_StatBuild(void* o, void* type, UpStat* st)
     st->own[0] = (unsigned char)hasFire;
     st->own[1] = (unsigned char)hasStrong;
     st->own[2] = (unsigned char)hasFast;
-    st->own[4] = (unsigned char)(fm > 1.0005);
-    st->own[5] = (unsigned char)(amm > 1.0005);
-    st->own[6] = (unsigned char)(sm > 1.0005);
+    /* 后 4 个是"吃过箱子"的标记, 来源只有箱子拾取分支写的那几个字段
+     * (0x482E71 / 0x483240 / 0x483060 / 0x48294F)。
+     * **建筑一律不亮**: 箱子不给建筑, 建筑身上的倍率只可能来自 AE 或老兵,
+     * 那是"有加成", 不是"吃过箱子"。
+     * ⚠ 单位上这三个 double 是"箱子 × AE"的合并值 (Ares RecalculateStats 把自家
+     * 记的 Crate_* 乘上 AE 后写回字段), 光看字段剥不出 AE —— 所以单位上 AE 也会
+     * 点亮这几个图标。数值行 (提示框) 用同一批字段是**对的**, 那里要的就是实际倍率。 */
+    st->own[4] = (unsigned char)(notBld && fm > 1.0005);
+    st->own[5] = (unsigned char)(notBld && amm > 1.0005);
+    st->own[6] = (unsigned char)(notBld && sm > 1.0005);
     /* 隐形箱子只写单位的 Cloakable; 类型本来就隐形的单位不算拿到箱子 */
-    st->own[7] = (unsigned char)((*(unsigned char*)((char*)o + OFF_TECH_CLOAKABLE) &&
+    st->own[7] = (unsigned char)((notBld &&
+                                  *(unsigned char*)((char*)o + OFF_TECH_CLOAKABLE) &&
                                   !(ti && ti->cloak)) ? 1 : 0);
 
     Up_TypeName(type, st->name, UP_TIP_NAME_CAP);
     st->armor = ti ? ti->armor : 0;
 
+    st->pctFire = Up_MultPct(hasFire ? s_Rules.vetCombat : 1000, fm);
     st->pctHp = Up_MultPct(hasStrong ? s_Rules.vetArmor : 1000, amm);
-    st->pctSpeed = (am == ABS_BUILDING) ? 0
-                   : Up_MultPct(hasFast ? s_Rules.vetSpeed : 1000, sm);
+    st->pctSpeed = notBld
+                   ? Up_MultPct(hasFast ? s_Rules.vetSpeed : 1000, sm) : 0;
     /* 生命: 当前 / 本型满血 (都是原值; 加成后的一行由提示框并排给出) */
     st->hpCur = Up_Hp(o);
     if (st->hpCur < 0) st->hpCur = 0;
@@ -2122,7 +2132,7 @@ static int Up_StatBuild(void* o, void* type, UpStat* st)
     st->spdBase = 0;
     st->spdMilli = 0;
     baseMilli = ti ? ti->speedMilli : 0;
-    if (am != ABS_BUILDING && baseMilli > 0)
+    if (notBld && baseMilli > 0)
     {
         st->spdBase = baseMilli;
         st->spdMilli = (int)((double)baseMilli *
@@ -2149,24 +2159,6 @@ static int Up_StatBuild(void* o, void* type, UpStat* st)
             int frames = organic ? s_Rules.shInfFrames : s_Rules.shUnitFrames;
             int amt = (organic ? s_Rules.shInfAmt : s_Rules.shUnitAmt) * gainLayers;
             st->shMilli += Up_HealMilli(amt, frames);
-        }
-    }
-    /* 数值变了才打一行 (低频): 核对层数有没有进 House 就靠它。 */
-    if (g_Log)
-    {
-        static int lastMilli = -1, lastGain = -1, lastAres = -1;
-        if (st->shMilli != lastMilli || gainLayers != lastGain || aresHeal != lastAres)
-        {
-            char buf[128];
-            unsigned q = 0;
-            lastMilli = st->shMilli; lastGain = gainLayers; lastAres = aresHeal;
-            q = AppendCStr(buf, q, "up: heal ares=", sizeof(buf));
-            q += UtoA((unsigned)aresHeal, buf + q);
-            q = AppendCStr(buf, q, " gain=", sizeof(buf));
-            q += UtoA((unsigned)gainLayers, buf + q);
-            q = AppendCStr(buf, q, " milli=", sizeof(buf));
-            q += UtoA((unsigned)st->shMilli, buf + q);
-            LogLine(buf);
         }
     }
     st->ok = 1;
@@ -2228,19 +2220,31 @@ static int Up_AppMilli(wchar_t* d, int cap, int milli)
     return n;
 }
 
-/* "+40% (175)" —— 加成百分比 + 括号里的加成后数值 (没有加成一个字符都不写)。
- * 右列所有行都从 '+' 起排, 所以这一列天然对齐。 */
-static int Up_PctBoost(wchar_t* d, int cap, int pct, int after, int afterMilli)
+/* "+40%" / "-80%" (0 = 没有加成, 一个字符都不写)。符号在前, 右列所有行
+ * 都从符号起排, 所以这一列天然对齐。 */
+static int Up_Pct(wchar_t* d, int cap, int pct)
 {
     int n = 0;
-    if (pct <= 0 || after <= 0 || cap < 12) return 0;
-    d[n++] = L'+';
-    n += Up_Num(d + n, cap - n - 2, pct);
+    if (!pct || cap < 8) return 0;
+    d[n++] = (pct > 0) ? L'+' : L'-';
+    n += Up_Num(d + n, cap - n - 2, pct > 0 ? pct : -pct);
     d[n++] = L'%';
+    d[n] = 0;
+    return n;
+}
+
+/* "+40% (175)" —— 加成百分比 + 括号里的加成后数值 (没有加成一个字符都不写)。
+ * 括号里的数也可能是 0 (倍率 0 → 定住/无火力), 那时写 "(0)" 而不省略。 */
+static int Up_PctBoost(wchar_t* d, int cap, int pct, int after, int afterMilli)
+{
+    int n;
+    if (!pct || cap < 12) return 0;
+    n = Up_Pct(d, cap, pct);
+    if (n > cap - 5) return n;
     d[n++] = L' ';
     d[n++] = L'(';
-    n += afterMilli ? Up_AppMilli(d + n, cap - n - 2, after)
-                    : Up_Num(d + n, cap - n - 2, after);
+    n += afterMilli ? Up_AppMilli(d + n, cap - n - 1, after)
+                    : Up_Num(d + n, cap - n - 1, after);
     d[n++] = L')';
     d[n] = 0;
     return n;
@@ -2289,13 +2293,14 @@ static int Up_InkMetrics(int px, int* top, int* h)
 
 /* 提示框画在面板右侧 (放不下改左侧), 底边与面板对齐 —— **不跟鼠标走**:
  * 逐像素跟随会让整块每帧重画, 位置也会晃。宽高按内容自适应。
- * 行: 单位名 / 分隔线 / (8 个能力图标) / 生命 / 速度 / 护甲 / 自愈。
- * 数值行分三列: 标签 | 原值 | 加成 —— 右列一律从 '+' 起排, 所以两行的加号
+ * 行: 单位名 / 分隔线 / (8 个能力图标) / 火力 / 生命 / 速度 / 护甲 / 自愈。
+ * 数值行分三列: 标签 | 原值 | 加成 —— 右列一律从符号起排, 所以各行的加号
  * 是对齐的; 右列 = 百分比 + 括号里的加成后数值, 没有加成时整列留空。
  * 没有数据的那行整行不画 (不占位、不写 "—")。第一行是单位全名 (格子下那行
  * 名字受 cameo 尺寸限制会被截, 有的单位没图标)。 */
 static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
 {
+    static const wchar_t k_fire[]  = { 0x706B, 0x529B, 0 };   /* 火力 */
     static const wchar_t k_life[]  = { 0x751F, 0x547D, 0 };   /* 生命 */
     static const wchar_t k_spd[]   = { 0x901F, 0x5EA6, 0 };   /* 速度 */
     static const wchar_t k_armor[] = { 0x62A4, 0x7532, 0 };   /* 护甲 */
@@ -2326,6 +2331,18 @@ static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
     /* 图标行: 面板上已经有同一单位的常驻图标时就跳过, 不重复画 */
     if (s_DetOK && !(s_DetRow && s_TipObj == s_List[0].obj))
         iconH = (UP_DET_CELL > lineH) ? UP_DET_CELL : lineH;
+    /* 火力: 倍率作用在这个单位的**每一种**武器上, 没有单一的"原值"可写
+     * (多武器, 伤害还随弹头与目标护甲变), 所以只给右列的百分比。
+     * 建筑同样吃 AE 的火力倍率 (老兵/精英也能给建筑 ABIL_FIREPOWER),
+     * 所以建筑照画, 不像速度那样整行掐掉。 */
+    if (st->pctFire)
+    {
+        lab[nl] = k_fire;
+        left[nl][0] = 0;
+        leftN[nl] = 0;
+        rightN[nl] = Up_Pct(right[nl], UP_TIP_LINE_CAP, st->pctFire);
+        nl++;
+    }
     /* 生命: 左列是原值 (当前/本型满血, 满血时不写 "/满血"), 右列是护甲加成 */
     if (st->hpMax > 0)
     {
@@ -2416,9 +2433,7 @@ static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
     {
         int ix = bx + (bw - UP_DET_BLOCK_W) / 2;
         int iy = y + (iconH - UP_DET_CELL) / 2;
-        int k;
-        for (k = 0; k < UP_DET_N; k++)
-            Up_BlitDet(base, pitch, W, H, ix + k * UP_DET_CELL, iy, k, st->own[k]);
+        Up_DrawIconRow(base, pitch, W, H, ix, iy, st->own);
         y += iconH;
     }
     xL = bx + UP_TIP_PAD + labW + UP_TIP_COL_GAP;
@@ -3542,7 +3557,7 @@ extern "C" __declspec(dllexport) unsigned __cdecl UP_ClickGate(void* regs)
  * 放行时原样重放; 压掉时跳到 0x478E0C 那条裸 `ret 4` (同函数族的收尾, 两侧
  * 都没有 push 要平衡) —— 不能跳自己的尾段, 那里会 pop 尚未压入的寄存器。 */
 
-int UP_CursorOnPanel(void)
+static int UP_CursorOnPanel(void)
 {
     int mx = -1, my = -1;
     UP_EnsureInit();

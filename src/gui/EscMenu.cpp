@@ -49,6 +49,7 @@
 #include "ToolTip.h"
 #include "Observer.h"
 #include "NoApproach.h"
+#include "MCLoss.h"
 #include "WeaponRange.h"
 #include "LightConvFix.h"
 #include "MOEVersion.h"
@@ -250,6 +251,7 @@ enum {
     GUI_ITEM_WR_ON,             /*   格: 启用 ([Features] WeaponRange) */
     GUI_ITEM_WR_H,              /*   格: 对空圈抬高 ([Features] WeaponRangeAAZ) */
     GUI_ITEM_NO_APPROACH,       /* 阻止无攻击力单位靠近目标 ([Features] NoApproach) */
+    GUI_ITEM_MC_LOSS,           /* 静音心控单位损失提示 ([Features] MCLossMute) */
     GUI_ITEM_COUNT
 };
 
@@ -919,7 +921,7 @@ static const char* const kLabelKey[GUI_ITEM_COUNT] = {
     "GuiHkFuzzy", "GuiHkMind", "GuiHkAttackMove", "GuiHkAggressive",
     "GuiRepair", "GuiTooltip", "GuiPipSize", "GuiSaveShot", "GuiObserver",
     "GuiScoreExit", "GuiWeaponRange", "GuiWeaponRangeOn", "GuiWeaponRangeH",
-    "GuiNoApproach"
+    "GuiNoApproach", "GuiMcLoss"
 };
 static const char* const kLightKey[LIGHT_PRESET_COUNT + 1] = {
     "GuiLightOrig", "GuiLightStandard", "GuiLightMorning", "GuiLightAfternoon",
@@ -1604,7 +1606,8 @@ static const EscGuiRowInfo s_CtrlLayout[] = {
     { EG_GROUP,  GUI_GROUP_MISC },
     { EG_SWITCH, GUI_ITEM_CRATE },
     { EG_SWITCH, GUI_ITEM_FPS },
-    { EG_SWITCH, GUI_ITEM_SCORE_EXIT }
+    { EG_SWITCH, GUI_ITEM_SCORE_EXIT },
+    { EG_SWITCH, GUI_ITEM_MC_LOSS }
 };
 
 /* 显示设置页: 环境显示 (光照/天气) + 界面外观 (玩家颜色/阵营 UI)。
@@ -2218,7 +2221,9 @@ static const EscToggle s_Toggle[] = {
     { GUI_ITEM_WR_ON,        "Features", "WeaponRange", WeaponRange_Enabled,
       WeaponRange_SetEnabled },
     { GUI_ITEM_NO_APPROACH,  "Features", "NoApproach", NoApproach_Enabled,
-      NoApproach_SetEnabled }
+      NoApproach_SetEnabled },
+    { GUI_ITEM_MC_LOSS,      "Features", "MCLossMute", MCLoss_Enabled,
+      MCLoss_SetEnabled }
 };
 
 /* 行控件表的 item 都是首字段, 五张表的查找长得一样, 用宏生成。 */

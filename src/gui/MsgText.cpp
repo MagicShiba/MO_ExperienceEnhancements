@@ -43,7 +43,6 @@
 
 /* 点击门落点: ProcessClickCoords (0x692300) 的"未处理"出口, 栈形对齐。 */
 
-#define OFF_REG_ESP              0x14
 #define STK_ARG_NAME             0x04
 #define STK_ARG_MESSAGE          0x0C
 #define STK_ARG_CS               0x10
@@ -953,7 +952,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl MsgText_AddMessageHook(void* regs
 
     MsgText_EnsureInit();
 
-    esp = *(unsigned char**)((char*)regs + OFF_REG_ESP);
+    esp = *(unsigned char**)((char*)regs + REG_OFF_ESP);
     if (!esp || !IsPlausiblePtr(esp)) return 0;
 
     argName    = *(const wchar_t**)(esp + STK_ARG_NAME);

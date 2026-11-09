@@ -166,3 +166,6 @@
 0x730F30 = CheerSelect_Hook, 8
 ; 战败评估段入口: 观战者不落胜/负旗, 否则任何 AI 出局都会让对局结束
 0x4FC3E6 = Observer_DefeatEvalHook, 6
+; 心控单位损失提示: 挡 UnitLost 雷达事件与紧跟的 EVA 语音, 见 src/misc/MCLoss.cpp
+0x65FA70 = MCLoss_CreateHook, 6
+0x752480 = MCLoss_VoiceHook, 5

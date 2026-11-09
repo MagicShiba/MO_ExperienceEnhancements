@@ -69,11 +69,30 @@
 | 目标 | 规则 |
 |---|---|
 | 自家楼 | 工程师修掉血楼只派 1 人（CAPTURE 进驻即修，人消耗），满血跳过；士兵进驻不限数不查血（吸收型楼见末两行） |
-| 非自家楼 | 工程师占无主/中立科技（TL≠-1）按楼限 1；工程师对中立民房（TL=-1，无归属变更）只做维修（掉血 1 人/满血跳过）；士兵进驻中立民房轮转均分；敌楼强占与拆除按 Squad |
+| 非自家楼 | 工程师占无主/中立科技（TL≠-1）按楼限 1；工程师对中立民房（TL=-1，无归属变更）只做维修（掉血 1 人/满血跳过）；士兵进驻中立民房轮转均分；敌楼强占：**不损伤模式按楼限 1，损伤模式按 Squad**（见下节）；拆除按 Squad |
 | 非自家载具 | `Enter`（占空车）按目标限 1；偷车 `Capture` 不分归属限 1 |
 | 自家运输机 | 装人不限 |
 | 自家碉堡/隧道口 | `Enter(7)` 开进去按目标限 1 辆（NumberOfDocks=1，与"占车限 1"共用标记） |
 | 自家吸收型楼（电厂） | 按余位均分：配额 = `Passengers` − 已占 − 已派，轮转一人一楼；配额 0（楼满）不派 |
+
+## 工程师占敌楼派几个（Ares MultiEngineer）
+
+工程师点敌方楼的光标由 Ares 决定（`InfantryExt::GetEngineerEnterEnemyBuildingAction`，
+钩 `0x51E5E1`）：按 HP 与 `EngineerCaptureLevel`(35%) 比较，楼还健壮就给
+`Damage(28)` 光标 + `0x519D9C` 里直接削 `EngineerDamage`(34%) 的血，够低了才
+给 `Capture`。**唯一的例外是战役**：Ares 硬编码 `gameMode == Campaign` 时
+不做损伤，一个工程师直接占领整栋楼。
+
+所以"一个楼该分几个工程师"跟着这个开关走（`OU_EngDamageOn`，纯只读）：
+
+| 场合 | 判定 | 分配 |
+|---|---|---|
+| 战役（GameMode 0） | 恒关 | 按楼限 1 |
+| 遭遇战（5） | 看 `GameModeOptionsClass.MultiEngineer`（0xA8B26C） | 关 → 限 1；开 → Squad |
+| LAN / Internet（3/4） | 恒开 | Squad |
+
+不开损伤的场合用 `s_SnapRepairSent`（与修楼共用的"按目标单派"标记）限 1：
+第一个进楼后楼已属自家，多派无益。
 
 工程师判定: `InfantryType+0xEC3`（Engineer=yes 本体）或 GRepair/Repair(29/11)
 光标；`Capture(9)` 不能自证（士兵对空房同样拿 9，占领与进驻按单位类型区分）。

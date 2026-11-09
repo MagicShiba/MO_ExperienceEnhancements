@@ -114,6 +114,9 @@ static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(
      * 否则任何 AI 出局都会给观战房落 Flag_To_Lose, 90 帧后对局结束。
      * 见 Observer.cpp 与 notes/观战.md §8。 */
     SYHOOK(0x4FC3E6u, 6u, "Observer_DefeatEvalHook"),
+    /* 心控单位的"单位损失"提示: 雷达事件 + 紧跟的 EVA, 见 MCLoss.cpp。 */
+    SYHOOK(0x65FA70u, 6u, "MCLoss_CreateHook"),
+    SYHOOK(0x752480u, 5u, "MCLoss_VoiceHook"),
 };
 
 /* ---------------- Syringe 握手 ---------------- */

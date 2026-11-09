@@ -127,6 +127,15 @@ int OU_IsTarget(void* p);
 /* 联机判定 (GameMode 3=LAN/4=Internet, 其它单机)。订单系统共用。 */
 int OU_IsMP(void);
 
+/* 工程师占敌楼是否"先损伤、占领不了" (Ares MultiEngineer)。
+ * 关 = 一个工程师直接占领整栋楼, 派第二个是白跑 (楼已归我, 后来的人只会
+ * 被当成维修消耗掉), 分配时按楼限 1。
+ * 判据同 Ares InfantryExt::GetEngineerEnterEnemyBuildingAction:
+ *   战役 (GameMode 0) 恒关 —— Ares 硬编码单人任务不做损伤;
+ *   遭遇战 (5) 看 GameModeOptionsClass.MultiEngineer 勾选;
+ *   LAN/Internet 恒开。纯只读, 联机安全。 */
+int OU_EngDamageOn(void);
+
 /* ---------------- 下令资格 (敌我识别, 全下单模块共用) ----------------
  * 引擎允许单独选中一个非己方单位, 不过滤就能把敌人的车开走/展开。
  * 敌人与中立 (HouseType::MultiplayPassive) 一律不可控; 盟友只在"近距离

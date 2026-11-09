@@ -39,6 +39,16 @@ int OU_IsMP(void)
     return (gm == 3 || gm == 4) ? 1 : 0;   /* 3=LAN, 4=Internet */
 }
 
+/* 工程师占敌楼的损伤模式 (判据见 .h; 与 Ares 的 gameMode/allowDamage 同式)。 */
+int OU_EngDamageOn(void)
+{
+    int gm = *(int*)ADDR_GAMEMODE;
+    if (gm == 0) return 0;           /* 战役/菜单: Ares 硬编码不做损伤 */
+    if (gm == 5)                     /* 遭遇战: 看"多位工程师"勾选 */
+        return *(unsigned char*)ADDR_MULTI_ENGINEER ? 1 : 0;
+    return 1;                        /* LAN/Internet: 恒按开 */
+}
+
 /* 建筑实例 → 类型 (BuildingTypeClass); 非建筑/读不到回 NULL。 */
 static void* OU_BldType(void* bld)
 {
@@ -1327,9 +1337,10 @@ void OU_HotkeyText(const OU_Hotkey* hk, char* buf, int buflen)
 /* 帧内缓存: GetAsyncKeyState 是 user32 系统调用 (~1us), 而一帧里十来个 Draw
  * 各查一遍 Ctrl/Shift/中键就是十几 us 白烧 (实测 sm/msgtail 段)。同一游戏帧
  * 内同一键只问一次系统; 暂停时帧号冻结 (迷你循环), 用 16ms 墙钟兜底重查,
- * 保证 F5 之类在暂停中照样灵敏。 */
+ * 保证 F5 之类在暂停中照样灵敏。时间戳按 vk 分开存: 一次查询只能延长自己那个
+ * 键的缓存有效期, 否则帧号冻结时某键会被别的键一直按在缓存里, 采不到松开。 */
 static unsigned s_KeyFr[256];
-static unsigned s_KeyTick = 0;
+static unsigned s_KeyTick[256];
 static unsigned char s_KeyDown[256];
 
 int OU_KeyDown(unsigned vk)
@@ -1339,11 +1350,11 @@ int OU_KeyDown(unsigned vk)
     if (!vk || vk > 255) return 0;
     fr = *(volatile unsigned*)(size_t)ADDR_FRAME;   /* 引擎帧号 */
     now = GetTickCount();
-    if (s_KeyFr[vk] == fr && (now - s_KeyTick) < 16u)
+    if (s_KeyFr[vk] == fr && (unsigned)(now - s_KeyTick[vk]) < 16u)
         return s_KeyDown[vk] ? 1 : 0;
     d = (GetAsyncKeyState((int)vk) & 0x8000) ? 1 : 0;
     s_KeyFr[vk] = fr;
-    s_KeyTick = now;
+    s_KeyTick[vk] = now;
     s_KeyDown[vk] = (unsigned char)d;
     return d;
 }

@@ -13,7 +13,7 @@ Print 0x434B90 / Simple 0x4A5EB0 / GetDim 0x433CF0。
 
 ## 性能
 
-`Enable=1` 从 300 帧掉到 210 帧（约 +1.4ms/帧），主项与修法：
+`Enable=1` 约 +1.4ms/帧，主项与修法：
 
 1. **一槽一字号**。`CreditPx` 与 `FontPx` 混槽会逐字互拆重建。`VecGdiSlot` 分槽 2/8；`GDI_SLOTS` 扩到 9。
 2. **只清所需 DIB**。`ClearDibRect` 替代整幅清。
@@ -139,12 +139,12 @@ Print 0x434B90 / Simple 0x4A5EB0 / GetDim 0x433CF0。
 - Enable=1，FontFace=文件名原样匹配（先游戏目录后系统目录），FontPx=0（自动），Bold=0。
 - CreditPx/CreditDY（顶栏）；BriefOwn/BriefLine/BriefTrack/BriefWidth/BriefAdv/BriefMark（简报）；Render；电力四键见下。详细日志开关 LogDetail 在 `[Log]` 节。
 
-## 已排除（勿重查）
+## 配置与排查约束
 
-- DrawText 改 t+0x1C 无效：t 是画布，字体是 a1。
-- IsPlausiblePtr 要求 4 字节对齐，字节级探测先对齐。
-- 正文无体外循环，都经 DrawText。
-- 已删键勿加回：`LogAdv`、`FixLineH`、`BriefBox`/`BriefClip`、`VShift`。
+- `DrawText` 的 t 是画布、字体是 a1，改 `t+0x1C` 不影响字体。
+- 正文都经 `DrawText`，没有体外循环。
+- `IsPlausiblePtr` 要求 4 字节对齐，字节级探测先对齐。
+- 已移除的 ini 键不要加回：`LogAdv`、`FixLineH`、`BriefBox`/`BriefClip`、`VShift`。
 
 ## 返回值哨兵
 
@@ -155,7 +155,6 @@ Print 0x434B90 / Simple 0x4A5EB0 / GetDim 0x433CF0。
 `vtext:` 钩子成败、`brief: own draw/skip why=`、`perf:`、`gdi:` (LogDetail=1)。
 
 `brief: own draw` 只留一条（盒/行高/字宽/行数/cell），核对版式用；`skip why=` 只在自绘失败时记。
-抽查类探针已删。
 
 ## 右侧提示与超武区分
 
@@ -170,12 +169,9 @@ FPS 钉住（任何档位 1x、位置固定）：`Simple_` 入口收串并跳过
 ## 提示串（电力 / 悬浮）
 
 - 悬浮提示串一律经 `Print`，caller == `0x4A5FF2`；前 16 字含 `=` 的不是列表串。
-- 盒子由引擎按 `GetDim` 返回的宽度自己画，矢量宽度接管后盒宽自动跟上，
-  不需要自绘补边（`TipBox` 键与补边代码已删：开着只会在同 y 带的其它文本上
-  多描一圈边）。
-- 同理不需要记"提示落笔位/串宽"：`Print` 与随后的逐字 `Blit` 用的是同一套
-  坐标，`inTip` 那套定位从来是空转，已连同 sticky 宽度表一起删除。
-- 背景盒（半透明取样）不要重开：取样失真 + 自盲 + 误收列表，三题须同解。
+- 盒子由引擎按 `GetDim` 返回的宽度自己画，矢量宽度接管后盒宽自动跟上，不需要自绘补边。
+- `Print` 与随后的逐字 `Blit` 用同一套坐标，不需要另记提示落笔位/串宽。
+- 不要做半透明背景盒：取样失真 + 自盲 + 误收列表，三题须同解。
 
 ## 底部电量
 

@@ -23,12 +23,10 @@
 #define ADDR_SESSION            0xA8B238u
 #define ADDR_GAMEMODE           0xA8B238u   /* 旧名, 同址 */
 
-/* 主循环的四面"退出对局"旗: 任一非 0 就收场 (0x55D059 那组比较)。
- * 写入点与落旗链条见 notes/观战.md §8。 */
-#define ADDR_END_EXIT           0x8B41C0u   /* 退出程序 (关窗) */
-#define ADDR_END_QUIT           0xA83D48u   /* 退出对局回菜单 (ESC) */
-#define ADDR_END_LOSE           0xA83D49u   /* 本机玩家出局 (无结算) */
-#define ADDR_END_SCORE          0xA8ECD0u   /* 对局结束 -> 弹结算 */
+/* GameModeOptionsClass::Instance.MultiEngineer (0xA8B250 + 0x1C, YRpp
+ * Unsorted::MultiEngineer): 遭遇战设置里的"多位工程师"勾选。Ares 拿它决定
+ * 工程师占敌楼是先损伤还是直接占领 (见 OU_EngDamageOn)。 */
+#define ADDR_MULTI_ENGINEER     0xA8B26Cu
 
 /* Game::IsActive (bool, YRpp Unsorted.h)。 */
 #define ADDR_ISACTIVE           0xA8E9A0u
@@ -59,13 +57,6 @@
 #define OFF_HOUSE_INDEX         0x30u     /* HouseClass::ArrayIndex */
 #define OFF_HOUSE_TYPE          0x34u     /* HouseClass::Type -> HouseTypeClass* */
 #define OFF_IS_HUMAN            0x1ECu    /* HouseClass::IsHumanPlayer */
-/* 四个结局面板标志, 都在 HouseClass 里, 连着排 (见 notes/观战.md §8)。
- * AcceptDefeat 只按这四个挑房写; HouseClass::Update 在"借来的时间"用完后
- * 才把 IsWinner/IsLoser 折算成全局的 [0xA83D49]/[0xA8ECD0]。 */
-#define OFF_DEFEATED            0x1F5u    /* HouseClass::Defeated */
-#define OFF_GAME_OVER           0x1F6u    /* HouseClass::IsGameOver (FlagToDie 落) */
-#define OFF_IS_WINNER           0x1F7u    /* HouseClass::IsWinner (Flag_To_Win 落) */
-#define OFF_IS_LOSER            0x1F8u    /* HouseClass::IsLoser  (Flag_To_Lose 落) */
 /* HouseClass::Money: 0x705DF3 (Available_Money) 与 0x4F9950 (GiveMoney)
  * 均通过 [ecx+0x30C] 访问。 */
 #define OFF_HOUSE_MONEY         0x30Cu
@@ -710,6 +701,30 @@
  * InfantryClass 重写 (0x522C00 = 播 Sequence::Cheer); 收尾 `ret 4`。 */
 #define OFF_VT_CHEER            0x388u
 
+/* ==================== 单位损失播报 (RadarEvent / EVA) ==================== */
+
+/* RadarEventType::UnitLost (YRpp GeneralDefinitions.h:1112)。
+ * Ares 3.0 把 FootClass::Destroyed 的 0x4D98C0 整段重写: 对"当前玩家控制"的
+ * 阵亡单位调下面两个函数, 心控来的单位 Owner 已改成我方, 因此也算我方损失。
+ * 这两个入口都是纯表现层 (本地雷达事件对象 / 本地 EVA 播放), Ares 与本项目
+ * 均未在它们上面挂钩。 */
+#define RE_UNIT_LOST                7
+
+/* RadarEventClass::Create: fastcall(ecx=RadarEventType), 栈=CellStruct(4B), ret 4。
+ * 站点 0x65FA70 的入口 6 字节 = push ebp / mov ebp,esp / and esp,~7 (无 rel),
+ * 序言未执行时可直接跳下面的 ret 4。 */
+#define ADDR_RE_CREATE_RET          0x0065FB47u  /* 函数尾 ret 4 */
+
+/* VoxClass::PlayIndex: fastcall(ecx=语音索引, edx=nUnk), 栈=nUnk2, ret 4。
+ * 站点 0x752480 的入口 5 字节是一条 mov eax,[abs] (无 rel)。Ares 的 EVA.Lost 走它,
+ * 不走按名字的 VoxClass::Play (0x752700, 原版 FootClass::Destroyed 才用)。 */
+#define ADDR_VOX_PLAYINDEX_RET      0x00752581u  /* 函数尾 ret 4 */
+
+/* TechnoClass::IsMindControlled (0x7105E0): thiscall 无栈参, 纯只读,
+ * 返回 [this+0x2C0] (MindControlledBy) || [this+0x2C4] (MindControlledByAUnit)。
+ * MindSelect.cpp 与本模块共用, 覆盖临时心控与永久心控两种。返回值只有 AL 有效。 */
+#define FN_TECH_ISMINDCONTROLLED    0x007105E0u
+
 /* ==================== 事件 (EventClass) ==================== */
 
 #define EVT_SIZE                111u      /* EventClass 结构的字节数 */
@@ -721,6 +736,7 @@
 #define REG_OFF_ESI             0x0Cu     /* YRpp Syringe.h REGISTERS */
 #define REG_OFF_EDI             0x08u
 #define REG_OFF_EBP             0x10u
+#define REG_OFF_ESP             0x14u     /* 钩点现场栈顶 (MsgText 读栈参实证) */
 #define REG_OFF_EAX             0x24u
 #define REG_OFF_ECX             0x20u
 #define REG_OFF_EDX             0x1Cu

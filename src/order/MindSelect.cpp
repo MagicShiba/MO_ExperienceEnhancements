@@ -23,11 +23,11 @@
 #define VT_SELECT       (0x14Cu / 4u)   /* ObjectClass::Select */
 #define VT_ISSELECTABLE (0x64u / 4u)    /* ObjectClass::IsSelectable */
 
-typedef int __attribute__((thiscall)) (*Fn_IsMindControlled)(void* self);
+typedef unsigned char __attribute__((thiscall)) (*Fn_IsMindControlled)(void* self);
 typedef int __attribute__((thiscall)) (*Fn_IsSelectable)(void* self);
 typedef int __attribute__((thiscall)) (*Fn_Select)(void* self);
 
-#define FN_ISMC ((Fn_IsMindControlled)(void*)0x7105E0u)
+#define FN_ISMC ((Fn_IsMindControlled)(void*)(size_t)FN_TECH_ISMINDCONTROLLED)
 
 #define MS_MC_CAP 256   /* 单轮心控收集上限 (超限截断) */
 

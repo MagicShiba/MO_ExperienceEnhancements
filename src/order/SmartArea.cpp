@@ -779,7 +779,9 @@ static int SA_AssignOne(int i, int j, void* house, int* takeOrNull)
      * 工程师 + 无主/中立科技 → 按楼限 1;
      * 工程师 + 无主/中立民房 (不可夺无归属变更) → 按修楼限数
      *   (掉血 1 人, 满血跳过);
-     * 工程师 + 敌方 → Squad; 士兵进驻 → 均分预轮处理, 这里跳过;
+     * 工程师 + 敌方 → 不损伤模式按楼限 1 (战役恒如此, 见 OU_EngDamageOn),
+     *   损伤模式 (遭遇战"多位工程师"/联机) 才按 Squad 分;
+     * 士兵进驻 → 均分预轮处理, 这里跳过;
      * 士兵攻击拆除 → 不管。读不到按敌方路径。 */
     if ((ms == MISSION_SABOTAGE || ms == MISSION_ENTER || ms == MISSION_CAPTURE) &&
         OU_WhatAmI(s_SnapTgts[j]) == ABS_BUILDING &&
@@ -795,6 +797,10 @@ static int SA_AssignOne(int i, int j, void* house, int* takeOrNull)
             }
             return SA_RepairCap(i, j, ms, takeOrNull);
         }
+        /* 工程师占敌方楼: 一个就够的模式下按楼限 1。多派的不会帮忙占领,
+         * 楼一归我就成了维修消耗 (CAPTURE 进驻即修, 掉血才吃掉人)。 */
+        if (isEng && !OU_EngDamageOn())
+            return SA_RepairCap(i, j, ms, takeOrNull);
         if (!isEng && !isNull && s_SnapTgtNeut[j] && s_SnapTgtHouse[j] &&
             (ms == MISSION_CAPTURE || ms == MISSION_SABOTAGE ||
              ms == MISSION_ENTER))
