@@ -1,6 +1,7 @@
 /* TreeChop.cpp - Ctrl+Z+中键快速砍树。
  * 按住显示 Range x Range 菱形框, 松开在当前鼠标格执行。
- * 框内树用地形扫描找 (TREE / TIBTRE 前缀, 见 TC_IsTreeID),
+ * 框内目标用地形扫描找 (可砍前缀名单见 TC_IsTreeID / g_TcChopPfx),
+ * 参战单位要先过弹头关 (TC_UnitCanChop): 没武器或弹头没写 Wood=yes 的留在原地。
  * 单位/树按 max 轮转全覆盖分配 (k % nu / k % nt, IsPlanningEvent=1 排队):
  * 树多一单位规划多棵且覆盖选区内全部树, 树少多单位集火同一棵。
  * 画框走引擎 CoordsToClient 投影格线角点, 与扫描同格。
@@ -21,15 +22,26 @@
 typedef void* __attribute__((thiscall)) (*Fn_GetTerrain)(void* cell, int alt);
 #define FN_GETTERRAIN ((Fn_GetTerrain)(void*)0x47C550u)
 
+/* 可砍地形限名单 (按地形 ID 前缀, 命中即砍)。
+ * 树 TREE*; 城市小品 红绿灯 TRFF* / 交通标志 SIGN* /
+ * 路灯 LT_GEN* LT_EUR* LT_SGN* (带牌路灯)。全是 rulesmo.ini 里 Armor=tree 的可摧毁地形。
+ * TIBTRE01~03 (Tiberium Tree, 矿柱) 是 Immune=yes 的无敌地形, 绝不进名单:
+ * 派兵过去只会白跑, 单位还被钉在那儿。VEINTREE 同理 (IsVeinhole)。 */
+static const char* const g_TcChopPfx[] =
+{
+    "TREE", "TRFF", "SIGN", "LT_GEN", "LT_EUR", "LT_SGN"
+};
+
 /* 配置 */
 static int g_TcInit = 0;
 static int g_TcEnable = 1;
 static OU_Hotkey g_TcHk;
 static int g_TcRange = 4;
+static int g_TcWoodCheck = 1;   /* 只派"弹头写了 Wood=yes"的单位 ([TreeChop] WoodCheck=0 关掉) */
 
 static void TC_EnsureInit(void)
 {
-    char buf[96], b1[16];
+    char buf[96];
     unsigned q = 0;
     if (g_TcInit) return;
     g_TcInit = 1;
@@ -42,9 +54,10 @@ static void TC_EnsureInit(void)
     g_TcRange = GetPrivateProfileIntA(TC_SECTION, "Range", 4, g_IniPath);
     if (g_TcRange < 2) g_TcRange = 2;
     if (g_TcRange > 16) g_TcRange = 16;
+    g_TcWoodCheck = GetPrivateProfileIntA(TC_SECTION, "WoodCheck", 1, g_IniPath) ? 1 : 0;
     q = AppendCStr(buf, q, "treechop: ON (ctrl+Z+middle) range=", sizeof(buf));
-    UtoA((unsigned)g_TcRange, b1);
-    q = AppendCStr(buf, q, b1, sizeof(buf));
+    q = OU_AppendU(buf, q, (unsigned)g_TcRange, sizeof(buf));
+    q = AppendCStr(buf, q, g_TcWoodCheck ? " woodcheck=on" : " woodcheck=OFF", sizeof(buf));
     (void)q;
     LogLine(buf);
     if (!g_TcEnable) LogLine("treechop: OFF");
@@ -74,6 +87,137 @@ static int TC_FireAttack(int houseIdx, int srcID, unsigned char srcRtti,
 {
     return OU_FireMega(houseIdx, srcID, srcRtti, MISSION_ATTACK,
                        tgtID, tgtRtti, 0, 0, 0, 0, 1, unit, uid, idxOk);
+}
+
+/* ---------------- 弹头能不能伤木 (能不能砍) ----------------
+ * 判据只有一条: 弹头写了 `Wood=yes`。
+ * 不看 Verses, 也不看建筑的木甲 (`Armor=tree`) —— 那是另一套东西, 自定义护甲一加,
+ * wood 档伤害就跟"能不能拆木结构"脱节。
+ * 数据从引擎的 rules INIClass 现读: 武器节 `Warhead=` → 弹头节 `Wood=`。
+ * 只读查询, 联机安全。 */
+
+typedef void* (__attribute__((thiscall)) *Fn_TC_GetWeapon)(void* self, int idx);
+typedef int (__attribute__((thiscall)) *Fn_TC_IniStr)(void* ini, const char* sec,
+    const char* key, const char* def, char* buf, unsigned size);
+
+#define FN_TC_INISTR ((Fn_TC_IniStr)(void*)FN_INI_READSTRING)
+#define TC_CHOP_CACHE 32         /* 武器 → 能不能砍 缓存条数 */
+#define TC_SEC_POOL 32           /* 弹头节名池 (见 TC_SecName) */
+
+/* 类型 ID 可读: 非空 + 全可打印。别换成 OU_StrOk —— 它只认大写, 驼峰武器 ID
+ * (`MissileLauncher` / `120mm`) 会被整条判坏, 带导弹的单位反而"不能砍"。 */
+static int TC_IdOk(const char* s)
+{
+    int n;
+    if (!s) return 0;
+    for (n = 0; n < 23 && s[n]; n++)
+        if ((unsigned char)s[n] < 0x20 || (unsigned char)s[n] > 0x7E) return 0;
+    return n > 0;
+}
+
+/* 弹头节名要持久、且每个名字一个地址: INIClass 按节名**指针**缓存上一节
+ * (EngineAddr.h 那条坑), 传栈上缓冲会让后面的查询命中上一节的数据。 */
+static char s_TcSec[TC_SEC_POOL][32];
+static int s_TcSecN = 0;
+
+static const char* TC_SecName(const char* name)
+{
+    int i;
+    for (i = 0; i < s_TcSecN; i++)
+        if (!lstrcmpA(s_TcSec[i], name)) return s_TcSec[i];
+    if (s_TcSecN >= TC_SEC_POOL) return name;
+    lstrcpynA(s_TcSec[s_TcSecN], name, 32);
+    return s_TcSec[s_TcSecN++];
+}
+
+static int TC_IniStr(void* ini, const char* sec, const char* key, char* out, unsigned cap)
+{
+    out[0] = 0;
+    if (!ini || !IsPlausiblePtr(ini) || !sec || !sec[0]) return 0;
+    FN_TC_INISTR(ini, sec, key, "", out, cap);
+    return out[0] ? 1 : 0;
+}
+
+/* yes/no → 1/0, 没写或不认识 → -1。 */
+static int TC_Flag3(const char* v)
+{
+    if (!v || !v[0]) return -1;
+    if (v[0] == 'y' || v[0] == 'Y' || v[0] == 't' || v[0] == 'T' || v[0] == '1') return 1;
+    if (v[0] == 'n' || v[0] == 'N' || v[0] == 'f' || v[0] == 'F' || v[0] == '0') return 0;
+    return -1;
+}
+
+/* 一把武器砍不砍得动: 1=弹头 Wood=yes; 0=其余 (没武器/读不到/没写/写 no)。 */
+static int TC_WeaponChops(void* ini, void* wt)
+{
+    const char* wsec;
+    char wh[32], v[8];
+
+    if (!wt || !IsPlausiblePtr(wt)) return 0;
+    wsec = (const char*)((char*)wt + OFF_TYPE_ID);   /* 武器节名 = 武器 ID */
+    if (MemReadableBytes(wsec, 0x18) < 0x18 || !TC_IdOk(wsec)) return 0;
+    wh[0] = 0;
+    v[0] = 0;
+    if (!TC_IniStr(ini, wsec, "Warhead", wh, sizeof(wh))) return 0;
+    if (!TC_IniStr(ini, TC_SecName(wh), "Wood", v, sizeof(v))) return 0;
+    return (TC_Flag3(v) == 1) ? 1 : 0;
+}
+
+static void* s_TcWp[TC_CHOP_CACHE];
+static int s_TcChops[TC_CHOP_CACHE];
+static int s_TcWpN = 0;
+static void* s_TcWpIni = 0;
+
+/* 按武器缓存判据 (换局换 rules 指针即清)。 */
+static int TC_WeaponChopsCached(void* ini, void* wt)
+{
+    int i;
+    if (ini != s_TcWpIni) { s_TcWpIni = ini; s_TcWpN = 0; s_TcSecN = 0; }
+    for (i = 0; i < s_TcWpN; i++)
+        if (s_TcWp[i] == wt) return s_TcChops[i];
+    if (s_TcWpN >= TC_CHOP_CACHE) s_TcWpN = 0;
+    s_TcWp[s_TcWpN] = wt;
+    s_TcChops[s_TcWpN] = TC_WeaponChops(ini, wt);
+    return s_TcChops[s_TcWpN++];
+}
+
+/* 单位当前武器 (0=主武器, 没有再试 2=精英/部署)。0 = 没有武器。 */
+static void* TC_UnitWeapon(void* u)
+{
+    void** vt;
+    Fn_TC_GetWeapon gw;
+    void* ws;
+    void* wt;
+    int idx;
+
+    if (!u || !IsPlausiblePtr(u)) return 0;
+    vt = *(void***)u;
+    if (!vt || !IsPlausiblePtr(vt)) return 0;
+    gw = (Fn_TC_GetWeapon)vt[OFF_VT_GETWEAPON / 4];
+    if (!gw || !IsPlausiblePtr((const void*)gw)) return 0;
+    for (idx = 0; idx <= 2; idx += 2)
+    {
+        ws = gw(u, idx);
+        if (!ws || !IsPlausiblePtr(ws)) continue;
+        wt = *(void**)ws;
+        if (wt && IsPlausiblePtr(wt)) return wt;
+    }
+    return 0;
+}
+
+/* 能砍树吗: 有武器 且 弹头 Wood=yes。没武器 (= 不能攻击) 一律不动。
+ * rules 读不到时放行, 免得一次取数失败把整队筛空。 */
+static int TC_UnitCanChop(void* u)
+{
+    void* ini;
+    void* wt;
+
+    if (!g_TcWoodCheck) return 1;
+    wt = TC_UnitWeapon(u);
+    if (!wt) return 0;
+    ini = *(void**)ADDR_INI_RULES;
+    if (!ini || !IsPlausiblePtr(ini)) return 1;
+    return TC_WeaponChopsCached(ini, wt);
 }
 
 /* 画框投影: 格线角点走引擎 CoordsToClient, 每角取框内格高。 */
@@ -114,14 +258,23 @@ static int TC_GridCorner(int gx, int gy, int gz, int* px, int* py)
 static int g_TcTypeOff = -1;   /* 树对象内 Type 指针偏移 pin */
 static int g_TcIdOff = -1;     /* 类型内 ID 字符串偏移 pin */
 
-/* TREE* / TIBTRE* 为树, 其余排除。 */
+/* id 以 pfx 开头回 1。id 是 24 字节零填充串 (见 TC_FindTrees), 逐字节比到
+ * pfx 结束即可, 不会读越界。 */
+static int TC_Pfx(const char* id, const char* pfx)
+{
+    int i;
+    for (i = 0; pfx[i]; i++)
+        if (id[i] != pfx[i]) return 0;
+    return 1;
+}
+
+/* 命中 g_TcChopPfx 任一前缀即可砍。 */
 static int TC_IsTreeID(const char* id)
 {
+    unsigned i;
     if (!id || !id[0]) return 0;
-    if (id[0] == 'T' && id[1] == 'R' && id[2] == 'E' && id[3] == 'E')
-        return 1;
-    if (id[0] == 'T' && id[1] == 'I' && id[2] == 'B' && id[3] == 'T')
-        return 1;
+    for (i = 0; i < sizeof(g_TcChopPfx) / sizeof(g_TcChopPfx[0]); i++)
+        if (TC_Pfx(id, g_TcChopPfx[i])) return 1;
     return 0;
 }
 
@@ -201,8 +354,6 @@ static void TC_Drain(void)
     void* cur = *(void**)ADDR_CURPLAYER;
     int houseIdx;
     int sent = 0;
-    char buf[64], b1[16];
-    unsigned q;
     if (!cur || cur != g_TcHouse) { g_TcPendCount = 0; return; }
     houseIdx = *(int*)((char*)cur + OFF_HOUSE_INDEX);
     if (houseIdx != g_TcHouseIdx) { g_TcPendCount = 0; return; }
@@ -228,15 +379,6 @@ static void TC_Drain(void)
         TC_ShiftDown();
         sent++;
     }
-    if (g_TcPendCount <= 0)
-    {
-        q = 0;
-        q = AppendCStr(buf, q, "tc: drained sent=", sizeof(buf));
-        UtoA((unsigned)sent, b1);
-        q = AppendCStr(buf, q, b1, sizeof(buf));
-        (void)q;
-        LogLine(buf);
-    }
 }
 
 /* 触发 */
@@ -247,8 +389,6 @@ static void TC_Press(void)
     void** items;
     int selN, i, nu = 0, nt = 0;
     int cx, cy;
-    char buf[96], b1[16], b2[16];
-    unsigned q;
     static void* s_units[TC_UNIT_CAP];
     static int s_uids[TC_UNIT_CAP];
     static void* s_trees[TC_TREE_CAP];
@@ -258,18 +398,19 @@ static void TC_Press(void)
     if (!cur || !IsPlausiblePtr(cur)) return;
     selN = *(int*)ADDR_SELOBJ_COUNT;
     items = *(void***)ADDR_SELOBJ_ITEMS;
-    if (selN <= 0 || !items || !IsPlausiblePtr(items))
-    { LogLine("tc: no selection"); return; }
+    if (selN <= 0 || !items || !IsPlausiblePtr(items)) return;
     for (i = 0; i < selN && nu < TC_UNIT_CAP; i++)
     {
         void* o = items[i];
         if (!TC_IsChopper(o)) continue;
         /* 敌我识别: 只派自家单位 (敌人/中立/盟友都不接砍树令)。 */
         if (OU_OrderSide(o) != 1) continue;
+        /* 弹头没写 Wood=yes (或压根没武器) 的留在原地, 不派。 */
+        if (!TC_UnitCanChop(o)) continue;
         s_units[nu++] = o;
     }
-    if (nu <= 0) { LogLine("tc: no choppers"); return; }
-    if (!OU_MouseCell(&cx, &cy)) { LogLine("tc: off map"); return; }
+    if (nu <= 0) return;
+    if (!OU_MouseCell(&cx, &cy)) return;
     for (i = 0; i < nu; i++)
     {
         char tb[8];
@@ -287,27 +428,7 @@ static void TC_Press(void)
             g_TcIdxOk = 1;
     }
     nt = TC_FindTrees(cx, cy, s_trees, s_tids);
-    if (nt <= 0)
-    {
-        char nb[64], n1[16];
-        unsigned nq = 0;
-        int tcnt = *(int*)(ADDR_TERRAINTYPES + OFF_VEC_COUNT);
-        nq = AppendCStr(nb, nq, "tc: no trees types=", sizeof(nb));
-        UtoA((unsigned)(tcnt > 0 ? tcnt : 0), n1);
-        nq = AppendCStr(nb, nq, n1, sizeof(nb));
-        (void)nq;
-        LogLine(nb);
-        return;
-    }
-    q = 0;
-    q = AppendCStr(buf, q, "tc: chop trees=", sizeof(buf));
-    UtoA((unsigned)nt, b1);
-    q = AppendCStr(buf, q, b1, sizeof(buf));
-    q = AppendCStr(buf, q, " units=", sizeof(buf));
-    UtoA((unsigned)nu, b2);
-    q = AppendCStr(buf, q, b2, sizeof(buf));
-    (void)q;
-    LogLine(buf);
+    if (nt <= 0) return;
     /* 单位/树按 max 轮转全覆盖 (k % nu / k % nt, IsPlanningEvent=1 排队):
      * 树多 (nt>nu): 覆盖选区内全部树, 每单位规划多棵;
      * 树少 (nu>nt): 全部单位参战, 每棵树被多单位集火。 */
