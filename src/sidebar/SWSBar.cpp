@@ -528,10 +528,9 @@ static int s_OrderN = -1;           /* -1 = 还没排过 */
 static int s_OrderFill = -1;
 static int s_OrderColCount[4];
 
-/* 侧栏主题色 (淡蓝): 箭头、箭头边框、文字描边统一用它, 方便一处改色。 */
-#define SWS_ACCENT_R 0xA5
-#define SWS_ACCENT_G 0xD3
-#define SWS_ACCENT_B 0xFF
+/* 悬停提示的边框/文字色按当前 UI 阵营取 (SidebarSkin_TipRGB), 与选中信息
+ * 面板那份提示同源; 这里不再留死色值。SwsSig 含 SidebarSkin_Side(), 换皮肤
+ * 会触发缓存重建, 不会残留旧颜色的提示框。 */
 static int s_BoundX = 0, s_BoundY = 0, s_BoundW = 0, s_BoundH = 0;
 /* 面板级滚动偏移 (所有列一起上下滚): 列间距为 0 时塞不进逐列滚动条,
  * 与战役框同样整框一个偏移。 */
@@ -3276,27 +3275,33 @@ static void SwsTipRect(int w, int h, int panelRight, int ax, int ayTop,
     *rx = sx - 2; *ry = ny - 1; *rw = sw + 6; *rh = th + 2;
 }
 
-/* 提示框: 半透明黑底 + 主题色边框 + 白字。不吃侧栏整体透明度。
+/* 提示框: 半透明黑底 + 阵营主题色边框 + **同色**文字。不吃侧栏整体透明度。
  * 多行按 \n 上下叠放 (短行左对齐), 整块在盒内垂直居中。 */
 static void SwsDrawTip(int w, int h, int panelRight, int ax, int ayTop)
 {
-    int bx, by, bw, bh, sx, k;
+    int bx, by, bw, bh, sx, k, tr, tg, tb;
+    unsigned tc;
     if (!s_Tip.ok) return;
     SwsTipRect(w, h, panelRight, ax, ayTop, &bx, &by, &bw, &bh);
     if (bw <= 0) return;
+    tc = SidebarSkin_TipRGB();
+    tr = (int)((tc >> 16) & 0xFFu);
+    tg = (int)((tc >> 8) & 0xFFu);
+    tb = (int)(tc & 0xFFu);
     /* 提示框不吃整体 Alpha ("正在读"的信息须始终清晰), 直接用不带 s_Alpha 的 SwsCFill。 */
     SwsCFill(bx, by, bw, bh, 0, 0, 0, 150);
-    SwsCFill(bx, by, bw, 1, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
-    SwsCFill(bx, by + bh - 1, bw, 1, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
-    SwsCFill(bx, by, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
-    SwsCFill(bx + bw - 1, by, 1, bh, SWS_ACCENT_R, SWS_ACCENT_G, SWS_ACCENT_B, 200);
+    /* SwsCFill 的 op 是百分比 (SwsFillCore 夹到 100), 100 = 满色, 与文字同色。 */
+    SwsCFill(bx, by, bw, 1, tr, tg, tb, 100);
+    SwsCFill(bx, by + bh - 1, bw, 1, tr, tg, tb, 100);
+    SwsCFill(bx, by, 1, bh, tr, tg, tb, 100);
+    SwsCFill(bx + bw - 1, by, 1, bh, tr, tg, tb, 100);
     sx = bx + 2;
     for (k = 0; k < s_Tip.nl; k++)
     {
         if (s_Tip.wl[k] <= 0) continue;   /* 空行留空 */
         SwsCCov(s_Tip.cov + (size_t)k * s_Tip.adv * SWS_TIP_COV_W,
                 SWS_TIP_COV_W, 1, sx, by + 1 + k * s_Tip.adv,
-                s_Tip.wl[k], s_Tip.adv, 255, 255, 255, 100);
+                s_Tip.wl[k], s_Tip.adv, tr, tg, tb, 100);
     }
 }
 

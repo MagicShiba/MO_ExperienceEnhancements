@@ -19,6 +19,7 @@
 #include "Observer.h"
 #include "PauseView.h"
 #include "PcxImage.h"
+#include "SidebarSkin.h"
 #include "SingleUnload.h"
 #include "UnitPanel.h"
 #include "VecText.h"
@@ -87,24 +88,23 @@
 #define UP_SH_W        60
 #define UP_SH_H        32
 
-/* 悬停提示框 (样式同超武侧栏的悬停名: 半透明黑底 + 主题色 1px 边 + 白字)。
+/* 悬停提示框 (样式同超武侧栏的悬停名: 不透明黑底 + 主题色 1px 边 + 同色字)。
  * 字号/字体跟随 [VecText] (与侧栏那份提示一致), 单独占一个 GDI 槽,
  * 免得与面板正文 (FontPx) 互相拆了重建。
  * 行距按**墨迹**排 (见 Up_InkMetrics), 不按字体 cell —— cell 含 ~6px leading,
  * 按它排行会空出一大块 (与保存截图那里的列表同一个做法)。 */
-#define UP_TIP_PAD     4         /* 左右内边距 */
-#define UP_TIP_VPAD    3
+#define UP_TIP_PAD     5         /* 左右内边距 (边框内缘 ↔ 文字/图标) */
+#define UP_TIP_VPAD    4         /* 上下内边距 (边框内缘 ↔ 墨迹), 上下相等 */
 #define UP_TIP_GAP     4         /* 与面板之间的空隙 */
 #define UP_TIP_LINE_CAP 40
-#define UP_TIP_LINES   7         /* 数值行上限 (火力/生命/速度/护甲/自愈 只占 5 条) */
+#define UP_TIP_LINES   7         /* 数值行上限 (矿石/火力/生命/速度/护甲/自愈 占 6 条) */
 #define UP_TIP_LINE_GAP 3        /* 行间空隙 (墨迹之外) */
 #define UP_TIP_COL_GAP 6         /* 标签 / 原值 / 加成 三列之间的空隙 */
 #define UP_TIP_NAME_GAP 3        /* 名字下那条分隔线占的高度 */
 #define UP_TIP_NAME_CAP 40
 #define UP_TIP_SLOT    14        /* GdiText 槽: 面板悬停提示 (字号走 [VecText]) */
-#define UP_TIP_ACCENT_R 165
-#define UP_TIP_ACCENT_G 211
-#define UP_TIP_ACCENT_B 255
+/* 边框/文字/分隔线的颜色不写死: SidebarSkin_TipRGB() 按当前 UI 阵营给
+ * (盟军 A5D3FF / 苏联·厄普西隆 FFFF00 / 焚风 84E7CE), 与超武侧栏提示同源。 */
 
 /* 护甲基础档: 与 rules [ArmorTypes] 链末端的名字一一对应, 下标即 UpStat.armor。
  * MO 的单位写的是 `Armor=flak_t1` 这类别名, 别名本身没有意义, 要沿
@@ -142,6 +142,8 @@ typedef struct {
     int spdMilli;                   /* 加成后速度: 原速度 × 倍率 (毫) */
     int shMilli;                    /* 自愈: 每秒回多少 (毫 HP/游戏秒), 0 = 没有 */
     int armor;                      /* 护甲基础档 (k_ArmorId 的下标), 0 = 没读到 */
+    int harv;                       /* 1 = 矿车 (UnitTypeClass::Harvester) */
+    int oreValue;                   /* 车上矿石折算的钱 (StorageClass::GetTotalValue) */
     wchar_t name[UP_TIP_NAME_CAP];  /* 类型显示名 (UIName), 空则不打标题行 */
 } UpStat;
 
@@ -285,6 +287,9 @@ typedef int (__attribute__((thiscall)) *Fn_IniReadStr)(void* ini, const char* se
                                                        char* buf, unsigned size);
 typedef unsigned char (__attribute__((thiscall)) *Fn_IniReadBool)(void* ini, const char* sec,
                                                                   const char* key, int def);
+/* StorageClass::GetTotalValue: ecx = &TechnoClass::Tiberium, 无参, 返回车上
+ * 矿石折算的钱。只读查询, 联机可用。 */
+typedef int (__attribute__((thiscall)) *Fn_StorageValue)(void* self);
 
 /* ---------------- 小工具 ---------------- */
 
@@ -1728,12 +1733,12 @@ static void Up_LoadDetSheet(void)
     if (g_Log) LogLine("up: det sheet ok");
 }
 
-/* 详情行 (图标块) 的左上角: 贴格子下方, 水平居中。宽高就是 UP_DET_BLOCK_W/H。 */
+/* 详情行 (图标块) 的左上角: 贴格子下方, 与格区左缘左对齐。
+ * 宽高就是 UP_DET_BLOCK_W/H。 */
 static void Up_DetRect(int* px, int* py)
 {
-    int gw = s_Cols * UP_CELL_W + (s_Cols - 1) * UP_CELL_GAP;
     int gh = s_Rows * UP_CELL_H + (s_Rows - 1) * UP_CELL_GAP;
-    *px = s_Gx + (gw - UP_DET_BLOCK_W) / 2;
+    *px = s_Gx;
     *py = s_Gy + gh + UP_DET_TOP;
 }
 
@@ -2065,11 +2070,23 @@ static int Up_StatBuild(void* o, void* type, UpStat* st)
 
     for (i = 0; i < UP_DET_N; i++) st->own[i] = 0;
     st->ok = 0;
+    st->harv = 0;
+    st->oreValue = 0;
     if (!o || !type) return 0;
     am = Up_WhatAmI(o);
     if (am != ABS_UNIT && am != ABS_INFANTRY && am != ABS_AIRCRAFT &&
         am != ABS_BUILDING) return 0;
     notBld = (am != ABS_BUILDING);
+    /* 矿车判据 = 引擎自己的 Harvester 字段; 非 UnitTypeClass 没这一字节, 不读。
+     * 价值用引擎的 GetTotalValue, 与卸载时给钱的口径一致 (空车就是 0)。 */
+    st->harv = (am == ABS_UNIT &&
+                ((unsigned char*)type)[OFF_UNITTYPE_HARVESTER]) ? 1 : 0;
+    if (st->harv)
+    {
+        st->oreValue = ((Fn_StorageValue)(void*)FN_STORAGE_TOTALVALUE)
+                       ((char*)o + OFF_TECH_TIBERIUM);
+        if (st->oreValue < 0 || st->oreValue > 10000000) st->oreValue = 0;
+    }
     Up_RulesPoll();
     ti = Up_TypeInfo(type);
 
@@ -2220,6 +2237,16 @@ static int Up_AppMilli(wchar_t* d, int cap, int milli)
     return n;
 }
 
+/* "$700": 车上矿石的钱。矿车那行的左列, 空车写 "$0"。 */
+static int Up_OreValue(wchar_t* d, int cap, int v)
+{
+    int n = 0;
+    if (cap < 3) return 0;
+    d[n++] = (wchar_t)'$';
+    n += Up_Num(d + n, cap - n, v);
+    return n;
+}
+
 /* "+40%" / "-80%" (0 = 没有加成, 一个字符都不写)。符号在前, 右列所有行
  * 都从符号起排, 所以这一列天然对齐。 */
 static int Up_Pct(wchar_t* d, int cap, int pct)
@@ -2293,13 +2320,15 @@ static int Up_InkMetrics(int px, int* top, int* h)
 
 /* 提示框画在面板右侧 (放不下改左侧), 底边与面板对齐 —— **不跟鼠标走**:
  * 逐像素跟随会让整块每帧重画, 位置也会晃。宽高按内容自适应。
- * 行: 单位名 / 分隔线 / (8 个能力图标) / 火力 / 生命 / 速度 / 护甲 / 自愈。
+ * 行: 单位名 / 分隔线 / (8 个能力图标) / 火力 / 生命 / 速度 / 护甲 / 自愈 / 矿石。
+ * 矿石排在最后, 只在矿车上画, 值是它此刻装载的矿石折算成钱。
  * 数值行分三列: 标签 | 原值 | 加成 —— 右列一律从符号起排, 所以各行的加号
  * 是对齐的; 右列 = 百分比 + 括号里的加成后数值, 没有加成时整列留空。
  * 没有数据的那行整行不画 (不占位、不写 "—")。第一行是单位全名 (格子下那行
  * 名字受 cameo 尺寸限制会被截, 有的单位没图标)。 */
 static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
 {
+    static const wchar_t k_ore[]   = { 0x77FF, 0x77F3, 0 };   /* 矿石 */
     static const wchar_t k_fire[]  = { 0x706B, 0x529B, 0 };   /* 火力 */
     static const wchar_t k_life[]  = { 0x751F, 0x547D, 0 };   /* 生命 */
     static const wchar_t k_spd[]   = { 0x901F, 0x5EA6, 0 };   /* 速度 */
@@ -2313,9 +2342,15 @@ static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
     int nl = 0, i, px, inkTop, inkH, lineH;
     int labW = 0, leftW = 0, leftAll = 0, rightW = 0, anyRight = 0, iconH = 0;
     int nameN = 0, nameW = 0;
-    int total, maxw, bw, bh, bx, by, y, xL = 0, xR = 0;
+    int total, maxw, bw, bh, bx, by, y, cx, xL = 0, xR = 0;
+    unsigned tc;
+    int tr, tg, tb;
 
     if (!st->ok) return;
+    tc = SidebarSkin_TipRGB();
+    tr = (int)((tc >> 16) & 0xFFu);
+    tg = (int)((tc >> 8) & 0xFFu);
+    tb = (int)(tc & 0xFFu);
     /* 字号/字体与侧栏那份悬停提示同源 ([VecText]), 单独一个槽互不打扰。 */
     px = VecText_FontPx();
     if (px <= 0) px = 18;
@@ -2378,6 +2413,15 @@ static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
         rightN[nl] = 0;
         nl++;
     }
+    /* 矿石放最后一行: 只有矿车画。值是引擎 GetTotalValue 折算的钱 (不含精炼厂
+     * 提纯器加成), 空车也画 "$0" —— 矿车没装矿本身就是要看的状态。 */
+    if (st->harv)
+    {
+        lab[nl] = k_ore;
+        leftN[nl] = Up_OreValue(left[nl], UP_TIP_LINE_CAP, st->oreValue);
+        rightN[nl] = 0;
+        nl++;
+    }
     if (!nl) return;
 
     for (i = 0; i < nl; i++)
@@ -2403,10 +2447,14 @@ static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
     if (nameW > maxw) maxw = nameW;
     if (iconH > 0 && UP_DET_BLOCK_W > maxw) maxw = UP_DET_BLOCK_W;
     if (maxw <= 0) return;
-    total = nl * lineH + iconH;
-    if (nameW > 0) total += lineH + UP_TIP_NAME_GAP;
-    bw = maxw + UP_TIP_PAD * 2;
-    bh = total + UP_TIP_VPAD * 2;
+    /* 框高按**墨迹**算: 行与行之间才留 LINE_GAP, 末行不拖那段行距空档;
+     * 名字行也只占墨迹高 + 分隔线那段。上下各一个 VPAD 外加 1px 边框 ——
+     * 旧算法按 nl*lineH 计高, 把末行的行距空档算进了框里, 底边看着比顶边宽。 */
+    total = (nl - 1) * lineH + inkH;
+    if (nameW > 0) total += inkH + UP_TIP_NAME_GAP;
+    total += iconH;
+    bw = maxw + UP_TIP_PAD * 2 + 2;
+    bh = total + UP_TIP_VPAD * 2 + 2;
     bx = s_Px + s_Pw + UP_TIP_GAP;
     if (bx + bw > W - 2) bx = s_Px - bw - UP_TIP_GAP;
     if (bx < 2) bx = 2;
@@ -2414,40 +2462,41 @@ static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
     by = s_Py + s_Ph - bh;
     if (by < 2) by = 2;
     if (bw < 16) return;
-    Up_Fill(base, pitch, W, H, bx, by, bw, bh, 0, 0, 0, 150);
-    Up_Edge(base, pitch, W, H, bx, by, bw, bh,
-            UP_TIP_ACCENT_R, UP_TIP_ACCENT_G, UP_TIP_ACCENT_B, 200);
+    /* a=255 走 Blend16 的直写分支: 地图/迷雾一点都不从底下透出来。
+     * 边框用满不透明, 与文字 (覆盖率 100 压在黑底上) 就是同一个颜色。 */
+    Up_Fill(base, pitch, W, H, bx, by, bw, bh, 0, 0, 0, 255);
+    Up_Edge(base, pitch, W, H, bx, by, bw, bh, tr, tg, tb, 255);
 
-    y = by + UP_TIP_VPAD;
+    cx = bx + 1 + UP_TIP_PAD;      /* 内容左缘: 与边框隔一个 PAD */
+    y = by + 1 + UP_TIP_VPAD;      /* 第一行的墨迹顶, 不是字体 cell 顶 */
     if (nameW > 0)
     {
-        Up_Text(base, pitch, W, H, bx + UP_TIP_PAD,
-                y + (lineH - inkH) / 2 - inkTop, st->name, nameN,
-                255, 255, 255, 0, 0, 0);
-        y += lineH;
-        /* 名字下的分隔线 (半透明白), 让标题和数值分层 */
-        Up_Fill(base, pitch, W, H, bx + 1, y, bw - 2, 1, 255, 255, 255, 45);
+        Up_Text(base, pitch, W, H, cx, y - inkTop, st->name, nameN,
+                tr, tg, tb, 0, 0, 0);
+        y += inkH;
+        /* 名字下的分隔线: 居中放在 NAME_GAP 里, 与边框同色但压暗 */
+        Up_Fill(base, pitch, W, H, bx + 1, y + UP_TIP_NAME_GAP / 2,
+                bw - 2, 1, tr, tg, tb, 90);
         y += UP_TIP_NAME_GAP;
     }
     if (iconH > 0)
     {
-        int ix = bx + (bw - UP_DET_BLOCK_W) / 2;
         int iy = y + (iconH - UP_DET_CELL) / 2;
-        Up_DrawIconRow(base, pitch, W, H, ix, iy, st->own);
+        Up_DrawIconRow(base, pitch, W, H, cx, iy, st->own);  /* 左对齐 */
         y += iconH;
     }
-    xL = bx + UP_TIP_PAD + labW + UP_TIP_COL_GAP;
+    xL = cx + labW + UP_TIP_COL_GAP;
     xR = xL + leftW + UP_TIP_COL_GAP;
     for (i = 0; i < nl; i++)
     {
-        int ty = y + (lineH - inkH) / 2 - inkTop;
-        Up_Text(base, pitch, W, H, bx + UP_TIP_PAD, ty, lab[i], 2,
-                255, 255, 255, 0, 0, 0);
+        int ty = y - inkTop;
+        Up_Text(base, pitch, W, H, cx, ty, lab[i], 2,
+                tr, tg, tb, 0, 0, 0);
         Up_Text(base, pitch, W, H, xL, ty, left[i], leftN[i],
-                255, 255, 255, 0, 0, 0);
+                tr, tg, tb, 0, 0, 0);
         if (rightN[i])
             Up_Text(base, pitch, W, H, xR, ty, right[i], rightN[i],
-                    255, 255, 255, 0, 0, 0);
+                    tr, tg, tb, 0, 0, 0);
         y += lineH;
     }
 }

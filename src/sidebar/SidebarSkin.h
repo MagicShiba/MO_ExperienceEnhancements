@@ -21,5 +21,10 @@ void SidebarSkin_Set(int value);
 /* 当前实际使用的 UI 阵营 (0=盟军 1=苏联 2=厄普西隆 3=焚风)。 */
 int  SidebarSkin_Side(void);
 
+/* 悬停提示框主题色 0x00RRGGBB: 盟军 A5D3FF / 苏联·厄普西隆 FFFF00 /
+ * 焚风 84E7CE。选中信息面板与超武侧栏两份提示框共用, 边框和文字都取它,
+ * 免得两处各自硬编码一份色表。按当前 UI 阵营 (含 SkinSide 覆盖) 取。 */
+unsigned SidebarSkin_TipRGB(void);
+
 /* Action 900: switch the local sidebar skin; visual-only, works in MP too. */
 void SidebarSkin_SetAction(int value);

@@ -197,6 +197,18 @@
 #define ABIL_STRONGER           1
 #define ABIL_FIREPOWER          2
 #define ABIL_SELFHEAL           9
+/* TechnoClass::Tiberium (StorageClass: 4 个 float, 每种矿石装了多少 bails)。
+ * 0x73E412 `lea ecx,[esi+0x33C]` + call StorageClass::GetAmount 实证。
+ * GetTotalValue (0x6C9600, __thiscall ecx=&Tiberium, 返回 int) 是引擎自己的
+ * 折算: 逐种乘 TiberiumClass::Array[i]->Value(+0xB8) 累加, 即车上矿石的钱
+ * (不含精炼厂 OrePurifier 加成)。只读, 联机可用。 */
+#define OFF_TECH_TIBERIUM       0x33Cu
+#define FN_STORAGE_TOTALVALUE   0x006C9600u
+/* UnitTypeClass::Harvester (bool): `Harvester=` 的解析结果, 0x7476B9
+ * `mov [edi+0xE0E], al`; 紧邻 +0xE0F 是 `Weeder=` (0x7476CD)。
+ * **只有 UnitTypeClass 有这一字节**, 别的类型不要读。 */
+#define OFF_UNITTYPE_HARVESTER  0xE0Eu
+
 #define OFF_TECH_AMMO           0x2FCu
 /* TechnoClass::Target: 当前攻击目标 (TarCom)。SetTarget (0x6FCDB0) 开头读旧值
  * 比较、末尾写入 0x2B4, 双向实证。 */

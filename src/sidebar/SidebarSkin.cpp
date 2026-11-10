@@ -387,6 +387,17 @@ int SidebarSkin_Side(void)
     return s_SkinSide;
 }
 
+unsigned SidebarSkin_TipRGB(void)
+{
+    /* 下标 = SidebarSkin_Side(): 0=盟军 1=苏联 2=厄普西隆 3=焚风。 */
+    static const unsigned k_tip[4] = {
+        0xA5D3FFu, 0xFFFF00u, 0xFFFF00u, 0x84E7CEu
+    };
+    int side = s_SkinSide;
+    if (side < 0 || side > 3) side = 0;
+    return k_tip[side];
+}
+
 /* 返回持久设置 (INI/ESC), 不返回 Action 900 的临时覆盖。 */
 int SidebarSkin_Get(void)
 {
