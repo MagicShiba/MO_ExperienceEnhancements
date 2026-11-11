@@ -55,7 +55,8 @@
 目前不打算合并。
 
 ## 使用说明
-将 `MOExperience.dll`、`MOExperience.ini` 与 `MOExperienceResources` 文件夹放在游戏根目录内。
+将 `MOExperience.dll`、`MOExperience.ini` 与 `MOExperienceResources` 文件夹放在游戏根目录内。  
+**注意**:如果遇到界面错乱，请更新或使用发布中附带的cnc-ddraw。
 
 ### 功能配置
 游戏内按下ESC键，即可显示扩展的设置菜单（这并非全部）。  
@@ -65,8 +66,8 @@
 
 ## 开发与构建
 
-查看项目：[自动装车](https://github.com/MagicShiba/MO_AutoLoad)  
-在说明中简要说明了如何开发这类插件。
+开发类似项目建议查看：[自动装车](https://github.com/MagicShiba/MO_AutoLoad)  
+在说明中简要说明了如何开发这类插件，可从简单功能下手，相信AI实力。
 
 环境：
 - 环境：`mingw-i686`
@@ -91,11 +92,12 @@ x实现回放功能和添加内部列表
 
 ## 笔记(notes)
 由AI编写的功能实现原理，踩坑记录，注意事项等。  
-这基本不是给用户看的。
+这基本不是给用户看的，给需要参考实现功能的人的AI使用。
 
 ## 参考项目
 [phobos](https://github.com/Phobos-developers/Phobos) ：一个强大的扩展。  
 [yrpp](https://github.com/Ares-Developers/YRpp) ：提供与 C++ 引擎补丁/扩展中的 Yuri's Revenge 引擎交互的能力。
 
 ## 相关项目
-[红警2字体编辑器](https://github.com/MagicShiba/Ra2FontEditor)
+[红警2字体编辑器](https://github.com/MagicShiba/Ra2FontEditor)  
+[改进的cnc-ddraw](https://github.com/MagicShiba/cnc-ddraw/releases)
