@@ -2061,9 +2061,11 @@ void FM_SetHideState(int state)
  * 否则 RadarClass::Action 随后切回 miniMap=true, 每循环都会重置动画计时器。
  * 原生雷达通过 SetCursor(0x5BDA80) / UpdateCursor(0x5BDC80) 选择 MiniFrame;
  * 这里只阻止穿透, 不重跑可能包含下令的 RadarClass::Action。
- * 钩点取 0x692F43 (jne 之后的 mov ecx,[WWMouse], 6B 无 rel), 让 0x692F3D
- * 那条 UserInputLocked 的 jne 保持原样: 过场期间引擎靠它跳过整轮鼠标输入,
- * 边缘卷屏也一并停住。 */
+ * 钩点取 0x692FDC (ProcessClickCoords 调用前的两条 lea, 8B 无 rel): 命中只跳过
+ * 0x692FDC..0x693033 的地图悬停/点击段。出口必须是 0x693034 (卷屏开关检查),
+ * 它后面的 0x69304E 是贴屏幕边缘卷屏, 0x692F8E 那支按键拖拽输入又在钩点之前
+ * 分走; 跳整轮返回出口 0x693053 会让顶部块这一整块矩形两种移动画面都失效。
+ * 0x692F3D 的 UserInputLocked jne 保持原样: 过场期间由引擎自己跳过整轮输入。 */
 extern "C" __declspec(dllexport) unsigned __cdecl FullMap_MapHoverGate(void*)
 {
     int x, y;
@@ -2074,7 +2076,7 @@ extern "C" __declspec(dllexport) unsigned __cdecl FullMap_MapHoverGate(void*)
     if (!GtMouseGameXY(&x, &y) || !FM_KeepTopRectScreen(&top)) return 0;
     if (x < top.X || x >= top.X + top.Width || y < top.Y || y >= top.Y + top.Height)
         return 0;
-    return 0x00693053u;   /* ProcessMouse 的平衡返回出口, 无局部状态要恢复 */
+    return 0x00693034u;   /* 卷屏检查入口: 栈形与 0x692FDC 相同, 鼠标点已写好 */
 }
 
 /* 全隐藏时资金条/顶部按钮的几何悬停判定也必须让位给地图。

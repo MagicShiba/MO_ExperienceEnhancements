@@ -47,9 +47,10 @@
 ; 落点雷达矩形内就自己调引擎原生 RadarClass::Action 跳转并跳 0x6925FC 吞掉,
 ; 见 src/gui/FullMap.cpp 的"小地图点击: 自己接手 + 吞掉穿透"
 0x692406 = FullMap_RadarClickGate, 6
-; 悬停门落在 0x692F43 (mov ecx,[WWMouse]); 前面 0x692F3D 的 jne 是引擎
-; UserInputLocked 出口 (过场跳 0x693053), 必须留给引擎原样执行。
-0x692F43 = FullMap_MapHoverGate, 6
+; 悬停门落在 0x692FDC (ProcessClickCoords 调用前两条 lea, 8B 无 rel): 命中只
+; 跳到 0x693034, 保留 0x69304E 的边缘卷屏与 0x692F8E 的按键拖拽输入。前面
+; 0x692F3D 的 jne 是引擎 UserInputLocked 出口, 必须留给引擎原样执行。
+0x692FDC = FullMap_MapHoverGate, 8
 0x653865 = FullMap_RadarHoverGate, 6
 0x6D06D2 = FullMap_TopHoverGate, 5
 

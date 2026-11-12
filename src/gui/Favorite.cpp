@@ -1,8 +1,9 @@
 /* Favorite.cpp - 选中单位收藏槽, 见 Favorite.h。
  *
  * 槽里存整组单位 (对象指针 + Fetch_ID), 每帧验活剪枝, 死了就掉出槽。
- * 头顶星星只画在"该格已揭示"的单位上, 黑幕里不画星也不画箭头 —— 收藏是
- * 本机信息, 但标记露在画面上就等于把黑幕里的位置说了出来。
+ * 头顶星星与收藏箭头只画在"该格已揭示"的单位上 —— 单位是模拟对象, 标记露
+ * 在画面上就等于把黑幕里的位置说了出来。信标是玩家自己放置的本机 UI 标记,
+ * 位置本就已知, 不套黑幕判据。
  *
  * 按钮语义: Ctrl+左键按下 = 立即收藏当前选中集; 不按 Ctrl 时按下只是记起点,
  * 按住超过 HoldMs = 清空该槽, 松开而未超时 = 镜头跳过去。这样"单击跳转"
@@ -726,9 +727,9 @@ static void Fav_DrawSlotArrows(unsigned char* base, int pitch, int w, int h,
 /* ---------------- 通信信标 (B 键) 的箭头 ----------------
  * 信标用各自玩家的颜色: HouseClass::ColorSchemeIndex → ColorScheme::Array[..]
  * 的 Colors[MainShadeIndex], 与 ESC 玩家色色块、单位颜色是同一套。
- * 只给本机看得见的信标画: 先问引擎 BeaconClass::VisibleToPlayer (0x4308B0,
- * 只读: 已放置 + 与本家同盟 + 该房可见), 再叠本地黑幕判据 —— 不能靠箭头把
- * 己方看不到的信标位置漏出来。 */
+ * 只给本机看得见的信标画: 引擎 BeaconClass::VisibleToPlayer (0x4308B0,
+ * 只读: 已放置 + 与本家同盟 + 该房可见)。信标由玩家自己放置, 位置本就已知,
+ * 不需要黑幕判据; 敌方/不可见信标仍由 VisibleToPlayer 挡住。 */
 #define BC_HOUSE_MAX    8          /* BeaconManagerClass::Beacons[8][3] */
 #define BC_SLOT_MAX     3
 #define BC_MAX          (BC_HOUSE_MAX * BC_SLOT_MAX)
@@ -780,7 +781,6 @@ int Fav_DrawBeaconArrows(void* surf, int w, int h, int pitch)
         hid = *(int*)(b + OFF_BC_HOUSEID);
         if (!OU_HouseIndexColor(hid, &r, &g, &bl)) continue;
         if (!Fav_BeaconVisible(b)) continue;
-        if (Fav_CellHidden(*(int*)b, *(int*)(b + 4))) continue;
         if (!OU_ProjWorld(*(int*)b, *(int*)(b + 4), *(int*)(b + 8), &px, &py)) continue;
         if (Fav_InView(&a, px, py)) continue;          /* 在画面上就有信标本体 */
         mk[n].px = px;

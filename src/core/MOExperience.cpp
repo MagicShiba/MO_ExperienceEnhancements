@@ -14,6 +14,7 @@
 #include "VecText.h"
 #include "AirWay.h"
 #include "Aggressive.h"
+#include "BuildAlly.h"
 #include "BuildQueue.h"
 #include "ChatEdit.h"
 #include "CrateIcon.h"
@@ -468,6 +469,8 @@ static void PowerDrawBoth(void)
     tSeg = Perf_Now(); Observer_Poll();   Perf_Add(PF_A_OB, tSeg);
     /* 光照预设: 换局后重新快照地图原值并重套当前选择。 */
     tSeg = Perf_Now(); Lighting_Poll();   Perf_Add(PF_A_LIGHT, tSeg);
+    /* 战役读档后补回盟友旁建造 (一帧一个字节读, 不计时)。 */
+    BuildAlly_Poll();
     }
     if (!g_InitDone) MOE_EnsureInit();
     /* 撑满视口 + 摘侧栏 gadget (隐藏原版建造栏时必须每循环都跑, 引擎每次

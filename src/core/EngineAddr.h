@@ -28,6 +28,12 @@
  * 工程师占敌楼是先损伤还是直接占领 (见 OU_EngDamageOn)。 */
 #define ADDR_MULTI_ENGINEER     0xA8B26Cu
 
+/* GameModeOptionsClass::Instance.BuildOffAlly (0xA8B250 + 0x14, YRpp
+ * GameModeOptionsClass.h): 建造范围扫描 0x4A8FFA 判它决定要不要把盟友建造场
+ * 算进基地范围。引擎只在遭遇战存/读整块 GameModeOptions, 战役读档后该值不
+ * 恢复, 由 BuildAlly_Poll 补回 (见 BuildAlly.cpp)。 */
+#define ADDR_BUILD_OFF_ALLY     0xA8B264u
+
 /* Game::IsActive (bool, YRpp Unsorted.h)。 */
 #define ADDR_ISACTIVE           0xA8E9A0u
 

@@ -65,7 +65,7 @@ static SyHookDecl g_syHooks[] __attribute__((section(".syhks00"), used, aligned(
     SYHOOK(0x478E30u, 7u, "UP_TipGate"),
     SYHOOK(0x692419u, 7u, "SWS_ClickGate"),
     SYHOOK(0x692406u, 6u, "FullMap_RadarClickGate"),
-    SYHOOK(0x692F43u, 6u, "FullMap_MapHoverGate"),
+    SYHOOK(0x692FDCu, 8u, "FullMap_MapHoverGate"),
     SYHOOK(0x653865u, 6u, "FullMap_RadarHoverGate"),
     SYHOOK(0x6D06D2u, 5u, "FullMap_TopHoverGate"),
     SYHOOK(0x692361u, 6u, "UP_ClickGate"),
