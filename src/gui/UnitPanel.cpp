@@ -134,6 +134,7 @@ typedef struct {
  * 数值一律用"毫"整数存 (×1000), 免得浮点跨帧漂。 */
 typedef struct {
     int ok;
+    int basic;                      /* 1 = 基础档: 只给名称/血量/护甲/速度, 不给加成 */
     unsigned char own[UP_DET_N];    /* 每个图标是否已拥有 (1=彩色 / 0=灰) */
     int pctFire, pctHp, pctSpeed;   /* 加成百分比, 正 = 加成, 负 = 削弱, 0 = 没有 */
     int hpCur, hpMax;               /* 当前血量 / 本型满血 (都是原值) */
@@ -1295,7 +1296,20 @@ static int Up_InfoFull(void* o)
     return Up_IsEnemy(o) ? Up_LocalSpectator() : 1;
 }
 
-/* 详情行与提示框的共同前提: 单选, 且这个单位的小信息能全列。
+/* 提示框的基础档: 中立与敌方 (非观战) 只给名称 / 血量 / 护甲 / 速度。
+ * 加成、能力图标、自愈、载矿都是本对象当前状态, 不是公开规则值; 血量在地图
+ * 血条上可见, 名称/护甲/速度是类型规则值。观战不参与对局, 照给全部。
+ * 中立房另认 House->Type->MultiplayPassive: IsAlliedWith 对它的结果随地图而变。 */
+static int Up_TipBasic(void* o)
+{
+    void* own;
+    if (Up_LocalSpectator()) return 0;
+    if (!Up_InfoFull(o)) return 1;
+    own = *(void**)((char*)o + OFF_OWNER);
+    return (own && IsPlausiblePtr(own) && OU_HouseNeutral(own)) ? 1 : 0;
+}
+
+/* 详情行的前提: 单选, 且这个单位的小信息能全列 (加成图标不给敌方 / 中立看)。
  * 排版 (要不要给详情行留高) 与取值 (要算哪 8 个图标) 都只认这一处。 */
 static int Up_DetailTarget(void)
 {
@@ -1998,13 +2012,17 @@ static int Up_HasAbility(void* o, int ab)
     return ((Fn_Up_HasAbil)(void*)FN_TECH_HASABILITY)(o, ab) ? 1 : 0;
 }
 
-/* 对象上的倍率字段; 取到垃圾值 (负数 / 天文数字) 当 1.0。
- * 0 是合法值: MO 的 AE 用 `SpeedMultiplier=0` / `FirepowerMultiplier=0` 做
- * "定住/无火力", 这时必须照原样返回, 否则面板上看不出这个状态。 */
-static double Up_Mult(void* o, unsigned off)
+/* 两种免伤 AE 都归 ∞ 档, 写法分开: >= 999 → `+99999% (∞)`, 0 → `+∞` (无 %)。
+ * 语义差异见 notes/选中信息面板.md。两者都是 pctHp 的哨兵, 不写折算血量。 */
+#define UP_HP_MULT_INF 999.0
+#define UP_PCT_INF     1000000
+#define UP_PCT_ZERO    1000001
+
+/* NaN / 负数 / 超过 cap 当垃圾归 1.0。护甲的 cap 要盖住免伤 AE, 火力/速度仍 100。 */
+static double Up_Mult(void* o, unsigned off, double cap)
 {
     double d = *(double*)((char*)o + off);
-    if (!(d >= 0.0) || d > 100.0) return 1.0;
+    if (!(d >= 0.0) || d > cap) return 1.0;
     return d;
 }
 
@@ -2019,7 +2037,7 @@ static int Up_MultPct(int milli, double crate)
     if (m > 1.0) pc = (int)((m - 1.0) * 100.0 + 0.5);
     else if (m < 1.0) pc = -(int)((1.0 - m) * 100.0 + 0.5);
     else return 0;
-    if (pc > 999) pc = 999;
+    if (pc > 99800) pc = 99800;   /* 倍率到 999 倍 = +99800% */
     if (pc < -999) pc = -999;
     return pc;
 }
@@ -2070,6 +2088,7 @@ static int Up_StatBuild(void* o, void* type, UpStat* st)
 
     for (i = 0; i < UP_DET_N; i++) st->own[i] = 0;
     st->ok = 0;
+    st->basic = 0;
     st->harv = 0;
     st->oreValue = 0;
     if (!o || !type) return 0;
@@ -2093,9 +2112,9 @@ static int Up_StatBuild(void* o, void* type, UpStat* st)
     hasFire = Up_HasAbility(o, ABIL_FIREPOWER);
     hasStrong = Up_HasAbility(o, ABIL_STRONGER);
     hasFast = Up_HasAbility(o, ABIL_FASTER);
-    fm = Up_Mult(o, OFF_TECH_FIREPOWER_MULT);
-    amm = Up_Mult(o, OFF_TECH_ARMOR_MULT);
-    sm = notBld ? Up_Mult(o, OFF_FOOT_SPEED_MULT) : 1.0;
+    fm = Up_Mult(o, OFF_TECH_FIREPOWER_MULT, 100.0);
+    amm = Up_Mult(o, OFF_TECH_ARMOR_MULT, 1000000.0);
+    sm = notBld ? Up_Mult(o, OFF_FOOT_SPEED_MULT, 100.0) : 1.0;
     /* 自愈的三个来源, 前两个是 Ares 口径 (同一个开关), 第三个是 Phobos 的光环:
      *   ① 类型自带 SelfHealing= (类型字节 0xD14);
      *   ② 老兵/精英带的 SelfHeal 能力 (HasAbility 9);
@@ -2131,7 +2150,9 @@ static int Up_StatBuild(void* o, void* type, UpStat* st)
     st->armor = ti ? ti->armor : 0;
 
     st->pctFire = Up_MultPct(hasFire ? s_Rules.vetCombat : 1000, fm);
-    st->pctHp = Up_MultPct(hasStrong ? s_Rules.vetArmor : 1000, amm);
+    if (amm <= 0.0) st->pctHp = UP_PCT_ZERO;
+    else if (amm >= UP_HP_MULT_INF) st->pctHp = UP_PCT_INF;
+    else st->pctHp = Up_MultPct(hasStrong ? s_Rules.vetArmor : 1000, amm);
     st->pctSpeed = notBld
                    ? Up_MultPct(hasFast ? s_Rules.vetSpeed : 1000, sm) : 0;
     /* 生命: 当前 / 本型满血 (都是原值; 加成后的一行由提示框并排给出) */
@@ -2139,9 +2160,9 @@ static int Up_StatBuild(void* o, void* type, UpStat* st)
     if (st->hpCur < 0) st->hpCur = 0;
     st->hpMax = *(int*)((char*)type + OFF_TYPE_STRENGTH);
     if (st->hpMax <= 0) st->hpMax = st->hpCur;
-    /* 折算满血 = 满血 × 老兵护甲 × 箱子护甲 (两者都是"少掉血", 等效加血) */
+    /* 折算满血 = 满血 × 老兵护甲 × 护甲倍率; 两个 ∞ 哨兵都不写括号里的数。 */
     st->hpBoost = 0;
-    if (st->hpMax > 0 && st->hpMax < 100000)
+    if (st->hpMax > 0 && st->hpMax < 100000 && st->pctHp < UP_PCT_INF)
         st->hpBoost = (int)((double)st->hpMax *
                             (hasStrong ? (double)s_Rules.vetArmor / 1000.0 : 1.0) *
                             amm + 0.5);
@@ -2191,8 +2212,8 @@ static void Up_DetPoll(void)
 }
 
 /* 提示框: 鼠标落在面板上就出。目标 = 鼠标下那一格的单位 (多选里的一格 /
- * 车下载员), 落在面板主体但没压到有单位的格子时回到单选的那个;
- * 敌方 (非观战) 一律不显示。 */
+ * 车下载员), 落在面板主体但没压到有单位的格子时回到单选的那个。
+ * 中立与敌方 (非观战) 照样出框, 内容由 Up_TipBasic 收到基础档。 */
 static void Up_TipPoll(int mx, int my)
 {
     void* o = NULL;
@@ -2212,12 +2233,16 @@ static void Up_TipPoll(int mx, int my)
     {
         /* 按钮列与框外空白不算"面板上" */
         if (!Up_PtIn(mx, my, s_Px, s_Py, s_Pw, s_Ph)) return;
-        if (!Up_DetailTarget()) return;
+        /* 只认单选: 敌方 / 中立也要能回到被选中的那个, 不套详情行的可见性判据 */
+        if (s_ListN != 1 || !s_List[0].obj || !s_List[0].type) return;
         o = s_List[0].obj;
         t = s_List[0].type;
     }
-    if (!Up_InfoFull(o)) return;         /* 敌方 (非观战) 不给看 */
-    if (Up_StatBuild(o, t, &s_Tip)) s_TipObj = o;
+    if (Up_StatBuild(o, t, &s_Tip))
+    {
+        s_Tip.basic = Up_TipBasic(o);
+        s_TipObj = o;
+    }
 }
 
 /* ---- 悬停提示框 ---- */
@@ -2261,10 +2286,32 @@ static int Up_Pct(wchar_t* d, int cap, int pct)
 }
 
 /* "+40% (175)" —— 加成百分比 + 括号里的加成后数值 (没有加成一个字符都不写)。
- * 括号里的数也可能是 0 (倍率 0 → 定住/无火力), 那时写 "(0)" 而不省略。 */
+ * 括号里的数也可能是 0 (速度/火力倍率 0 → 定住/无火力), 那时写 "(0)" 而不省略;
+ * 两个免伤哨兵: >= 999 写 `+99999% (∞)`, 0 写 `+∞` (无 %)。 */
 static int Up_PctBoost(wchar_t* d, int cap, int pct, int after, int afterMilli)
 {
     int n;
+    if (pct == UP_PCT_ZERO)
+    {
+        if (cap < 3) return 0;
+        d[0] = L'+';
+        d[1] = (wchar_t)0x221E;
+        d[2] = 0;
+        return 2;
+    }
+    if (pct == UP_PCT_INF)
+    {
+        n = Up_Pct(d, cap, 99999);
+        if (n && n + 4 < cap)
+        {
+            d[n++] = L' ';
+            d[n++] = L'(';
+            d[n++] = (wchar_t)0x221E;
+            d[n++] = L')';
+            d[n] = 0;
+        }
+        return n;
+    }
     if (!pct || cap < 12) return 0;
     n = Up_Pct(d, cap, pct);
     if (n > cap - 5) return n;
@@ -2324,6 +2371,9 @@ static int Up_InkMetrics(int px, int* top, int* h)
  * 矿石排在最后, 只在矿车上画, 值是它此刻装载的矿石折算成钱。
  * 数值行分三列: 标签 | 原值 | 加成 —— 右列一律从符号起排, 所以各行的加号
  * 是对齐的; 右列 = 百分比 + 括号里的加成后数值, 没有加成时整列留空。
+ * 基础档 (st->basic: 中立 / 敌方且非观战) 只留 名称 / 生命 / 速度 / 护甲:
+ * 右列整列留空, 能力图标 / 火力 / 自愈 / 矿石都不画 —— 加成是本对象当前状态,
+ * 不是公开规则值; 三行都取不到时只剩名字也要成框。
  * 没有数据的那行整行不画 (不占位、不写 "—")。第一行是单位全名 (格子下那行
  * 名字受 cameo 尺寸限制会被截, 有的单位没图标)。 */
 static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
@@ -2335,6 +2385,7 @@ static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
     static const wchar_t k_armor[] = { 0x62A4, 0x7532, 0 };   /* 护甲 */
     static const wchar_t k_heal[]  = { 0x81EA, 0x6108, 0 };   /* 自愈 */
     const UpStat* st = &s_Tip;
+    const int basic = st->basic;
     const wchar_t* lab[UP_TIP_LINES];
     wchar_t left[UP_TIP_LINES][UP_TIP_LINE_CAP];
     wchar_t right[UP_TIP_LINES][UP_TIP_LINE_CAP];
@@ -2363,14 +2414,14 @@ static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
         nameN = lstrlenW(st->name);
         nameW = RenderLine(st->name, nameN);
     }
-    /* 图标行: 面板上已经有同一单位的常驻图标时就跳过, 不重复画 */
-    if (s_DetOK && !(s_DetRow && s_TipObj == s_List[0].obj))
+    /* 图标行: 面板上已经有同一单位的常驻图标时就跳过, 不重复画; 基础档不画 */
+    if (!basic && s_DetOK && !(s_DetRow && s_TipObj == s_List[0].obj))
         iconH = (UP_DET_CELL > lineH) ? UP_DET_CELL : lineH;
     /* 火力: 倍率作用在这个单位的**每一种**武器上, 没有单一的"原值"可写
      * (多武器, 伤害还随弹头与目标护甲变), 所以只给右列的百分比。
      * 建筑同样吃 AE 的火力倍率 (老兵/精英也能给建筑 ABIL_FIREPOWER),
-     * 所以建筑照画, 不像速度那样整行掐掉。 */
-    if (st->pctFire)
+     * 所以建筑照画, 不像速度那样整行掐掉。基础档整行不画。 */
+    if (!basic && st->pctFire)
     {
         lab[nl] = k_fire;
         left[nl][0] = 0;
@@ -2385,8 +2436,8 @@ static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
         leftN[nl] = (st->hpCur < st->hpMax)
                     ? Up_NumPair(left[nl], UP_TIP_LINE_CAP, st->hpCur, st->hpMax)
                     : Up_Num(left[nl], UP_TIP_LINE_CAP, st->hpMax);
-        rightN[nl] = Up_PctBoost(right[nl], UP_TIP_LINE_CAP,
-                                 st->pctHp, st->hpBoost, 0);
+        rightN[nl] = basic ? 0 : Up_PctBoost(right[nl], UP_TIP_LINE_CAP,
+                                             st->pctHp, st->hpBoost, 0);
         nl++;
     }
     /* 速度: 左列是 rules 的 Speed, 右列是乘过倍率的实际速度 (建筑没有这一行) */
@@ -2394,8 +2445,8 @@ static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
     {
         lab[nl] = k_spd;
         leftN[nl] = Up_AppMilli(left[nl], UP_TIP_LINE_CAP, st->spdBase);
-        rightN[nl] = Up_PctBoost(right[nl], UP_TIP_LINE_CAP,
-                                 st->pctSpeed, st->spdMilli, 1);
+        rightN[nl] = basic ? 0 : Up_PctBoost(right[nl], UP_TIP_LINE_CAP,
+                                             st->pctSpeed, st->spdMilli, 1);
         nl++;
     }
     if (st->armor > 0 && st->armor < UP_ARMOR_N)
@@ -2406,7 +2457,7 @@ static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
         rightN[nl] = 0;
         nl++;
     }
-    if (st->shMilli > 0)
+    if (!basic && st->shMilli > 0)
     {
         lab[nl] = k_heal;
         leftN[nl] = Up_HealValue(left[nl], UP_TIP_LINE_CAP, st->shMilli);
@@ -2415,14 +2466,15 @@ static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
     }
     /* 矿石放最后一行: 只有矿车画。值是引擎 GetTotalValue 折算的钱 (不含精炼厂
      * 提纯器加成), 空车也画 "$0" —— 矿车没装矿本身就是要看的状态。 */
-    if (st->harv)
+    if (!basic && st->harv)
     {
         lab[nl] = k_ore;
         leftN[nl] = Up_OreValue(left[nl], UP_TIP_LINE_CAP, st->oreValue);
         rightN[nl] = 0;
         nl++;
     }
-    if (!nl) return;
+    /* 基础档只剩名字也要成框 (血量/护甲/速度都取不到时 nl 可能为 0) */
+    if (!nl && !nameW) return;
 
     for (i = 0; i < nl; i++)
     {
@@ -2450,7 +2502,7 @@ static void Up_DrawTip(unsigned char* base, int pitch, int W, int H)
     /* 框高按**墨迹**算: 行与行之间才留 LINE_GAP, 末行不拖那段行距空档;
      * 名字行也只占墨迹高 + 分隔线那段。上下各一个 VPAD 外加 1px 边框 ——
      * 旧算法按 nl*lineH 计高, 把末行的行距空档算进了框里, 底边看着比顶边宽。 */
-    total = (nl - 1) * lineH + inkH;
+    total = nl ? ((nl - 1) * lineH + inkH) : 0;
     if (nameW > 0) total += inkH + UP_TIP_NAME_GAP;
     total += iconH;
     bw = maxw + UP_TIP_PAD * 2 + 2;
