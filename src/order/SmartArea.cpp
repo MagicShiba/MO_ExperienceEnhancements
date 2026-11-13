@@ -4,7 +4,9 @@
  * 点按=单块, 划线=沿轨迹各节点逐块环扫 (去重, 松开格点中排首, 上限 64 节点)。
  * 只有攻击/进入/进驻/占领才下单, 移动/未知跳过。进建筑一律 Enter(7)+建筑对象
  * (载具进碉堡/隧道口、步兵进电厂都是它, 见 SA_BldFix), 吸收型建筑按余位均分
- * (SA_GarrQuota)。分配规则、进楼限数、工程师与中立判定、预览口径、仲裁全在
+ * (SA_GarrQuota)。Spread=1 (默认) 时先给每个目标 1 个单位再轮转均分, 优先覆盖
+ * 最多目标 (5 工程师 5 油井 → 5 个目标); Spread=0 回到旧版每目标先塞 SquadSize 个。
+ * 分配规则、进楼限数、工程师与中立判定、预览口径、仲裁全在
  * notes/SmartArea范围下令.md。
  *
  *   - 光标查询走 OU_MouseOverObjectNative (ignoreForce=1): 本功能热键含 Shift,
@@ -37,7 +39,8 @@ static int g_SaInit = 0;
 static int g_SaEnable = 1;
 static OU_Hotkey g_SaHk;      /* Hotkey=Shift+Middle (含 Ctrl/Z 时被别家抢走) */
 static int g_SaRange = 4;       /* 扫描块边长 (格, 2~16) */
-static int g_SaSquad = 4;       /* 几打一 (1~16, 同一目标首轮几个, 满分流) */
+static int g_SaSquad = 4;       /* 几打一 (1~16, 仅 Spread=0 的旧分配使用) */
+static int g_SaSpread = 1;      /* 1=优先覆盖每个目标再轮转均分, 0=旧版每目标先塞 Squad 个 */
 static int g_SaOwnerOff = -1;   /* Techno 内 Owner 指针偏移 (校准见 OU_CalOwner) */
 
 static void SA_EnsureInit(void)
@@ -52,6 +55,7 @@ static void SA_EnsureInit(void)
     if (g_SaHk.disabled) g_SaEnable = 0;
     g_SaRange = GetPrivateProfileIntA(SA_SECTION, "Range", 4, g_IniPath);
     g_SaSquad = GetPrivateProfileIntA(SA_SECTION, "SquadSize", 4, g_IniPath);
+    g_SaSpread = GetPrivateProfileIntA(SA_SECTION, "Spread", 1, g_IniPath) ? 1 : 0;
     if (g_SaRange < 2) g_SaRange = 2;
     if (g_SaRange > 16) g_SaRange = 16;
     if (g_SaSquad < 1) g_SaSquad = 1;
@@ -67,6 +71,7 @@ static void SA_EnsureInit(void)
         (void)q;
         LogLine(buf);
     }
+    LogLine(g_SaSpread ? "smartarea: spread=1" : "smartarea: spread=0");
     if (!g_SaEnable) LogLine("smartarea: OFF");
 }
 
@@ -946,28 +951,69 @@ static void SA_Distribute(void* house)
     }
     /* 步兵进自家吸收型建筑的配额 (民房预轮吃过人之后再算, 否则配额虚高)。 */
     SA_GarrQuota(nu);
-    /* 首轮: 每目标取 Squad 个可处理单位 (满分流下个目标); 吸收型楼按配额放宽,
-     * 否则会出现"先进 4 人、次轮再补 1 人"。 */
-    for (j = 0; j < nt; j++)
+    if (g_SaSpread)
     {
-        int take = 0;
-        int takeCap = g_SaSquad;
-        if (s_SnapQInf[j] > takeCap) takeCap = s_SnapQInf[j];
-        for (i = 0; i < nu && take < takeCap; i++)
+        /* 新分配: 先给每个目标 1 个单位, 最大化覆盖目标数 (5 工程师 5 油井
+         * → 5 个油井各 1 人), 再轮转均分剩余单位。能否接令仍由
+         * SA_AssignOne 判定 (工程师/进驻配额/建筑上限等)。 */
+        for (j = 0; j < nt; j++)
+        {
+            int take = 0;
+            for (i = 0; i < nu; i++)
+            {
+                if (s_SnapBusy[i]) continue;
+                if (!OU_PtrAlive(s_SnapUnits[i], s_SnapUids[i], g_SaIdxOk)) continue;
+                if (SA_AssignOne(i, j, house, &take)) break;
+            }
+        }
+        {
+            /* 剩余单位按目标轮转补员 (每个目标每次最多再拿 1 个), 均分且
+             * 不会把几十个单位全塞给第一个目标。 */
+            int start = 0;
+            for (i = 0; i < nu; i++)
+            {
+                int k;
+                if (s_SnapBusy[i]) continue;
+                if (!OU_PtrAlive(s_SnapUnits[i], s_SnapUids[i], g_SaIdxOk)) continue;
+                for (k = 0; k < nt; k++)
+                {
+                    j = start + k;
+                    if (j >= nt) j -= nt;
+                    if (SA_AssignOne(i, j, house, 0))
+                    {
+                        start = j + 1;
+                        if (start >= nt) start = 0;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+        /* 旧分配: 首轮每目标取 Squad 个可处理单位 (满分流下个目标);
+         * 吸收型楼按配额放宽, 否则会出现"先进 4 人、次轮再补 1 人"。 */
+        for (j = 0; j < nt; j++)
+        {
+            int take = 0;
+            int takeCap = g_SaSquad;
+            if (s_SnapQInf[j] > takeCap) takeCap = s_SnapQInf[j];
+            for (i = 0; i < nu && take < takeCap; i++)
+            {
+                if (s_SnapBusy[i]) continue;
+                if (!OU_PtrAlive(s_SnapUnits[i], s_SnapUids[i], g_SaIdxOk)) continue;
+                SA_AssignOne(i, j, house, &take);
+            }
+        }
+        /* 次轮: 剩下的找最近可处理目标加入 (无事可做则待命, 不下移动令)。 */
+        for (i = 0; i < nu; i++)
         {
             if (s_SnapBusy[i]) continue;
             if (!OU_PtrAlive(s_SnapUnits[i], s_SnapUids[i], g_SaIdxOk)) continue;
-            SA_AssignOne(i, j, house, &take);
-        }
-    }
-    /* 次轮: 剩下的找最近可处理目标加入 (无事可做则待命, 不下移动令)。 */
-    for (i = 0; i < nu; i++)
-    {
-        if (s_SnapBusy[i]) continue;
-        if (!OU_PtrAlive(s_SnapUnits[i], s_SnapUids[i], g_SaIdxOk)) continue;
-        for (j = 0; j < nt; j++)
-        {
-            if (SA_AssignOne(i, j, house, 0)) break;
+            for (j = 0; j < nt; j++)
+            {
+                if (SA_AssignOne(i, j, house, 0)) break;
+            }
         }
     }
 }

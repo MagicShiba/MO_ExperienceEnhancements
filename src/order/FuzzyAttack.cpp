@@ -19,9 +19,9 @@
  *   指针 + WhatAmI 双重守卫, 偏移不对时自动退化不断链。
  *   敌我判定: Techno.Owner 指针 != 本家 (Owner 偏移用两个选中单位双确认自
  *   校准, 失败直接放弃, 绝不误击友军)。环扫顺序即由近及远, 首个即最近。
- * 分组 (SquadSize=几打一, 默认 4): 单位 <= SquadSize → 全员集火
- *   enemies[0]; 否则 nUsed=clamp(nU/SquadSize,1,nE), 前 nUsed 个敌人均衡分
- *   (sizes 差 <=1), 剩下的敌人没单 (集火优先, 不搞 1v1 添油)。
+ * 分组 (Spread=1, 默认): 优先把单位分散到尽可能多的敌人, nUsed=min(nU,nE),
+ *   再按目标数均衡分 (sizes 差 <=1); 5 单位 5 目标 → 5 个目标各 1 个。
+ *   Spread=0 时回到旧版 SquadSize 分组 (nU/SquadSize, 集火优先)。
  *
  * 联机: 只发标准事件, 各端同一份原版代码执行, 不影响联机。
  * 本地只读 + 标准事件入队, 不写模拟内存。
@@ -48,7 +48,8 @@ static int g_FaInit = 0;
 static int g_FaEnable = 1;
 static OU_Hotkey g_FaHk;      /* Hotkey=Ctrl+Middle (Z 按住时让路巡逻/砍树) */
 static int g_FaRange = 4;       /* 扫描块边长 (格, 鼠标在块内 [Range/2][Range/2]) */
-static int g_FaSquad = 4;       /* 几打一 (单位<=此数则全员集火一个) */
+static int g_FaSquad = 4;       /* 几打一 (仅 Spread=0 的旧版分配使用) */
+static int g_FaSpread = 1;      /* 1=优先分散到最多目标再均分, 0=旧版按 SquadSize 分组 */
 
 static void FA_EnsureInit(void)
 {
@@ -64,6 +65,7 @@ static void FA_EnsureInit(void)
     if (g_FaHk.disabled) g_FaEnable = 0;
     g_FaRange = GetPrivateProfileIntA(FA_SECTION, "Range", 4, g_IniPath);
     g_FaSquad = GetPrivateProfileIntA(FA_SECTION, "SquadSize", 4, g_IniPath);
+    g_FaSpread = GetPrivateProfileIntA(FA_SECTION, "Spread", 1, g_IniPath) ? 1 : 0;
     if (g_FaRange < 2) g_FaRange = 2;
     if (g_FaRange > 16) g_FaRange = 16;
     if (g_FaSquad < 2) g_FaSquad = 2;
@@ -73,6 +75,7 @@ static void FA_EnsureInit(void)
     q = AppendCStr(buf, q, b1, sizeof(buf));
     (void)q;
     LogLine(buf);
+    LogLine(g_FaSpread ? "fuzzyattack: spread=1" : "fuzzyattack: spread=0");
     if (!g_FaEnable) LogLine("fuzzyattack: OFF");
 }
 
@@ -272,13 +275,23 @@ static void FA_Preview(void)
     { s_FaPrevN = 0; return; }
     ne = FA_FindEnemies(cx, cy, cur, s_pf, s_pfid);
     if (ne <= 0) { s_FaPrevN = 0; return; }
-    if (nu <= g_FaSquad)
-        nUsed = 1;
+    if (g_FaSpread)
+    {
+        /* 新分配: 优先分散到尽可能多的目标 (1 单位 1 目标), 单位多于目标时
+         * 再按目标数均分。5 单位 5 目标 → 5 个目标各 1 个, 不再 4 个挤一个。 */
+        nUsed = (nu < ne) ? nu : ne;
+        if (nUsed < 1) nUsed = 1;
+    }
     else
     {
-        nUsed = nu / g_FaSquad;
-        if (nUsed < 1) nUsed = 1;
-        if (nUsed > ne) nUsed = ne;
+        if (nu <= g_FaSquad)
+            nUsed = 1;
+        else
+        {
+            nUsed = nu / g_FaSquad;
+            if (nUsed < 1) nUsed = 1;
+            if (nUsed > ne) nUsed = ne;
+        }
     }
     s_FaPrevN = 0;
     pos = 0;
@@ -345,13 +358,23 @@ static void FA_Press(void)
     if (ne <= 0) return;
     /* 分组: 单位<=Squad 则全员集火首敌 (最近);
      * 否则 nUsed=clamp(nU/Squad,1,nE), 前 nUsed 敌均衡分, 其余没单。 */
-    if (nu <= g_FaSquad)
-        nUsed = 1;
+    if (g_FaSpread)
+    {
+        /* 新分配: 优先分散到尽可能多的目标 (1 单位 1 目标), 单位多于目标时
+         * 再按目标数均分。5 单位 5 目标 → 5 个目标各 1 个, 不再 4 个挤一个。 */
+        nUsed = (nu < ne) ? nu : ne;
+        if (nUsed < 1) nUsed = 1;
+    }
     else
     {
-        nUsed = nu / g_FaSquad;
-        if (nUsed < 1) nUsed = 1;
-        if (nUsed > ne) nUsed = ne;
+        if (nu <= g_FaSquad)
+            nUsed = 1;
+        else
+        {
+            nUsed = nu / g_FaSquad;
+            if (nUsed < 1) nUsed = 1;
+            if (nUsed > ne) nUsed = ne;
+        }
     }
     g_FaPendCount = 0;
     pos = 0;
