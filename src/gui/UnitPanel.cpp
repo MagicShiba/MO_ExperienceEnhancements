@@ -3378,6 +3378,22 @@ static void Up_PickToggle(void* host, void* pax)
 
 /* ---------------- 输入 ---------------- */
 
+/* 把本机选中集整体换成 objs[0..n-1]: 先 UnselectAll 再逐个 Select。
+ * n == 0 就是全取消。只改本机选中集, 不动模拟状态, 联机安全。
+ * 必须放在 UP_Poll 里调 —— 点击门内调会撞上引擎的点击链路。 */
+static void Up_ApplySel(void** objs, int n)
+{
+    int i;
+    ((Fn_UnselectAll)(size_t)FN_MAP_UNSELECTALL)();
+    for (i = 0; i < n; i++)
+    {
+        Fn_Select f = (Fn_Select)(size_t)FN_TECHNO_SELECT;
+        f(objs[i]);
+    }
+    Up_ForceRebuild();
+    Up_Refresh();
+}
+
 static void Up_Select(const UpEnt* e)
 {
     void* keep[UP_LIST_CAP];
@@ -3392,15 +3408,29 @@ static void Up_Select(const UpEnt* e)
     }
     else keep[n++] = e->obj;
     if (!n) return;
+    Up_ApplySel(keep, n);
+}
 
-    ((Fn_UnselectAll)(size_t)FN_MAP_UNSELECTALL)();
-    for (i = 0; i < n; i++)
+/* 右键格子: 把这一格代表的单位从本机选中集里摘掉 (组 = 整组摘), 其余保持选中。
+ * 摘空 = 全取消, 与"右键取消"同一个手感。
+ * 只在多选版式里生效: 单选版式的格 0/1 是容器本身、格 2 起是载员, 而摘选中集
+ * 对载员没有意义 (载员本来就不在选中集里, 右键下去只会把容器一起摘掉)。
+ * 只改本机选中集, 不动模拟状态, 联机安全。 */
+static void Up_Deselect(const UpEnt* e)
+{
+    void* keep[UP_LIST_CAP];
+    int n = 0, i, byType;
+
+    if (s_ListN <= 1 || !e->obj) return;
+    byType = (e->count > 1) ? 1 : 0;
+    for (i = 0; i < s_ListN; i++)
     {
-        Fn_Select f = (Fn_Select)(size_t)FN_TECHNO_SELECT;
-        f(keep[i]);
+        if (byType) { if (s_List[i].type == e->type) continue; }
+        else if (s_List[i].obj == e->obj) continue;
+        keep[n++] = s_List[i].obj;
     }
-    Up_ForceRebuild();
-    Up_Refresh();
+    if (n == s_ListN) return;      /* 一个都没摘掉 (指针对不上), 不做无谓的重选 */
+    Up_ApplySel(keep, n);
 }
 
 static void Up_ClickAt(int mx, int my)
@@ -3495,10 +3525,12 @@ static void Up_ClickAt(int mx, int my)
 }
 
 /* 右键落在折叠键上: 切「普通 / 详情」两态 (详情态单选时面板底部多一行能力图标)。
- * 落在星星按钮上: 切换指示箭头类型 (贴边 / 中心同心圆)。 */
+ * 落在星星按钮上: 切换指示箭头类型 (贴边 / 中心同心圆)。
+ * 落在格子上: 把那一格 (或那一组) 从选中集里摘掉。 */
 static void Up_RightClickAt(int mx, int my)
 {
     int btn = Up_HitBtn(mx, my);
+    int cell;
     if (btn == UP_BTN_FOLD)
     {
         s_Detail = s_Detail ? 0 : 1;
@@ -3506,7 +3538,11 @@ static void Up_RightClickAt(int mx, int my)
         LogLine(s_Detail ? "up: detail on" : "up: detail off");
         return;
     }
-    if (btn >= UP_BTN_FAV1) Fav_ToggleArrowMode();
+    if (btn >= UP_BTN_FAV1) { Fav_ToggleArrowMode(); return; }
+    if (s_Collapsed) return;
+    cell = Up_HitCell(mx, my);
+    if (cell < 0 || cell >= s_Cols * s_Rows) return;
+    Up_Deselect(&s_Cell[cell]);
 }
 
 static void UP_NoteClick(int mx, int my, int left, int right)
