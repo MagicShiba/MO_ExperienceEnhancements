@@ -637,6 +637,115 @@ static int     s_QBakOk = 0;
 static char    s_PendQuick[ESC_QUICK_RAW + 16];
 static int     s_PendQuickDirty = 0;
 
+/* ---- 输入法 (组字串自画 / 候选窗贴框) ----
+ * 与聊天框同一套: 系统组合窗藏掉, 组字串画在框内插入点, 候选窗钉在框底。
+ * 对话框自己就是输入法窗口 (WM_IME_CHAR 直接到它), 所以 ImmGetContext 拿的就是
+ * 它; 坐标是对话框客户区, IMM 要的是**持有上下文那个窗口**的客户区, 两者不同时
+ * 转一次 (Esc_ImePin)。上屏字符仍走原过程 → WM_IME_CHAR, 这里只管显示。 */
+#define ESC_IME_COMP_N  ESC_QUICK_LINE
+static wchar_t s_QComp[ESC_IME_COMP_N];         /* 本帧组字串 */
+static int     s_QCompLen = 0;
+static int     s_QCompCur = 0;
+static HWND    s_QImeWnd = NULL;                /* 上次读到组字串的窗口 */
+static int     s_QImePX = -1, s_QImePY = -1;    /* 上次推给 IMM 的位置 */
+
+/* 输入法窗口: 上下文跟着焦点走, 没焦点退回对话框 / 前台窗。 */
+static HWND Esc_ImeWnd(void)
+{
+    HWND h = GetFocus();
+
+    if (h && IsWindow(h)) return h;
+    if (s_EditHost && IsWindow(s_EditHost)) return s_EditHost;
+    return GetForegroundWindow();
+}
+
+/* 读组字串进来 (只读显示用)。返回 1 = 变了, 调用方该重画。 */
+static int Esc_ImeCompRefresh(void)
+{
+    wchar_t tmp[ESC_IME_COMP_N];
+    HWND cand[4];
+    int i, n = 0, cur = 0, changed;
+
+    if (!s_QOn)
+    {
+        changed = (s_QCompLen > 0);
+        s_QCompLen = 0;
+        s_QCompCur = 0;
+        s_QImeWnd = NULL;
+        return changed;
+    }
+    /* 上次那个窗口优先 (组字在它上面), 再试焦点窗、对话框、前台窗。 */
+    cand[0] = s_QImeWnd;
+    cand[1] = GetFocus();
+    cand[2] = (s_EditHost && IsWindow(s_EditHost)) ? s_EditHost : NULL;
+    cand[3] = GetForegroundWindow();
+    tmp[0] = 0;
+    for (i = 0; i < 4 && n <= 0; i++)
+    {
+        HIMC imc;
+        HWND w = cand[i];
+        int j, dup = 0;
+
+        if (!w || !IsWindow(w)) continue;
+        for (j = 0; j < i; j++) if (cand[j] == w) { dup = 1; break; }
+        if (dup) continue;
+        imc = ImmGetContext(w);
+        if (!imc) continue;
+        n = LiCompRead(imc, tmp, ESC_IME_COMP_N, &cur);
+        ImmReleaseContext(w, imc);
+        if (n > 0) s_QImeWnd = w;
+    }
+    if (n <= 0)
+    {
+        changed = (s_QCompLen > 0);
+        s_QCompLen = 0;
+        s_QCompCur = 0;
+        s_QImeWnd = NULL;
+        return changed;
+    }
+    changed = (n != s_QCompLen) || (cur != s_QCompCur);
+    if (!changed)
+        for (i = 0; i < n; i++) if (tmp[i] != s_QComp[i]) { changed = 1; break; }
+    for (i = 0; i < n; i++) s_QComp[i] = tmp[i];
+    s_QComp[i] = 0;
+    s_QCompLen = n;
+    s_QCompCur = cur;
+    return changed;
+}
+
+/* 候选窗贴框底 (组合窗已藏, 两处都指同一位置)。位置没变不重复调 IMM。 */
+static void Esc_ImePin(int x, int yBottom)
+{
+    HWND w = s_QImeWnd ? s_QImeWnd : Esc_ImeWnd();
+    POINT pt;
+    HIMC imc;
+
+    if (!w || !IsWindow(w)) return;
+    if (x == s_QImePX && yBottom == s_QImePY) return;
+    pt.x = x;
+    pt.y = yBottom;
+    if (s_EditHost && s_EditHost != w)
+    {
+        if (!ClientToScreen(s_EditHost, &pt)) return;
+        if (!ScreenToClient(w, &pt)) return;
+    }
+    imc = ImmGetContext(w);
+    if (!imc) return;
+    LiImePin(imc, pt.x, pt.y, pt.x, pt.y);
+    ImmReleaseContext(w, imc);
+    s_QImePX = x;
+    s_QImePY = yBottom;
+}
+
+/* 收编辑会话时清掉组字状态与位置缓存 (下次开框重新推)。 */
+static void Esc_ImeReset(void)
+{
+    s_QCompLen = 0;
+    s_QCompCur = 0;
+    s_QImeWnd = NULL;
+    s_QImePX = s_QImePY = -1;
+}
+
 static int Esc_EditIs(int page, int item)
 {
     return s_EditOn && s_EditPage == page && s_EditItem == item;
@@ -1362,6 +1471,7 @@ static void Esc_LineBegin(HWND hDlg, wchar_t* buf, int cap, int curAt)
     if (curAt >= 0)               /* < 0 = 光标放末尾 (LiEdBind 已设) */
         s_QSt.cur = (curAt < len) ? curAt : len;
     LiEdTouch(&s_QSt);            /* 刚点进来光标要立刻可见 */
+    Esc_ImeReset();
     s_QOn = 1;
     s_EditHost = hDlg;
     LiKeysReset(s_EditKeys, (int)(sizeof(s_EditKeys) / sizeof(s_EditKeys[0])), 1);
@@ -1400,6 +1510,7 @@ static void Esc_QuickClose(HWND hDlg)
     s_QEdit = -1;
     s_QKind = QK_PRESET;
     s_QFaceTarget = -1;
+    Esc_ImeReset();
     Esc_Redraw(hDlg);
 }
 
@@ -1448,6 +1559,8 @@ static void Esc_QuickChar(wchar_t ch)
 {
     if (!s_QOn) return;
     if (ch < 32 || ch == 127) return;   /* 回车/退格等控制字归轮询 */
+    /* 组字中 ASCII 已被输入法收编 (聊天框同判据), 照收会留下拼音残渣。 */
+    if (s_QCompLen > 0 && ch > 32 && ch < 127) return;
     if (LiEdInsert(&s_QSt, &ch, 1, ESC_QUICK_LINE - 1, NULL, NULL))
         Esc_QuickSync(1);
 }
@@ -1460,6 +1573,9 @@ static void Esc_QuickPoll(HWND hDlg)
     int i, changed = 0, vdown;
 
     if (!s_QOn) return;
+    /* 组字串每拍读一次: 系统组合窗已藏, 这个显示是组字唯一的反馈。
+     * 有的输入法不给对话框发 WM_IME_COMPOSITION, 只靠消息会漏画。 */
+    if (Esc_ImeCompRefresh()) Esc_Redraw(hDlg);
     for (i = 0; i < (int)(sizeof(s_EditKeys) / sizeof(s_EditKeys[0])); i++)
     {
         LiKey* k = &s_EditKeys[i];
@@ -3996,13 +4112,45 @@ static void Esc_DrawLineBox(void* surf, int boxX, int boxY, int boxW,
         Esc_Text(surf, s + start, x, textY, innerW, ESC_BODY_PX, ESC_BODY_SLOT,
                  editing ? 245u : 232u, editing ? 245u : 232u,
                  editing ? 245u : 232u);
-    if (editing && st && LiBlinkOn(st))
+    if (!editing || !st) return;
     {
-        int cx = x + (wStart - wCur);
+        /* insX = 插入点 (钳在框内); 组字串从它画起, 光标跟组字光标。 */
+        int insX = x + (wStart - wCur);
+        int careX;
 
-        if (cx < x) cx = x;
-        if (cx > x + innerW) cx = x + innerW;
-        Esc_Fill(surf, cx, textY, 1, bodyH, 245, 245, 245, 220);
+        if (insX < x) insX = x;
+        if (insX > x + innerW) insX = x + innerW;
+        careX = insX;
+        if (s_QCompLen > 0)
+        {
+            int room = x + innerW - insX;
+
+            if (room > 0)
+            {
+                int i, cw;
+
+                Esc_Text(surf, s_QComp, insX, textY, room, ESC_BODY_PX,
+                         ESC_BODY_SLOT, 255, 210, 60);
+                cw = Esc_TextWidth(s_QComp, ESC_BODY_PX, ESC_BODY_SLOT);
+                if (cw > room) cw = room;
+                if (cw > 0)
+                    Esc_Fill(surf, insX, textY + bodyH - 1, cw, 1,
+                             255, 210, 60, 230);
+                for (i = 0; i < s_QCompCur && i < s_QCompLen; i++)
+                {
+                    wchar_t one[2];
+
+                    one[0] = s_QComp[i];
+                    one[1] = 0;
+                    careX += Esc_TextWidth(one, ESC_BODY_PX, ESC_BODY_SLOT);
+                }
+                if (careX > x + innerW) careX = x + innerW;
+            }
+        }
+        if (LiBlinkOn(st))
+            Esc_Fill(surf, careX, textY, 1, bodyH, 245, 245, 245, 220);
+        /* 候选窗贴框底: 锚点用插入点 (不跟组字串走)。 */
+        Esc_ImePin(insX, boxY + ESC_STEP_BTN_H);
     }
 }
 
@@ -5668,6 +5816,19 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_TIMER:
         if (wp == ESC_EDIT_TIMER) { Esc_EditPoll(h); return 0; }
         if (wp == ESC_HK_TIMER) { Esc_HkPoll(h); return 0; }
+        break;
+    case WM_IME_SETCONTEXT:
+        /* 组字串自画 (Esc_DrawLineBox), 系统那个组合窗藏掉。 */
+        if (s_QOn) lp &= (LPARAM)(~(DWORD)ISC_SHOWUICOMPOSITIONWINDOW);
+        break;
+    case WM_IME_STARTCOMPOSITION:
+        /* 组合窗我们画: 吞掉它系统那个就不会弹。 */
+        if (s_QOn) { Esc_ImeCompRefresh(); Esc_Redraw(h); return 0; }
+        break;
+    case WM_IME_COMPOSITION:
+    case WM_IME_ENDCOMPOSITION:
+        /* 只旁观 (组字串自己画): 仍交给原过程, 上屏字符要它转成 WM_IME_CHAR。 */
+        if (s_QOn) { Esc_ImeCompRefresh(); Esc_Redraw(h); }
         break;
     case WM_CHAR:
     case WM_IME_CHAR:

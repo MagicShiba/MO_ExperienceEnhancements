@@ -285,6 +285,15 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
   缓冲（数字框只认 0-9，走按键轮询），回车/Esc/退格这类控制字在轮询里处理
   （`Esc_QuickPoll`），对话框那份直接吞掉，免得漏给引擎触发菜单快捷行为。
   光标横向滚动用二分找起点（每次测量都要过一遍 GDI，不能逐字试）。
+- 文本框的**输入法**与聊天框同一套（`Esc_ImeCompRefresh/Esc_ImePin`）：系统组合窗
+  在 `Esc_DlgProc` 的 `WM_IME_SETCONTEXT` 里去掉 `ISC_SHOWUICOMPOSITIONWINDOW`、
+  `WM_IME_STARTCOMPOSITION` 直接返回 0，组字串画在插入点（黄字 + 下划线，
+  `Esc_DrawLineBox`），候选窗贴框底。上屏字符仍走原过程转出的 `WM_IME_CHAR`，
+  `WM_IME_COMPOSITION/ENDCOMPOSITION` 只旁观（读组字串后照旧交下去），否则上屏
+  就断了。组字串每 16ms（`Esc_QuickPoll`）重读一次：有的输入法不给对话框发
+  组字消息，只靠消息会漏画。组字中 ASCII 由输入法收编，`Esc_QuickChar` 丢掉
+  （与聊天框同判据），否则会留拼音残渣。`Esc_ImePin` 传的是**持有输入上下文那个
+  窗口**的客户区，不是对话框客户区，跨窗时先 `ClientToScreen` 再 `ScreenToClient`。
 - 取消（点“取消”/`Esc_RestoreSettings`）整表退回打开菜单时的快照，回灌聊天框但
   **不排落盘**（`Esc_QuickSync(0)`）。
 - 文本页落盘的节名由 `Esc_OptSection(mod)` 推（`[MsgText]` / `[SWPanel]` /
