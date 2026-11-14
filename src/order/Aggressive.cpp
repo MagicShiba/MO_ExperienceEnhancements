@@ -565,15 +565,19 @@ void Aggressive_Poll(void)
 
 void Aggressive_Draw(void* surf, int w, int h, int pitch)
 {
+    unsigned char* base;
+    OuClip clip;
     PcxImage img;
     int ox, oy, i;
     AG_EnsureInit();
-    if (!g_AgEnable || s_AgTrkN <= 0) return;
-    if (!g_Calibrated) return;
+    if (!g_AgEnable || s_AgTrkN <= 0 || !g_Calibrated) return;
     if (!surf || !IsPlausiblePtr(surf)) return;
-    if (w <= 0 || h <= 0 || pitch <= 0) return;
-    /* 每帧重取缓存图像: 引擎重载后 BSurface 指针可能变化。 */
+    if (w <= 0 || h <= 0 || pitch < w * 2) return;
+    /* 每帧重取: 引擎重载后 BSurface 指针会变。 */
     if (!PcxImage_Load(&img, "icon_aggressive.pcx", 2)) return;
+    OU_ViewClip(&clip, w, h);
+    base = GtLock(surf);
+    if (!base) return;
     ox = g_AgOffX - img.width / 2;
     oy = g_AgOffY - img.height / 2;
     for (i = 0; i < s_AgTrkN; i++)
@@ -583,12 +587,8 @@ void Aggressive_Draw(void* surf, int w, int h, int pitch)
         if (!AG_Alive(s_AgTrk[i].p, s_AgTrk[i].uid)) continue;
         if (!OU_GetCoords(s_AgTrk[i].p, &c)) continue;
         if (!OU_ProjWorld(c.X, c.Y, c.Z, &px, &py)) continue;
-        /* 完全在面外不画: PcxImage_Draw 会把越界坐标夹进面内, 屏外单位
-         * 否则会以图标贴在屏幕边缘。 */
-        px += ox;
-        py += oy;
-        if (px + img.width <= 0 || py + img.height <= 0 ||
-            px >= w || py >= h) continue;
-        PcxImage_Draw(&img, surf, px, py);
+        PcxImage_DrawClip(&img, base, pitch, px + ox, py + oy,
+                          clip.x0, clip.y0, clip.x1, clip.y1);
     }
+    GtUnlock(surf);
 }

@@ -1014,26 +1014,27 @@ void DeployPreview_Poll(void)
 
 static unsigned char* s_DpLocked = 0;
 static int s_DpW = 0, s_DpH = 0, s_DpPitch = 0;
+static OuClip s_DpClip;
 
 /* 3px 粗线 / 细线 / 方块 (公共实现: OrderUtil 的 OU_Line / OU_Box)。
  * 黄=房框/预览, 白=认领态轨迹 (SmartOrder 熄火时补上)。 */
 static void DP_LineC(int x0, int y0, int x1, int y1,
                      int r, int g, int b, unsigned a)
 {
-    OU_Line(s_DpLocked, s_DpW, s_DpH, s_DpPitch, 0, x0, y0, x1, y1,
+    OU_Line(s_DpLocked, s_DpW, s_DpH, s_DpPitch, &s_DpClip, x0, y0, x1, y1,
             (unsigned)r, (unsigned)g, (unsigned)b, a, 3);
 }
 
 static void DP_MarkC(int cx, int cy, int m, int r, int g, int b, unsigned a)
 {
-    OU_Box(s_DpLocked, s_DpW, s_DpH, s_DpPitch, 0, cx, cy, m,
+    OU_Box(s_DpLocked, s_DpW, s_DpH, s_DpPitch, &s_DpClip, cx, cy, m,
            (unsigned)r, (unsigned)g, (unsigned)b, a);
 }
 
 /* 细线 (目标格描边用)。 */
 static void DP_ThinLine(int x0, int y0, int x1, int y1, unsigned a)
 {
-    OU_Line(s_DpLocked, s_DpW, s_DpH, s_DpPitch, 0, x0, y0, x1, y1,
+    OU_Line(s_DpLocked, s_DpW, s_DpH, s_DpPitch, &s_DpClip, x0, y0, x1, y1,
             255, 255, 0, a, 1);
 }
 
@@ -1091,6 +1092,7 @@ static int DP_LockSurface(void* surf, int w, int h, int pitch)
     s_DpW = w;
     s_DpH = h;
     s_DpPitch = pitch;
+    OU_ViewClip(&s_DpClip, w, h);
     return 1;
 }
 

@@ -9,5 +9,6 @@ void Aggressive_ReloadHotkey(void);
 int  Aggressive_AllTargets(void);
 void Aggressive_SetAllTargets(int all);
 
-/* 渲染期画标记图标 (MOE_DrawUILayers 内调): 在每个已标记单位上方 blit。 */
+/* 渲染期画标记图标 (MOE_DrawUILayers 内调): 在每个已标记单位上方贴图标,
+ * 只写战场视口内的像素 (底栏/侧栏不每帧重画, 写进去会留残影)。 */
 void Aggressive_Draw(void* surf, int w, int h, int pitch);

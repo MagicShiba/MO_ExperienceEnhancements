@@ -330,6 +330,11 @@ void OU_Box(unsigned char* locked, int w, int h, int pitch,
             const OuClip* clip, int cx, int cy, int m,
             unsigned r, unsigned g, unsigned b, unsigned a);
 
+/* 战场视口当裁剪框 (与投影点同一坐标系)。底栏带子/侧栏列不在视口内且不是
+ * 每帧重画, 手绘线/框画进去就是残影 —— 贴在战场上的手绘层都要用它当 clip。
+ * 读不到视口时不裁剪。 */
+void OU_ViewClip(OuClip* clip, int w, int h);
+
 /* 存一对端点 (leptons 世界坐标; 满回 0)。 */
 int OU_PrevPush(OU_PrevLine* buf, int* nio,
                 int ulx, int uly, int ulz, int tlx, int tly, int tlz);
@@ -337,16 +342,16 @@ int OU_PrevPush(OU_PrevLine* buf, int* nio,
 int OU_PrevPushObjs(OU_PrevLine* buf, int* nio, void* u, void* t);
 /* 起点取单位中心, 终点取落点格心地表高度 (含桥面, 与空军高度无关)。 */
 int OU_PrevPushCell(OU_PrevLine* buf, int* nio, void* u, int cx, int cy);
-/* 绘制全部预览线 (逐对引擎投影, 失败跳过)。thick = 线宽像素。 */
+/* 绘制全部预览线 (逐对引擎投影, 失败跳过)。thick = 线宽像素; clip 见 OU_ViewClip。 */
 void OU_PrevDraw(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, int pitch,
-                 unsigned r, unsigned g, unsigned b, unsigned a, int thick);
+                 const OuClip* clip, unsigned r, unsigned g, unsigned b, unsigned a, int thick);
 /* 同 OU_PrevDraw, 画虚线 (每 dash 像素实 / 后 gap 像素空)。 */
 void OU_PrevDrawDash(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, int pitch,
-                     unsigned r, unsigned g, unsigned b, unsigned a,
+                     const OuClip* clip, unsigned r, unsigned g, unsigned b, unsigned a,
                      int thick, int dash, int gap);
-/* 单像素细虚线 (逐像素插值, 自带裁剪)。 */
+/* 单像素细虚线 (逐像素插值, 自带面内裁剪; clip 同上)。 */
 void OU_ThinLineDash(unsigned char* locked, int w, int h, int pitch,
-                     int x0, int y0, int x1, int y1,
+                     const OuClip* clip, int x0, int y0, int x1, int y1,
                      unsigned r, unsigned g, unsigned b, unsigned a,
                      int thick, int dash, int gap);
 /* 预览节流 (三家规划线共用): 换格/换key且距上次>minMs, 或超 refreshMs 刷一次。

@@ -1110,17 +1110,18 @@ static void SA_BoxSample(void)
 
 static unsigned char* s_SaLocked = 0;
 static int s_SaW = 0, s_SaH = 0, s_SaPitch = 0;
+static OuClip s_SaClip;
 
 /* 3px 白线 / 实心方块 (公共实现: OrderUtil 的 OU_Line / OU_Box)。 */
 static void SA_Line(int x0, int y0, int x1, int y1, unsigned a)
 {
-    OU_Line(s_SaLocked, s_SaW, s_SaH, s_SaPitch, 0,
+    OU_Line(s_SaLocked, s_SaW, s_SaH, s_SaPitch, &s_SaClip,
             x0, y0, x1, y1, 255, 255, 255, a, 3);
 }
 
 static void SA_Mark(int cx, int cy, int m, unsigned a)
 {
-    OU_Box(s_SaLocked, s_SaW, s_SaH, s_SaPitch, 0,
+    OU_Box(s_SaLocked, s_SaW, s_SaH, s_SaPitch, &s_SaClip,
            cx, cy, m, 255, 255, 255, a);
 }
 
@@ -1148,6 +1149,7 @@ void SmartArea_Draw(void* surf, int w, int h, int pitch)
     locked = OU_SurfLock(surf);
     if (!locked) return;
     s_SaLocked = locked; s_SaW = w; s_SaH = h; s_SaPitch = pitch;
+    OU_ViewClip(&s_SaClip, w, h);
     if (showBox)
     {
         lo = -(g_SaRange / 2);
@@ -1167,7 +1169,7 @@ void SmartArea_Draw(void* surf, int w, int h, int pitch)
     }
     /* 规划线 (绿色细线, 单位中心→分到的目标中心, 含高度, 只在按住时存在)。 */
     if (showLines)
-        OU_PrevDraw(s_PrevBuf, s_PrevN, locked, w, h, pitch, 0, 255, 0, 255, 1);
+        OU_PrevDraw(s_PrevBuf, s_PrevN, locked, w, h, pitch, &s_SaClip, 0, 255, 0, 255, 1);
     s_SaLocked = 0;
     OU_SurfUnlock(surf);
 }

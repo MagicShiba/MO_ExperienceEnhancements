@@ -6,6 +6,7 @@
 #include "GdiText.h"
 #include "OrderUtil.h"
 #include "OrderThrottle.h"   /* OT_Fire: OU_FireMega 的收尾 */
+#include "FullMap.h"         /* FM_GetViewRects: OU_ViewClip */
 #include "ScaleBar.h"
 
 int OU_IsUnit(void* p)
@@ -1015,9 +1016,22 @@ void OU_Box(unsigned char* locked, int w, int h, int pitch,
             OU_Put(locked, w, h, pitch, clip, cx + k, cy + j, r, g, b, a);
 }
 
+void OU_ViewClip(OuClip* clip, int w, int h)
+{
+    RectangleStruct a;
+    if (!clip) return;
+    clip->x0 = 0; clip->y0 = 0; clip->x1 = w; clip->y1 = h;
+    FM_GetViewRects(&a, 0);
+    if (a.Width < 16 || a.Height < 16) return;   /* 读不到视口: 不裁剪 */
+    if (a.X > 0) clip->x0 = a.X;
+    if (a.Y > 0) clip->y0 = a.Y;
+    if (a.X + a.Width < w) clip->x1 = a.X + a.Width;
+    if (a.Y + a.Height < h) clip->y1 = a.Y + a.Height;
+}
+
 /* 虚线: 沿线段每 (dash+gap) 像素画 dash 段实线, 其余留空 (风格贴近引擎聚集点线)。 */
 void OU_ThinLineDash(unsigned char* locked, int w, int h, int pitch,
-                     int x0, int y0, int x1, int y1,
+                     const OuClip* clip, int x0, int y0, int x1, int y1,
                      unsigned r, unsigned g, unsigned b, unsigned a,
                      int thick, int dash, int gap)
 {
@@ -1040,6 +1054,8 @@ void OU_ThinLineDash(unsigned char* locked, int w, int h, int pitch,
         px = x0 + (int)(((long long)dx * i) / n);
         py = y0 + (int)(((long long)dy * i) / n);
         if (px < 0 || py < 0 || px >= w || py >= h) continue;
+        if (clip && (px < clip->x0 || px >= clip->x1 ||
+                     py < clip->y0 || py >= clip->y1)) continue;
         for (k = 0; k < thick; k++)
         {
             unsigned short* row;
@@ -1083,7 +1099,7 @@ int OU_PrevPushCell(OU_PrevLine* buf, int* nio, void* u, int cx, int cy)
 }
 
 void OU_PrevDraw(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, int pitch,
-                 unsigned r, unsigned g, unsigned b, unsigned a, int thick)
+                 const OuClip* clip, unsigned r, unsigned g, unsigned b, unsigned a, int thick)
 {
     void* tac;
     int k;
@@ -1096,13 +1112,13 @@ void OU_PrevDraw(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, i
         int ux, uy, tx, ty;
         if (!OU_ProjWorld(buf[k].ulx, buf[k].uly, buf[k].ulz, &ux, &uy)) continue;
         if (!OU_ProjWorld(buf[k].tlx, buf[k].tly, buf[k].tlz, &tx, &ty)) continue;
-        OU_Line(locked, w, h, pitch, 0, ux, uy, tx, ty, r, g, b, a, thick);
+        OU_Line(locked, w, h, pitch, clip, ux, uy, tx, ty, r, g, b, a, thick);
     }
 }
 
 /* 同 OU_PrevDraw, 但画虚线 (dash 实 / gap 空 像素)。 */
 void OU_PrevDrawDash(OU_PrevLine* buf, int n, unsigned char* locked, int w, int h, int pitch,
-                     unsigned r, unsigned g, unsigned b, unsigned a,
+                     const OuClip* clip, unsigned r, unsigned g, unsigned b, unsigned a,
                      int thick, int dash, int gap)
 {
     void* tac;
@@ -1116,7 +1132,8 @@ void OU_PrevDrawDash(OU_PrevLine* buf, int n, unsigned char* locked, int w, int 
         int ux, uy, tx, ty;
         if (!OU_ProjWorld(buf[k].ulx, buf[k].uly, buf[k].ulz, &ux, &uy)) continue;
         if (!OU_ProjWorld(buf[k].tlx, buf[k].tly, buf[k].tlz, &tx, &ty)) continue;
-        OU_ThinLineDash(locked, w, h, pitch, ux, uy, tx, ty, r, g, b, a, thick, dash, gap);
+        OU_ThinLineDash(locked, w, h, pitch, clip, ux, uy, tx, ty, r, g, b, a,
+                        thick, dash, gap);
     }
 }
 

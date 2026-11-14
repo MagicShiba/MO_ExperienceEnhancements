@@ -442,17 +442,18 @@ static void FA_BoxSample(void)
 
 static unsigned char* s_FaLocked = 0;
 static int s_FaW = 0, s_FaH = 0, s_FaPitch = 0;
+static OuClip s_FaClip;
 
 /* 3px 白线 / 实心方块 (公共实现: OrderUtil 的 OU_Line / OU_Box)。 */
 static void FA_Line(int x0, int y0, int x1, int y1, unsigned a)
 {
-    OU_Line(s_FaLocked, s_FaW, s_FaH, s_FaPitch, 0,
+    OU_Line(s_FaLocked, s_FaW, s_FaH, s_FaPitch, &s_FaClip,
             x0, y0, x1, y1, 255, 255, 255, a, 3);
 }
 
 static void FA_Mark(int cx, int cy, int m, unsigned a)
 {
-    OU_Box(s_FaLocked, s_FaW, s_FaH, s_FaPitch, 0,
+    OU_Box(s_FaLocked, s_FaW, s_FaH, s_FaPitch, &s_FaClip,
            cx, cy, m, 255, 255, 255, a);
 }
 
@@ -479,6 +480,7 @@ void FuzzyAttack_Draw(void* surf, int w, int h, int pitch)
     locked = OU_SurfLock(surf);
     if (!locked) return;
     s_FaLocked = locked; s_FaW = w; s_FaH = h; s_FaPitch = pitch;
+    OU_ViewClip(&s_FaClip, w, h);
     /* 生效格块 (参考格为块中心锚点, 与 Find 一致) 菱形框 + 四角标记。
      * 注: 中键拖动平移镜头时参考点按轮更新, 帧间小漂, 与各家线同 caveat。 */
     lo = -(g_FaRange / 2);
@@ -496,7 +498,7 @@ void FuzzyAttack_Draw(void* surf, int w, int h, int pitch)
     FA_Mark(x2, y2, 1, 230);
     FA_Mark(x3, y3, 1, 230);
     /* 规划线 (红色细线, 单位中心→分到的敌中心, 含高度, 只在按住时存在)。 */
-    OU_PrevDraw(s_FaPrevBuf, s_FaPrevN, locked, w, h, pitch, 255, 0, 0, 255, 1);
+    OU_PrevDraw(s_FaPrevBuf, s_FaPrevN, locked, w, h, pitch, &s_FaClip, 255, 0, 0, 255, 1);
     s_FaLocked = 0;
     OU_SurfUnlock(surf);
 }

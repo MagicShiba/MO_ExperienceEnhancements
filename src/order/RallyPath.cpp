@@ -727,6 +727,7 @@ void RallyPath_Draw(void* surf, int w, int h, int pitch)
     unsigned char* locked;
     void** items;
     OU_PrevLine buf[OU_PREV_CAP]; /* 多选工厂每家一条线, 按全表上限给 */
+    OuClip clip;                  /* 手绘裁剪: 战场视口 */
     int selN, i, k, n;
     int zDown;
 
@@ -741,6 +742,7 @@ void RallyPath_Draw(void* surf, int w, int h, int pitch)
 
     locked = OU_SurfLock(surf);
     if (!locked) return;
+    OU_ViewClip(&clip, w, h);
 
     n = 0;
     for (i = 0; i < selN; i++)
@@ -783,7 +785,7 @@ void RallyPath_Draw(void* surf, int w, int h, int pitch)
     {
         int cr, cg, cb;
         if (!OU_HouseColor(*(void**)ADDR_CURPLAYER, &cr, &cg, &cb)) { cr = 255; cg = 255; cb = 0; }
-        OU_PrevDrawDash(buf, n, locked, w, h, pitch, cr, cg, cb, 220, 2, 6, 4);
+        OU_PrevDrawDash(buf, n, locked, w, h, pitch, &clip, cr, cg, cb, 220, 2, 6, 4);
     }
     OU_SurfUnlock(surf);
 }

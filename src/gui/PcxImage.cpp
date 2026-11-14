@@ -15,13 +15,9 @@ typedef void* (__thiscall *PcxGetSurfFn)(void* pcx, const char* name, void* pal)
 /* 引擎返回 bool (al), 用 unsigned char 读。 */
 typedef unsigned char (__thiscall *PcxLoadFn)(void* pcx, const char* name,
                                               int f1, int f2);
-typedef unsigned char (__thiscall *PcxBlitFn)(void* pcx, RectangleStruct* r,
-                                              void* target, void* surf,
-                                              unsigned short key);
 
 #define FN_PCXGET  ((PcxGetSurfFn)(void*)0x6BA140u)
 #define FN_PCXLOAD ((PcxLoadFn)(void*)0x6B9D00u)
-#define FN_PCXBLIT ((PcxBlitFn)(void*)0x6BA580u)
 
 typedef struct {
     const char* name;
@@ -305,7 +301,6 @@ int PcxImage_Load(PcxImage* img, const char* name, int wantBpp)
     const unsigned char* p;
     unsigned short key;
     if (!img) return 0;
-    img->surf = NULL;
     img->px = NULL;
     img->width = img->height = img->bpp = 0;
     img->key = 0;
@@ -323,7 +318,6 @@ int PcxImage_Load(PcxImage* img, const char* name, int wantBpp)
     }
     if (bpp == 2) key = ((const unsigned short*)p)[0];
     else key = 0;
-    img->surf = s;
     img->px = p;
     img->width = w;
     img->height = h;
@@ -333,28 +327,26 @@ int PcxImage_Load(PcxImage* img, const char* name, int wantBpp)
     return 1;
 }
 
-int PcxImage_Draw(const PcxImage* img, void* target, int x, int y)
+int PcxImage_DrawClip(const PcxImage* img, unsigned char* base, int pitch,
+                      int x, int y, int cx0, int cy0, int cx1, int cy1)
 {
-    int tw, th, tbpp;
-    RectangleStruct r;
-    if (!img || !img->surf || img->bpp != 2) return -1;
-    if (img->width < 1 || img->height < 1) return -1;
-    if (!target || !IsPlausiblePtr(target)) return -1;
-    if (!IsPlausiblePtr(*(void**)target)) return -1;
-    tw = *(int*)((char*)target + 0x04);
-    th = *(int*)((char*)target + 0x08);
-    tbpp = *(int*)((char*)target + 0x10);
-    if (tw < 1 || th < 1 || tbpp != 2) return -1;
-    if (img->width > tw || img->height > th) return -1;
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x > tw - img->width) x = tw - img->width;
-    if (y > th - img->height) y = th - img->height;
-    r.X = x;
-    r.Y = y;
-    r.Width = img->width;
-    r.Height = img->height;
-    if (!FN_PCXBLIT((void*)ADDR_PCX_INSTANCE, &r, target, img->surf, img->key))
-        return -1;
-    return 0;
+    const unsigned short* src;
+    int left, top, right, bottom, r;
+    if (!img || !img->px || img->bpp != 2 || !base || pitch <= 0) return 0;
+    left = x > cx0 ? x : cx0;
+    top = y > cy0 ? y : cy0;
+    right = x + img->width < cx1 ? x + img->width : cx1;
+    bottom = y + img->height < cy1 ? y + img->height : cy1;
+    if (right <= left || bottom <= top) return 0;
+    src = (const unsigned short*)img->px;
+    for (r = top; r < bottom; r++)
+    {
+        unsigned short* dst = (unsigned short*)(base + (size_t)r * (size_t)pitch) + left;
+        const unsigned short* s =
+            src + (size_t)(r - y) * (size_t)img->width + (left - x);
+        int c;
+        for (c = left; c < right; c++, dst++, s++)
+            if (*s != img->key) *dst = *s;
+    }
+    return 1;
 }

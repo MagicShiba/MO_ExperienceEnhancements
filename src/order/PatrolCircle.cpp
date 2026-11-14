@@ -784,17 +784,18 @@ void PatrolCircle_Poll(void)
 
 static unsigned char* s_PcLocked = 0;
 static int s_PcW = 0, s_PcH = 0, s_PcPitch = 0;
+static OuClip s_PcClip;
 
 /* 3px 白线 / 实心方块 (公共实现: OrderUtil 的 OU_Line / OU_Box)。 */
 static void PC_Line(int x0, int y0, int x1, int y1, unsigned a)
 {
-    OU_Line(s_PcLocked, s_PcW, s_PcH, s_PcPitch, 0,
+    OU_Line(s_PcLocked, s_PcW, s_PcH, s_PcPitch, &s_PcClip,
             x0, y0, x1, y1, 255, 255, 255, a, 3);
 }
 
 static void PC_Mark(int cx, int cy, int m, unsigned a)
 {
-    OU_Box(s_PcLocked, s_PcW, s_PcH, s_PcPitch, 0,
+    OU_Box(s_PcLocked, s_PcW, s_PcH, s_PcPitch, &s_PcClip,
            cx, cy, m, 255, 255, 255, a);
 }
 
@@ -813,6 +814,7 @@ void PatrolCircle_Draw(void* surf, int w, int h, int pitch)
     locked = OU_SurfLock(surf);
     if (!locked) return;
     s_PcLocked = locked; s_PcW = w; s_PcH = h; s_PcPitch = pitch;
+    OU_ViewClip(&s_PcClip, w, h);
     /* 节点折线 (采样时刻实测像素) + 橡皮尾巴 (末节点→当前鼠标)。
      * 与 SmartOrder 同 caveat: 中键拖动平移镜头, 节点像素跨镜头帧会漂;
      * 落点格按松开时刻重算, 不受影响。 */

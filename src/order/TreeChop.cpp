@@ -472,17 +472,18 @@ void TreeChop_Poll(void)
 
 static unsigned char* s_TcLocked = 0;
 static int s_TcW = 0, s_TcH = 0, s_TcPitch = 0;
+static OuClip s_TcClip;
 
 /* 3px 白线 / 实心方块 (公共实现: OrderUtil 的 OU_Line / OU_Box)。 */
 static void TC_Line(int x0, int y0, int x1, int y1, unsigned a)
 {
-    OU_Line(s_TcLocked, s_TcW, s_TcH, s_TcPitch, 0,
+    OU_Line(s_TcLocked, s_TcW, s_TcH, s_TcPitch, &s_TcClip,
             x0, y0, x1, y1, 255, 255, 255, a, 3);
 }
 
 static void TC_Mark(int cx, int cy, int m, unsigned a)
 {
-    OU_Box(s_TcLocked, s_TcW, s_TcH, s_TcPitch, 0, cx, cy, m, 255, 255, 255, a);
+    OU_Box(s_TcLocked, s_TcW, s_TcH, s_TcPitch, &s_TcClip, cx, cy, m, 255, 255, 255, a);
 }
 
 void TreeChop_Draw(void* surf, int w, int h, int pitch)
@@ -514,6 +515,7 @@ void TreeChop_Draw(void* surf, int w, int h, int pitch)
     locked = OU_SurfLock(surf);
     if (!locked) return;
     s_TcLocked = locked; s_TcW = w; s_TcH = h; s_TcPitch = pitch;
+    OU_ViewClip(&s_TcClip, w, h);
     TC_Line(x0, y0, x1, y1, 230);
     TC_Line(x1, y1, x2, y2, 230);
     TC_Line(x2, y2, x3, y3, 230);

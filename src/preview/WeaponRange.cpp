@@ -619,12 +619,13 @@ static WRInfo WR_Resolve(void* u)
 
 static unsigned char* s_WrLocked = 0;
 static int s_WrW = 0, s_WrH = 0, s_WrPitch = 0;
+static OuClip s_WrClip;
 
 /* 1px 细线 (公共实现: OrderUtil 的 OU_Line)。 */
 static void WR_ThinLine(int x0, int y0, int x1, int y1,
                         int cr, int cg, int cb, unsigned a)
 {
-    OU_Line(s_WrLocked, s_WrW, s_WrH, s_WrPitch, 0, x0, y0, x1, y1,
+    OU_Line(s_WrLocked, s_WrW, s_WrH, s_WrPitch, &s_WrClip, x0, y0, x1, y1,
             (unsigned)cr, (unsigned)cg, (unsigned)cb, a, 1);
 }
 
@@ -698,6 +699,7 @@ void WeaponRange_Draw(void* surf, int w, int h, int pitch)
     locked = OU_SurfLock(surf);
     if (!locked) return;
     s_WrLocked = locked; s_WrW = w; s_WrH = h; s_WrPitch = pitch;
+    OU_ViewClip(&s_WrClip, w, h);
     /* 地面蓝圈 (当前武器) + 最小红圈 (0 不画) + 空中青虚线圈
      * + 隐形探测黄圈 + 间谍识别紫圈 (后两者 0 不画)。 */
     WR_Circle(r.center.X, r.center.Y, r.center.Z, r.range, 64, 128, 255, 230, 0);

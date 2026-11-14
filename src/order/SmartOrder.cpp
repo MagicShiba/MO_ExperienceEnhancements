@@ -922,17 +922,18 @@ void SmartOrder_Poll(void)
 
 static unsigned char* s_AsLocked = 0;
 static int s_AsW = 0, s_AsH = 0, s_AsPitch = 0;
+static OuClip s_AsClip;
 
 /* 3px 白线 / 实心方块 (公共实现: OrderUtil 的 OU_Line / OU_Box)。 */
 static void SO_Line(int x0, int y0, int x1, int y1, unsigned a)
 {
-    OU_Line(s_AsLocked, s_AsW, s_AsH, s_AsPitch, 0,
+    OU_Line(s_AsLocked, s_AsW, s_AsH, s_AsPitch, &s_AsClip,
             x0, y0, x1, y1, 255, 255, 255, a, 3);
 }
 
 static void SO_Mark(int cx, int cy, int m, unsigned a)
 {
-    OU_Box(s_AsLocked, s_AsW, s_AsH, s_AsPitch, 0,
+    OU_Box(s_AsLocked, s_AsW, s_AsH, s_AsPitch, &s_AsClip,
            cx, cy, m, 255, 255, 255, a);
 }
 
@@ -950,6 +951,7 @@ void SmartOrder_Draw(void* surf, int w, int h, int pitch)
     locked = OU_SurfLock(surf);
     if (!locked) return;
     s_AsLocked = locked; s_AsW = w; s_AsH = h; s_AsPitch = pitch;
+    OU_ViewClip(&s_AsClip, w, h);
     /* 节点折线 (全用采样时刻实测像素, 弧形保真) + 橡皮尾巴 (末节点→当前鼠标)。
      * 注: 中键拖动会平移镜头, 前后节点像素不在同一镜头帧, 大位移拖动线会
      * 整体漂, 这是引擎行为, 与 PatrolCircle 同 caveat。 */
@@ -970,7 +972,7 @@ void SmartOrder_Draw(void* surf, int w, int h, int pitch)
         SO_Mark(x1, y1, 2, 255); /* 当前 5x5 */
     }
     /* 绿线预览 (单位中心→预估落点/目标中心, 含高度, 只在按住时存在)。 */
-    OU_PrevDraw(s_SoPrevBuf, s_SoPrevN, locked, w, h, pitch, 0, 255, 0, 255, 1);
+    OU_PrevDraw(s_SoPrevBuf, s_SoPrevN, locked, w, h, pitch, &s_AsClip, 0, 255, 0, 255, 1);
     s_AsLocked = 0;
     OU_SurfUnlock(surf);
 }

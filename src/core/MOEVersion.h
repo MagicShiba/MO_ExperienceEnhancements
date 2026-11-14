@@ -1,5 +1,5 @@
 /* MOEVersion.h - 版本号独立成头, 提版本时只重编直接包含它的 .cpp。 */
 #pragma once
 
-#define MOE_VERSION "1.0.793"
+#define MOE_VERSION "1.05.796"
 
