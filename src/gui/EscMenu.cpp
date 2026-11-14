@@ -429,7 +429,7 @@ static LiKey s_EditKeys[] = {
     ES_KEY(VK_LEFT, 1), ES_KEY(VK_RIGHT, 1), ES_KEY(VK_HOME, 1), ES_KEY(VK_END, 1),
     ES_KEY(VK_UP, 1), ES_KEY(VK_DOWN, 1),
     ES_KEY(VK_DELETE, 1), ES_KEY(VK_BACK, 1), ES_KEY(VK_RETURN, 0), ES_KEY(VK_ESCAPE, 0),
-    ES_KEY(VK_OEM_MINUS, 0), ES_KEY(VK_SUBTRACT, 0),
+    ES_KEY(VK_OEM_MINUS, 0), ES_KEY(VK_SUBTRACT, 0), ES_KEY('A', 0),
     ES_KEY('0', 0), ES_KEY('1', 0), ES_KEY('2', 0), ES_KEY('3', 0), ES_KEY('4', 0),
     ES_KEY('5', 0), ES_KEY('6', 0), ES_KEY('7', 0), ES_KEY('8', 0), ES_KEY('9', 0),
     ES_KEY(VK_NUMPAD0, 0), ES_KEY(VK_NUMPAD1, 0), ES_KEY(VK_NUMPAD2, 0),
@@ -634,6 +634,8 @@ static int     s_QKind = QK_PRESET;
 static int     s_QFaceTarget = -1;
 static wchar_t s_FaceBuf[ESC_FACE_CAP];
 static int     s_QBakOk = 0;
+static HWND    s_QInputWnd = NULL;
+static WNDPROC s_QInputOld = NULL;
 static char    s_PendQuick[ESC_QUICK_RAW + 16];
 static int     s_PendQuickDirty = 0;
 
@@ -1410,6 +1412,8 @@ static void Esc_EditBegin(HWND hDlg, const RECT* right, int mx, int page,
 static int  Esc_TextWidth(const wchar_t* s, int px, int slot);
 static void Esc_EditEnd(HWND hDlg);
 static void Esc_EditCommit(HWND hDlg);
+static void Esc_QInputAttach(HWND hDlg);
+static void Esc_QInputDetach(void);
 
 /* 光标可见窗口的起点: 从 start 起到光标处的宽度不超过框宽的最小 start。
  * 宽度随 start 单调不增, 二分 (每次测量都要过一遍 GDI, 不能逐字试)。 */
@@ -1474,6 +1478,9 @@ static void Esc_LineBegin(HWND hDlg, wchar_t* buf, int cap, int curAt)
     Esc_ImeReset();
     s_QOn = 1;
     s_EditHost = hDlg;
+    Esc_QInputAttach(hDlg);
+    /* 专用 EDIT 子窗口承接焦点和字符消息, 自绘框只负责呈现。 */
+    if (s_QInputWnd && IsWindow(s_QInputWnd)) SetFocus(s_QInputWnd);
     LiKeysReset(s_EditKeys, (int)(sizeof(s_EditKeys) / sizeof(s_EditKeys[0])), 1);
     SetTimer(hDlg, ESC_EDIT_TIMER, 16, NULL);
     Esc_Redraw(hDlg);
@@ -1505,6 +1512,7 @@ static void Esc_FaceBegin(HWND hDlg, int target, int curAt)
 /* 收掉编辑态 (提交与取消共用): 停定时器 + 重画。内容已经就地写好, 不用回拷。 */
 static void Esc_QuickClose(HWND hDlg)
 {
+    Esc_QInputDetach();
     if (s_EditHost) KillTimer(s_EditHost, ESC_EDIT_TIMER);
     s_QOn = 0;
     s_QEdit = -1;
@@ -1555,6 +1563,83 @@ static void Esc_QuickDel(HWND hDlg, int idx)
     Esc_Redraw(hDlg);
 }
 
+static void Esc_QuickChar(wchar_t ch);
+
+static LRESULT CALLBACK Esc_QInputProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_IME_SETCONTEXT)
+    {
+        lp &= (LPARAM)(~(DWORD)ISC_SHOWUICOMPOSITIONWINDOW);
+    }
+    if (msg == WM_KEYDOWN)
+    {
+        int ctrl = (GetKeyState(VK_CONTROL) < 0);
+        if (ctrl && (wp == 'C' || wp == 'X'))
+        {
+            if (wp == 'X')
+            {
+                if (LiEdCopy(&s_QSt, 1)) Esc_QuickSync(1);
+            }
+            else LiEdCopy(&s_QSt, 0);
+            if (s_EditHost) Esc_Redraw(s_EditHost);
+            return 0;
+        }
+    }
+    if (msg == WM_CHAR || msg == WM_IME_CHAR)
+    {
+        Esc_QuickChar((wchar_t)(wp & 0xFFFFu));
+        if (s_EditHost) Esc_Redraw(s_EditHost);
+        return 0;
+    }
+    if (msg == WM_IME_COMPOSITION || msg == WM_IME_ENDCOMPOSITION)
+    {
+        if (s_EditHost) { Esc_ImeCompRefresh(); Esc_Redraw(s_EditHost); }
+    }
+    if (msg == WM_NCDESTROY)
+    {
+        WNDPROC old = s_QInputOld;
+        s_QInputWnd = NULL;
+        s_QInputOld = NULL;
+        if (old)
+        {
+            SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)old);
+            return CallWindowProcW(old, h, msg, wp, lp);
+        }
+    }
+    return LiCallOld(h, s_QInputOld, msg, wp, lp);
+}
+
+static void Esc_QInputAttach(HWND hDlg)
+{
+    HWND w;
+    WNDPROC old;
+
+    if (!hDlg || !IsWindow(hDlg)) return;
+    if (s_QInputWnd && IsWindow(s_QInputWnd)) return;
+    w = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL,
+                        0, 0, 1, 1, hDlg, NULL, GetModuleHandleW(NULL), NULL);
+    if (!w) return;
+    old = (WNDPROC)SetWindowLongPtrW(w, GWLP_WNDPROC, (LONG_PTR)Esc_QInputProc);
+    if (!old)
+    {
+        DestroyWindow(w);
+        return;
+    }
+    s_QInputWnd = w;
+    s_QInputOld = old;
+    ShowWindow(w, SW_SHOW);
+}
+
+static void Esc_QInputDetach(void)
+{
+    HWND w = s_QInputWnd;
+    if (w && IsWindow(w) && s_QInputOld)
+        SetWindowLongPtrW(w, GWLP_WNDPROC, (LONG_PTR)s_QInputOld);
+    s_QInputWnd = NULL;
+    s_QInputOld = NULL;
+    if (w && IsWindow(w)) DestroyWindow(w);
+}
+
 static void Esc_QuickChar(wchar_t ch)
 {
     if (!s_QOn) return;
@@ -1562,7 +1647,10 @@ static void Esc_QuickChar(wchar_t ch)
     /* 组字中 ASCII 已被输入法收编 (聊天框同判据), 照收会留下拼音残渣。 */
     if (s_QCompLen > 0 && ch > 32 && ch < 127) return;
     if (LiEdInsert(&s_QSt, &ch, 1, ESC_QUICK_LINE - 1, NULL, NULL))
+    {
+        LiEdTouch(&s_QSt);
         Esc_QuickSync(1);
+    }
 }
 
 /* 轮询: 只处理"到不了对话框"的键 (移动/删除/回车/Esc) 与 Ctrl+V。 */
@@ -1571,8 +1659,10 @@ static void Esc_QuickPoll(HWND hDlg)
     static int s_PrevV = 0;
     unsigned now = GetTickCount();
     int i, changed = 0, vdown;
-
+    int shift = (GetAsyncKeyState(VK_SHIFT) < 0);
+    int ctrl = (GetAsyncKeyState(VK_CONTROL) < 0);
     if (!s_QOn) return;
+    if (!s_QInputWnd || !IsWindow(s_QInputWnd)) Esc_QInputAttach(hDlg);
     /* 组字串每拍读一次: 系统组合窗已藏, 这个显示是组字唯一的反馈。
      * 有的输入法不给对话框发 WM_IME_COMPOSITION, 只靠消息会漏画。 */
     if (Esc_ImeCompRefresh()) Esc_Redraw(hDlg);
@@ -1589,7 +1679,9 @@ static void Esc_QuickPoll(HWND hDlg)
         }
         else if (k->vk == VK_LEFT || k->vk == VK_RIGHT ||
                  k->vk == VK_HOME || k->vk == VK_END)
-            LiEdMove(&s_QSt, k->vk, 0);
+            LiEdMove(&s_QSt, k->vk, shift);
+        else if (k->vk == 'A' && ctrl)
+            LiEdSelAll(&s_QSt);
         else
             continue;
         changed = 1;
@@ -4107,13 +4199,33 @@ static void Esc_DrawLineBox(void* surf, int boxX, int boxY, int boxW,
         start = Esc_QuickStart(s, curl, innerW, wCur);
     }
     x = boxX + ESC_TEXT_INSET;
+    /* 光标在最左侧时也要计算光标后的尾串宽度, 否则插入点会被当成尾端。 */
+    wCur = Esc_TextWidth(s + curl, ESC_BODY_PX, ESC_BODY_SLOT);
     wStart = Esc_TextWidth(s + start, ESC_BODY_PX, ESC_BODY_SLOT);
+    if (editing && st)
+    {
+        int lo, hi, sx, ex;
+        LiEdSel(st, &lo, &hi);
+        if (lo >= 0 && hi > lo)
+        {
+            sx = (lo <= start) ? x
+                : x + wStart - Esc_TextWidth(s + lo, ESC_BODY_PX, ESC_BODY_SLOT);
+            ex = (hi <= start) ? x
+                : x + wStart - Esc_TextWidth(s + hi, ESC_BODY_PX, ESC_BODY_SLOT);
+            if (sx < x) sx = x;
+            if (ex > x + innerW) ex = x + innerW;
+            if (ex > sx)
+                Esc_Fill(surf, sx, boxY + 2, ex - sx,
+                         ESC_STEP_BTN_H - 4, 196, 132, 48, 255);
+        }
+    }
     if (s[start])
         Esc_Text(surf, s + start, x, textY, innerW, ESC_BODY_PX, ESC_BODY_SLOT,
                  editing ? 245u : 232u, editing ? 245u : 232u,
                  editing ? 245u : 232u);
     if (!editing || !st) return;
     {
+        int caretY, caretBottom;
         /* insX = 插入点 (钳在框内); 组字串从它画起, 光标跟组字光标。 */
         int insX = x + (wStart - wCur);
         int careX;
@@ -4121,6 +4233,12 @@ static void Esc_DrawLineBox(void* surf, int boxX, int boxY, int boxW,
         if (insX < x) insX = x;
         if (insX > x + innerW) insX = x + innerW;
         careX = insX;
+        caretY = textY;
+        caretBottom = textY + bodyH;
+        if (caretY < boxY + 2) caretY = boxY + 2;
+        if (caretBottom > boxY + ESC_STEP_BTN_H - 2)
+            caretBottom = boxY + ESC_STEP_BTN_H - 2;
+        if (caretBottom < caretY) caretBottom = caretY;
         if (s_QCompLen > 0)
         {
             int room = x + innerW - insX;
@@ -4147,8 +4265,9 @@ static void Esc_DrawLineBox(void* surf, int boxX, int boxY, int boxW,
                 if (careX > x + innerW) careX = x + innerW;
             }
         }
-        if (LiBlinkOn(st))
-            Esc_Fill(surf, careX, textY, 1, bodyH, 245, 245, 245, 220);
+        if (LiBlinkOn(st) && caretBottom > caretY)
+            Esc_Fill(surf, careX, caretY, 1, caretBottom - caretY,
+                     245, 245, 245, 220);
         /* 候选窗贴框底: 锚点用插入点 (不跟组字串走)。 */
         Esc_ImePin(insX, boxY + ESC_STEP_BTN_H);
     }
@@ -5843,7 +5962,8 @@ static LRESULT CALLBACK Esc_DlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
     case WM_KILLFOCUS:
-        if (s_EditOn || s_QOn) Esc_EditCommit(h);
+        /* 编辑态不在这里提交: 方向键可能先让对话框管理器切换子控件焦点,
+         * 但编辑会话仍由 ESC_EDIT_TIMER 管理, 真正离开菜单由 WM_SHOWWINDOW 收尾。 */
         break;
     case WM_MOUSEWHEEL:
         if (Esc_PageWheel(h, wp, lp)) return 0;
