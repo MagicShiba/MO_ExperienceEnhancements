@@ -384,6 +384,10 @@ int OU_HotkeyDown(const OU_Hotkey* hk);
 /* 从 ini 读字符串: 行尾 ;注释截掉, 两端去空; 缺键/空值用 def。无 CRT。 */
 void OU_ReadString(const char* section, const char* key, const char* def,
                    char* buf, int buflen);
+/* 当名单读: 逗号/空白分隔, 就地切段后把段首指针写进 out, 返回条数。
+ * 段指针指向 buf 内部 (buf 必须是静态/持久的), 最长 max 条。 */
+int OU_ReadList(const char* section, const char* key, const char* def,
+                char* buf, int buflen, const char** out, int max);
 /* 从 ini 读热键串 (缺键/空串/坏串回 0, 调用方保留原值; 成功含 None 回 1)。 */
 int OU_ReadHotkey(const char* section, const char* key, OU_Hotkey* io);
 /* 单行开关+热键 (缺键/空串/坏串=默认值启用; "0"=禁用; 其它按 Hotkey 串解析,

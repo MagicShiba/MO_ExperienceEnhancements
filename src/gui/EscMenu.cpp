@@ -237,6 +237,7 @@ enum {
     GUI_ITEM_HK_MIND,           /* 选择被心控单位 [Features] MindSelect */
     GUI_ITEM_HK_ATTACKMOVE,     /* 移动攻击 [Features] AttackMove */
     GUI_ITEM_HK_AGGRESSIVE,     /* 侵略模式 [Aggressive] Hotkey */
+    GUI_ITEM_AG_SKIP_TECH,      /* 侵略模式: 有价值的科技建筑不当目标 */
     /* ---- 建筑组: 快捷维修 (升级自 RepairAll) ---- */
     GUI_ITEM_REPAIR,            /* 关闭 / 自动 / 半自动 ([RepairAll] Mode) */
     /* ---- 侧边栏组: 建造提示追加耗时/耗电 ---- */
@@ -914,6 +915,7 @@ typedef struct {
     int repair;             /* 快捷维修 0/1/2 原值 ([RepairAll] Mode) */
     int tooltip, saveShot, observer, noApproach;   /* 各模块总开关 */
     int agTarget;           /* 侵略模式目标 0=建筑 1=全部 ([Aggressive] Target) */
+    int agSkipTech;         /* 侵略模式忽略有价值的科技建筑 ([Aggressive] SkipTechBuildings) */
     int wrOn, wrH;          /* 显示单位范围: 开关 + 对空圈抬高 */
     int lightFix;           /* 光照修复 ([Environment] LightFixEnable) */
     /* 结算页退出按钮走 VecText 选项 (VTO_SCORE_EXIT), 由 VecText_SaveOptions
@@ -963,6 +965,7 @@ typedef struct {
     X(observer, Observer_Enabled, Observer_SetEnabled) \
     X(noApproach, NoApproach_Enabled, NoApproach_SetEnabled) \
     X(agTarget, Aggressive_AllTargets, Aggressive_SetAllTargets) \
+    X(agSkipTech, Aggressive_SkipTechBuildings, Aggressive_SetSkipTechBuildings) \
     X(wrOn, WeaponRange_Enabled, WeaponRange_SetEnabled) \
     X(wrH, WeaponRange_Height, WeaponRange_SetHeight) \
     X(lightFix, LightFix_Enabled, LightFix_SetEnabled)
@@ -1030,6 +1033,7 @@ static const char* const kLabelKey[GUI_ITEM_COUNT] = {
     "GuiPipScale",
     "GuiHkSmartOrder", "GuiHkSmartArea", "GuiHkPatrol", "GuiHkTreeChop",
     "GuiHkFuzzy", "GuiHkMind", "GuiHkAttackMove", "GuiHkAggressive",
+    "GuiAgSkipTech",
     "GuiRepair", "GuiTooltip", "GuiPipSize", "GuiSaveShot", "GuiObserver",
     "GuiScoreExit", "GuiWeaponRange", "GuiWeaponRangeOn", "GuiWeaponRangeH",
     "GuiNoApproach", "GuiMcLoss"
@@ -1851,7 +1855,9 @@ static const EscGuiRowInfo s_KeyLayout[] = {
     { EG_GROUP,  GUI_GROUP_HOTKEY_MISC },
     { EG_HOTKEY, GUI_ITEM_HK_MIND },
     { EG_HOTKEY, GUI_ITEM_HK_ATTACKMOVE },
-    { EG_HOTKEY, GUI_ITEM_HK_AGGRESSIVE }
+    { EG_HOTKEY, GUI_ITEM_HK_AGGRESSIVE },
+    /* 侵略模式的目标过滤 (热键行下面的开关, 只影响本机发令) */
+    { EG_SWITCH, GUI_ITEM_AG_SKIP_TECH }
 };
 
 static const EscGuiRowInfo s_TextLayout[] = {
@@ -2431,7 +2437,10 @@ static const EscToggle s_Toggle[] = {
     { GUI_ITEM_NO_APPROACH,  "Features", "NoApproach", NoApproach_Enabled,
       NoApproach_SetEnabled },
     { GUI_ITEM_MC_LOSS,      "Features", "MCLossMute", MCLoss_Enabled,
-      MCLoss_SetEnabled }
+      MCLoss_SetEnabled },
+    /* 快捷键页: 侵略模式目标过滤 */
+    { GUI_ITEM_AG_SKIP_TECH, "Aggressive", "SkipTechBuildings",
+      Aggressive_SkipTechBuildings, Aggressive_SetSkipTechBuildings }
 };
 
 /* 行控件表的 item 都是首字段, 五张表的查找长得一样, 用宏生成。 */

@@ -1430,6 +1430,29 @@ void OU_ReadString(const char* section, const char* key, const char* def,
     }
 }
 
+/* 名单行: 逗号/空白分隔, 就地切成若干段 (段尾写 0), 返回条数。
+ * 段指针指向 buf 内部, 生命周期跟 buf 一致。';' 已由 OU_ReadString 截掉。 */
+int OU_ReadList(const char* section, const char* key, const char* def,
+                char* buf, int buflen, const char** out, int max)
+{
+    char* s;
+    int n = 0;
+    if (!buf || buflen <= 0 || !out || max <= 0) return 0;
+    OU_ReadString(section, key, def, buf, buflen);
+    s = buf;
+    while (*s && n < max)
+    {
+        char* st;
+        while (*s == ' ' || *s == '\t' || *s == ',') s++;
+        if (!*s) break;
+        st = s;
+        while (*s && *s != ',' && *s != ' ' && *s != '\t') s++;
+        if (*s) *s++ = 0;
+        out[n++] = st;
+    }
+    return n;
+}
+
 int OU_ReadHotkey(const char* section, const char* key, OU_Hotkey* io)
 {
     char buf[64];

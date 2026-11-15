@@ -1,6 +1,7 @@
 /* 侵略模式: 热键切换本机标记, 空闲单位定期寻找警戒范围内可下令目标。
  * 订单沿用引擎光标判定和 Action→Mission 映射, 攻击使用 Target,
  * 进入/占领/破坏使用 Destination。忽略被动中立, Target 可限为建筑。
+ * 无敌目标 (Immune=yes / Armor=special) 与有价值的科技建筑默认不当目标。
  * 联机只读模拟状态, 所有命令经 OU_FireMega / OT_Fire 标准事件广播;
  * 不得直接调用改变模拟状态的引擎函数。 */
 
@@ -25,6 +26,8 @@
 typedef int __attribute__((thiscall)) (*Fn_GetMission)(void* self);
 typedef int __attribute__((thiscall)) (*Fn_GetGuardRange)(void* self, int control);
 typedef int __attribute__((thiscall)) (*Fn_GetWeaponRange)(void* self, int idxWeapon);
+typedef int __attribute__((thiscall)) (*Fn_IniKeyCount)(void* self, const char* section);
+typedef const char* __attribute__((thiscall)) (*Fn_IniKeyName)(void* self, const char* section, int idx);
 
 #define FN_GETGUARDRANGE ((Fn_GetGuardRange)(void*)0x707E60u)
 
@@ -43,6 +46,17 @@ static int g_AgInterval = 15;    /* 扫描间隔 (逻辑帧) */
 static int g_AgCooldown = 45;    /* 同一单位两次发令最小间隔 (逻辑帧) */
 static int g_AgRangePct = 100;   /* 攻击半径 = 真射程 x RangePercent% */
 static int g_AgAllTargets = 1;   /* 0=只打建筑 (Target=building) / 1=所有敌方单位 (默认) */
+static int g_AgSkipTech = 1;     /* 1=有价值的科技建筑不当目标 (SkipTechBuildings, 默认) */
+
+/* 有价值的科技建筑 (按 rules 节名 = 类型 ID 认): 占领后给电力/资金/维修/视野*/
+#define AG_TECH_MAX 48
+
+static const char* const AG_TECH_DEFAULT =
+    "CAPOWR,CASLAB,CAAIRP,CAOILD,CAOILDOM,CAFHOSP,CAHOSP";
+
+static char g_AgTechRaw[1024];              /* ini 原文 (OU_ReadList 就地切分) */
+static const char* g_AgTechBld[AG_TECH_MAX];
+static int g_AgTechN = 0;
 
 static int g_AgPrev = 0;
 static void* g_AgHouse = 0;
@@ -76,7 +90,12 @@ static void AG_EnsureInit(void)
         OU_ReadString(AG_SECTION, "Target", "all", buf, sizeof(buf));
         g_AgAllTargets = (buf[0] == 'b' || buf[0] == 'B') ? 0 : 1;
     }
+    g_AgSkipTech = GetPrivateProfileIntA(AG_SECTION, "SkipTechBuildings", 1, g_IniPath) ? 1 : 0;
+    g_AgTechN = OU_ReadList(AG_SECTION, "SkipTechList", AG_TECH_DEFAULT,
+                            g_AgTechRaw, sizeof(g_AgTechRaw),
+                            g_AgTechBld, AG_TECH_MAX);
     LogLine(g_AgEnable ? "aggressive: ON" : "aggressive: OFF");
+    LogLine(g_AgSkipTech ? "aggressive: skip tech buildings" : "aggressive: hit tech buildings");
 }
 
 /* 设置页改完热键后回读 (ini 已写盘)。 */
@@ -99,14 +118,25 @@ void Aggressive_SetAllTargets(int all)
     g_AgAllTargets = all ? 1 : 0;
 }
 
+/* 有价值的科技建筑 (设置页开关): 1 = 不当目标, 0 = 照打。 */
+int Aggressive_SkipTechBuildings(void)
+{
+    AG_EnsureInit();
+    return g_AgSkipTech;
+}
+
+void Aggressive_SetSkipTechBuildings(int on)
+{
+    AG_EnsureInit();
+    g_AgSkipTech = on ? 1 : 0;
+}
+
 /* ---------------- 小工具 ---------------- */
 
 /* 对象 Fetch_ID (身份; 失败回 0)。rttiOut 透出 RTTI 字节 (可空)。 */
 static int AG_FetchId(void* p, unsigned char* rttiOut)
 {
-    char tb[8];
-    unsigned i;
-    for (i = 0; i < 8; i++) tb[i] = 0;
+    char tb[8] = {0};
     if (!p || !FN_TGT_OBJ(tb, p)) return 0;
     if (rttiOut) *rttiOut = (unsigned char)tb[4];
     return *(int*)(tb + 0);
@@ -138,12 +168,10 @@ static int AG_WeaponRange(void* u, int idx)
     return fn(u, idx);
 }
 
-/* 目标搜索半径 (轻子): 取类型的 GuardRange 原值 (GetGuardRange(0)，不可用时回 0)
- * 与主/副武器射程三者中的最大值 —— 有的单位 GuardRange 比真射程小 (不主动索敌的
- * 支援/攻城单位), 只按 GuardRange 会够不到本来能打的目标。
- * 不能用 GetGuardRange(1)：它会把射程加倍后以 4096 轻子(16 格)封顶，
- * 无 GuardRange 的远射程单位会被严重截断。
- * 最后乘 RangePercent% (默认 100)。非法回 0。 */
+/* 目标搜索半径 (轻子): GuardRange 与主/副武器射程取最大 —— 不主动索敌的支援/
+ * 攻城单位 GuardRange 比真射程小, 只按它会够不到本来能打的目标。不能用
+ * GetGuardRange(1): 它会把射程加倍后按 4096 轻子 (16 格) 封顶。
+ * 最后乘 RangePercent%。非法回 0。 */
 static int AG_GuardRange(void* u)
 {
     int r, a, b;
@@ -173,15 +201,117 @@ typedef unsigned char __attribute__((thiscall)) (*Fn_CellSensors)(void* cell, in
 
 #define VT_GETTYPE (0x84u / 4u)
 
-/* 这个目标"鼠标点得到"吗 —— 复刻引擎命中判定 (0x6DA380 像素命中 /
- * 0x692300 点击后处理)。判据顺序照抄: +0x41A 置位的对象放行; 否则隐形
- * (CloakState==Cloaked) 要求本家隐形探测器覆盖它所在格; InvisibleInGame
- * 类型一律点不到。看不见的目标光标落不上去, 攻击令也会被引擎自己清掉
- * (0x414D79), 单位只会发呆。全程只读。 */
-static int AG_Clickable(void* p, void* cur, const CoordStruct* c)
+/* "打不烂"的类型只有两种: `Immune=yes` 或 `Armor=special` —— 弹头打上去 0 伤害,
+ * 攻击令只让单位白跑一趟。判据读 ObjectTypeClass 的两个字段:
+ *   +0x233 Immune / +0x09C Armor (护甲序号, 见 AG_SpecialArmor)。 */
+#define AG_ARMOR_SPECIAL_FALLBACK 236   /* 拿不到 rules ini 时的兜底 */
+
+/* 类型指针 (GetType 虚表槽 0x84): 取不到返回 0。 */
+static void* AG_TypeOf(void* p)
 {
     void** vt;
     Fn_GetType getType;
+    if (!p || !IsPlausiblePtr(p)) return 0;
+    vt = *(void***)p;
+    if (!vt || !IsPlausiblePtr(vt)) return 0;
+    getType = (Fn_GetType)vt[VT_GETTYPE];
+    if (!getType || !IsPlausiblePtr((const void*)getType)) return 0;
+    return getType(p);
+}
+
+/* 一行日志 "aggressive: ArmorTypes=N special=M", 对账用。 */
+static void AG_LogArmorIdx(int count, int idx)
+{
+    char buf[64];
+    unsigned p = AppendCStr(buf, 0, "aggressive: ArmorTypes=", sizeof(buf));
+    p = AppendInt(buf, p, sizeof(buf), count);
+    p = AppendCStr(buf, p, " special=", sizeof(buf));
+    AppendInt(buf, p, sizeof(buf), idx);
+    LogLine(buf);
+}
+
+/* 类型 ID (AbstractTypeClass::ID, char[0x18]) 是否等于 name: 大小写不敏感,
+ * 按字段长度截断比较, 不假设调用方给的是 NUL 结尾的串。 */
+static int AG_IdIs(const char* id, const char* name)
+{
+    int i;
+    if (!id || !name) return 0;
+    for (i = 0; i < 0x17; i++)
+    {
+        char a = id[i], b = name[i];
+        if (a >= 'a' && a <= 'z') a = (char)(a - 32);
+        if (b >= 'a' && b <= 'z') b = (char)(b - 32);
+        if (a != b) return 0;
+        if (!a) return 1;
+    }
+    return 0;
+}
+
+/* `special` 护甲的序号: 问游戏已加载的 rules ini (0x887048 的 CCINIClass*)。
+ * GetKeyCount/GetKeyName 的遍历顺序就是 Ares 给护甲编号的顺序 (它的
+ * Enumerable<ArmorType>::LoadFromINIList 用同一对接口), 第 i 个键名即 `Armor`
+ * 字段里会出现的值 i。缓存 "ini 指针 -> 序号" (换图会换指针); 拿不到 ini 用兜底
+ * 常量, 有 ini 但没这个键则返回 -1 (不按 special 过滤)。 */
+static int AG_SpecialArmor(void)
+{
+    static void* s_ini;
+    static int s_idx = AG_ARMOR_SPECIAL_FALLBACK;
+    void* ini = *(void**)ADDR_INI_RULES;
+    int n, i;
+    if (ini == s_ini) return s_idx;
+    s_ini = ini;
+    s_idx = AG_ARMOR_SPECIAL_FALLBACK;
+    if (!ini || !IsPlausiblePtr(ini)) return s_idx;
+    n = ((Fn_IniKeyCount)(void*)FN_INI_GETKEYCOUNT)(ini, "ArmorTypes");
+    s_idx = -1;
+    for (i = 0; i < n; i++)
+    {
+        const char* k = ((Fn_IniKeyName)(void*)FN_INI_GETKEYNAME)(ini, "ArmorTypes", i);
+        if (k && AG_IdIs(k, "special")) { s_idx = i; break; }
+    }
+    AG_LogArmorIdx(n, s_idx);
+    return s_idx;
+}
+
+/* 无敌对象: 打不动, 攻击令只会让单位白跑一趟。 */
+static int AG_Invincible(void* p)
+{
+    void* type = AG_TypeOf(p);
+    if (!type) return 0;
+    if (*(unsigned char*)((char*)type + OFF_TYPE_IMMUNE)) return 1;
+    return *(int*)((char*)type + OFF_TYPE_ARMOR) == AG_SpecialArmor();
+}
+
+/* 建筑是否属于上面那张表。建筑类型直接读 BuildingClass::Type (+0x520),
+ * 不走 GetType 虚调用。 */
+static int AG_ValuableBld(void* p)
+{
+    void* type;
+    const char* id;
+    unsigned i;
+    if (!p || !IsPlausiblePtr(p)) return 0;
+    type = *(void**)((char*)p + OFF_BLD_TYPE);
+    if (!type || !IsPlausiblePtr(type)) return 0;
+    id = (const char*)((char*)type + OFF_TYPE_ID);
+    for (i = 0; i < (unsigned)g_AgTechN; i++)
+        if (AG_IdIs(id, g_AgTechBld[i])) return 1;
+    return 0;
+}
+
+/* 一条标记管两种过滤: 目标打不烂或值得留着时只挡攻击令 —— 占领/进驻这类
+ * "拿走"的订单照发。 */
+static int AG_NoAttack(void* p, int isBld)
+{
+    if (AG_Invincible(p)) return 1;
+    return (isBld && g_AgSkipTech && AG_ValuableBld(p)) ? 1 : 0;
+}
+
+/* 这个目标"鼠标点得到"吗 —— 复刻引擎命中判定 (0x6DA380 像素命中 /
+ * 0x692300 点击后处理): +0x41A 置位放行; 隐形 (Cloaked) 要求本家探测器覆盖
+ * 其所在格; InvisibleInGame 类型一律点不到。点不到的目标光标落不上去, 攻击令
+ * 也会被引擎清掉 (0x414D79), 单位只会发呆。 */
+static int AG_Clickable(void* p, void* cur, const CoordStruct* c)
+{
     void* type;
     void* cell;
     int idx;
@@ -196,11 +326,7 @@ static int AG_Clickable(void* p, void* cur, const CoordStruct* c)
         if (!cell || !IsPlausiblePtr(cell)) return 1;
         if (!((Fn_CellSensors)(void*)FN_CELL_SENSORS)(cell, idx)) return 0;
     }
-    vt = *(void***)p;
-    if (!vt || !IsPlausiblePtr(vt)) return 1;
-    getType = (Fn_GetType)vt[VT_GETTYPE];
-    if (!getType || !IsPlausiblePtr((const void*)getType)) return 1;
-    type = getType(p);
+    type = AG_TypeOf(p);
     if (type && IsPlausiblePtr(type) &&
         *(unsigned char*)((char*)type + OFF_TYPE_INVISIBLE)) return 0;
     return 1;
@@ -297,13 +423,12 @@ static void AG_ToggleSelect(void)
 #define AG_TGT_CAP 4096     /* 候选表容量 (建筑优先收, 满了就不再收单位) */
 #define AG_SCAN_CAP 16384   /* 单个类型数组的合法 count 上限, 超出按脏数据跳过 */
 
-typedef struct { void* p; int id; int x, y; } AGTgt;
+typedef struct { void* p; int id; int x, y; int noAtk; } AGTgt;
 static AGTgt s_AgTgt[AG_TGT_CAP];
 static int s_AgTgtN = 0;
 
 /* 中立阵营判定 (OU_HouseNeutral: House->Type->MultiplayPassive, SmartArea 同式)。
- * 自检: 本家不可能是被动中立。Mode: 0=未定, 1=启用过滤, 2=停用 (回"非本家即目标")。
- * 读不到一律按非中立 (不误伤候选取舍)。全程只读。 */
+ * Mode: 0=未定, 1=启用过滤, 2=停用 (回"非本家即目标")。 */
 static int g_AgNeutMode = 0;
 
 /* 四个类型数组各自的两轮稳定门: 引擎在改数组时可能读到半初始化的 items/count
@@ -365,6 +490,8 @@ static void AG_CollectArr(int k, void* cur)
         s_AgTgt[s_AgTgtN].id = AG_FetchId(p, 0);
         s_AgTgt[s_AgTgtN].x = c.X;
         s_AgTgt[s_AgTgtN].y = c.Y;
+        /* 打不烂/值得留的照收, 由 AG_FindTarget 按订单丢 (见 AG_NoAttack)。 */
+        s_AgTgt[s_AgTgtN].noAtk = AG_NoAttack(p, k == 0);
         s_AgTgtN++;
     }
 }
@@ -406,6 +533,8 @@ static void* AG_FindTarget(void* u, int range, int* outId, int* outMs)
         if (best && d2 >= bestD) continue;
         ms = AG_UnitMission(u, s_AgTgt[i].p);   /* 只读光标 = 与左键同判 */
         if (ms < 0) continue;
+        /* 打不烂/值得留的目标: 只跳过攻击令 (工程师的占领/进驻照发)。 */
+        if (ms == MISSION_ATTACK && s_AgTgt[i].noAtk) continue;
         best = s_AgTgt[i].p;
         bestD = d2;
         bestId = s_AgTgt[i].id;
@@ -423,19 +552,6 @@ static void* AG_FindTarget(void* u, int range, int* outId, int* outMs)
 typedef struct { void* unit; int uid; void* foe; int fid; int mission; } AGPend;
 static AGPend g_AgPend[AG_PEND_CAP];
 static int g_AgPendN = 0;
-
-/* 发一条对象令事件 (MegaMission, 直接下令 flag=0)。
- * 攻击: Target=敌对象, Destination=空; 进驻/占领/破坏: Target=空, Destination=敌对象
- * (与鼠标点建筑的真实事件布局同形, 见 SmartOrder/SmartArea)。 */
-static int AG_Fire(int houseIdx, int srcID, unsigned char srcRtti, int mission,
-                   int tgtID, unsigned char tgtRtti,
-                   int dstID, unsigned char dstRtti,
-                   void* unit, int uid, int idxOk)
-{
-    return OU_FireMega(houseIdx, srcID, srcRtti, mission,
-                       tgtID, tgtRtti, dstID, dstRtti, 0, 0, 0,
-                       unit, uid, idxOk);
-}
 
 static void AG_ShiftDown(void)
 {
@@ -458,24 +574,29 @@ static void AG_Drain(void)
         if (!AG_Alive(e->unit, e->uid)) { AG_ShiftDown(); continue; }
         if (!OU_IsUnit(e->unit)) { AG_ShiftDown(); continue; }
         if (!OU_PtrAlive(e->foe, e->fid, s_AgIdxOk)) { AG_ShiftDown(); continue; }
-        /* 目标在被挑中后隐形了 (或探测器没了): 光标已经点不到, 发了也只会被引擎清目标。 */
+        /* 挑中后隐形/探测器没了: 光标点不到, 引擎会清目标。 */
         {
             CoordStruct fc;
             if (!OU_GetCoords(e->foe, &fc) || !AG_Clickable(e->foe, cur, &fc))
             { AG_ShiftDown(); continue; }
         }
-        /* 发令前重算订单 (只读光标复核): 状态变了 (打不着/改占领) 就丢, 不猜着下单。 */
-        if (AG_UnitMission(e->unit, e->foe) != e->mission)
-        { AG_ShiftDown(); continue; }
+        /* 发令前重算订单 (只读光标复核), 状态变了就丢; 挑中后才变成打不烂的,
+         * 攻击令同样作废 (占领令照发)。 */
+        {
+            int ms = AG_UnitMission(e->unit, e->foe);
+            if (ms != e->mission) { AG_ShiftDown(); continue; }
+            if (ms == MISSION_ATTACK && AG_Invincible(e->foe))
+            { AG_ShiftDown(); continue; }
+        }
         srcID = AG_FetchId(e->unit, &srcR);
         tgtID = AG_FetchId(e->foe, &tgtR);
         if (srcID <= 0 || tgtID <= 0) { AG_ShiftDown(); continue; }
-        /* 攻击放 Target 槽; 进驻/占领/破坏放 Destination 槽 (与引擎同形)。 */
+        /* 攻击放 Target 槽; 进驻/占领/破坏放 Destination 槽 (与鼠标下令同形)。 */
         atk = (e->mission == MISSION_ATTACK);
-        if (!AG_Fire(houseIdx, srcID, srcR, e->mission,
-                     atk ? tgtID : 0, atk ? tgtR : 0,
-                     atk ? 0 : tgtID, atk ? 0 : tgtR,
-                     e->unit, e->uid, s_AgIdxOk))
+        if (!OU_FireMega(houseIdx, srcID, srcR, e->mission,
+                         atk ? tgtID : 0, atk ? tgtR : 0,
+                         atk ? 0 : tgtID, atk ? 0 : tgtR, 0, 0, 0,
+                         e->unit, e->uid, s_AgIdxOk))
             return;   /* OutList 满: 下轮继续 */
         AG_ShiftDown();
         sent++;

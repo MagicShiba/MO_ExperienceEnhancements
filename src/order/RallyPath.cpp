@@ -120,8 +120,9 @@ static int    g_RpZLastFrame = -1; /* Z 宽限计时的帧门 (Poll 一帧被调
 #define OFF_TYP_ID 0x24u
 #define RP_TYPES_MAX 64
 
-static char g_RpTypes[RP_TYPES_MAX][24];   /* ini Types= 解析结果 */
-static int  g_RpTypesCount = 0;
+static char  g_RpRaw[1024];                /* ini 原文 (OU_ReadList 就地切分) */
+static const char* g_RpTypes[RP_TYPES_MAX]; /* ini Types= 解析结果 (指向 g_RpRaw) */
+static int   g_RpTypesCount = 0;
 
 /* 建筑 ID 是不是像样: 3~23 个大写字母/数字/下划线。 */
 static int RP_IdOk(const char* s)
@@ -138,25 +139,15 @@ static int RP_IdOk(const char* s)
     return n >= 3 && n < 24;
 }
 
-/* 读 ini Types= (逗号/分号/空格分隔), 存进 g_RpTypes[]。读不到就留空 = 不限类型。 */
+/* 读 ini Types= (逗号/空白分隔), 只留像样 ID。读不到就留空 = 不限类型。 */
 static void RP_LoadTypes(void)
 {
-    char raw[1024];
-    int i = 0;
+    int i, n;
     g_RpTypesCount = 0;
-    raw[0] = 0;
-    OU_ReadString(RP_SECTION, "Types", "", raw, sizeof(raw));
-    while (raw[i] && g_RpTypesCount < RP_TYPES_MAX)
-    {
-        int k = 0;
-        while (raw[i] == ',' || raw[i] == ' ' || raw[i] == '\t') i++;
-        if (!raw[i]) break;
-        while (raw[i] && raw[i] != ',' && raw[i] != ' ' && raw[i] != '\t' &&
-               k < 23)
-            g_RpTypes[g_RpTypesCount][k++] = raw[i++];
-        g_RpTypes[g_RpTypesCount][k] = 0;
-        if (k > 0 && RP_IdOk(g_RpTypes[g_RpTypesCount])) g_RpTypesCount++;
-    }
+    n = OU_ReadList(RP_SECTION, "Types", "", g_RpRaw, sizeof(g_RpRaw),
+                    g_RpTypes, RP_TYPES_MAX);
+    for (i = 0; i < n; i++)
+        if (RP_IdOk(g_RpTypes[i])) g_RpTypes[g_RpTypesCount++] = g_RpTypes[i];
 }
 
 static int RP_TypeAllowed(const char* id)

@@ -255,28 +255,6 @@ static void Wth_Col(int* d, int r, int g, int b)
     d[0] = r; d[1] = g; d[2] = b;
 }
 
-/* 一行里逗号分隔的若干名字 -> out[0..n-1], 顺带裁掉每段的空白。少给的槽位清空,
- * 这样 Sfx_Index 拿到空串会返回 -1, 挑雷声时自然跳过。输入已由 OU_ReadString
- * 去过注释, 这里只管切分。 */
-static void Wth_CfgList(char out[WTH_TH_SND_N][24], const char* src)
-{
-    int i, n;
-
-    for (n = 0; n < WTH_TH_SND_N; n++) out[n][0] = 0;
-    if (!src) return;
-    for (n = 0, i = 0; n < WTH_TH_SND_N; n++)
-    {
-        int j = 0;
-
-        while (src[i] == ' ' || src[i] == '\t') i++;
-        while (src[i] && src[i] != ',' && j < 23) out[n][j++] = src[i++];
-        while (j > 0 && (out[n][j - 1] == ' ' || out[n][j - 1] == '\t')) j--;
-        out[n][j] = 0;
-        if (src[i] != ',') break;
-        i++;
-    }
-}
-
 static void Wth_Defaults(void)
 {
     WthKind* k;
@@ -556,9 +534,19 @@ static void Wth_ReadCfg(void)
 
     /* 音效条目名 = sound.ini 的段名。写错只是不出声, 启动日志里有解析结果。
      * 一条键里逗号分隔若干条雷声, 每次打闪随机挑一条。 */
-    OU_ReadString(WTH_SECTION, "ThunderSound",
-                  "WeatherIntro,WeatherStart,WeatherStrike", buf, sizeof(buf));
-    Wth_CfgList(g_Cfg.thSnd, buf);
+    {
+        static char raw[1024];          /* 段指针指向它, 必须持久 */
+        const char* snd[WTH_TH_SND_N];
+        int n = OU_ReadList(WTH_SECTION, "ThunderSound",
+                            "WeatherIntro,WeatherStart,WeatherStrike",
+                            raw, sizeof(raw), snd, WTH_TH_SND_N);
+
+        for (i = 0; i < WTH_TH_SND_N; i++)
+        {
+            if (i < n) lstrcpynA(g_Cfg.thSnd[i], snd[i], sizeof(g_Cfg.thSnd[i]));
+            else g_Cfg.thSnd[i][0] = 0;   /* 少给的槽清空, 挑雷声时自然跳过 */
+        }
+    }
     OU_ReadString(WTH_SECTION, "RainSound", "RainLoop",
                   g_Cfg.rainName, sizeof(g_Cfg.rainName));
     OU_ReadString(WTH_SECTION, "SnowSound", "_Amb_WindCold",

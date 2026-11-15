@@ -90,6 +90,14 @@
                                            * 0x4509B4 清 0; 建筑 0x43B98A 写。 */
 #define OFF_TYPE_STRENGTH       0xA0u     /* ObjectTypeClass::Strength
                                            * (0x5F5C42 自己的 `fild [eax+0xA0]`) */
+#define OFF_TYPE_ARMOR          0x9Cu     /* ObjectTypeClass::Armor = [ArmorTypes]
+                                           * 索引 (0x6F36F2 直接拿它当 Verses 下标) */
+#define OFF_TYPE_IMMUNE         0x233u    /* ObjectTypeClass::Immune (`Immune=yes`)
+                                           * 邻位: 0x22F RadarInvisible / 0x230
+                                           * Selectable / 0x231 LegalTarget /
+                                           * 0x232 Insignificant。样板 0x5F53CF
+                                           * `call [eax+0x88]; mov cl,[eax+0x233]`;
+                                           * 键名串表在 0x832B5x 一带。 */
 #define OFF_TECH_TOKEN          0x514u    /* TechnoClass 规划令牌 (0x705D20 实证) */
 
 /* 动态向量 (DynamicVectorClass) 通用布局。 */
@@ -296,6 +304,14 @@
  * 用途: Ares 的 TechnoType 键 `NoManualUnload=` (靠载员实现特殊功能的单位)。 */
 #define ADDR_INI_RULES          0x00887048u
 #define FN_INI_READBOOL         0x005295F0u
+
+/* INIClass::GetKeyCount (0x526960, __thiscall: section) /
+ * GetKeyName (0x526CC0, __thiscall: section, index; 返回 ini 内部指针, 只在本次有效)。
+ * 顺序 = 条目在文件里的出现顺序; Ares 的 `Enumerable<ArmorType>` 就用这对接口给
+ * 护甲编号, 所以 `Armor` 字段值 == 护甲名在 `[ArmorTypes]` 里的键序号。
+ * 节名同样受上面那条指针缓存约束: 传持久常量串。 */
+#define FN_INI_GETKEYCOUNT      0x00526960u
+#define FN_INI_GETKEYNAME       0x00526CC0u
 
 /* TechnoTypeClass 成员 (图标 SHP 与弹药上限)。CameoFile 是 `Cameo=` 写的文件名
  * (0x19 字节, 紧挨在 Cameo 指针前); MO 的图标多为 .pcx, 此时 Cameo 指向的是

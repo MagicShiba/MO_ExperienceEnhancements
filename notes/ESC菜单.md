@@ -101,7 +101,8 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
 - 左栏第四项为“快捷键”（`EDIT_PAGE_KEYS` / `s_KeyLayout`）：`下令`（中键移动
   (划战线) = SmartOrder / 模糊下令 (分配目标) = SmartArea / 快速建立巡逻圈 /
   快速砍树 / 模糊攻击）与`杂项`（选择被心控单位/移动攻击/侵略模式）。这一页
-  只有 `EG_HOTKEY` 一种控件：标签 + 右侧值框。**两套中键的标签容易写串**：
+  几乎只有 `EG_HOTKEY` 一种控件：标签 + 右侧值框（唯一例外是侵略模式热键行
+  下面那个开关，见下）。**两套中键的标签容易写串**：
   `[SmartOrder]` 是裸中键按住划一条线让单位沿线散开，`[SmartArea]` 是 Shift+
   中键的范围分配。
   - 点行 = 进**捕获态**：16ms 定时器（`ESC_HK_TIMER`）扫 `GetAsyncKeyState`，
@@ -122,6 +123,9 @@ blit 到 `[0x887310]`。在 `0x622396` (6B = `mov ecx,[0x887310]`) 处绘制：
     Target`）与热键并成一行，`Esc_RowAtoms` 给这一行 3 个原子（段 0、段 1、
     热键框），热键框永远是最后一个原子。点在前两段 = 切范围（直接
     `Aggressive_SetAllTargets` + `Esc_QueueRaw`），点其它地方才进捕获态。
+  - 热键行下面跟一个 `EG_SWITCH`（`GUI_ITEM_AG_SKIP_TECH`，落盘
+    `[Aggressive] SkipTechBuildings`），走 `s_Toggle` 统一分派（点击/绘制都按
+    控件类型分派，与页码无关，这一页放开关不用另写代码）。
 - 左栏第五项为“游戏控制”（`EDIT_PAGE_CTRL` / `s_CtrlLayout`）：`游戏控制`
   （自定义游戏速度开关与速度滑条 → 分割线 → 游戏存档缩略图、观战修复、
   显示单位范围 (Ctrl)（数值格 + 胶囊同一行）、阻止无攻击力单位靠近目标）与
