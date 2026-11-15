@@ -1119,9 +1119,10 @@ static int PiP_Blit(void* dst, int X, int Y, int dW, int dH)
     dp = GtSurfGet(dst, GtVT_GET_PITCH);
     cw = GtSurfGet(dst, GtVT_GET_WIDTH);
     ch = GtSurfGet(dst, GtVT_GET_HEIGHT);
-    /* 几何校验: 行距必须与宽一致, 窗口必须整块落在面内。 */
+    /* 源为独立离屏面；窗口目标可能只公布地图区逻辑宽度，物理行距仍含侧栏。
+     * 按实际 pitch 跨行，目标只需容得下逻辑宽度，不要求两者紧密排列。 */
     if (sp <= 0 || sp < g_RW * 2 || sp > g_RW * 2 + 64) return 0;
-    if (dp <= 0 || dp < cw * 2 || dp > cw * 2 + 64) return 0;
+    if (dp <= 0 || dp < cw * 2) return 0;
     if (cw < 8 || ch < 8 || dW <= 0 || dH <= 0) return 0;
     if (X < 0 || Y < 0 || X + dW > cw || Y + dH > ch) return 0;
     sc = g_ScaleNum;

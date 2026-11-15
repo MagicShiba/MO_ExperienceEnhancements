@@ -40,6 +40,8 @@
 #define ADDR_SIDEBAR_NEEDRD   0x00884B8Eu   /* byte (单例+0x53A6) */
 #define ADDR_SIDEBAR_BGNEEDRD 0x00884B8Fu   /* byte (this+0x53A7) */
 #define ADDR_GAME_HWND        0x00B73550u
+#define ADDR_BOTTOM_RECT      0x00B0FC58u
+#define ADDR_CHROME_DIRTY     0x00B0CD44u
 /* Set_View_Dimensions 按 ViewBounds 重建的两个"可见区裁剪器"。两者结构相同:
  * +0..+0x0F 就是那个矩形, +0x28/+0x2C 是 W/H。鼠标→格换算与 Render 的
  * Clip() 都走它们 —— 与 ViewBounds 不同源就会判错。*/
@@ -53,6 +55,11 @@
 #define ADDR_TAB_ARRAY        0x00B07C48u   /* ShapeButtonClass[4], 步长 0x60 */
 #define FM_TAB_N              4
 #define FM_TAB_STRIDE         0x60
+#define ADDR_STRIP_ARRAY     0x00880D2Cu
+#define FM_STRIP_STRIDE      0x0F94u
+#define STRIP_SCREEN_X      0x20u
+#define STRIP_CAMEO_COUNT   0x54u
+#define ADDR_CAMEO_ORIGIN_X  0x00B0B4F4u
 
 #define GAD_X       0x0Cu
 #define GAD_Y       0x10u
@@ -519,6 +526,63 @@ static int Fm_ViewPatchDetect(void);
 static int s_ViewPatched = -1;   /* -1=未探测, -2=字节不符不碰, 0=原版宽, 1=全宽 */
 static RectangleStruct* __fastcall Fm_ViewRectStub(RectangleStruct* out);
 
+/* 引擎双缓冲有全宽底层容量；逻辑宽度与当前地图区一致。 */
+static void Fm_SyncSurfaceWidths(void)
+{
+    static void* known[2] = { NULL, NULL };
+    static void* lastStrip = NULL;
+    static int lastWindowWidth = 0;
+    static int edgeState = -1;
+    static const unsigned char edgeFull[4] = { 0x8D, 0x6C, 0x28, 0xFF };
+    static const unsigned char edgeWide[4] = { 0x8D, 0x68, 0xFF, 0x90 };
+    RectangleStruct* window = (RectangleStruct*)(size_t)ADDR_WINDOWBOUNDS;
+    void* strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
+    void* surfaces[2] = { *(void**)(size_t)ADDR_SURF_COMPOSITE,
+                          *(void**)(size_t)ADDR_SURF_MAP };
+    int width = window->Width;
+    int sidebar = *(int*)(size_t)ADDR_SIDEBAR_W;
+    int wanted, wide, i, j;
+    if (!s_PatchesInstalled || SB_InRender()) return;
+    if (!strip)
+    {
+        known[0] = known[1] = lastStrip = NULL;
+        return;
+    }
+    if (width < 640 || width > 8192 || sidebar < 64 || sidebar > 512
+        || width - sidebar < 64) return;
+    if (strip != lastStrip || width != lastWindowWidth)
+    {
+        known[0] = known[1] = NULL;
+        lastStrip = strip;
+        lastWindowWidth = width;
+    }
+    wide = !Fm_ModeFull();
+    wanted = wide ? width : width - sidebar;
+    for (i = 0; i < 2; ++i)
+    {
+        int* surface = (int*)surfaces[i];
+        if (!surface || !IsPlausiblePtr(surface) || SB_IsBigSurface(surface)) continue;
+        for (j = 0; j < 2 && known[j] != surface; ++j) {}
+        if (j == 2 && surface[1] == width && GtSurfGet(surface, GtVT_GET_PITCH) >= width * 2)
+        {
+            for (j = 0; j < 2 && known[j]; ++j) {}
+            if (j < 2) known[j] = surface;
+        }
+        if (j < 2 && (surface[1] == width || surface[1] == width - sidebar))
+            surface[1] = wanted;
+    }
+    if (surfaces[0] && IsPlausiblePtr(surfaces[0]) &&
+        ((int*)surfaces[0])[1] == wanted && edgeState != wide)
+    {
+        const unsigned char* from = wide ? edgeFull : edgeWide;
+        const unsigned char* to = wide ? edgeWide : edgeFull;
+        unsigned char* site = (unsigned char*)(size_t)0x00692BB4u;
+        if (Fm_BytesSame(site, to, 4) ||
+            (Fm_BytesSame(site, from, 4) && Fm_PatchBytes(0x00692BB4u, to, 4)))
+            edgeState = wide;
+    }
+}
+
 /* 宿主映像在不在 (DllMain 调用时 gamemd 可能还没映射, 那就一个字节都不写)。
  * 判据: 0x400000 已提交且是 PE 头, 且模块文件名是
  * gamemd.exe / gamemd-spawn.exe / ra2md.exe。 */
@@ -750,9 +814,8 @@ static int Fm_RadarRect(RectangleStruct* out)
  *
  * ⚠ 这个字节是引擎的**语义状态**, 不是本模块的开关: 页签按钮 +0x1E 表示"该页签
  * 有没有内容" (AddCameo 0x6A6300 里 IsEnabled 为假就 Enable 0x4E1450, 页签空了
- * 引擎自己 Disable), 绘制 0x69DEB0 按它选激活帧/空帧。所以只能"改前快照 →
- * 改后写回", 绝不能统一写 0: 无脑清零会把步兵/防御/载具三个空页签画成亮图标,
- * 而引擎之后再没有"页签从有到空"的事件把它关回去 → 一进图就 4 个页签全亮。 */
+ * 引擎自己 Disable)，绘制 0x69DEB0 按它选激活帧/空帧。
+ * cameo 保存原状态，页签恢复时依据当前 CameoCount；两者都只恢复实际摘过的对象。 */
 
 /* 几何校验通过才返回 1 并给出对象指针: 只摘/复真正属于侧栏列的那些,
  * 顶部一簇 (资金条/那两个小按钮) 与别的窗口控件一律不碰。 */
@@ -777,7 +840,8 @@ static int Fm_GadPick(unsigned g, int colX, int topH, unsigned char** out)
 /* 摘之前的 Disabled 快照。s_GadSnap = 0 表示"本模块没摘过", 此时侧栏控件的
  * 状态完全是引擎的, 恢复路径一个字节都不许写。 */
 static unsigned char s_CameoDisab[FM_CAMEO_N];
-static unsigned char s_TabDisab[FM_TAB_N];
+static unsigned char s_CameoSaved[FM_CAMEO_N];
+static unsigned char s_TabSaved[FM_TAB_N];
 static int s_GadSnap = 0;
 
 
@@ -822,39 +886,44 @@ static void Fm_DisarmSidebarGadgets(int colX, int topH)
     for (i = 0; i < FM_CAMEO_N; i++)
     {
         if (!Fm_GadPick(ADDR_CAMEO_ARRAY + (unsigned)i * FM_CAMEO_STRIDE, colX, topH, &p)) continue;
-        /* 首次进摘态记快照; 之后读到 0 说明是引擎自己开的 (隐藏态里造出了
-         * 兵营/工厂), 跟着更新, 免得切回完整显示后那个页签还是暗的。 */
-        if (!s_GadSnap || p[GAD_DISAB] == 0) s_CameoDisab[i] = p[GAD_DISAB];
+        /* 首次记录原状态；隐藏期间引擎重新启用的 cameo 也应在恢复时可用。 */
+        if (!s_CameoSaved[i] || p[GAD_DISAB] == 0) s_CameoDisab[i] = p[GAD_DISAB];
+        s_CameoSaved[i] = 1;
         p[GAD_DISAB] = 1;
         p[GAD_REDRAW] = 1;
     }
     for (i = 0; i < FM_TAB_N; i++)
     {
         if (!Fm_GadPick(ADDR_TAB_ARRAY + (unsigned)i * FM_TAB_STRIDE, colX, topH, &p)) continue;
-        if (!s_GadSnap || p[GAD_DISAB] == 0) s_TabDisab[i] = p[GAD_DISAB];
+        s_TabSaved[i] = 1;
         p[GAD_DISAB] = 1;
         p[GAD_REDRAW] = 1;
     }
     s_GadSnap = 1;
 }
 
-/* 完全显示时恢复 Disabled 快照；没摘过就不写，保留引擎的空页签状态。 */
-static void Fm_RearmSidebarGadgets(int colX, int topH)
+/* 只恢复实际摘过的对象，不按恢复时的几何重新筛选；页签按当前内容恢复。 */
+static void Fm_RearmSidebarGadgets(void)
 {
     int i;
     unsigned char* p;
     if (!s_GadSnap) return;
     for (i = 0; i < FM_CAMEO_N; i++)
     {
-        if (!Fm_GadPick(ADDR_CAMEO_ARRAY + (unsigned)i * FM_CAMEO_STRIDE, colX, topH, &p)) continue;
+        if (!s_CameoSaved[i]) continue;
+        p = (unsigned char*)(size_t)(ADDR_CAMEO_ARRAY + (unsigned)i * FM_CAMEO_STRIDE);
         p[GAD_DISAB] = s_CameoDisab[i];
         p[GAD_REDRAW] = 1;
+        s_CameoSaved[i] = 0;
     }
     for (i = 0; i < FM_TAB_N; i++)
     {
-        if (!Fm_GadPick(ADDR_TAB_ARRAY + (unsigned)i * FM_TAB_STRIDE, colX, topH, &p)) continue;
-        p[GAD_DISAB] = s_TabDisab[i];
+        if (!s_TabSaved[i]) continue;
+        p = (unsigned char*)(size_t)(ADDR_TAB_ARRAY + (unsigned)i * FM_TAB_STRIDE);
+        /* 引擎按 StripClass::CameoCount 决定页签是否可用；隐藏期间生产内容会变化。 */
+        p[GAD_DISAB] = *(int*)(size_t)(ADDR_STRIP_ARRAY + i * FM_STRIP_STRIDE + STRIP_CAMEO_COUNT) <= 0 ? 1 : 0;
         p[GAD_REDRAW] = 1;
+        s_TabSaved[i] = 0;
     }
     s_GadSnap = 0;
 }
@@ -1409,6 +1478,91 @@ static void Fm_NoteSurfaceRebuild(void)
     s_LastStrip = strip;
 }
 
+/* 底栏与视口分离，隐藏侧栏时覆盖整个窗口底边。 */
+static void Fm_SyncBottomBar(void)
+{
+    static int lastMode = -1, lastWidth = -1, lastHeight = -1;
+    RectangleStruct* bottom = *(RectangleStruct**)(size_t)ADDR_BOTTOM_RECT;
+    RectangleStruct* window = (RectangleStruct*)(size_t)ADDR_WINDOWBOUNDS;
+    RectangleStruct* sidebar = *(RectangleStruct**)(size_t)0x00B0FC34u;
+    RectangleStruct* left = *(RectangleStruct**)(size_t)0x00B0FC60u;
+    RectangleStruct* alternate = *(RectangleStruct**)(size_t)0x00B0FC64u;
+    RectangleStruct* spacer = *(RectangleStruct**)(size_t)0x00B0FC68u;
+    RectangleStruct* right = *(RectangleStruct**)(size_t)0x00B0FC6Cu;
+    int changed = 0;
+    int x = Fm_ModeFull() ? s_ViewA.X : 0;
+    int width = Fm_ModeFull() ? s_ViewA.Width : window->Width;
+    if (!bottom || !IsPlausiblePtr(bottom) || window->Width < 640 || window->Width > 8192 ||
+        window->Height < 240 || window->Height > 8192 ||
+        x < 0 || width < 64 || x + width > window->Width) return;
+    if (bottom->Y >= window->Height - 64 && bottom->Y < window->Height &&
+        bottom->Height > 0 && bottom->Height <= 64 &&
+        (bottom->X != x || bottom->Width != width))
+    {
+        bottom->X = x;
+        bottom->Width = width;
+        changed = 1;
+    }
+    if (sidebar && left && alternate && spacer && right &&
+        IsPlausiblePtr(sidebar) && IsPlausiblePtr(left) && IsPlausiblePtr(alternate) &&
+        IsPlausiblePtr(spacer) && IsPlausiblePtr(right) &&
+        sidebar->Width >= 0 && sidebar->Width <= 512 &&
+        left->Width >= 0 && left->Width <= 512 &&
+        alternate->Width >= 0 && alternate->Width <= 512 &&
+        right->Width >= 0 && right->Width <= 512 && spacer->Width > 0 && spacer->Width <= 512)
+    {
+        int layoutWidth = Fm_ModeFull() ? window->Width : window->Width + sidebar->Width;
+        int available = layoutWidth - left->Width - sidebar->Width - right->Width;
+        if (available >= 0)
+        {
+            int count = available / spacer->Width;
+            int rightX = layoutWidth - sidebar->Width - right->Width;
+            int spacerX = rightX - count * spacer->Width;
+            int leftX = spacerX - left->Width;
+            int alternateX = rightX - alternate->Width;
+            unsigned char* collapse = (unsigned char*)(size_t)0x00B0CCB0u;
+            unsigned char* expand = (unsigned char*)(size_t)0x00B0CC40u;
+            if (right->X != rightX || spacer->X != spacerX || left->X != leftX ||
+                alternate->X != alternateX || *(int*)(size_t)0x00B0F9E4u != count)
+            {
+                right->X = rightX; spacer->X = spacerX;
+                left->X = leftX; alternate->X = alternateX;
+                *(int*)(size_t)0x00B0F9E4u = count;
+                *(int*)(size_t)0x00B0FAD8u = leftX;
+                *(int*)(size_t)0x00B0FAA4u = alternateX;
+                *(int*)(size_t)0x00B0FA78u = rightX - left->Width - leftX;
+                changed = 1;
+            }
+            if (*(int*)(collapse + GAD_W) == left->Width &&
+                *(int*)(collapse + GAD_H) == left->Height &&
+                (*(int*)(collapse + GAD_X) != left->X || *(int*)(collapse + GAD_Y) != left->Y))
+            {
+                *(int*)(collapse + GAD_X) = left->X;
+                *(int*)(collapse + GAD_Y) = left->Y;
+                collapse[GAD_REDRAW] = 1;
+                changed = 1;
+            }
+            if (*(int*)(expand + GAD_W) == alternate->Width &&
+                *(int*)(expand + GAD_H) == alternate->Height &&
+                (*(int*)(expand + GAD_X) != alternate->X || *(int*)(expand + GAD_Y) != alternate->Y))
+            {
+                *(int*)(expand + GAD_X) = alternate->X;
+                *(int*)(expand + GAD_Y) = alternate->Y;
+                expand[GAD_REDRAW] = 1;
+                changed = 1;
+            }
+        }
+    }
+    if (changed || lastMode != s_Mode || lastWidth != window->Width ||
+        lastHeight != window->Height || s_LayoutDirty)
+    {
+        *(unsigned*)(size_t)ADDR_CHROME_DIRTY = 0;
+        lastMode = s_Mode;
+        lastWidth = window->Width;
+        lastHeight = window->Height;
+    }
+}
+
 void FM_Poll(void)
 {
     RectangleStruct* sb;
@@ -1425,12 +1579,32 @@ void FM_Poll(void)
     Fm_NoteSurfaceRebuild();
     /* 不碰 s_LbPress (点击门自己的标记, 门直接读按键状态)。 */
     Fm_PollToggle();
+    Fm_SyncSurfaceWidths();
     /* 视口宽度跟模式走 (幂等, 须在侧栏列纠正之前)。 */
     Fm_ViewPatchSet(!Fm_ModeFull());
     /* ViewBounds 引擎不重算, 每循环纠正。 */
     Fm_ApplyViewWidth();
     /* 几何没变但面换过人 (读档) 时, 上面的 Apply 会早退, 布局脏标记还在这儿。*/
     Fm_ConsumeLayoutDirty();
+    /* StripClass::Draw 使用屏幕起点减 SidebarBounds.X 得到侧栏面局部坐标。
+     * 起点必须与当前列同源，不能沿用建面时全宽视口推导的缓存。 */
+    {
+        int column = *(int*)(size_t)ADDR_SIDEBARBOUNDS;
+        int origin = column + 22;
+        int changed = 0;
+        for (int i = 0; i < 4; ++i)
+        {
+            int* stripX = (int*)(size_t)(ADDR_STRIP_ARRAY + i * FM_STRIP_STRIDE + STRIP_SCREEN_X);
+            if (*stripX != origin) { *stripX = origin; changed = 1; }
+        }
+        if (changed)
+        {
+            *(int*)(size_t)ADDR_CAMEO_ORIGIN_X = origin;
+            *(unsigned char*)(size_t)ADDR_SIDEBAR_REDRAW = 1;
+            *(unsigned char*)(size_t)ADDR_SIDEBAR_NEEDRD = 1;
+        }
+    }
+    Fm_SyncBottomBar();
     Fm_SyncRadarGadgets();
     /* 催重画 (须在 Apply 之后, 那儿才知道几何变没变)。 */
     Fm_DirtyRedraw();
@@ -1500,9 +1674,7 @@ void FM_Poll(void)
         q = AppendCStr(buf, q, " anchor=", sizeof(buf));
         UtoA((unsigned)FM_MapRightEdge(), b1); q = AppendCStr(buf, q, b1, sizeof(buf));
         LogLine(buf);
-        /* 第二行: 引擎内部状态与视口是否同源。侧栏标题栏那条"未探索的区域"
-         * 就是这一组不一致造成的 (视口窄、裁剪器宽 ⇒ 侧栏列上的鼠标被当成
-         * "还在地图里"去查格, 那一格在地图外)。这三个矩形必须每行都能对。*/
+        /* 面的逻辑尺寸；pitch 可保留窗口全宽容量。 */
         {
             void* pComp = *(void**)ADDR_SURF_COMPOSITE;
             void* pMap = *(void**)ADDR_SURF_MAP;
@@ -1513,8 +1685,6 @@ void FM_Poll(void)
             int mhgt = pMap ? GtSurfGet(pMap, GtVT_GET_HEIGHT) : -1;
             int swid = pStrip ? GtSurfGet(pStrip, GtVT_GET_WIDTH) : -1;
             int shgt = pStrip ? GtSurfGet(pStrip, GtVT_GET_HEIGHT) : -1;
-            RectangleStruct* cb = (RectangleStruct*)(size_t)ADDR_VIEWCLIP_A;
-            RectangleStruct* cb2 = (RectangleStruct*)(size_t)ADDR_VIEWCLIP_B;
             q = 0;
             q = AppendCStr(buf, q, "fullmap: surf comp=", sizeof(buf));
             UtoA((unsigned)cwid, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
@@ -1531,14 +1701,6 @@ void FM_Poll(void)
             UtoA((unsigned)swid, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
             q = AppendCh(buf, q, 'x', sizeof(buf));
             UtoA((unsigned)shgt, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
-            q = AppendCStr(buf, q, " clipA=", sizeof(buf));
-            UtoA((unsigned)cb->Width, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCh(buf, q, '@', sizeof(buf));
-            UtoA((unsigned)cb->X, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
-            q = AppendCStr(buf, q, " clipB=", sizeof(buf));
-            UtoA((unsigned)cb2->Width, b1); q = AppendCStr(buf, q, b1, sizeof(buf));
-            q = AppendCh(buf, q, '@', sizeof(buf));
-            UtoA((unsigned)cb2->X, b2); q = AppendCStr(buf, q, b2, sizeof(buf));
             if (s_ViewPatched)   /* 0 是常态, 不记; 非 0 才追 */
             {
                 q = AppendCStr(buf, q, " vpatch=", sizeof(buf));
@@ -1559,10 +1721,8 @@ void FM_Poll(void)
     }
     else if (!s_GadgetsArmed)
     {
-        /* 恢复只需做一次: 按摘之前的快照写回, 没摘过就一个字节都不碰 ——
-         * 页签的 Disabled 是引擎表达"这一页有没有内容"的位, 清 0 会让空页签
-         * 全部亮出来 (见上面 Fm_GadPick 的说明)。*/
-        Fm_RearmSidebarGadgets(colX, topH);
+        /* 恢复只需做一次；仅还原实际摘过的控件，页签以当前内容决定可用性。 */
+        Fm_RearmSidebarGadgets();
         s_GadgetsArmed = 1;
     }
     /* 视口命中区: 态1 收窄成"视口减去侧栏列", 态0/态2 是整宽 (态0 视口本来就是

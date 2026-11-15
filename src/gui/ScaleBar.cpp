@@ -1826,8 +1826,10 @@ static int Sb_OverBar(int mx, int my)
 
 static void Sb_Place(void)
 {
-    int gw = GtGameW(), gh = GtGameH();
+    int gw = ((RectangleStruct*)(size_t)ADDR_WINDOWBOUNDS)->Width;
+    int gh = GtGameH();
     int sbw = *(int*)(size_t)ADDR_SIDEBAR_W;
+    if (gw < 640 || gw > 8192) gw = GtGameW();
     if (sbw < 64 || sbw > 512) sbw = 168;
     s_TextH = s_FontPx + 2;
     s_BarH = SB_SLIDER_H;
@@ -2006,7 +2008,8 @@ static void Sb_Fill(unsigned char* base, int pitch, int W, int H,
 
 /* 刻度条只画不擦：换档/悬停切档后旧像素会留在底栏带上。
  * 放大档须在切换时刻刷一次 chrome 脏缓存，让引擎重画底栏带盖掉旧像素。 */
-static long s_BarSig = -1;
+static int s_BarLastLevel = -1, s_BarLastHover = -2;
+static int s_BarLastX = -1, s_BarLastY = -1, s_BarLastW = -1;
 
 /* 条的全部像素 (无底板/边框)。ox/oy = 原点偏移。 */
 static void Sb_PaintFills(unsigned char* base, int pitch, int W, int H, int ox, int oy)
@@ -2017,12 +2020,12 @@ static void Sb_PaintFills(unsigned char* base, int pitch, int W, int H, int ox, 
     int dx, i;
     int ga = Sb_Gx0(), gb = Sb_Gx1(), gn = s_NLev > 1 ? s_NLev - 1 : 1;
     int gx0 = Sb_Gx0() + ox, gx1 = Sb_Gx1() + ox;
-    long sig;
 
-    sig = s_Level * 2 + (s_HoverLev + 1);
-    if (sig != s_BarSig)
+    if (s_Level != s_BarLastLevel || s_HoverLev != s_BarLastHover ||
+        s_BarX != s_BarLastX || s_BarY != s_BarLastY || s_BarW != s_BarLastW)
     {
-        s_BarSig = sig;
+        s_BarLastLevel = s_Level; s_BarLastHover = s_HoverLev;
+        s_BarLastX = s_BarX; s_BarLastY = s_BarY; s_BarLastW = s_BarW;
         *(unsigned*)(size_t)SB_CHROME_DIRTY_N = 0;
     }
 

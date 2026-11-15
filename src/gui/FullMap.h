@@ -8,8 +8,8 @@
 /* 读 [Sidebar] 节 (幂等)。 */
 void FM_EnsureInit(void);
 
-/* 装字节补丁 + CreateAll 两个调用点重定向: 让**渲染面永远全宽** (态0 要把视口
- * 收回 clientW-168, 面不能跟着缩)。DllMain 里调 (见 MOExperience.cpp)。 */
+/* 装字节补丁 + CreateAll 调用点重定向，按窗口全宽分配缓冲。
+ * 运行时逻辑面宽随显示模式同步，不改变物理容量或 pitch。 */
 void FM_Install(void);
 
 /* 每循环 (prepare 钩 0x4F42F0) 调: 采 F11 三态切换、撑视口、纠正侧栏列、摘

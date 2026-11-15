@@ -187,8 +187,10 @@ FPS 钉住（任何档位 1x、位置固定）：`Simple_` 入口收串并跳过
 ## Phobos 版本告警（右上角红字）
 
 - 只在 `MOE_PhobosLoaded()` 为真时才判（PEB 模块表按名含 "phobos"，带缓存）；没装 Phobos 不扫串。
-- 认法：`Phobos ` 前缀 + 含 `build` + 含 `Please test the build` / `DO NOT SHIP` 三者齐
-  （0.4 dev / 0.5 alpha / nightly 三种措辞都盖住）；单看前缀会误伤模组自己的文本。
+- 认法：`Phobos ` 前缀 + 含固定尾句 `Please test the build` 或 `DO NOT SHIP`；
+  不能额外强制含 `build`，Nightly 的 `DO NOT SHIP` 告警不保证有它；单看前缀又会误伤普通文本。
+- 只有串指针时，扫描上限取 `MemReadableBytes(s, 192) / sizeof(wchar_t)`，必须在可读范围内
+  找到 NUL 才继续识别；不能只探 48 字节却按 96 个宽字符扫描，也不能把截断串当完整串。
 - `[VecText] HidePhobosWarn`：0 = 整条交回原版点阵（字号同原版），1 = 整句不画（默认）。
   GetDim 命中时：0 交回原版度量（不进宽度缓存），1 报 `w=-10`（Phobos 拿 `w+10` 当黑底盒宽，
   加完是 0，FillRect 不出像素）、`h` 照报原版 —— Phobos 把 `rect.Height` 当 `ShowGameTime`

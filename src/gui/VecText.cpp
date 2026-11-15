@@ -795,19 +795,15 @@ static void __fastcall VecStandaloneShowEntry(void* thisptr, void* edx)
  *   0.4       "Phobos development build #46. Please test the build before shipping."
  *   0.5       "Phobos v0.5.0.0-alpha1. Please test the build before shipping."
  *   nightly   "Phobos nightly build (...). DO NOT SHIP IN MODS!"
- * 它按 Composite 宽右对齐、字号跟随引擎点阵字体。矢量化会按全局 FontPx 重排,
- * 字比原版大一圈。另外 MOE 的隐藏侧栏功能让 Composite 建面恒按整窗分配 (侧栏那
- * 168 列也画在这块面上), 于是它右对齐到整窗右缘、压住侧栏顶部的资金条。
- * 面宽不能为这件事改 —— 那条边就是贴边卷屏的右缘触发线 (notes/隐藏侧栏.md §3.1),
- * 所以只在文本层给开关:
+ * 它按 Composite 逻辑宽度右对齐、字号跟随引擎点阵字体。
+ * FullMap 完整模式发布原生地图宽度；此开关只决定是否显示告警，不改变布局。
+ * 矢量化会按全局 FontPx 重排，因此告警显示时保留原生点阵字体：
  *   1 (默认) 整句不画: 度量报负宽让黑底盒塌成 0, 字也不落墨;
- *   0        整条交回原版点阵 (度量 + 逐字绘制都不碰), 字号同原版, 位置照旧压侧栏。
+ *   0        整条交回原版点阵 (度量 + 逐字绘制都不碰), 字号同原版。
  * 只有装了 Phobos 才可能画这句, 所以整套判定先过 MOE_PhobosLoaded(); 没装时
  * 连字符串都不比 (每帧几百次 Print, 白扫一遍没意义)。
- * 认法: "Phobos " 开头 + 含 "build" + 含 "Please test"/"DO NOT SHIP" 三者齐,
- * 单看前缀会误伤模组自己的普通文本。 */
+ * 认法: "Phobos " 开头且含版本告警的固定尾句。 */
 static const wchar_t kWarnHead[]  = L"Phobos ";
-static const wchar_t kWarnBuild[] = L"build";
 static const wchar_t kWarnTail1[] = L"Please test the build";
 static const wchar_t kWarnTail2[] = L"DO NOT SHIP";
 
@@ -830,7 +826,6 @@ static int VecIsPhobosWarn(const wchar_t* s, int n)
     if (!MOE_PhobosLoaded()) return 0;
     if (n < 24) return 0;
     for (i = 0; kWarnHead[i]; i++) if (s[i] != kWarnHead[i]) return 0;
-    if (!VecHasSub(s, n, kWarnBuild)) return 0;
     return VecHasSub(s, n, kWarnTail1) || VecHasSub(s, n, kWarnTail2);
 }
 
@@ -840,10 +835,13 @@ static int VecIsPhobosWarn(const wchar_t* s, int n)
 static int VecIsPhobosWarnS(const wchar_t* s)
 {
     int n = 0;
+    unsigned lim;
     if (!MOE_PhobosLoaded() || !s) return 0;
-    if (MemReadableBytes((void*)s, 48) < 48) return 0;
+    lim = MemReadableBytes((void*)s, 192) / sizeof(wchar_t);
+    if (lim < 24) return 0;
     if (s[0] != L'P' || s[1] != L'h') return 0;
-    while (n < 96 && s[n]) n++;
+    while ((unsigned)n < lim && s[n]) n++;
+    if ((unsigned)n == lim) return 0;
     return VecIsPhobosWarn(s, n);
 }
 

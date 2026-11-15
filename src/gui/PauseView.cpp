@@ -164,8 +164,10 @@ static int PV_ShotReserve(void)
 int PV_SlotGeom(int slot, int* x, int* y)
 {
     int bx, by, bw, bh;
-    int gw = GtGameW(), gh = GtGameH();
+    int gw = ((RectangleStruct*)(size_t)ADDR_WINDOWBOUNDS)->Width;
+    int gh = GtGameH();
     int sbw, right, gy, px;
+    if (gw < 640 || gw > 8192) gw = GtGameW();
     if (gw < 200 || gh < 200) return 0;
     if (SB_BarGeom(&bx, &by, &bw, &bh))
     {
