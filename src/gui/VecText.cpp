@@ -78,6 +78,7 @@ typedef struct {
     int BriefAdv;   /* 格宽基准: 0=字号+字距, 1=字体前进宽+字距 */
     int Bold;
     int ScoreExit;  /* 1=任务结算对话框挂"退出游戏"按钮 */
+    int HidePhobosWarn; /* 1=Phobos 版本告警整句不画; 0=交回原版点阵 */
     int LogDetail;  /* 1=逐字日志 */
     int Perf;       /* 1=每 2s 记性能账 */
     int Render;
@@ -789,6 +790,67 @@ static void __fastcall VecStandaloneShowEntry(void* thisptr, void* edx)
     }
 }
 
+/* ---------------- Phobos 版本告警 ----------------
+ * 非 release 版 Phobos 会在屏幕右上角画一条版本告警, 措辞随版本变:
+ *   0.4       "Phobos development build #46. Please test the build before shipping."
+ *   0.5       "Phobos v0.5.0.0-alpha1. Please test the build before shipping."
+ *   nightly   "Phobos nightly build (...). DO NOT SHIP IN MODS!"
+ * 它按 Composite 宽右对齐、字号跟随引擎点阵字体。矢量化会按全局 FontPx 重排,
+ * 字比原版大一圈。另外 MOE 的隐藏侧栏功能让 Composite 建面恒按整窗分配 (侧栏那
+ * 168 列也画在这块面上), 于是它右对齐到整窗右缘、压住侧栏顶部的资金条。
+ * 面宽不能为这件事改 —— 那条边就是贴边卷屏的右缘触发线 (notes/隐藏侧栏.md §3.1),
+ * 所以只在文本层给开关:
+ *   1 (默认) 整句不画: 度量报负宽让黑底盒塌成 0, 字也不落墨;
+ *   0        整条交回原版点阵 (度量 + 逐字绘制都不碰), 字号同原版, 位置照旧压侧栏。
+ * 只有装了 Phobos 才可能画这句, 所以整套判定先过 MOE_PhobosLoaded(); 没装时
+ * 连字符串都不比 (每帧几百次 Print, 白扫一遍没意义)。
+ * 认法: "Phobos " 开头 + 含 "build" + 含 "Please test"/"DO NOT SHIP" 三者齐,
+ * 单看前缀会误伤模组自己的普通文本。 */
+static const wchar_t kWarnHead[]  = L"Phobos ";
+static const wchar_t kWarnBuild[] = L"build";
+static const wchar_t kWarnTail1[] = L"Please test the build";
+static const wchar_t kWarnTail2[] = L"DO NOT SHIP";
+
+static int VecHasSub(const wchar_t* s, int n, const wchar_t* k)
+{
+    int kn = 0, i, j;
+    while (k[kn]) kn++;
+    for (i = 0; i + kn <= n; i++)
+    {
+        for (j = 0; j < kn; j++) if (s[i + j] != k[j]) break;
+        if (j == kn) return 1;
+    }
+    return 0;
+}
+
+/* n = 已确认可读的字符数 (不含结尾 0)。装了 Phobos 才可能画这句, 先过这道门。 */
+static int VecIsPhobosWarn(const wchar_t* s, int n)
+{
+    int i;
+    if (!MOE_PhobosLoaded()) return 0;
+    if (n < 24) return 0;
+    for (i = 0; kWarnHead[i]; i++) if (s[i] != kWarnHead[i]) return 0;
+    if (!VecHasSub(s, n, kWarnBuild)) return 0;
+    return VecHasSub(s, n, kWarnTail1) || VecHasSub(s, n, kWarnTail2);
+}
+
+/* 入口只给串指针时用: 长度现场数 (上限 96), 不可读按不命中。
+ * 可读性先查 (引擎在对话框路径上会传进不可读的串, 见 VecGetDimBody 的同款
+ * 兜底), 再比首字 —— 绝大多数串在这里就退出, 不做长扫描。 */
+static int VecIsPhobosWarnS(const wchar_t* s)
+{
+    int n = 0;
+    if (!MOE_PhobosLoaded() || !s) return 0;
+    if (MemReadableBytes((void*)s, 48) < 48) return 0;
+    if (s[0] != L'P' || s[1] != L'h') return 0;
+    while (n < 96 && s[n]) n++;
+    return VecIsPhobosWarn(s, n);
+}
+
+/* >0 = 当前正整条回退原版点阵 (告警串在 Print/DrawText 里置上), Blit 不做
+ * 字形替换。用计数而非布尔: 入口可能嵌套。 */
+static int g_NoVec = 0;
+
 int __fastcall VecDrawTextEntry(void* t, void* e,
     int a1, int a2, int a3, int a4, int a5,
     int a6, int a7, int a8, int a9, int a10)
@@ -799,6 +861,17 @@ int __fastcall VecDrawTextEntry(void* t, void* e,
     if (g_ScoreScreen)
         return g_OrigDrawText ? g_OrigDrawText(t, NULL, a1, a2, a3, a4, a5,
                                                 a6, a7, a8, a9, a10) : 0;
+    /* Phobos 版本告警: HidePhobosWarn=1 时整句不画, 否则整条原版点阵
+     * (Blit 期间也不换字形)。 */
+    if (VecIsPhobosWarnS((const wchar_t*)(size_t)a3))
+    {
+        if (g_VT.HidePhobosWarn) return 0;
+        g_NoVec++;
+        r = g_OrigDrawText ? g_OrigDrawText(t, NULL, a1, a2, a3, a4, a5,
+                                            a6, a7, a8, a9, a10) : 0;
+        g_NoVec--;
+        return r;
+    }
     brief = VecIsBriefCaller(caller);
     menuTake = VecMenuMatch(caller, a6, a7, a8);
     if (menuTake)
@@ -909,6 +982,21 @@ static int __fastcall VecPrintBody(void* t, void* e,
     int r;
     if (g_ScoreScreen)
         return VecCallOrigPrint(t, a1, a2, a3, a4, a5, a6, a7);
+    /* Phobos 版本告警: HidePhobosWarn=1 时整句不画, 否则整条原版点阵
+     * (Blit 期间也不换字形)。 */
+    if (VecIsPhobosWarnS((const wchar_t*)(size_t)a3))
+    {
+        static int nW = 0;
+        if (g_Log && nW++ == 0)
+            LogLine(g_VT.HidePhobosWarn
+                    ? "vtext: phobos warn -> hidden"
+                    : "vtext: phobos warn -> original glyphs");
+        if (g_VT.HidePhobosWarn) return 0;
+        g_NoVec++;
+        r = VecCallOrigPrint(t, a1, a2, a3, a4, a5, a6, a7);
+        g_NoVec--;
+        return r;
+    }
     /* 超武列表: 只收冒号计时器。CJK 名串不在此收 (与提示不可区分)。 */
     if (a4 >= 1300 && a5 >= 32)
     {
@@ -1133,6 +1221,25 @@ static int __fastcall VecGetDimBody(void* t, void* e, const wchar_t* s,
     idata = *(void**)((char*)t + 4);
     for (i = 0; i < 256 && (unsigned)(i * 2 + 1) < lim; i++) { if (!s[i]) break; n++; }
     if (i >= 256) return g_OrigGetDim(t, e, s, w, h, maxW);
+    /* Phobos 版本告警: 宽度都不进缓存 (进缓存就会被矢量宽度顶大)。
+     * HidePhobosWarn=0: 整条度量交回原版, 与不装 MOE 时同尺寸。
+     * HidePhobosWarn=1: 宽度报 -10 —— Phobos 拿 width+10 当黑底盒宽, 加完是 0
+     *   (FillRect 不出像素), 字也已在 Print/DrawText 里被吞掉。
+     *   高度**照报原版**: Phobos 把 rect.Height 当 ShowGameTime 的 coordY,
+     *   报 0 会把游戏时间顶到 y=0; 宽 0 的黑盒本来就不出像素, 不影响隐藏。 */
+    if (VecIsPhobosWarn(s, n))
+    {
+        if (!g_VT.HidePhobosWarn)
+            return g_OrigGetDim(t, e, s, w, h, maxW);
+        *w = -10;
+        if (h)
+        {
+            int ow = 0, oh = 0;
+            g_OrigGetDim(t, e, s, &ow, &oh, maxW);
+            *h = oh;
+        }
+        return 1;
+    }
     /* 记忆命中。 */
     {
         DimCE* d = DimFind(t, idata, s, maxW, n);
@@ -1877,6 +1984,9 @@ static int __fastcall VecText_BlitBody(void* t, void* edxUnused, int wch, int x,
      * 替换, 笔位也照引擎原样走。 */
     if (g_ScoreScreen > 0)
         return g_OrigBlit(t, NULL, wch, x, y, color);
+    /* Phobos 版本告警 (见 VecIsPhobosWarn): 逐字也走原版点阵。 */
+    if (g_NoVec > 0)
+        return g_OrigBlit(t, NULL, wch, x, y, color);
     /* TAB 走原版特殊公式, 缺字/度量失败也走原版 (保留 0x5555 兜底行为) */
     if (!t || !IsPlausiblePtr(t) || wc == 9)
         return g_OrigBlit(t, NULL, wch, x, y, color);
@@ -2096,6 +2206,7 @@ void VecText_EnsureInit(void)
         { "BriefWidth", &g_VT.BriefWidth, 620, 0, 4000 },
         { "BriefAdv",   &g_VT.BriefAdv,   1,   0, 1    },
         { "ScoreExit",  &g_VT.ScoreExit,  1,   0, 1    },
+        { "HidePhobosWarn", &g_VT.HidePhobosWarn, 1, 0, 1 },
         { "Perf",       &g_VT.Perf,       0,   0, 1    },
         { "Render",     &g_VT.Render,     0,   0, 1    },
     };

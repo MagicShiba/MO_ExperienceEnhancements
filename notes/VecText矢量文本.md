@@ -183,3 +183,18 @@ FPS 钉住（任何档位 1x、位置固定）：`Simple_` 入口收串并跳过
 - 字号/字体与资金同源；值变才重光栅。
 - 四路同画：Message::Draw、prepare 0x4F42F0、BlitSidebar 0x6A70E0、UpdatePrimarySurface 0x4F4780。naked 只许 "m" 操作数。
 - 上屏唯 BlitSidebar 内 CopyFromPart；禁每帧调 BlitSidebar（光标拖影）。
+
+## Phobos 版本告警（右上角红字）
+
+- 只在 `MOE_PhobosLoaded()` 为真时才判（PEB 模块表按名含 "phobos"，带缓存）；没装 Phobos 不扫串。
+- 认法：`Phobos ` 前缀 + 含 `build` + 含 `Please test the build` / `DO NOT SHIP` 三者齐
+  （0.4 dev / 0.5 alpha / nightly 三种措辞都盖住）；单看前缀会误伤模组自己的文本。
+- `[VecText] HidePhobosWarn`：0 = 整条交回原版点阵（字号同原版），1 = 整句不画（默认）。
+  GetDim 命中时：0 交回原版度量（不进宽度缓存），1 报 `w=-10`（Phobos 拿 `w+10` 当黑底盒宽，
+  加完是 0，FillRect 不出像素）、`h` 照报原版 —— Phobos 把 `rect.Height` 当 `ShowGameTime`
+  的 coordY，报 0 会把游戏时间顶到 y=0。Print/DrawText 命中时整条转发并在期间置 `g_NoVec`
+  （Blit 见到就不换字形），1 时直接返回 0。
+- **为什么是"隐藏"而不是"把位置挪回地图区"**：位置由 Phobos 算 `Composite->GetWidth()` 得出；
+  MOE 的隐藏侧栏功能让面恒按整窗分配，面宽多 168 ⇒ 文字右对齐到整窗右缘，压住侧栏资金条。
+  唯一能让它回到原版落点的办法是改 `Composite` 的 `Surface::Width`，而那条线正是边卷屏的
+  右侧触发线（`notes/隐藏侧栏.md` §3.1 / §7.1），改了鼠标一进侧栏就卷屏 —— 所以位置不动，只给开关。

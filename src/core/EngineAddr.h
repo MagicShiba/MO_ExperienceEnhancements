@@ -319,6 +319,9 @@
 #define ADDR_SURF_COMPOSITE     0x0088731Cu
 #define ADDR_SURF_ALT           0x00887310u   /* 备用面 (崩溃诊断的面快照读它) */
 #define ADDR_VIEWBOUNDS         0x00886FA0u   /* ViewBounds (缩放档 = R) */
+/* WindowBounds = 窗口客户区 {0,0,客户宽,客户高}。Composite 建面恒按它分配
+ * (隐藏侧栏那个功能要把地图铺到整窗), 所以面宽 = 窗口宽。*/
+#define ADDR_WINDOWBOUNDS       0x00886FB0u
 #define ADDR_TACTICAL           0x00887324u   /* TacticalClass::Instance (指针) */
 #define ADDR_WWMOUSE            0x00887640u
 /* TacticalClass::SetTacticalPosition(CoordStruct const*) (__thiscall)。

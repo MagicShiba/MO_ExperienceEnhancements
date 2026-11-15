@@ -31,7 +31,6 @@
 /* ---------------- 地址 (反汇编实证) ---------------- */
 
 #define ADDR_SIDEBARBOUNDS    0x00886F90u
-#define ADDR_WINDOWBOUNDS     0x00886FB0u
 #define ADDR_ISNOD_SIDEBAR    0x00A8EB7Cu   /* byte: 1=侧栏在右(苏联), 0=在左(盟军) */
 #define ADDR_ARMAGEDDON       0x00A8ED6Bu   /* byte: 末日模式 (视口 X 偏移也不加 168) */
 #define ADDR_RADAR_RECT       0x008809F4u   /* RadarClass+0x120C: 雷达绘制矩形(侧栏面内) */
