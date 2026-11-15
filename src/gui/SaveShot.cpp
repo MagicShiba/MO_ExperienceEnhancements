@@ -48,6 +48,7 @@
 #define SS_ID_LIST_SAVE 1319
 #define SS_ID_BTN_LOAD  1039
 #define SS_ID_BTN_SAVE  1735
+#define SS_ID_BTN_BACK  1670    /* GUI:Back "上一页", 两个页面都钉在面板右下角 */
 #define SS_ID_TITLE     1036
 
 /* 我们自建的"载入"/"删除"/"重命名"按钮 (只有存档页)。必须在引擎的 WM_INITDIALOG 之前
@@ -59,6 +60,7 @@
 /* 三个按钮排成一列时按钮之间 / 按钮列与截图列之间的缝 (px) */
 #define SS_BTN_GAP  6
 #define SS_COL_GAP  10
+#define SS_COL_RGAP 12      /* 800x600: 侧栏列右缘与面板边框之间的边距 */
 #define SS_ADDR_SAVE_DLG   0x558B90u   /* 存档页对话框过程 (stdcall, ret 0x10) */
 #define SS_ADDR_MENU_TAIL  0x4F14BFu   /* ESC 菜单命令处理 0x4F1330 的公共落点 */
 
@@ -95,6 +97,9 @@ static int   s_CapAx = 0, s_CapAy = 0;  /* 框标题左上角 */
 static int   s_CapBx = 0, s_CapBy = 0;
 static int   s_CapH = 0;                /* 标题行高 (跟随 [VecText] 字号) */
 static int   s_LayoutW = 0, s_LayoutH = 0;  /* 布局时的面板尺寸, 变了就重排 */
+static int   s_LayoutX = 0, s_LayoutY = 0;  /* 布局时的面板位置: 窗口放大后要跟着挪 */
+static int   s_ColL = 0, s_ColR = 0;        /* 800x600 侧栏列 (首次从"上一页"取, 之后固定:
+                                             * 我们把这个按钮挪进列里了, 再读会越缩越窄) */
 static int   s_LayoutN = 0;             /* 本实例排过几次 (防和引擎互抢位置) */
 static int   s_MoverY = 0, s_MoverH = 0;/* 被推到面板底的存档名输入框 */
 static HWND  s_Scroll = NULL;           /* 列表那个独立滚动条子窗口 */
@@ -590,16 +595,18 @@ static void SS_InstallMenuTail(const unsigned char* want)
 
 /* ---------------- 初始化 ---------------- */
 
+/* 存档目录的兜底 (只在中途没取到引擎写档路径时用)。原版 YR 的写档路径不带目录
+ * ("pathW SAVE7CBE.SAV"), 存档就落在游戏根目录 ⇒ 缩略图也放这里。
+ * 别猜 "Saved Games": 原版根本没有这个目录, 写图时 CreateDirectory 连父目录都建不
+ * 出来, 结果是永远"无截图"。 */
 static void SS_DefaultDir(void)
 {
-    unsigned p;
     const char* gd;
 
     if (s_SaveDir[0]) return;
     gd = GtGameDir();
     if (!gd[0]) return;
-    p = AppendCStr(s_SaveDir, 0, gd, MAX_PATH_LEN);
-    AppendCStr(s_SaveDir, p, "\\Saved Games", MAX_PATH_LEN);
+    AppendCStr(s_SaveDir, 0, gd, MAX_PATH_LEN);
 }
 
 /* 装三处钩子 (幂等)。配置关着时不装, 之后在设置页打开再补装 ——
@@ -793,7 +800,8 @@ void SaveShot_OnSaveEnd(void* regs)
 
     p = AppendCStr(dir, 0, s_SaveDir, MAX_PATH_LEN);
     AppendCStr(dir, p, "\\Thumbs", MAX_PATH_LEN);
-    CreateDirectoryA(dir, NULL);   /* 已存在返回 ERROR_ALREADY_EXISTS, 忽略 */
+    if (!CreateDirectoryA(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        SS_Log("thumbs dir FAIL ", dir);   /* 建不出来时写图必失败, 留个原因 */
 
     SS_ThumbPath(path, MAX_PATH_LEN, s_SaveDir, s_BaseName);
     ok = Shot_WriteBmp565(path, s_Pix, s_PixW, s_PixH);
@@ -811,7 +819,24 @@ static int SS_IsRealDialog(HWND h)
     return h && GetWindowLongPtrA(h, DWLP_DLGPROC) != 0;
 }
 
-/* 对话框是 #32770, 但窗口被撑成整屏, 只能靠"有没有我们的列表控件"认。 */
+/* 存档文件列表: 读档页 `1317` / 存档页 `1319`。
+ * **id 会和其他对话框撞车**: 遭遇战设置页的 `1317`~`1320` 是颜色/位置/小队那几个
+ * 下拉框 (ComboBox)。只按 id 认的话, 打开过存/读档界面之后再去遭遇战页, 那张页会
+ * 被当成存档页 —— 我们挪它的控件、把它的下拉框拉伸成列表、还在它上面画截图列
+ * (症状: 遭遇战页出现一条黑带 + "存档截图/无截图")。所以按控件自证: 不是下拉框,
+ * 而且够宽 (存档列表原宽 380, 下拉框 ~45)。 */
+static int SS_IsSaveList(HWND w)
+{
+    char cls[32];
+    RECT r;
+
+    if (!w || !IsWindow(w)) return 0;
+    if (GetClassNameA(w, cls, sizeof(cls)) > 0 && !lstrcmpiA(cls, "ComboBox")) return 0;
+    if (!GetWindowRect(w, &r)) return 0;
+    return (r.right - r.left) >= 200;
+}
+
+/* 对话框是 #32770, 但窗口被撑成整屏, 只能靠"有没有存档列表控件"认。 */
 typedef struct { HWND hwnd; int listId; } SS_Find;
 
 static BOOL CALLBACK SS_EnumCb(HWND h, LPARAM lp)
@@ -822,8 +847,8 @@ static BOOL CALLBACK SS_EnumCb(HWND h, LPARAM lp)
     if (GetClassNameA(h, cls, sizeof(cls)) < 2) return TRUE;
     if (lstrcmpA(cls, "#32770") != 0) return TRUE;
     if (!SS_IsRealDialog(h)) return TRUE;
-    if (GetDlgItem(h, SS_ID_LIST_LOAD)) { f->hwnd = h; f->listId = SS_ID_LIST_LOAD; return FALSE; }
-    if (GetDlgItem(h, SS_ID_LIST_SAVE)) { f->hwnd = h; f->listId = SS_ID_LIST_SAVE; return FALSE; }
+    if (SS_IsSaveList(GetDlgItem(h, SS_ID_LIST_LOAD))) { f->hwnd = h; f->listId = SS_ID_LIST_LOAD; return FALSE; }
+    if (SS_IsSaveList(GetDlgItem(h, SS_ID_LIST_SAVE))) { f->hwnd = h; f->listId = SS_ID_LIST_SAVE; return FALSE; }
     return TRUE;
 }
 
@@ -915,11 +940,13 @@ static int SS_IsOurBtn(HWND w)
  * 这段判据是拿实测算出来的, 别"顺手优化"。 */
 static int SS_Layout(HWND hDlg, HWND list, int listId)
 {
-    RECT cr, o, r, band, sr;
+    RECT cr, o, r, band, sr, back;
     HWND c, btn, title, sb;
     const int pad = 12;
     int avail, listW, listX, colW, colX, dx, dw, bw = 0, bh = 0, sbW = 0;
     int bandR = 0;      /* 输入框右缘上限: 载入/删除 占掉的地方 */
+    int backTop;        /* "上一页"顶边: 截图列与载入按钮的上界 */
+    int hasBack = 0, tight;
 
     s_MoverY = s_MoverH = 0;
 
@@ -929,32 +956,90 @@ static int SS_Layout(HWND hDlg, HWND list, int listId)
     if (s_PanelW < 240 || s_PanelH < 180) return 0;
     if (!SS_WinRect(list, &o)) return 0;
 
+    /* "上一页"钉在面板右下角 (模板定死), 它自己就在侧栏里 —— 800x600 下拿它当侧栏的
+     * 锚: 截图列 / 载入 / 三个自绘按钮都跟它同左缘同宽, 列表在主区里居中。 */
+    backTop = s_Py + s_PanelH - pad;
+    {
+        HWND bk = GetDlgItem(hDlg, SS_ID_BTN_BACK);
+        if (bk && SS_WinRect(bk, &back)) { backTop = (int)back.top; hasBack = 1; }
+    }
+
+    /* 800x600 窗口 (载入页): 截图列 200 宽塞不进侧栏, 走按侧栏对齐的排法 ——
+     * 列宽按侧栏收窄并留右边距, 列表宽度照旧 (只是挪位置, 不跟着侧栏变宽)。
+     * 判据用**客户区**而不是面板: 面板永远是 800x600, 游戏内窗口放大后还是它;
+     * 大窗口要跟"储存"页一致 (老的满宽排法), 不能套这套窄排法。 */
+    tight = (cr.right <= 800 && cr.bottom <= 600 && listId == SS_ID_LIST_LOAD && hasBack);
+
     sb = SS_FindScroll(hDlg, list, &o);
     if (sb && SS_WinRect(sb, &sr)) sbW = (int)(sr.right - sr.left);
     s_Scroll = sb;
 
-    listX  = s_Px + pad;
-    avail  = s_Px + s_PanelW - pad - listX;
-    colW   = s_PrevW;
-    if (colW > avail - sbW - 380) colW = avail - sbW - 380;   /* 列表至少留 380 */
-    if (colW < SS_MIN_PREV) colW = 0;                         /* 挤不下就不开截图列 */
-    listW  = avail - sbW - (colW > 0 ? colW + pad : 0);
-    if (listW < o.right - o.left) {                   /* 不缩, 只长 */
-        listW = (int)(o.right - o.left);
-        listX = (int)o.left;
+    if (tight)
+    {
+        /* 缩略图列 = 侧栏里那一列, 右缘让出 SS_COL_RGAP 不贴面板边框。
+         * 列的位置在第一次排版时从"上一页"取, 之后固定 —— 这个按钮会被我们挪进列里。 */
+        if (!s_ColR) { s_ColL = (int)back.left; s_ColR = (int)back.right; }
+        colX  = s_ColL;
+        colW  = s_ColR - s_ColL - SS_COL_RGAP;
+        if (colW < SS_MIN_PREV) colW = s_ColR - s_ColL;
+        /* 列表宽度照旧 (原来那套算法), 只是整体挪到主区中间; 不跟着侧栏变宽 */
+        avail  = s_Px + s_PanelW - pad - (s_Px + pad);
+        listW  = avail - sbW - (s_PrevW + pad);
+        if (listW < o.right - o.left) listW = (int)(o.right - o.left);   /* 不缩 */
+        avail  = colX - pad - (s_Px + pad);                              /* 主区 */
+        listX  = s_Px + pad + (avail - listW) / 2;
+        if (listX < s_Px + pad) listX = s_Px + pad;
+    }
+    else
+    {
+        listX  = s_Px + pad;
+        avail  = s_Px + s_PanelW - pad - listX;
+        colW   = s_PrevW;
+        if (colW > avail - sbW - 380) colW = avail - sbW - 380;   /* 列表至少留 380 */
+        if (colW < SS_MIN_PREV) colW = 0;                         /* 挤不下就不开截图列 */
+        listW  = avail - sbW - (colW > 0 ? colW + pad : 0);
+        if (listW < o.right - o.left) {                   /* 不缩, 只长 */
+            listW = (int)(o.right - o.left);
+            listX = (int)o.left;
+        }
+        colX = listX + listW + sbW + pad;
     }
 
     dx = listX - (int)o.left;
     dw = listW - (int)(o.right - o.left);
 
-    SetRect(&s_ListRect, listX, (int)o.top, listX + listW, (int)o.bottom);
-    MoveWindow(list, listX, s_ListRect.top, listW, s_ListRect.bottom - s_ListRect.top, TRUE);
-    if (sb)
-        MoveWindow(sb, listX + listW, (int)sr.top, sbW, (int)(sr.bottom - sr.top), TRUE);
+    /* 对话框刚建出来那一帧, 列表还是 0 宽 (引擎还没给它尺寸), 照这个排会把列表画成
+     * 一条线 (日志里 `list 0/29/0/571`)。不排, 等下一帧再算。 */
+    if (listW < 120) return 0;
 
-    colX = listX + listW + sbW + pad;
+    if (tight)
+    {
+        /* 800x600 载入页的高度: 底边收到"上一页"上沿之上 6px, 顶边由竖向居中定
+         * (h = 2*(底限 - 面板顶) - 面板高 ⇒ 上下留白相等)。必须拿面板尺寸算, 不能读
+         * o 的高度: 重排时 o 是上一轮居中后的矩形, 拿它当基准会一轮比一轮长。 */
+        int lim  = (int)back.bottom - 6;
+        int maxh = s_PanelH - 2 * pad;
+        int h    = 2 * (lim - s_Py) - s_PanelH;
+        int nt;
 
-    /* 底部那条带: [存档名输入框 ...][储存] —— 输入框右缘让到按钮左边 */
+        if (h > maxh) h = maxh;
+        if (h < 120)  h = 120;
+        nt = s_Py + (s_PanelH - h) / 2;
+        s_ListRect.top    = nt;
+        s_ListRect.bottom = nt + h;
+        MoveWindow(list, listX, nt, listW, h, TRUE);
+        if (sb) MoveWindow(sb, listX + listW, nt, sbW, h, TRUE);
+    }
+    else
+    {
+        SetRect(&s_ListRect, listX, (int)o.top, listX + listW, (int)o.bottom);
+        MoveWindow(list, listX, s_ListRect.top, listW, s_ListRect.bottom - s_ListRect.top, TRUE);
+        if (sb)
+            MoveWindow(sb, listX + listW, (int)sr.top, sbW, (int)(sr.bottom - sr.top), TRUE);
+    }
+
+    /* 底部那条带: [存档名输入框 ...][储存] —— 输入框右缘让到按钮左边。
+     * 载入页没有名字框, 这条带就是"载入"自己, 摆在"上一页"上面。 */
     btn = GetDlgItem(hDlg, listId == SS_ID_LIST_SAVE ? SS_ID_BTN_SAVE : SS_ID_BTN_LOAD);
     SetRect(&band, 0, 0, 0, 0);
     SetRect(&s_BtnLoad, 0, 0, 0, 0);
@@ -962,52 +1047,78 @@ static int SS_Layout(HWND hDlg, HWND list, int listId)
     SetRect(&s_BtnRename, 0, 0, 0, 0);
     if (btn && SS_WinRect(btn, &r))
     {
-        bw = (int)(r.right - r.left);
-        bh = (int)(r.bottom - r.top);
+        /* 800x600 下按钮宽度跟截图列一致 (同列同宽), 高度仍用自己的, 免得拉伸按钮图 */
+        if (tight)
+        {
+            bw = colW;
+            bh = (int)(r.bottom - r.top);
+        }
+        else
+        {
+            bw = (int)(r.right - r.left);
+            bh = (int)(r.bottom - r.top);
+        }
         band.left   = colW > 0 ? colX : s_Px + s_PanelW - bw - pad;
         band.top    = (int)o.bottom + 10;
+        if (listId == SS_ID_LIST_LOAD)
+        {
+            band.top = backTop - SS_BTN_GAP - bh;
+            if (band.top < (int)o.top + bh + 40) band.top = (int)o.top + bh + 40;
+        }
         band.right  = band.left + bw;
-        band.bottom = band.top + bh;
         bandR = band.left;
     }
 
-    /* 高度: 列表一直拉到面板底。下面压着的可见小控件 (存档名输入框) 推到面板底,
-     * 列表停在它上面 8px。 */
+    /* 800x600: "上一页"也收进这一列 (右边让出边距), 与"载入"同左缘同宽 */
+    if (tight)
     {
-        int bottomLimit = s_Py + s_PanelH - pad;
+        HWND bk = GetDlgItem(hDlg, SS_ID_BTN_BACK);
+        if (bk) MoveWindow(bk, colX, (int)back.top, colW, (int)(back.bottom - back.top), TRUE);
+    }
+
+    /* 高度: 列表一直拉到面板底。下面压着的可见小控件 (存档名输入框) 推到面板底,
+     * 列表停在它上面 8px。800x600 载入页收在"上一页"底边上面, 不压底栏。 */
+    {
+        int bottomLimit = tight ? (int)back.bottom - 6 : s_Py + s_PanelH - pad;
         int newBottom = bottomLimit;
-        HWND mover = NULL;
-        RECT mr;
-
-        SetRect(&mr, 0, 0, 0, 0);
-        for (c = GetWindow(hDlg, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
-        {
-            if (c == list || c == sb || SS_IsOurBtn(c)) continue;
-            if (!IsWindowVisible(c) || !SS_WinRect(c, &mr)) continue;
-            if (mr.top < o.bottom - 6) continue;                  /* 只看列表下方 */
-            if (mr.right <= listX || mr.left >= listX + listW) continue;
-            if (mr.bottom - mr.top > 60) continue;                /* 大块的不动 */
-            mover = c;
-            break;
-        }
         /* 只记录不参与布局: 名字框接管只认这一个。引擎的子控件层级跟模板 id 对不上,
-         * 自己按 id/类名再扫一遍就会挑到隐藏的空壳。 */
-        if (listId == SS_ID_LIST_SAVE) s_BoxHwnd = mover;
-        if (mover)
+         * 自己按 id/类名再扫一遍就会挑到隐藏的空壳。
+         * 只有存档页有名字框: 载入页走这套会挑到"载入"按钮自己, 把它挪到面板底再缩
+         * 列表 —— 载入页的按钮位置由 band 定死, 这里一律不碰。 */
+        if (listId == SS_ID_LIST_SAVE)
         {
-            int eh = (int)(mr.bottom - mr.top);
-            int nl = (int)mr.left + dx;
-            int nw = SS_WideW(&mr, nl, dw, bandR, pad);
-            int ntop = bottomLimit - eh;
+            HWND mover = NULL;
+            RECT mr;
 
-            if (ntop < (int)o.bottom + 18) ntop = (int)o.bottom + 18;
-            MoveWindow(mover, nl, ntop, nw, eh, TRUE);
-            s_MoverY = ntop;
-            s_MoverH = eh;
-            newBottom = ntop - 8;
+            SetRect(&mr, 0, 0, 0, 0);
+            for (c = GetWindow(hDlg, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
+            {
+                if (c == list || c == sb || SS_IsOurBtn(c)) continue;
+                if (!IsWindowVisible(c) || !SS_WinRect(c, &mr)) continue;
+                if (mr.top < o.bottom - 6) continue;                  /* 只看列表下方 */
+                if (mr.right <= listX || mr.left >= listX + listW) continue;
+                if (mr.bottom - mr.top > 60) continue;                /* 大块的不动 */
+                mover = c;
+                break;
+            }
+            s_BoxHwnd = mover;
+            if (mover)
+            {
+                int eh = (int)(mr.bottom - mr.top);
+                int nl = (int)mr.left + dx;
+                int nw = SS_WideW(&mr, nl, dw, bandR, pad);
+                int ntop = bottomLimit - eh;
+
+                if (ntop < (int)o.bottom + 18) ntop = (int)o.bottom + 18;
+                MoveWindow(mover, nl, ntop, nw, eh, TRUE);
+                s_MoverY = ntop;
+                s_MoverH = eh;
+                newBottom = ntop - 8;
+            }
         }
         if (newBottom > bottomLimit) newBottom = bottomLimit;
-        if (newBottom > (int)o.bottom)
+        /* 800x600 载入页不拉高: 高度保持列表原样, 下面再整体竖向居中 */
+        if (!tight && newBottom > (int)o.bottom)
         {
             s_ListRect.bottom = newBottom;
             if (sb) MoveWindow(sb, listX + listW, s_ListRect.top, sbW,
@@ -1024,8 +1135,11 @@ static int SS_Layout(HWND hDlg, HWND list, int listId)
         if (band.top + bh > s_Py + s_PanelH - 4) band.top = s_Py + s_PanelH - 4 - bh;
     }
 
-    /* 与列表左缘对齐、贴着列表下沿的控件跟着挪+加宽, 但别伸进截图列 */
-    if (dw || dx)
+    /* 800x600 的竖向居中已经在上面定高时一起算完 (见 tight 分支)。 */
+
+    /* 与列表左缘对齐、贴着列表下沿的控件跟着挪+加宽, 但别伸进截图列。
+     * 800x600 载入页列表是整体右移居中的, 底栏那行提示也贴着左缘, 一起挪会挪歪 —— 跳过。 */
+    if ((dw || dx) && !tight)
     {
         for (c = GetWindow(hDlg, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
         {
@@ -1066,13 +1180,17 @@ static int SS_Layout(HWND hDlg, HWND list, int listId)
         imgH = (int)((long long)imgW * vh / vw);
         if (imgH < 24) imgH = 24;
 
-        /* 竖向预算: 标题行在图上面 (整块比列表顶高一个标题行), 下边到三个按钮
-         * 排起来的上沿再留一道缝。按钮上沿按它的实际位置算, 不用估的。 */
+        /* 竖向预算: 标题行在图上面 (整块比列表顶高一个标题行); 下沿一律让到主按钮
+         * 上沿 —— 存档页让三个按钮排起来的高度, 载入页让"载入"这一块。 */
         stackTop = (int)s_ListRect.bottom;
-        if (listId == SS_ID_LIST_SAVE && bw > 0 && bh > 0)
-            stackTop = (int)band.top - SS_BTN_GAP - (3 * bh + 2 * SS_BTN_GAP);
+        if (bw > 0 && bh > 0)
+            stackTop = (listId == SS_ID_LIST_SAVE)
+                     ? (int)band.top - SS_BTN_GAP - (3 * bh + 2 * SS_BTN_GAP)
+                     : (int)band.top - SS_COL_GAP;
         colTop = (int)o.top - s_CapH;
         if (colTop < s_Py + 4) colTop = s_Py + 4;   /* 面板顶上放不下就压回来 */
+        /* 800x600: 侧栏顶部那块 (载入任务标题 + 任务小图) 占到 y=110, 截图列从它下面起 */
+        if (tight && colTop < s_Py + 116) colTop = s_Py + 116;
 
         availH = stackTop - SS_COL_GAP - colTop;
         if (availH < 2 * (s_CapH + 26) + pad) availH = 2 * (s_CapH + 26) + pad;
@@ -1083,7 +1201,11 @@ static int SS_Layout(HWND hDlg, HWND list, int listId)
             if (imgH < 24) imgH = 24;
             imgW = (int)((long long)imgH * vw / vh);
             if (imgW < 48) imgW = 48;
+            need = 2 * (s_CapH + imgH + 2) + pad;
         }
+        /* 800x600: 列宽被侧栏卡在 ~136, 图比列短, 富余的竖空上下均分 (不堆在底上) */
+        if (tight && stackTop - SS_COL_GAP - colTop > need + 24)
+            colTop += (stackTop - SS_COL_GAP - colTop - need) / 2;
 
         s_CapAx = colX; s_CapAy = colTop;
         SetRect(&s_BoxA, colX, colTop + s_CapH, colX + imgW + 2, colTop + s_CapH + imgH + 2);
@@ -1126,20 +1248,23 @@ static int SS_Layout(HWND hDlg, HWND list, int listId)
 
     s_LayoutW = s_PanelW;
     s_LayoutH = s_PanelH;
+    s_LayoutX = s_Px;
+    s_LayoutY = s_Py;
     s_LayoutN++;
     return 1;
 }
 
-/* 引擎偶尔会把自己的控件摆回去: 列表位置不对就重排一次。 */
+/* 引擎偶尔会把自己的控件摆回去: 列表位置不对就重排一次。
+ * 面板位置变了 (窗口放大/缩小后引擎把对话框重新居中) 也要重排 —— 面板尺寸一直是
+ * 800x600, 只看尺寸的话窗口一变, 我们的控件就留在老位置上。 */
 static int SS_LayoutDrift(HWND list)
 {
     RECT r;
 
     if (!s_LayoutW) return 1;
     if (s_PanelW != s_LayoutW || s_PanelH != s_LayoutH) return 1;
+    if (s_Px != s_LayoutX || s_Py != s_LayoutY) return 1;
     if (!SS_WinRect(list, &r)) return 0;
-    if (r.left == s_ListRect.left && r.top == s_ListRect.top &&
-        r.right == s_ListRect.right && r.bottom == s_ListRect.bottom) return 0;
     if (r.right - r.left != s_ListRect.right - s_ListRect.left) return 1;
     if (r.bottom - r.top != s_ListRect.bottom - s_ListRect.top) return 1;
     return 0;
@@ -1174,12 +1299,11 @@ static void SS_Blit(void* surf, int dx, int dy,
 }
 
 /* ---------------- 界面文字 (语言文件 [SaveShot]) ----------------
- * 引擎自己的按钮文字来自 CSF, 但我们建的三个按钮和截图列的标题都在 DLL 里, 一律走
- * 语言文件 MOExperienceResources\<locale>.ini; 缺项由 Lang 回退到下面的默认值。
- * 只在开对话框时读一次 (GetPrivateProfileString 不进每帧的绘制路径)。 */
+ * 截图列标题、重命名及确认文字来自语言文件; 载入与删除的初始文字由引擎查 CSF。
+ * 缺项由 Lang 回退到下面的默认值, 仅在对话框初始化与排版时读取。 */
 #define SS_TXT_CAP 48
 static wchar_t s_TxtCapNow[SS_TXT_CAP], s_TxtCapShot[SS_TXT_CAP], s_TxtNoShot[SS_TXT_CAP];
-static wchar_t s_TxtLoad[SS_TXT_CAP], s_TxtRename[SS_TXT_CAP], s_TxtRenameOk[SS_TXT_CAP];
+static wchar_t s_TxtRename[SS_TXT_CAP], s_TxtRenameOk[SS_TXT_CAP];
 static wchar_t s_TxtDelete[SS_TXT_CAP], s_TxtDeleteOk[SS_TXT_CAP];
 
 static void SS_LoadText(void)
@@ -1189,7 +1313,6 @@ static void SS_LoadText(void)
     Lang_GetW(SS_SECTION, "NoShot",       L"无截图",   s_TxtNoShot,   SS_TXT_CAP);
     Lang_GetW(SS_SECTION, "BtnRename",    L"重命名",   s_TxtRename,   SS_TXT_CAP);
     Lang_GetW(SS_SECTION, "BtnRenameOk",  L"确认改名", s_TxtRenameOk, SS_TXT_CAP);
-    Lang_GetW(SS_SECTION, "BtnLoad",      L"载入",     s_TxtLoad,     SS_TXT_CAP);
     Lang_GetW(SS_SECTION, "BtnDelete",    L"删除",     s_TxtDelete,   SS_TXT_CAP);
     Lang_GetW(SS_SECTION, "BtnDeleteOk",  L"确认删除", s_TxtDeleteOk, SS_TXT_CAP);
 }
@@ -1575,6 +1698,19 @@ static int SS_EntryFile(HWND list, char* sav, unsigned savN, char* bmp, unsigned
         p = AppendCStr(sav, 0, s_SaveDir, savN);
         p = AppendCh(sav, p, '\\', savN);
         AppendCStr(sav, p, nm, savN);
+        /* 裸文件名不携带目录; 本次进程尚未存档时, 缓存可能仍是原版的根目录兜底。 */
+        if (GetFileAttributesA(sav) == INVALID_FILE_ATTRIBUTES)
+        {
+            p = AppendCStr(sav, 0, GtGameDir(), savN);
+            p = AppendCStr(sav, p, "\\Saved Games\\", savN);
+            AppendCStr(sav, p, nm, savN);
+            if (GetFileAttributesA(sav) == INVALID_FILE_ATTRIBUTES)
+            {
+                p = AppendCStr(sav, 0, GtGameDir(), savN);
+                p = AppendCh(sav, p, '\\', savN);
+                AppendCStr(sav, p, nm, savN);
+            }
+        }
     }
 
     SS_SplitPath(sav, dir, base);
@@ -1833,48 +1969,99 @@ static unsigned* SS_OwnerDrawElem(HWND h)
     return NULL;
 }
 
-/* 按钮文字存在 ownerdraw 元素的某个字段 (引擎自己 malloc 的宽串副本), 绘制时直接
- * 读它, 不读窗口文本。偏移没有文档, 打开对话框时用文本已知的"储存"按钮探一次:
- * 扫 +0x04..+0x200 的 DWORD, 找指向 L"储存" 的那个。 */
-static int s_TxtOff = -2;              /* -2 未探过, -1 探失败, 其它 = 字段偏移 */
+/* ---------------- 按钮文字 (交给引擎画) ----------------
+ * 引擎的 ownerdraw 按钮在初始化时把窗口文本当 CSF 键解一次 (0x6102EA → 0x734E60),
+ * 结果存进元素里的一个 wchar_t* (引擎 malloc 的副本); 绘制 0x6071E0 只读那份副本,
+ * 所以 SetWindowTextW 改不动字, 之后窗口文本也不再被读。
+ *
+ * 载入/删除给的是 CSF 里现成的键 (GUI:Load / GUI:Delete), 引擎填得好好的; 只有
+ * "重命名"没有对应 CSF 键 ⇒ 元素里没字 ⇒ 空红条。于是只补它一个: 在同一张对话框里
+ * 拿**两个已经填好字**的按钮 (载入 / 删除) 比出文字字段的偏移, 再往重命名元素的
+ * 同一偏移写一份自己 malloc 的串 (销毁时引擎 free 的必须是堆块)。 */
+#define SS_ELEM_SIZE 0x1F0
+static int s_TxtOff = 0;               /* 0 = 还没探到 */
+static int s_TxtTries = 0;             /* 引擎可能到第一次绘制才填 CSF 文本, 前几帧重试 */
+static int s_RenameTextReady = 0;      /* 当前对话框的重命名按钮已成功填字 */
 
-static int SS_ProbeTextOff(void* obj, const wchar_t* want)
+/* 指针字段是否指向一段可读、非空、短、含 CJK 的宽串 (按钮标签的样子)。 */
+static const wchar_t* SS_LabelAt(const unsigned char* e, int off)
 {
-    int k;
+    unsigned v;
+    const wchar_t* w;
+    int n, cjk = 0;
 
-    if (!obj || !IsPlausiblePtr(obj)) return -1;
-    for (k = 0x04; k <= 0x200; k += 4)
+    if (!e) return NULL;
+    v = *(const unsigned*)(e + off);
+    if (v < 0x10000u || (v & 1u)) return NULL;
+    if (!IsPlausiblePtr((const void*)(size_t)v)) return NULL;
+    if (MemReadableBytes((const void*)(size_t)v, 4) < 4) return NULL;
+    w = (const wchar_t*)(size_t)v;
+    for (n = 0; n < 32 && w[n]; n++)
     {
-        unsigned v = *(unsigned*)((char*)obj + k);
-        if (v < 0x10000u || (v & 1u) || !IsPlausiblePtr((const void*)(size_t)v)) continue;
-        if (MemReadableBytes((const void*)(size_t)v, 8) >= 8 &&
-            !lstrcmpW((const wchar_t*)(size_t)v, want)) return k;
+        if (w[n] < 0x20 || w[n] > 0xFFEF) return NULL;
+        if (w[n] >= 0x2E80 && w[n] <= 0x9FFF) cjk++;
     }
-    return -1;
+    if (n < 1 || n > 16 || !cjk) return NULL;
+    return w;
 }
 
-/* 改按钮文字。换字必须给**引擎自己 malloc 的副本** (0x7C8E17 是它用的 malloc),
- * 因为按钮销毁时引擎会 free 这个字段 —— 指到 DLL 里的静态串就会崩。旧块直接丢弃
- * 泄漏, 几十字节换零风险。探不到偏移就什么都不做 (字不变, 但不会写坏内存)。 */
-static void SS_SetBtnText(HWND btn, const wchar_t* s)
+/* 载入和删除的字不同: 同一偏移上两边都是标签且内容不同 ⇒ 那就是按钮文字字段。 */
+static int SS_BtnTextOff(void)
 {
-    typedef void* (__cdecl *SS_MallocFn)(size_t);
+    const unsigned char* a = (const unsigned char*)SS_OwnerDrawElem(s_HWndLoad);
+    const unsigned char* b = (const unsigned char*)SS_OwnerDrawElem(s_HWndDel);
+    int k, hit = 0, off = 0;
+
+    if (!a || !b) return 0;
+    for (k = 0x04; k < SS_ELEM_SIZE; k += 4)
+    {
+        const wchar_t* sa = SS_LabelAt(a, k);
+        const wchar_t* sb = SS_LabelAt(b, k);
+
+        if (!sa || !sb || !lstrcmpW(sa, sb)) continue;
+        hit++;
+        off = k;
+    }
+    return hit == 1 ? off : 0;
+}
+
+/* 换按钮文字: 必须给引擎自己 malloc 的副本 (销毁时它会 free 这个字段, 指到静态串
+ * 会崩)。旧块泄漏几十字节, 换零风险。 */
+static int SS_SetBtnText(HWND btn, const wchar_t* s)
+{
+    typedef void* (__cdecl *MallocFn)(size_t);
     void* e;
     wchar_t* d;
     int n;
 
-    if (!btn || !IsWindow(btn) || !s || s_TxtOff < 0) return;
+    if (!btn || !IsWindow(btn) || !s || s_TxtOff <= 0) return 0;
     e = SS_OwnerDrawElem(btn);
-    if (!e || !IsPlausiblePtr(e)) return;
+    if (!e) return 0;
     n = lstrlenW(s);
-    d = (wchar_t*)((SS_MallocFn)0x7C8E17u)(((size_t)n + 1) * sizeof(wchar_t));
-    if (!d) return;
+    d = (wchar_t*)((MallocFn)0x7C8E17u)(((size_t)n + 1) * sizeof(wchar_t));
+    if (!d) return 0;
     memcpy(d, s, ((size_t)n + 1) * sizeof(wchar_t));
     *(wchar_t**)((char*)e + s_TxtOff) = d;
     InvalidateRect(btn, NULL, TRUE);
+    return 1;
 }
 
-/* 把字体和底图从"储存"按钮搬给新按钮, 顺便探出文字字段偏移。 */
+/* 只补重命名一个 (载入/删除由引擎从 CSF 填)。偏移已知不代表当前按钮已填字。 */
+static void SS_FillRenameText(void)
+{
+    if (s_RenameTextReady || s_TxtTries >= 8) return;
+    if (!s_HWndRename || !s_HWndLoad || !s_HWndDel) return;
+    s_TxtTries++;
+    if (s_TxtOff <= 0) s_TxtOff = SS_BtnTextOff();
+    if (s_TxtOff <= 0)
+    {
+        if (s_TxtTries == 8) SS_Log("btn text: no field", NULL);
+        return;
+    }
+    s_RenameTextReady = SS_SetBtnText(s_HWndRename, s_TxtRename);
+}
+
+/* 把字体和底图从"储存"按钮搬给新按钮。 */
 static void SS_StyleButtons(HWND cont)
 {
     HWND mine[3];
@@ -1893,22 +2080,14 @@ static void SS_StyleButtons(HWND cont)
         for (k = 0; k < n; k++) SendMessageW(mine[k], WM_SETFONT, (WPARAM)f, TRUE);
 
     ec = SS_OwnerDrawElem(cont);
-    if (!ec) { SS_Log("native buttons no elem (plain look)", NULL); return; }
-    for (k = 0; k < n; k++)
+    if (!ec) SS_Log("native buttons no elem (plain look)", NULL);
+    for (k = 0; ec && k < n; k++)
     {
         unsigned* eb = SS_OwnerDrawElem(mine[k]);
         if (eb) *(unsigned*)((char*)eb + 0xB0) = *(unsigned*)((char*)ec + 0xB0);
         InvalidateRect(mine[k], NULL, TRUE);
     }
-    SS_Log("native buttons +band", NULL);
-
-    SS_LoadText();
-    s_TxtOff = SS_ProbeTextOff((char*)ec, L"储存");
-    if (s_TxtOff < 0) { SS_Log("btn text off not found (字不会变)", NULL); return; }
-    /* 三个按钮一起换成语言文件的字: 只换其中一个会让两个来源混着显示。 */
-    SS_SetBtnText(s_HWndRename, s_TxtRename);
-    SS_SetBtnText(s_HWndLoad,   s_TxtLoad);
-    SS_SetBtnText(s_HWndDel,    s_TxtDelete);
+    SS_FillRenameText();
 }
 
 /* 存档页对话框过程 (0x558B90 的替身)。stdcall: 原过程结尾 ret 0x10, 我们原样转。 */
@@ -1923,17 +2102,24 @@ static INT_PTR __stdcall SS_SaveDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         RECT rc;
 
         s_HWndLoad = s_HWndDel = s_HWndRename = NULL;
+        /* 按钮元素随对话框重建, 探测预算与填字状态必须按实例重新开始。 */
+        s_TxtOff = 0;
+        s_TxtTries = 0;
+        s_RenameTextReady = 0;
         s_DelArm = 0;
         s_DelArmShown = 0;
         s_RnArm = 0;
         s_RnArmShown = 0;
         /* 必须在原过程之前建: 引擎的 WM_INITDIALOG 会遍历子控件, 只有它接管的
-         * 按钮才会用原版美术画。窗口文本只是给引擎初始化查 StringTable 的占位,
-         * 真正的字在 SS_StyleButtons 里按语言文件设。初始坐标放到窗口外, 等
+         * 按钮才会用原版美术画。窗口文本是引擎初始化时查 CSF 的键: 载入/删除用
+         * 现成的 GUI:Load / GUI:Delete, 引擎会把字填进元素; 重命名没有这个键,
+         * 字由 SS_FillRenameText 直接写元素字段。初始坐标放到窗口外, 等
          * SS_Layout 算好再摆 (否则会临时压在"储存"上)。 */
         if (cont && !GetDlgItem(h, SS_ID_BTN_LOAD_NEW) && GetWindowRect(cont, &rc))
         {
             int w = (int)(rc.right - rc.left), hh = (int)(rc.bottom - rc.top);
+
+            SS_LoadText();
             s_HWndRename = CreateWindowExW(0, L"Button", L"",
                                            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                            -2000, -2000, w, hh,
@@ -1949,15 +2135,17 @@ static INT_PTR __stdcall SS_SaveDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                                         -2000, -2000, w, hh,
                                         h, (HMENU)(INT_PTR)SS_ID_BTN_DEL_NEW,
                                         GetModuleHandleW(NULL), NULL);
-            SS_Log((s_HWndLoad && s_HWndDel && s_HWndRename) ? "native buttons created"
-                                                             : "native buttons FAILED", NULL);
+            if (!(s_HWndLoad && s_HWndDel && s_HWndRename))
+                SS_Log("native buttons FAILED", NULL);
         }
         r = s_OrigSaveDlg ? ((DlgProcFn)s_OrigSaveDlg)(h, msg, wp, lp) : FALSE;
         SS_StyleButtons(cont);
         return r;
     }
 
-    if (msg == WM_COMMAND && HIWORD(wp) == BN_CLICKED)
+    /* OWNERDRAW 按钮的连续第二击会发 BN_DOUBLECLICKED, 也要计入两步确认。 */
+    if (msg == WM_COMMAND &&
+        (HIWORD(wp) == BN_CLICKED || HIWORD(wp) == BN_DOUBLECLICKED))
     {
         int id = LOWORD(wp);
         if (id == SS_ID_BTN_RN_NEW)
@@ -2345,11 +2533,14 @@ static int SS_EdComposing(void)
 {
     HWND w;
     HIMC imc;
+    LONG len;
 
     if (!s_Ed || !IsWindow(s_Ed)) return 0;
     imc = SS_EdHimc(&w);
     if (!imc) return s_EdCompLen > 0;    /* 拿不到上下文: 退到本地缓存判断 */
-    return LiComposing(w);
+    len = ImmGetCompositionStringW(imc, GCS_COMPSTR, NULL, 0);
+    ImmReleaseContext(w, imc);
+    return len > 0;
 }
 
 static void SS_EdImePoll(void)
@@ -2784,7 +2975,7 @@ static int SS_DlgAlive(void)
 {
     if (!s_Dlg || !s_DlgList) return 0;
     if (!IsWindow((HWND)s_Dlg)) return 0;
-    return GetDlgItem((HWND)s_Dlg, s_DlgList) != NULL;
+    return SS_IsSaveList(GetDlgItem((HWND)s_Dlg, s_DlgList));
 }
 
 /* 忘掉这个对话框。keepLive=0 (读档前) 连活着的控件一起交还 —— 世界马上重建, 它们
@@ -2814,6 +3005,8 @@ static void SS_Forget(int keepLive)
     s_DlgList = 0;
     s_Scroll = NULL;
     s_LayoutW = s_LayoutH = 0;
+    s_LayoutX = s_LayoutY = 0;
+    s_ColL = s_ColR = 0;
     s_LayoutN = 0;
     s_DrawnCur = s_DrawnTop = -2;
     SetRect(&s_BtnLoad, 0, 0, 0, 0);
@@ -2866,11 +3059,10 @@ void SaveShot_PaintDialog(void* regs, void* surf)
     }
 
     list = GetDlgItem(hwnd, listId);
-    if (!list) { SS_Forget(1); return; }
+    if (!SS_IsSaveList(list)) { SS_Forget(1); return; }
 
     SS_PanelRect(hwnd, &cr);
-    if ((!s_LayoutW || s_PanelW != s_LayoutW || s_PanelH != s_LayoutH ||
-         SS_LayoutDrift(list)) && s_LayoutN < 3)
+    if (SS_LayoutDrift(list) && s_LayoutN < 12)
     {
         SS_PicFree(&s_PicA);
         SS_ThumbReset();
@@ -2881,6 +3073,9 @@ void SaveShot_PaintDialog(void* regs, void* surf)
     SS_HookList(list);
     SS_DrawRows(surf, list);
 
+    /* 引擎可能到第一次绘制才把 CSF 文本填进按钮元素: 前几帧重试 (内部有上限)。 */
+    SS_FillRenameText();
+
     /* 存档页的存档名输入框: 认领 + 每帧重画。原生控件一个像素都不画, 所以这块
      * 屏幕上只剩这里画的紫框。 */
     if (listId == SS_ID_LIST_SAVE)
@@ -2890,7 +3085,7 @@ void SaveShot_PaintDialog(void* regs, void* surf)
         SS_EdDraw(surf);
     }
 
-    /* 删除按钮上膛: 直接改按钮对象里的文字字段 (引擎绘制只读那份副本) */
+    /* 删除按钮上膛: 改按钮对象里的文字字段 (引擎绘制只读那份副本) */
     if (listId == SS_ID_LIST_SAVE && s_HWndDel && IsWindow(s_HWndDel))
     {
         int arm = (s_DelArm && GetTickCount() - s_DelArmTick <= SS_DEL_ARM_MS) ? 1 : 0;
@@ -2936,9 +3131,9 @@ void SaveShot_PaintDialog(void* regs, void* surf)
         lstrcpynA(s_ThumbName, name, SS_NAME_MAX);   /* 加载失败也记下, 免得每帧重读磁盘 */
         if (name[0])
         {
-            char path[MAX_PATH_LEN];
-            SS_ThumbPath(path, MAX_PATH_LEN, s_SaveDir, name);
-            if (!SS_PicLoadBmp(&s_PicB, path, bw, bh))
+            char sav[MAX_PATH_LEN], path[MAX_PATH_LEN];
+            if (SS_EntryFile(list, sav, MAX_PATH_LEN, path, MAX_PATH_LEN) &&
+                !SS_PicLoadBmp(&s_PicB, path, bw, bh))
                 SS_Log("no thumb ", path);
         }
     }
