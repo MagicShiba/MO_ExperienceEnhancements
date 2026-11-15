@@ -847,31 +847,31 @@ static int s_GadSnap = 0;
 
 /* 顶部雷达 gadget 的屏幕矩形不会随 SidebarBounds.X 自动移动。
  * 全隐藏只禁用这三个控件, 切回后恢复进入全隐藏前的 Disabled 状态。 */
+static unsigned char s_RadarSaved[3];
+static int s_RadarHidden = 0;
 static void Fm_SyncRadarGadgets(void)
 {
     static const unsigned kRadar[] = { 0x00B04978u, 0x00B04910u, 0x00B04A10u };
-    static unsigned char saved[3];
-    static int hidden = 0;
     int i;
     if (Fm_ModeBare())
     {
         for (i = 0; i < 3; ++i)
         {
             unsigned char* g = (unsigned char*)(size_t)kRadar[i];
-            if (!hidden) saved[i] = g[GAD_DISAB];
+            if (!s_RadarHidden) s_RadarSaved[i] = g[GAD_DISAB];
             g[GAD_DISAB] = 1;
             /* Input 的捕获路径不检查 Disabled, 只清属于隐藏控件的捕获。 */
             if (*(void**)(size_t)0x008B3E88u == g) *(void**)(size_t)0x008B3E88u = NULL;
             if (*(void**)(size_t)0x008B3E90u == g) *(void**)(size_t)0x008B3E90u = NULL;
             if (*(void**)(size_t)0x008B3E94u == g) *(void**)(size_t)0x008B3E94u = NULL;
         }
-        hidden = 1;
+        s_RadarHidden = 1;
     }
-    else if (hidden)
+    else if (s_RadarHidden)
     {
         for (i = 0; i < 3; ++i)
-            ((unsigned char*)(size_t)kRadar[i])[GAD_DISAB] = saved[i];
-        hidden = 0;
+            ((unsigned char*)(size_t)kRadar[i])[GAD_DISAB] = s_RadarSaved[i];
+        s_RadarHidden = 0;
     }
 }
 
@@ -960,6 +960,19 @@ static int s_InSetViewDims = 0;
 static int s_InInitGui = 0;
 /* 一帧只允许重建一次裁剪器 (prepare 一帧能跑上百次) */
 static int s_SyncViewFrame = -1;
+/* 场景收尾会再次初始化 UI；恢复不能只依赖面地址或视口尺寸变化。 */
+static int s_SceneViewPending = 0;
+
+void FM_NotifySceneReady(void)
+{
+    s_SceneViewPending = 1;
+    s_SyncViewFrame = -1;
+    /* 新世界的控件已由引擎初始化，不能把上一局的 Disabled 快照写回去。 */
+    s_GadSnap = 0;
+    for (int i = 0; i < FM_CAMEO_N; ++i) s_CameoSaved[i] = 0;
+    for (int i = 0; i < FM_TAB_N; ++i) s_TabSaved[i] = 0;
+    s_RadarHidden = 0;
+}
 
 /* 侧栏一次性布局需要按 **A** 重算的标记 (几何一变就置, FM_Poll 消费)。 */
 static int s_LayoutDirty = 0;
@@ -1211,7 +1224,7 @@ static void Fm_ApplyViewWidth(void)
     int sbW = *(int*)(size_t)ADDR_SIDEBAR_W;
     int winW, winH, x, y = 0, w, h, cw, oldW, oldH, d;
 
-    if (!s_Enable || SB_InRender()) return;
+    if (!s_Enable || SB_InRender() || s_SceneViewPending == 1) return;
     MOE_SetPhase(MP_APPLY);
     if (sbW < 64 || sbW > 512) return;
     if (wb->Width < 640 || wb->Width > 8192) return;
@@ -1287,7 +1300,7 @@ static void Fm_ApplyViewWidth(void)
     }
     tac = *(void**)(size_t)0x00887324u;
     /* "拿 A 调 setDims"分支会把缓存留成 A, 早退前先自愈。 */
-    if (vb->X == x && vb->Y == y && vb->Width == w && vb->Height == h)
+    if (!s_SceneViewPending && vb->X == x && vb->Y == y && vb->Width == w && vb->Height == h)
     {
         Fm_SyncViewCache(tac, w, h);
         return;
@@ -1342,9 +1355,9 @@ static void Fm_ApplyViewWidth(void)
         }
         /* 便宜路径: 只同步矩形给 TacticalClass (幂等, 缓存对上才真调)。 */
         Fm_SyncViewCache(tac, w, h);
-        /* 宽度真变了走一次正门重建裁剪器/鼠标视口 (只调它俩不会重建)。
+        /* 宽度变化或场景收尾后走正门重建裁剪器/鼠标视口，尺寸相同不代表 UI 缓存有效。
          * 缩小档禁调 (它按 R 重建会顶掉 ScaleBar 的缓冲, 且末尾 InitGUI)。 */
-        if (w != oldW && !s_InSetViewDims && !SB_Out())
+        if ((w != oldW || s_SceneViewPending) && !s_InSetViewDims && !SB_Out())
         {
             void* mouse = *(void**)ADDR_WWMOUSE;
             FnSetViewDims setDims = (FnSetViewDims)(size_t)ADDR_SET_VIEW_DIMS;
@@ -1381,6 +1394,11 @@ static void Fm_ApplyViewWidth(void)
                 Fm_SyncViewCache(tac, w, h);
                 /* setDims 末尾已经按 A 跑过一次 InitGUI ⇒ 布局这块它包了。 */
                 s_LayoutDirty = 0;
+                if (s_SceneViewPending)
+                {
+                    s_SceneViewPending = 0;
+                    LogLine("fullmap: scene ready viewport restored (mouse/clip/layout)");
+                }
             }
         }
         /* 未走 setDims 时仍须消费布局脏标记，缩小档也要按 A 重排侧栏。 */
@@ -1574,6 +1592,28 @@ void FM_Poll(void)
 
     if (!s_Enable || SB_InRender()) return;
     if (!g_Log) return;
+    if (s_SceneViewPending)
+    {
+        /* 就绪钩仍在载入栈上；只在载入闸打开、UI 面可用后恢复本地视口。 */
+        void* strip = *(void**)(size_t)ADDR_SURF_SIDEBAR;
+        if (!*(unsigned char*)(size_t)0x00A8ED5Cu ||
+            *(int*)(size_t)ADDR_LOAD_PHASE || !strip || !IsPlausiblePtr(strip)) return;
+        if (s_SceneViewPending == 1)
+        {
+            SB_ResetZoom1x();
+            s_LayoutDirty = 1;
+            s_RadarLockOk = 0;
+            s_LbPress = 0;
+            s_GadgetsArmed = 0;
+            s_DisarmFrame = -1;
+            s_TogLastFrame = -1;
+            s_ForceRedraw = Fm_ModeFull() ? 8 : 0;
+            s_ForceRedrawFrame = -1;
+            s_DirtyFrames = 3;
+            s_LastLoggedMode = -1;
+            s_SceneViewPending = 2;
+        }
+    }
     /* 引擎重建了面? (读档/改分辨率) —— 要在 Apply 之前知道, 好让它这一趟就把
      * 布局按 A 重跑。 */
     Fm_NoteSurfaceRebuild();

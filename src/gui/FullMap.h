@@ -21,6 +21,9 @@ void FM_Install(void);
  * 全错 168, 页签/cameo/小地图一个都点不动。 */
 void FM_Poll(void);
 
+/* 新局/读档完成后通知；载入结束再恢复鼠标视口、裁剪与侧栏布局。 */
+void FM_NotifySceneReady(void);
+
 /* 缩放改档后立刻同步一次视口 (ScaleBar 的 SB_Poll 里调)。
  * 背景: SB_Poll 先跑 PrepareSurface(旧档) 再处理点击改档, 而引擎裁剪对象
  * ([0x887644]/[0x87E8A4], setDims 按 ViewBounds 重建) 要等下一帧 FM_Poll 才更新。

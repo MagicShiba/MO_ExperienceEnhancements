@@ -17,6 +17,7 @@
 #include "GdiText.h"
 #include "LightConvFix.h"
 #include "EnvIni.h"
+#include "FullMap.h"
 
 /* 参数顺序见 LightingPreset.h (LIGHT_P_*): 环境 / 等级 / 地面 / 红 / 绿 / 蓝。
  * 单位 = 引擎字段单位 (环境与 tint = ini ×100, 等级/地面 = ini ×1000)。 */
@@ -302,6 +303,7 @@ void Lighting_Poll(void)
 extern "C" __declspec(dllexport) DWORD __cdecl Lighting_ScenStartHook(void* regs)
 {
     (void)regs;
+    FM_NotifySceneReady();
     s_Tinted = 0;              /* 新场景的 convert 池由引擎重建, 上一局的染色作废 */
     if (!LightFix_Enabled()) return 0;     /* 关闭: 连 pending 都不置 */
     s_Pending = 1;
@@ -315,6 +317,7 @@ extern "C" __declspec(dllexport) DWORD __cdecl Lighting_ScenStartHook(void* regs
 extern "C" __declspec(dllexport) DWORD __cdecl Lighting_LoadReadyHook(void* regs)
 {
     (void)regs;
+    FM_NotifySceneReady();
     s_Tinted = 0;
     if (!LightFix_Enabled()) return 0;
     s_Pending = 1;
