@@ -184,6 +184,24 @@
 #define OFF_TYPE_SELFHEAL       0xD14u
 #define OFF_TYPE_ORGANIC        0xD97u
 
+/* TechnoTypeClass::SpeedType (int, YRpp GeneralDefinitions.h 的 SpeedType 枚举:
+ * Foot0 Track1 Wheel2 Hover3 Winged4 Float5 Amphibious6 FloatBeach7, 缺键时
+ * UnitType 兜底成 Track/Wheel)。
+ *   写入: 0x7121E5 `mov [ebp+0x67C], eax`, 紧跟 `push 0x844504`("SpeedType")
+ *         + call 0x476FC0 之后; UnitType 侧 0x74770B 再写一次 (-1 兜底在 0x7476D9)。
+ *   读取: 0x7400CC `cmp dword [eax+0x67C], 3` —— 引擎自己按它判"悬浮",
+ *         eax 来自 0x7400C6 `mov eax,[esi+0x6C4]` (就是 OFF_UNIT_TYPE 那个槽)。
+ * 判悬浮直接读这一对, 不要自己解析 ini。 */
+#define OFF_TYPE_SPEEDTYPE      0x67Cu
+#define SPEEDTYPE_HOVER         3
+#define SPEEDTYPE_WINGED        4
+
+/* TechnoTypeClass::MovementZone (int, YRpp GeneralDefinitions.h 的 MovementZone 枚举,
+ * Fly = 9)。写入: 0x716081 `mov [ebp+0x5B4], eax`, 紧跟 `push`("MovementZone")
+ * + call 0x476FC0 之后 (同一函数里 SpeedType 落 +0x67C)。判"会不会飞"优先读它。 */
+#define OFF_TYPE_MOVEMENTZONE   0x5B4u
+#define MOVEMENTZONE_FLY        9
+
 /* HouseClass 上的合计 (int, 累加值不是布尔): 面板只读这两个数就算完了。
  * 0x446392 `mov eax,[ebp+0x21C]`(建筑的 owner House) + `add [eax+0x164], ecx`
  * (ecx = 类型 +0x1564), 0x4463B4 同形写 +0x168 (类型 +0x1568); 拆楼/卖掉在

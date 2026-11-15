@@ -788,6 +788,35 @@ static int SU_HostPaxCount(void* host, int bld)
     return n;
 }
 
+/* 容器载具的类型指针 (UnitClass+0x6C4); 建筑 / 读不到回 NULL。 */
+static void* SU_HostType(void* host, int bld)
+{
+    void* tp;
+
+    if (bld || !host || !IsPlausiblePtr(host)) return 0;
+    tp = *(void**)((char*)host + OFF_UNIT_TYPE);
+    if (!tp || !IsPlausiblePtr(tp)) return 0;
+    return tp;
+}
+
+/* 容器载具的移动类型 (TechnoTypeClass::SpeedType)。建筑 / 读不到回 -1。
+ * 只读: 与引擎自己判悬浮同一对字段 (见 EngineAddr.h 的 OFF_TYPE_SPEEDTYPE)。 */
+static int SU_HostSpeedType(void* host, int bld)
+{
+    void* tp = SU_HostType(host, bld);
+
+    return tp ? *(int*)((char*)tp + OFF_TYPE_SPEEDTYPE) : -1;
+}
+
+/* 容器载具的载员容量 (TechnoTypeClass::Passengers)。建筑 / 读不到回 -1。
+ * "单载员载具"指**容量 1**(Jackal/Magnetic Beam 那种), 不是"现在车里有一个人"。 */
+static int SU_HostPaxCap(void* host, int bld)
+{
+    void* tp = SU_HostType(host, bld);
+
+    return tp ? *(int*)((char*)tp + OFF_TT_PASSENGERS) : -1;
+}
+
 /* 给一个载员垫点: 一个移动节点, 落点取他自己所在格。
  *
  * 必须在**认人那一刻**发, 不能等第一次点击: 提交发生在松开 Z 的瞬间 (0x637A10),
@@ -843,7 +872,7 @@ static void SU_PlanPadOne(void* pax)
  * lb = 0 表示认人是顺手做的 (按 Z 自动认名单), 紧接着的地图点击要当第一个节点。 */
 static int SU_PlanBegin(void* host, int am, int n, int lb)
 {
-    int i, pc;
+    int i, pc, st, cap;
 
     if (n <= 0) { SU_LogClick("plan arm empty", host, 0, 0); return 0; }
     s_PlanHost = host;
@@ -853,10 +882,14 @@ static int SU_PlanBegin(void* host, int am, int n, int lb)
     s_PlanLb = lb;
     s_PlanFired = 0;
     SU_LogClick("plan arm", host, s_PlanPax[0], (void*)(size_t)n);
-    /* 只有容器里就他一个人时, 提交才会吃掉队首节点; 多载员不垫。
-     * pc==0 视为容器读失败, 按"单载员"兜底 (垫多一段比丢第一个点轻)。 */
+    /* 垫点只为"悬浮移动类型 + 载员容量 1"的载具: 提交 (0x637A10 → 0x6385C0) 把队首
+     * 节点当场转成真令, 只有这一类容器会把那一下算成用掉一个点, 所以要垫一个落点在
+     * 自己格的移动节点去挨。其余载具与建筑不垫。
+     * 判据是**容量 1**, 不是"现在车里一个人": 12 座悬浮运输船只剩 1 人时也不垫。 */
     pc = SU_HostPaxCount(host, s_PlanHostBld);
-    if ((pc == 1 || pc == 0) && n == 1)
+    st = SU_HostSpeedType(host, s_PlanHostBld);
+    cap = SU_HostPaxCap(host, s_PlanHostBld);
+    if (n == 1 && st == SPEEDTYPE_HOVER && cap == 1)
     {
         for (i = 0; i < n; i++) SU_PlanPadOne(s_PlanPax[i]);   /* 必须此刻垫, 等点击就晚了 */
     }

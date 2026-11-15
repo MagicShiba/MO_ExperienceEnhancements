@@ -55,11 +55,8 @@ static int g_SoNodeStep = 2;    /* 拖线采样步长 (格, 切比雪夫距离) 
 
 /* 分类判据 (参考 RACommands, MO rulesmo 实测 + 内存 dump 双确认):
  * Aircraft 恒飞; 步兵/车辆 MZ==Fly(9), ST==Winged(4) 兜底。
- * MO 的飞行步兵/悬停直升机 MZ=Fly、ST=Hover(3), 故判据以 MZ==9 为主。 */
-#define SO_OFF_MZ 1460   /* dump 实证 (JUMPJET=9=Fly, MAMM=2=Destroyer) */
-#define SO_OFF_ST 1596   /* 未定死: 当前读垃圾, 命中概率极低, 仅作无害兜底 */
-#define SO_MZ_FLY 9
-#define SO_ST_WINGED 4
+ * MO 的飞行步兵/悬停直升机 MZ=Fly、ST=Hover(3), 故判据以 MZ==9 为主。
+ * 偏移见 EngineAddr.h 的 OFF_TYPE_MOVEMENTZONE / OFF_TYPE_SPEEDTYPE。 */
 
 static void SO_EnsureInit(void)
 {
@@ -189,9 +186,9 @@ static void SO_Press(void)
             tp = OU_TypeOf(u->unit, u->w, g_SoTypeOff, ADDR_TYPARRAY, &g_SoIdOff);
             if (tp)
             {
-                mz = *(int*)((char*)tp + SO_OFF_MZ);
-                st = *(int*)((char*)tp + SO_OFF_ST);
-                if (mz == SO_MZ_FLY || st == SO_ST_WINGED) u->fly = 1;
+                mz = *(int*)((char*)tp + OFF_TYPE_MOVEMENTZONE);
+                st = *(int*)((char*)tp + OFF_TYPE_SPEEDTYPE);
+                if (mz == MOVEMENTZONE_FLY || st == SPEEDTYPE_WINGED) u->fly = 1;
             }
         }
     }
